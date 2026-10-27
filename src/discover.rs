@@ -190,11 +190,11 @@ fn stamp_files(workspace_dir: &Path, workspace_root: &Path) -> Vec<PathBuf> {
 
 fn cached(snapshot: &Snapshot, dir: &Path) -> Option<Resolved> {
     let entry = snapshot.metadata.get(dir)?;
-    entry
-        .stamp
-        .iter()
-        .all(|(file, t)| mtime_nanos(file) == *t)
-        .then(|| entry.resolved.clone())
+    let stamp: BTreeMap<_, _> = stamp_files(dir, &entry.resolved.workspace_root)
+        .into_iter()
+        .map(|f| (f.clone(), mtime_nanos(&f)))
+        .collect();
+    (stamp == entry.stamp).then(|| entry.resolved.clone())
 }
 
 /// Dirs at depth 0–2 of a checkout that hold a `Cargo.toml`, with their depth.

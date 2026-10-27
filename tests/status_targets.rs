@@ -318,3 +318,46 @@ fn metadata_results_are_cached_until_a_stamped_file_changes() {
     let third = status(&hive, &[repo.to_str().unwrap()]);
     assert_eq!(count(&third, "metadata_calls"), Some(1));
 }
+
+#[test]
+fn a_different_cargo_home_is_not_a_metadata_cache_hit() {
+    let hive = Hive::ready();
+    let s = Scratch::new("cargo-home-cache");
+    let repo = init_repo(&s.path.join("app"), "");
+    register(&hive, &repo);
+    let first = status(&hive, &[repo.to_str().unwrap()]);
+    assert_eq!(
+        (
+            count(&first, "metadata_calls"),
+            count(&first, "metadata_cache_hits")
+        ),
+        (Some(1), Some(0))
+    );
+    let other = s.path.join("other-cargo-home");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(
+        other.join("config.toml"),
+        "[build]\ntarget-dir = \"from-other-home\"\n",
+    )
+    .unwrap();
+    let out = hive
+        .command(&["status", repo.to_str().unwrap(), "--json"])
+        .env("CARGO_HOME", &other)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let second: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        (
+            count(&second, "metadata_calls"),
+            count(&second, "metadata_cache_hits")
+        ),
+        (Some(1), Some(0)),
+        "{second}"
+    );
+}
