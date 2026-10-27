@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 mod common;
 use common::Hive;
+use common::Scratch;
 use std::process::{Child, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -81,4 +82,80 @@ fn doctor_finishes_with_no_terminal_attached() {
     assert!(f["measured"]["units"].as_u64().unwrap() >= 4, "{f}");
     assert_eq!(f["measured"]["edges_unresolved"], 0, "{f}");
     assert_eq!(f["measured"]["edges_ambiguous"], 0, "{f}");
+}
+
+fn doctor_dirs(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("hive-doctor-")
+        })
+        .collect()
+}
+
+#[test]
+fn doctor_leaves_no_temp_dir_behind_and_sweeps_dead_runs() {
+    let hive = Hive::new();
+    let tmp = Scratch::new("doctor-tmpdir");
+    let mut dead = std::process::Command::new("true").spawn().unwrap();
+    let dead_pid = dead.id();
+    dead.wait().unwrap();
+    std::fs::create_dir_all(tmp.path.join(format!("hive-doctor-{dead_pid}-leftover1"))).unwrap();
+    let child = hive
+        .command(&["doctor", "--json"])
+        .env("TMPDIR", &tmp.path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = wait_within(child, Duration::from_secs(300));
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(receipt["counts"]["stale_temp_dirs_removed"], 1);
+    assert_eq!(doctor_dirs(&tmp.path), Vec::<std::path::PathBuf>::new());
+}
+
+#[test]
+fn an_interrupted_doctor_exits_130_and_removes_its_temp_dir() {
+    for signal in ["-TERM", "-INT"] {
+        let hive = Hive::new();
+        let tmp = Scratch::new("doctor-signal");
+        let child = hive
+            .command(&["doctor"])
+            .env("TMPDIR", &tmp.path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id().to_string();
+        // Wait until the probe crate exists, so the signal lands inside the build of check f.
+        let started = Instant::now();
+        while !doctor_dirs(&tmp.path)
+            .iter()
+            .any(|d| d.join("f-crate/Cargo.toml").exists())
+        {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "doctor never reached check f"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(std::process::Command::new("kill")
+            .args([signal, &pid])
+            .status()
+            .unwrap()
+            .success());
+        let out = wait_within(child, Duration::from_secs(60));
+        assert_eq!(out.status.code(), Some(130), "{signal}");
+        assert_eq!(
+            doctor_dirs(&tmp.path),
+            Vec::<std::path::PathBuf>::new(),
+            "{signal}"
+        );
+    }
 }

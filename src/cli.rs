@@ -237,8 +237,16 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
         macos: macos.clone(),
         toolchain: doctor::resolve_toolchain(state.root()),
     };
+    if let Err(e) = doctor::install_signal_handlers() {
+        eprintln!("cargo-hive: could not install signal handlers: {e}");
+        return 1;
+    }
     let report = match doctor::run(&*platform.fs, &*platform.approve, &env) {
         Ok(r) => r,
+        Err(doctor::DoctorError::Cancelled) => {
+            eprintln!("cargo-hive: doctor {}", doctor::DoctorError::Cancelled);
+            return 130;
+        }
         Err(e) => {
             eprintln!("cargo-hive: {e}");
             return 1;

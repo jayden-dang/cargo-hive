@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 pub const CAPABILITIES_FILE: &str = "capabilities.json";
@@ -142,6 +144,7 @@ pub struct DoctorReport {
 #[derive(Debug)]
 pub enum DoctorError {
     TempDir(io::Error),
+    Cancelled,
 }
 
 impl fmt::Display for DoctorError {
@@ -150,8 +153,74 @@ impl fmt::Display for DoctorError {
             DoctorError::TempDir(e) => {
                 write!(f, "could not create doctor's temporary directory: {e}")
             }
+            DoctorError::Cancelled => {
+                write!(f, "interrupted; the temporary directory was removed")
+            }
         }
     }
+}
+
+/// Set by SIGINT/SIGTERM; doctor polls it between steps and while check f builds.
+pub static CANCEL: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_signal(_signal: libc::c_int) {
+    CANCEL.store(true, Ordering::SeqCst);
+}
+
+pub fn install_signal_handlers() -> io::Result<()> {
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: an all-zero sigaction is valid; the handler only stores to an atomic,
+        // which is async-signal-safe.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            libc::sigemptyset(&mut action.sa_mask);
+            if libc::sigaction(signal, &action, std::ptr::null_mut()) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn checkpoint() -> Result<(), DoctorError> {
+    if CANCEL.load(Ordering::SeqCst) {
+        Err(DoctorError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+/// Removes `hive-doctor-<pid>-*` dirs under `parent` whose process no longer exists.
+pub fn sweep_stale(parent: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("hive-doctor-"))
+            .and_then(|rest| rest.split_once('-'))
+            .and_then(|(pid, _)| pid.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if pid <= 0
+            || pid as u32 == std::process::id()
+            || !entry.file_type().is_ok_and(|t| t.is_dir())
+        {
+            continue;
+        }
+        // SAFETY: signal 0 delivers nothing; it only asks whether `pid` exists.
+        let gone = unsafe { libc::kill(pid, 0) } == -1
+            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if gone && std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -499,18 +568,22 @@ fn tail(text: &str, max: usize) -> String {
 }
 
 /// (f) The fingerprints the active toolchain writes match the supported signature.
-fn check_format(fs: &dyn Fs, dir: &Path, toolchain: &Result<Toolchain, String>) -> Check {
+fn check_format(
+    fs: &dyn Fs,
+    dir: &Path,
+    toolchain: &Result<Toolchain, String>,
+) -> Result<Check, DoctorError> {
     let tc = match toolchain {
         Ok(t) => t,
         Err(reason) => {
-            return Check {
+            return Ok(Check {
                 id: CheckId::F,
                 verdict: Verdict::Unavailable,
                 measured: Measures::from([("reason".to_string(), Measured::Text(reason.clone()))]),
-            }
+            })
         }
     };
-    let attempt = || -> io::Result<Check> {
+    let attempt = || -> io::Result<Result<Check, DoctorError>> {
         let (krate, target, cargo_home) = (
             dir.join("f-crate"),
             dir.join("f-target"),
@@ -525,11 +598,23 @@ fn check_format(fs: &dyn Fs, dir: &Path, toolchain: &Result<Toolchain, String>) 
         let stderr_path = dir.join("f-cargo.stderr");
         let mut child = probe_command(tc, &krate, &target, &cargo_home)
             .stderr(std::fs::File::create(&stderr_path)?)
+            .process_group(0)
             .spawn()?;
-        let status = child.wait()?;
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if CANCEL.load(Ordering::SeqCst) {
+                // SAFETY: the child leads its own process group; this signals only that group.
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                let _ = child.wait();
+                return Ok(Err(DoctorError::Cancelled));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
         if !status.success() {
             let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
-            return Ok(Check {
+            return Ok(Ok(Check {
                 id: CheckId::F,
                 verdict: Verdict::Fail,
                 measured: Measures::from([
@@ -542,7 +627,7 @@ fn check_format(fs: &dyn Fs, dir: &Path, toolchain: &Result<Toolchain, String>) 
                         Measured::Text(tail(&stderr, 600)),
                     ),
                 ]),
-            });
+            }));
         }
         let report = crate::fingerprint::read_profile(&target.join("debug"));
         let mut measured = Measures::from([
@@ -566,13 +651,16 @@ fn check_format(fs: &dyn Fs, dir: &Path, toolchain: &Result<Toolchain, String>) 
             }
             (crate::fingerprint::Format::Supported, None) => false,
         };
-        Ok(Check {
+        Ok(Ok(Check {
             id: CheckId::F,
             verdict: verdict(ok),
             measured,
-        })
+        }))
     };
-    attempt().unwrap_or_else(|e| failed(CheckId::F, e))
+    match attempt() {
+        Ok(result) => result,
+        Err(e) => Ok(failed(CheckId::F, e)),
+    }
 }
 
 /// (e) Owner authentication: availability only, never a dialog.
@@ -596,6 +684,7 @@ pub fn run(
     approve: &dyn Approve,
     env: &DoctorEnv,
 ) -> Result<DoctorReport, DoctorError> {
+    let stale_removed = sweep_stale(&env.tmp_parent);
     let tmp = fs
         .temp_dir(
             &env.tmp_parent,
@@ -612,9 +701,11 @@ pub fn run(
     ];
     let mut checks = Vec::new();
     for step in steps {
+        checkpoint()?;
         checks.push(step());
     }
-    checks.push(check_format(fs, dir, &env.toolchain));
+    checkpoint()?;
+    checks.push(check_format(fs, dir, &env.toolchain)?);
     Ok(DoctorReport {
         macos: env.macos.clone(),
         below_floor: env
@@ -624,7 +715,7 @@ pub fn run(
             .is_some_and(|m| m < MACOS_FLOOR),
         toolchain_release: env.toolchain.as_ref().ok().map(|t| t.release.clone()),
         checks,
-        stale_removed: 0,
+        stale_removed,
     })
 }
 
@@ -647,6 +738,7 @@ mod tests {
         linked: CompressOutcome,
         compress_touches_mtime: bool,
         probe_sees_locks: bool,
+        panic_in_compress: bool,
     }
 
     impl Default for Knobs {
@@ -659,6 +751,7 @@ mod tests {
                 linked: CompressOutcome::SkippedHardLink,
                 compress_touches_mtime: false,
                 probe_sees_locks: true,
+                panic_in_compress: false,
             }
         }
     }
@@ -741,6 +834,7 @@ mod tests {
             })
         }
         fn compress(&self, path: &Path) -> CompressOutcome {
+            assert!(!self.knobs.panic_in_compress, "injected panic");
             if self.knobs.compress_touches_mtime {
                 let _ = self.set_mtime(path, SystemTime::now());
             }
@@ -801,8 +895,21 @@ mod tests {
         capabilities_for(&only)
     }
 
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn leftovers(parent: &Path) -> Vec<String> {
+        std::fs::read_dir(parent)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("hive-doctor-"))
+            .collect()
+    }
+
     #[test]
     fn a_healthy_machine_passes_checks_a_to_e_and_disables_nothing() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let parent = scratch("healthy");
         let report = run(
             &FakeFs::new(Knobs::default()),
@@ -820,6 +927,9 @@ mod tests {
 
     #[test]
     fn each_failing_check_disables_exactly_its_capabilities() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         use Capability::*;
         let cases: Vec<(&str, Knobs, CheckId, Vec<Capability>)> = vec![
             (
@@ -922,6 +1032,9 @@ mod tests {
 
     #[test]
     fn unavailable_owner_authentication_disables_approval() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let parent = scratch("noauth");
         let report = run(
             &FakeFs::new(Knobs::default()),
@@ -954,6 +1067,9 @@ mod tests {
 
     #[test]
     fn a_macos_below_the_floor_is_flagged_and_every_check_still_runs() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let parent = scratch("floor");
         let report = run(
             &FakeFs::new(Knobs::default()),
@@ -1022,5 +1138,87 @@ mod tests {
     fn the_active_toolchain_release_comes_from_rustc() {
         let t = resolve_toolchain(&std::env::temp_dir()).unwrap();
         assert!(t.release.starts_with(|c: char| c.is_ascii_digit()), "{t:?}");
+    }
+
+    #[test]
+    fn the_temp_dir_is_removed_after_success_after_a_failed_check_and_after_a_panic() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let parent = scratch("cleanup");
+        run(
+            &FakeFs::new(Knobs::default()),
+            &FakeApprove(Availability::Available),
+            &env(&parent, "27.0.1"),
+        )
+        .unwrap();
+        assert_eq!(leftovers(&parent), Vec::<String>::new(), "after success");
+        run(
+            &FakeFs::new(Knobs {
+                probe_sees_locks: false,
+                ..Knobs::default()
+            }),
+            &FakeApprove(Availability::Available),
+            &env(&parent, "27.0.1"),
+        )
+        .unwrap();
+        assert_eq!(
+            leftovers(&parent),
+            Vec::<String>::new(),
+            "after a failed check"
+        );
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run(
+                &FakeFs::new(Knobs {
+                    panic_in_compress: true,
+                    ..Knobs::default()
+                }),
+                &FakeApprove(Availability::Available),
+                &env(&parent, "27.0.1"),
+            )
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(leftovers(&parent), Vec::<String>::new(), "after a panic");
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_run_stops_and_removes_its_temp_dir() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let parent = scratch("cancel");
+        CANCEL.store(true, Ordering::SeqCst);
+        let result = run(
+            &FakeFs::new(Knobs::default()),
+            &FakeApprove(Availability::Available),
+            &env(&parent, "27.0.1"),
+        );
+        CANCEL.store(false, Ordering::SeqCst);
+        assert!(matches!(result, Err(DoctorError::Cancelled)));
+        assert_eq!(leftovers(&parent), Vec::<String>::new());
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn the_sweep_removes_only_dirs_of_dead_doctor_processes() {
+        let parent = scratch("sweep");
+        let mut dead = Command::new("true").spawn().unwrap();
+        let dead_pid = dead.id();
+        dead.wait().unwrap();
+        let mut alive = Command::new("sleep").arg("30").spawn().unwrap();
+        let stale = parent.join(format!("hive-doctor-{dead_pid}-abcd1234"));
+        let live = parent.join(format!("hive-doctor-{}-abcd1234", alive.id()));
+        let odd = parent.join("hive-doctor-notapid-abcd1234");
+        let file = parent.join(format!("hive-doctor-{dead_pid}-file"));
+        for d in [&stale, &live, &odd] {
+            std::fs::create_dir_all(d.join("inner")).unwrap();
+        }
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(sweep_stale(&parent), 1);
+        assert!(!stale.exists() && live.exists() && odd.exists() && file.exists());
+        alive.kill().unwrap();
+        alive.wait().unwrap();
+        std::fs::remove_dir_all(parent).unwrap();
     }
 }
