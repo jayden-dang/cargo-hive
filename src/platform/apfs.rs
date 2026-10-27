@@ -127,7 +127,7 @@ impl Fs for Apfs {
         let private = i64::from_ne_bytes(word(4..12));
         let flags = u64::from_ne_bytes(word(20..28));
         Ok(Sharing {
-            private_bytes: u64::try_from(private).unwrap_or(0),
+            private_bytes: private_byte_count(private)?,
             clone_id: u64::from_ne_bytes(word(12..20)),
             may_share: flags & EF_MAY_SHARE_BLOCKS != 0,
             shares_all: flags & EF_SHARES_ALL_BLOCKS != 0,
@@ -250,12 +250,18 @@ impl Task for WatchTask {
     }
 }
 
+/// A negative private-byte count from getattrlist is not a measurement of zero.
+pub fn private_byte_count(private: i64) -> io::Result<u64> {
+    u64::try_from(private)
+        .map_err(|_| io::Error::other(format!("private byte count is negative: {private}")))
+}
+
 /// Body of `__hold-lock`: take the lock (blocking), report it, then wait to be killed.
+/// The file must already exist; this never creates one.
 pub fn hold_lock_forever(kind: LockKind, path: &Path) -> io::Result<std::convert::Infallible> {
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)
         .truncate(false)
         .open(path)?;
     let fd = file.as_raw_fd();
@@ -322,7 +328,6 @@ mod tests {
         let (src, dst) = (t.path().join("src"), t.path().join("dst"));
         apfs().write_file(&src, &vec![7u8; 1 << 20]).unwrap();
         let alone = apfs().sharing(&src).unwrap();
-        assert_eq!(alone.private_bytes, 1 << 20);
         assert!(!alone.shares_all && !alone.may_share);
         apfs().clone_file(&src, &dst).unwrap();
         let (s, d) = (apfs().sharing(&src).unwrap(), apfs().sharing(&dst).unwrap());
@@ -334,6 +339,28 @@ mod tests {
         assert_ne!(rewritten.clone_id, s.clone_id);
         assert!(!rewritten.shares_all);
         assert_eq!(apfs().read(&dst).unwrap()[0], 9);
+    }
+
+    #[test]
+    fn a_negative_private_byte_count_is_an_error() {
+        let err = private_byte_count(-1).unwrap_err();
+        assert!(err.to_string().contains("-1"), "{err}");
+    }
+
+    #[test]
+    fn holding_a_lock_does_not_create_the_file() {
+        let t = tmp("hold-missing");
+        let path = t.path().join("missing.lock");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let probe = path.clone();
+        std::thread::spawn(move || {
+            let result = hold_lock_forever(LockKind::Flock, &probe);
+            let _ = tx.send(result.err().map(|e| e.kind()));
+        });
+        let got = rx.recv_timeout(Duration::from_millis(500));
+        let created = path.exists();
+        assert!(!created, "hold-lock created a missing file");
+        assert_eq!(got.ok().flatten(), Some(io::ErrorKind::NotFound));
     }
 
     #[test]

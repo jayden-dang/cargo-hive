@@ -1,6 +1,7 @@
 mod common;
 use common::{git, init_repo, Hive, Scratch};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 
 fn refusal(receipt: &serde_json::Value) -> String {
     receipt["findings"]
@@ -86,6 +87,58 @@ fn a_submodule_is_refused_and_names_its_superproject() {
         refusal(&receipt).contains(outer.to_str().unwrap()),
         "{receipt}"
     );
+}
+
+#[test]
+fn a_failed_git_probe_is_refused_with_the_git_error() {
+    let modes = [
+        ("super", "superproject probe exploded", "registered"),
+        ("head", "HEAD probe exploded", "no commits"),
+        ("shallow", "shallow probe exploded", "shallow clone"),
+    ];
+    for (mode, needle, absent) in modes {
+        let hive = Hive::new();
+        let s = Scratch::new("git-probe");
+        let repo = init_repo(&s.path.join("app"), "");
+        let bin = s.path.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let log = s.path.join("git.log");
+        fs::write(
+            bin.join("git"),
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HIVE_GIT_LOG\"\njoined=\"$*\"\ntop=\"$HIVE_GIT_TOP\"\ncase \"$joined\" in\n  *--show-toplevel*) printf '%s\\n' \"$top\" ;;\n  *--show-superproject-working-tree*)\n    if [ \"$HIVE_GIT_FAIL\" = super ]; then echo 'fatal: superproject probe exploded' >&2; exit 128; fi ;;\n  *--git-dir*) printf '%s\\n' \"$top/.git\" ;;\n  *--git-common-dir*) printf '%s\\n' \"$top/.git\" ;;\n  *--verify*)\n    if [ \"$HIVE_GIT_FAIL\" = head ]; then echo 'fatal: HEAD probe exploded' >&2; exit 128; fi\n    echo abc ;;\n  *--is-shallow-repository*)\n    if [ \"$HIVE_GIT_FAIL\" = shallow ]; then echo 'fatal: shallow probe exploded' >&2; exit 128; fi\n    echo false ;;\n  *rev-list*) echo abcdef0123456789abcdef0123456789abcdef01 ;;\n  *) echo \"stub git: $joined\" >&2; exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        let out = hive
+            .command(&["repo", "add", repo.to_str().unwrap(), "--json"])
+            .env("PATH", &bin)
+            .env("HIVE_GIT_TOP", &repo)
+            .env("HIVE_GIT_FAIL", mode)
+            .env("HIVE_GIT_LOG", &log)
+            .output()
+            .unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "{mode}: {e}\n{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        let why = refusal(&receipt);
+        assert!(why.contains(needle), "{mode}: {why}");
+        assert!(!why.contains(absent), "{mode}: {why}");
+        if mode == "super" {
+            let text = fs::read_to_string(&log).unwrap();
+            let line = text
+                .lines()
+                .find(|l| l.contains("show-superproject"))
+                .unwrap_or("");
+            assert!(
+                line.contains("--path-format=absolute"),
+                "superproject call: {line}"
+            );
+        }
+    }
 }
 
 #[test]

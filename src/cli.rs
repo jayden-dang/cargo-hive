@@ -135,17 +135,33 @@ fn hold_lock(kind: &str, path: &std::path::Path) -> i32 {
 /// Logs the receipt, prints it (`--json`) or the human text, and returns `code`.
 pub fn emit(state: &State, out: OutputArgs, receipt: Receipt, human: &str, code: i32) -> i32 {
     let line = serde_json::to_string(&receipt).expect("receipts always serialize");
-    if let Err(e) = state.locked(|tx| tx.append_receipt_line(&line).map(|_| ())) {
-        eprintln!("cargo-hive: could not log the receipt: {e}");
-        return 1;
-    }
+    let logged = match state.locked(|tx| tx.append_receipt_line(&line).map(|_| ())) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("cargo-hive: could not log the receipt: {e}");
+            false
+        }
+    };
     if out.json {
         println!("{line}");
-        eprint!("{human}");
-    } else {
+        if logged {
+            eprint!("{human}");
+        }
+    } else if logged {
         print!("{human}");
     }
-    code
+    if logged {
+        code
+    } else {
+        1
+    }
+}
+
+fn emit_failure(state: &State, out: OutputArgs, command: &str, error: &str, code: i32) -> i32 {
+    eprintln!("cargo-hive: {error}");
+    let mut receipt = Receipt::new(command, Scope::default());
+    receipt.finding("error", None, error.to_string());
+    emit(state, out, receipt.finish(), &format!("{error}\n"), code)
 }
 
 fn repo_add(state: &State, path: &std::path::Path, out: OutputArgs) -> i32 {
@@ -153,10 +169,7 @@ fn repo_add(state: &State, path: &std::path::Path, out: OutputArgs) -> i32 {
     let result = state.locked(|tx| register(path, tx));
     let mut b = Receipt::new("repo add", Scope::default());
     match result {
-        Err(e) => {
-            eprintln!("cargo-hive: {e}");
-            1
-        }
+        Err(e) => emit_failure(state, out, "repo add", &e.to_string(), 1),
         Ok(Ok(RegisterOutcome::Registered(repo))) => {
             b.count("registered", 1);
             b.scope_mut().repos.push(repo.main.clone());
@@ -191,10 +204,7 @@ fn repo_add(state: &State, path: &std::path::Path, out: OutputArgs) -> i32 {
 fn repo_list(state: &State, out: OutputArgs) -> i32 {
     let reg: Registry = match state.read(registry::FILE) {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!("cargo-hive: {e}");
-            return 1;
-        }
+        Err(e) => return emit_failure(state, out, "repo list", &e.to_string(), 1),
     };
     let mut b = Receipt::new(
         "repo list",
@@ -245,24 +255,30 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
         toolchain: doctor::resolve_toolchain(state.root()),
     };
     if let Err(e) = doctor::install_signal_handlers() {
-        eprintln!("cargo-hive: could not install signal handlers: {e}");
-        return 1;
+        return emit_failure(
+            state,
+            out,
+            "doctor",
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
     }
     let report = match doctor::run(&*platform.fs, &*platform.approve, &env) {
         Ok(r) => r,
         Err(doctor::DoctorError::Cancelled) => {
-            eprintln!("cargo-hive: doctor {}", doctor::DoctorError::Cancelled);
-            return 130;
+            return emit_failure(
+                state,
+                out,
+                "doctor",
+                &format!("doctor {}", doctor::DoctorError::Cancelled),
+                130,
+            );
         }
-        Err(e) => {
-            eprintln!("cargo-hive: {e}");
-            return 1;
-        }
+        Err(e) => return emit_failure(state, out, "doctor", &e.to_string(), 1),
     };
     let caps = doctor::capabilities_for(&report);
     if let Err(e) = state.locked(|tx| tx.write(doctor::CAPABILITIES_FILE, &caps)) {
-        eprintln!("cargo-hive: {e}");
-        return 1;
+        return emit_failure(state, out, "doctor", &e.to_string(), 1);
     }
     let mut b = Receipt::with_os("doctor", Scope::default(), macos);
     b.toolchain(report.toolchain_release.clone());
@@ -324,10 +340,7 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
     })();
     let (reg, cfg, caps, mut snapshot) = match loaded {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("cargo-hive: {e}");
-            return 1;
-        }
+        Err(e) => return emit_failure(state, out, "status", &e.to_string(), 1),
     };
     let mut b = Receipt::new("status", Scope::default());
     let list = |v: &[std::path::PathBuf]| {
@@ -377,7 +390,11 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
     for repo in &selected {
         b.scope_mut().repos.push(repo.main.clone());
         human.push_str(&format!("{}\n", repo.main.display()));
-        for c in discover::checkouts(repo, &mains, &cfg) {
+        let (rows, faults) = discover::checkouts(repo, &mains, &cfg);
+        for fault in faults {
+            b.finding("walk.unreadable", Some(fault.path), fault.detail);
+        }
+        for c in rows {
             total += 1;
             let label = if c.missing {
                 missing += 1;
@@ -412,6 +429,13 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
             .iter()
             .all(|s| reg.repos.iter().any(|r| r.main == s.main));
     let mut scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot);
+    for fault in &scan.walk_faults {
+        b.finding(
+            "walk.unreadable",
+            Some(fault.path.clone()),
+            fault.detail.clone(),
+        );
+    }
     if no_sizes {
         b.unmeasured("sizes", "--no-sizes was given");
     } else {
@@ -436,9 +460,13 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
         b.count("bytes", bytes);
     }
     report_targets(&mut b, &mut human, &scan);
-    if let Err(e) = state.locked(|tx| tx.write(SNAPSHOT_FILE, &snapshot)) {
+    if let Err(e) = state.locked(|tx| {
+        let disk = tx.read(SNAPSHOT_FILE)?;
+        tx.write(SNAPSHOT_FILE, &discover::merge_snapshot(snapshot, disk))
+    }) {
         eprintln!("cargo-hive: {e}");
-        return 1;
+        b.finding("error", None, e.to_string());
+        return emit(state, out, b.finish(), &human, 1);
     }
     emit(state, out, b.finish(), &human, code)
 }

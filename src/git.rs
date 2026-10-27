@@ -103,17 +103,33 @@ impl Git {
     }
 
     pub fn superproject(&self) -> Result<Option<PathBuf>, GitError> {
-        let s = self.line(&["rev-parse", "--show-superproject-working-tree"])?;
+        let s = self.line(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-superproject-working-tree",
+        ])?;
         Ok((!s.is_empty()).then(|| PathBuf::from(s)))
     }
 
+    /// `Ok(false)` only when git quietly reports a missing HEAD. Any diagnostic
+    /// on stderr is a failed probe, not an empty repository.
     pub fn has_commits(&self) -> Result<bool, GitError> {
         let out = self
             .command()
             .args(["rev-parse", "--verify", "--quiet", "HEAD"])
             .output()
             .map_err(GitError::Spawn)?;
-        Ok(out.status.success())
+        if out.status.success() {
+            return Ok(true);
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        if stderr.trim().is_empty() {
+            return Ok(false);
+        }
+        Err(GitError::Failed {
+            args: "rev-parse --verify --quiet HEAD".into(),
+            stderr,
+        })
     }
 
     pub fn root_commits(&self) -> Result<BTreeSet<String>, GitError> {

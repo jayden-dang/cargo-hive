@@ -138,7 +138,14 @@ fn read_unit(dir: &Path, json_name: &str) -> Result<Unit, String> {
             "hash file `{stem}` is not 16 lowercase hex characters"
         ));
     }
-    let bytes = fs::read(dir.join(json_name)).map_err(|e| format!("{json_name}: {e}"))?;
+    let json_path = dir.join(json_name);
+    let len = fs::metadata(&json_path)
+        .map_err(|e| format!("{json_name}: {e}"))?
+        .len();
+    if len > 4 * 1024 * 1024 {
+        return Err(format!("{json_name}: larger than 4 MiB"));
+    }
+    let bytes = fs::read(&json_path).map_err(|e| format!("{json_name}: {e}"))?;
     let value: Value = serde_json::from_slice(&bytes).map_err(|e| format!("{json_name}: {e}"))?;
     let obj = value
         .as_object()
@@ -178,18 +185,38 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
     let mut units = Vec::new();
     let mut counted = 0usize;
     let mut problem: Option<String> = None;
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|e| e.path())
-        .collect();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                problem.get_or_insert(format!("cannot read .fingerprint/: {e}"));
+                continue;
+            }
+        };
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => dirs.push(entry.path()),
+            Ok(_) => {}
+            Err(e) => {
+                problem.get_or_insert(format!("{}: {e}", entry.path().display()));
+            }
+        }
+    }
     dirs.sort();
     for dir in dirs {
         let names: Vec<String> = match fs::read_dir(&dir) {
-            Ok(e) => e
-                .flatten()
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .collect(),
+            Ok(entries) => {
+                let mut names = Vec::new();
+                for entry in entries {
+                    match entry {
+                        Ok(entry) => names.push(entry.file_name().to_string_lossy().to_string()),
+                        Err(e) => {
+                            problem.get_or_insert(format!("{}: {e}", dir.display()));
+                        }
+                    }
+                }
+                names
+            }
             Err(e) => {
                 problem.get_or_insert(format!("{}: {e}", dir.display()));
                 continue;
@@ -248,6 +275,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn scratch() -> PathBuf {
@@ -420,6 +448,44 @@ mod tests {
             assert_eq!(r.edges, None, "{name}");
             fs::remove_dir_all(p).unwrap();
         }
+    }
+
+    #[test]
+    fn a_fingerprint_json_larger_than_four_mebibytes_is_unsupported() {
+        let p = scratch();
+        let dir = p.join(".fingerprint/huge-0000000000000001");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib-huge"), le_hex(1)).unwrap();
+        let features = "x".repeat(4 * 1024 * 1024);
+        fs::write(
+            dir.join("lib-huge.json"),
+            format!(
+                "{{\"rustc\":1,\"features\":\"{features}\",\"declared_features\":\"[]\",\"target\":1,\"profile\":2,\"path\":3,\"deps\":[],\"local\":[],\"rustflags\":[],\"config\":4,\"compile_kind\":0}}"
+            ),
+        )
+        .unwrap();
+        let r = read_profile(&p);
+        assert!(
+            matches!(r.format, Format::Unsupported(ref why) if why.contains("4 MiB")),
+            "{:?}",
+            r.format
+        );
+        assert_eq!(r.edges, None);
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_unit_directory_makes_the_profile_unsupported() {
+        let p = scratch();
+        write_unit(&p, "ok-0000000000000001", "lib-ok", 1, &[]);
+        let blocked = p.join(".fingerprint/blocked-0000000000000002");
+        fs::create_dir_all(&blocked).unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        let r = read_profile(&p);
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(r.format, Format::Unsupported(_)), "{:?}", r.format);
+        assert_eq!(r.edges, None);
+        fs::remove_dir_all(p).unwrap();
     }
 
     #[test]

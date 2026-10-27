@@ -42,6 +42,26 @@ fn io_err(path: &Path, source: io::Error) -> StateError {
     }
 }
 
+/// A state file name is one relative component. Absolute names, `..`, and
+/// separators would let `Path::join` write outside the hive root.
+fn state_file(root: &Path, name: &str) -> Result<PathBuf, StateError> {
+    if name.is_empty()
+        || name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || Path::new(name).is_absolute()
+    {
+        return Err(io_err(
+            &root.join(name),
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a state file name must be one relative component",
+            ),
+        ));
+    }
+    Ok(root.join(name))
+}
+
 pub struct State {
     root: PathBuf,
 }
@@ -68,7 +88,7 @@ impl State {
     }
 
     pub fn read<T: DeserializeOwned + Default>(&self, name: &str) -> Result<T, StateError> {
-        read_json(&self.root.join(name))
+        read_json(&state_file(&self.root, name)?)
     }
 
     /// Runs `body` while holding the exclusive state lock (`$root/.lock`).
@@ -157,11 +177,11 @@ pub struct Tx<'a> {
 
 impl Tx<'_> {
     pub fn read<T: DeserializeOwned + Default>(&self, name: &str) -> Result<T, StateError> {
-        read_json(&self.root.join(name))
+        read_json(&state_file(self.root, name)?)
     }
 
     pub fn write<T: Serialize>(&self, name: &str, value: &T) -> Result<(), StateError> {
-        let path = self.root.join(name);
+        let path = state_file(self.root, name)?;
         let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| StateError::Malformed {
             file: path.clone(),
             detail: e.to_string(),
@@ -380,6 +400,37 @@ mod tests {
             PathBuf::from("/private/tmp"),
             "an unset key keeps its default"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_state_file_name_cannot_escape_the_root() {
+        let root = scratch("escape");
+        let state = State::open_at(root.clone()).unwrap();
+        let outside = std::env::temp_dir().join(format!(
+            "hive-escaped-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let abs = outside.to_str().unwrap().to_string();
+        let wrote = state.locked(|tx| tx.write(&abs, &Counter { n: 1 }));
+        let leaked = outside.exists();
+        let _ = fs::remove_file(&outside);
+        assert!(wrote.is_err(), "an absolute name is rejected");
+        assert!(!leaked, "an absolute name wrote outside the root");
+
+        let parent_file = root.parent().unwrap().join("hive-escaped.json");
+        let wrote = state.locked(|tx| tx.write("../hive-escaped.json", &Counter { n: 7 }));
+        let leaked = parent_file.exists();
+        let _ = fs::remove_file(&parent_file);
+        assert!(wrote.is_err(), "a .. name is rejected");
+        assert!(!leaked, "a .. name wrote outside the root");
+
+        assert!(state.locked(|tx| tx.write("", &Counter { n: 1 })).is_err());
+        assert!(state.read::<Counter>(&abs).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

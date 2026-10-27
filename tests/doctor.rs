@@ -18,6 +18,48 @@ pub fn wait_within(mut child: Child, limit: Duration) -> Output {
     child.wait_with_output().unwrap()
 }
 
+#[test]
+fn a_doctor_error_still_prints_one_receipt() {
+    let hive = Hive::new();
+    let not_dir = hive.home.path.join("not-a-tmpdir");
+    std::fs::write(&not_dir, b"x").unwrap();
+    let out = hive
+        .command(&["doctor", "--json"])
+        .env("TMPDIR", &not_dir)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "{e}\nstdout {}\nstderr {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(receipt["command"], "doctor");
+    assert!(
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "error"),
+        "{receipt}"
+    );
+    let log = hive.home.path.join("receipts");
+    let lines: Vec<String> = std::fs::read_dir(&log)
+        .unwrap()
+        .flat_map(|e| {
+            std::fs::read_to_string(e.unwrap().path())
+                .unwrap()
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+}
+
 fn doctor(hive: &Hive) -> (Output, serde_json::Value) {
     let child = hive
         .command(&["doctor", "--json"])
@@ -157,5 +199,18 @@ fn an_interrupted_doctor_exits_130_and_removes_its_temp_dir() {
             Vec::<std::path::PathBuf>::new(),
             "{signal}"
         );
+        assert!(
+            !hive.home.path.join("capabilities.json").exists(),
+            "{signal}: a cancelled doctor must not record capabilities"
+        );
+        let logged = std::fs::read_dir(hive.home.path.join("receipts"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                std::fs::read_to_string(e.path())
+                    .unwrap_or_default()
+                    .contains("\"command\":\"doctor\"")
+            });
+        assert!(logged, "{signal}: a cancelled doctor appends a receipt");
     }
 }

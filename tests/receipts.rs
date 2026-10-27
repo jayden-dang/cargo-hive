@@ -1,6 +1,7 @@
 mod common;
 use common::{init_repo, Hive, Scratch};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 
 const RECEIPT_KEYS: [&str; 12] = [
     "schema",
@@ -84,6 +85,111 @@ fn scope_comes_from_arguments_never_from_the_working_directory() {
     let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(receipt["scope"]["repos"], serde_json::json!([]));
     assert_eq!(receipt["scope"]["checkouts"], serde_json::json!([]));
+}
+
+fn receipt_lines(hive: &Hive) -> Vec<serde_json::Value> {
+    let dir = hive.home.path.join("receipts");
+    let mut lines = Vec::new();
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return lines;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        for line in fs::read_to_string(path).unwrap().lines() {
+            lines.push(serde_json::from_str(line).unwrap());
+        }
+    }
+    lines
+}
+
+#[test]
+fn a_refusal_appends_a_receipt_line() {
+    let hive = Hive::new();
+    let s = Scratch::new("refuse-log");
+    let (out, receipt) = hive.json(&["repo", "add", s.path.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(receipt["command"], "repo add");
+    assert_eq!(receipt_lines(&hive), vec![receipt]);
+}
+
+#[test]
+fn a_state_read_failure_still_prints_one_receipt() {
+    let hive = Hive::new();
+    fs::write(hive.home.path.join("registry.json"), b"{").unwrap();
+    let out = hive.run(&["repo", "list", "--json"]);
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "{e}\nstdout {}\nstderr {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(receipt["command"], "repo list");
+    assert!(
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "error"),
+        "{receipt}"
+    );
+    assert_eq!(receipt_lines(&hive), vec![receipt]);
+}
+
+#[test]
+fn json_is_still_printed_when_the_receipt_log_cannot_be_written() {
+    let hive = Hive::new();
+    assert!(hive.run(&["repo", "list"]).status.success());
+    let receipts = hive.home.path.join("receipts");
+    fs::set_permissions(&receipts, fs::Permissions::from_mode(0o555)).unwrap();
+    let out = hive.run(&["repo", "list", "--json"]);
+    fs::set_permissions(&receipts, fs::Permissions::from_mode(0o755)).unwrap();
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "{e}\nstdout {}\nstderr {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(receipt["command"], "repo list");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("could not log"));
+}
+
+#[test]
+fn status_still_prints_a_receipt_when_the_snapshot_cannot_be_written() {
+    let hive = Hive::ready();
+    let s = Scratch::new("snap-ro");
+    let repo = init_repo(&s.path.join("app"), "");
+    assert!(hive
+        .run(&["repo", "add", repo.to_str().unwrap()])
+        .status
+        .success());
+    let home = hive.home.path.clone();
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o555)).unwrap();
+    let out = hive.run(&["status", "--json"]);
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "{e}\nstdout {}\nstderr {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(receipt["command"], "status");
+    assert_ne!(out.status.code(), Some(0));
+    assert!(
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "error"),
+        "{receipt}"
+    );
 }
 
 #[test]

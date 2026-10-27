@@ -36,6 +36,7 @@ pub enum RegisterRefusal {
     NoCommits,
     Shallow,
     NoCargoToml { root: PathBuf },
+    Git(String),
 }
 
 impl fmt::Display for RegisterRefusal {
@@ -62,6 +63,7 @@ impl fmt::Display for RegisterRefusal {
                 "no Cargo.toml within 2 directory levels of {}",
                 root.display()
             ),
+            RegisterRefusal::Git(message) => write!(f, "{message}"),
         }
     }
 }
@@ -100,8 +102,11 @@ pub fn register(
         Err(_) => return refusal(RegisterRefusal::NotGit),
     };
     let top_git = Git::at(&top);
-    if let Ok(Some(superproject)) = top_git.superproject() {
-        return refusal(RegisterRefusal::Submodule { superproject });
+    match top_git.superproject() {
+        Ok(Some(superproject)) => return refusal(RegisterRefusal::Submodule { superproject }),
+        Ok(None) => {}
+        Err(GitError::NotGit) => return refusal(RegisterRefusal::NotGit),
+        Err(e) => return refusal(RegisterRefusal::Git(e.to_string())),
     }
     let (git_dir, common) = match (top_git.git_dir(), top_git.common_dir()) {
         (Ok(a), Ok(b)) => (a, b),
@@ -115,11 +120,17 @@ pub fn register(
             .unwrap_or(common);
         return refusal(RegisterRefusal::LinkedWorktree { main });
     }
-    if !top_git.has_commits().unwrap_or(false) {
-        return refusal(RegisterRefusal::NoCommits);
+    match top_git.has_commits() {
+        Ok(true) => {}
+        Ok(false) => return refusal(RegisterRefusal::NoCommits),
+        Err(GitError::NotGit) => return refusal(RegisterRefusal::NotGit),
+        Err(e) => return refusal(RegisterRefusal::Git(e.to_string())),
     }
-    if top_git.is_shallow().unwrap_or(true) {
-        return refusal(RegisterRefusal::Shallow);
+    match top_git.is_shallow() {
+        Ok(false) => {}
+        Ok(true) => return refusal(RegisterRefusal::Shallow),
+        Err(GitError::NotGit) => return refusal(RegisterRefusal::NotGit),
+        Err(e) => return refusal(RegisterRefusal::Git(e.to_string())),
     }
     let main = canon(top);
     if !has_cargo_toml_within(&main, 2) {

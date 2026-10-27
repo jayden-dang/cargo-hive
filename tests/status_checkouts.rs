@@ -1,5 +1,6 @@
 mod common;
 use common::{git, init_repo, Hive, Scratch};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 fn class_of(receipt: &serde_json::Value, path: &Path) -> String {
@@ -214,6 +215,107 @@ fn discovery_stops_at_two_levels_and_never_enters_node_modules() {
     assert_eq!(class_of(&receipt, &sec.join("near")), "secondary");
     assert_eq!(class_of(&receipt, &sec.join("a/b/deep")), "absent");
     assert_eq!(class_of(&receipt, &sec.join("node_modules/pkg")), "absent");
+}
+
+#[test]
+fn an_unreadable_worktree_is_protected_and_not_missing() {
+    let hive = Hive::ready();
+    let s = Scratch::new("unreadable-wt");
+    let main = init_repo(&s.path.join("main"), "");
+    let lane = main.join(".worktrees/lane");
+    git(&main, &["worktree", "add", "-q", lane.to_str().unwrap()]);
+    register(&hive, &main);
+    let parent = main.join(".worktrees");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (out, receipt) = hive.json(&["status", main.to_str().unwrap()]);
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(class_of(&receipt, &lane), "protected");
+    assert_eq!(receipt["counts"]["missing"], 0);
+    let detail = receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["path"] == serde_json::json!(lane))
+        .unwrap()["detail"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        detail.to_lowercase().contains("permission") || detail.contains("denied"),
+        "{detail}"
+    );
+    assert!(!detail.contains("does not exist"), "{detail}");
+}
+
+#[test]
+fn a_secondary_checkout_whose_git_metadata_fails_is_protected() {
+    let hive = Hive::ready();
+    let s = Scratch::new("sec-git");
+    let sec = s.path.join("sec");
+    std::fs::create_dir_all(&sec).unwrap();
+    hive.config(&format!("{{\"secondary_roots\": [\"{}\"]}}", sec.display()));
+    let main = init_repo(&s.path.join("main"), "");
+    git(&sec, &["clone", "-q", main.to_str().unwrap(), "app"]);
+    let clone = sec.join("app");
+    std::fs::set_permissions(clone.join(".git"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    register(&hive, &main);
+    let (_, receipt) = hive.json(&["status", main.to_str().unwrap()]);
+    std::fs::set_permissions(clone.join(".git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(class_of(&receipt, &clone), "protected");
+    let detail = receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["kind"] == "checkout.protected" && f["path"] == serde_json::json!(clone))
+        .unwrap()["detail"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        detail.to_lowercase().contains("permission")
+            || detail.contains("denied")
+            || detail.contains("git"),
+        "{detail}"
+    );
+    assert_eq!(receipt["counts"]["missing"], 0);
+}
+
+#[test]
+fn an_unreadable_directory_is_reported_and_the_walk_continues() {
+    let hive = Hive::ready();
+    let s = Scratch::new("walk");
+    let sec = s.path.join("sec");
+    let hidden = sec.join("hidden");
+    std::fs::create_dir_all(&hidden).unwrap();
+    hive.config(&format!("{{\"secondary_roots\": [\"{}\"]}}", sec.display()));
+    let main = init_repo(&s.path.join("main"), "");
+    let blocked = main.join("blocked");
+    std::fs::create_dir_all(&blocked).unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+    register(&hive, &main);
+    let (_, receipt) = hive.json(&["status", "--no-sizes", main.to_str().unwrap()]);
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(class_of(&receipt, &main), "protected");
+    let details: Vec<String> = receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["kind"] == "walk.unreadable")
+        .map(|f| f["detail"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        details
+            .iter()
+            .any(|d| d.to_lowercase().contains("permission") || d.contains("denied")),
+        "{details:?} {receipt}"
+    );
 }
 
 #[test]

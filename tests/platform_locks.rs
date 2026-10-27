@@ -51,6 +51,7 @@ fn the_lock_holder_never_creates_hive_state() {
     let s = Scratch::new("holder-state");
     std::fs::remove_dir_all(&hive.home.path).unwrap();
     let path = s.path.join("x.lock");
+    std::fs::write(&path, b"").unwrap();
     let mut child = hive
         .command(&["__hold-lock", "flock", path.to_str().unwrap()])
         .stdout(Stdio::piped())

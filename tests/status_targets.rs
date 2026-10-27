@@ -143,6 +143,39 @@ fn naming_one_repo_twice_does_not_treat_a_cache_root_target_as_an_orphan() {
 }
 
 #[test]
+fn a_protected_checkout_owns_a_target_dir_also_resolved_by_a_secondary_checkout() {
+    let hive = Hive::ready();
+    let s = Scratch::new("shared-owner");
+    let sec = s.path.join("sec");
+    fs::create_dir_all(&sec).unwrap();
+    hive.config(&format!("{{\"secondary_roots\": [\"{}\"]}}", sec.display()));
+    let main = init_repo(&s.path.join("z-main"), "");
+    let shared = s.path.join("shared-target");
+    fs::create_dir_all(main.join(".cargo")).unwrap();
+    fs::write(
+        main.join(".cargo/config.toml"),
+        format!("[build]\ntarget-dir = \"{}\"\n", shared.display()),
+    )
+    .unwrap();
+    hive.build_crate(&main, None);
+    common::git(&main, &["add", "Cargo.lock", ".cargo"]);
+    common::git(&main, &["commit", "-q", "-m", "share the target dir"]);
+    common::git(&sec, &["clone", "-q", main.to_str().unwrap(), "a-clone"]);
+    register(&hive, &main);
+    let r = status(&hive, &[main.to_str().unwrap()]);
+    let (kind, detail) = target_kind(&r, &shared).expect("the shared target is listed");
+    assert_eq!(kind, "target.owned");
+    assert!(
+        detail.contains(main.to_str().unwrap()),
+        "protected checkout should own it: {detail}"
+    );
+    assert!(
+        !detail.contains(sec.join("a-clone").to_str().unwrap()),
+        "secondary checkout must not hide the protected owner: {detail}"
+    );
+}
+
+#[test]
 fn a_build_dir_outside_every_search_root_is_owned_and_its_artifact_dir_is_not_a_target() {
     let hive = Hive::ready();
     let s = Scratch::new("builddir");

@@ -4,9 +4,12 @@
 use crate::fingerprint::ProfileReport;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io;
+use std::io::{self, Read};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub const TAG_LINE: &str = "# This file is a cache directory tag created by cargo.";
 pub const TARGET_VARS: [&str; 3] = [
@@ -39,11 +42,15 @@ fn is_hex16(name: &str) -> bool {
 
 fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|e| e.path())
-        .collect();
+    let mut dirs = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => dirs.push(entry.path()),
+            Ok(_) => {}
+            Err(e) => return Err(format!("{}: {e}", entry.path().display())),
+        }
+    }
     dirs.sort();
     Ok(dirs)
 }
@@ -58,14 +65,14 @@ fn profile_layout(dir: &Path) -> Result<Option<Layout>, String> {
         return Ok(None);
     }
     for pkg in sorted_dirs(&build)? {
-        let Ok(hashes) = sorted_dirs(&pkg) else {
-            continue;
-        };
-        if hashes.iter().any(|h| {
-            h.file_name().and_then(|n| n.to_str()).is_some_and(is_hex16)
-                && h.join("fingerprint").is_dir()
-        }) {
-            return Ok(Some(Layout::NewBuildDir));
+        for hash in sorted_dirs(&pkg)? {
+            let hex = hash
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(is_hex16);
+            if hex && is_dir(&hash.join("fingerprint"))? {
+                return Ok(Some(Layout::NewBuildDir));
+            }
         }
     }
     Ok(None)
@@ -79,11 +86,9 @@ fn profile_dirs(target: &Path) -> Result<Vec<(PathBuf, Layout)>, String> {
             out.push((child, layout));
             continue;
         }
-        if let Ok(grandchildren) = sorted_dirs(&child) {
-            for g in grandchildren {
-                if let Some(layout) = profile_layout(&g)? {
-                    out.push((g, layout));
-                }
+        for grandchild in sorted_dirs(&child)? {
+            if let Some(layout) = profile_layout(&grandchild)? {
+                out.push((grandchild, layout));
             }
         }
     }
@@ -133,6 +138,131 @@ pub struct Resolved {
     pub build_directory: PathBuf,
 }
 
+pub const METADATA_DEADLINE: Duration = Duration::from_secs(60);
+
+#[derive(Debug)]
+pub enum ChildOutputError {
+    TimedOut,
+    Cancelled,
+    Failed(String),
+}
+
+fn kill_group(child: &std::process::Child) {
+    // SAFETY: the child leads its own process group; this signals only that group.
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+}
+
+struct PipeReaders {
+    stdout: Option<thread::JoinHandle<Vec<u8>>>,
+    stderr: Option<thread::JoinHandle<Vec<u8>>>,
+}
+
+impl Drop for PipeReaders {
+    fn drop(&mut self) {
+        if let Some(handle) = self.stdout.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.stderr.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl PipeReaders {
+    fn finish(mut self) -> (Vec<u8>, Vec<u8>) {
+        let stdout = self
+            .stdout
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        let stderr = self
+            .stderr
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
+        (stdout, stderr)
+    }
+}
+
+/// Runs `cmd` with piped stdout and stderr. A deadline or a cancel kills the
+/// process group. The pipe readers are joined on every return, including expiry.
+pub fn output_with_deadline(
+    cmd: &mut Command,
+    deadline: Duration,
+    mut cancel: impl FnMut() -> bool,
+) -> Result<Output, ChildOutputError> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| ChildOutputError::Failed(format!("could not spawn: {e}")))?;
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let readers = PipeReaders {
+        stdout: Some(thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(pipe) = stdout_pipe.as_mut() {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })),
+        stderr: Some(thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(pipe) = stderr_pipe.as_mut() {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })),
+    };
+    let started = Instant::now();
+    let status = loop {
+        if cancel() {
+            kill_group(&child);
+            let _ = child.wait();
+            return Err(ChildOutputError::Cancelled);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(retry) if retry.kind() == io::ErrorKind::Interrupted => {
+                    if cancel() {
+                        kill_group(&child);
+                        let _ = child.wait();
+                        return Err(ChildOutputError::Cancelled);
+                    }
+                }
+                Err(retry) => {
+                    kill_group(&child);
+                    let _ = child.wait();
+                    return Err(ChildOutputError::Failed(retry.to_string()));
+                }
+            },
+            Err(e) => {
+                kill_group(&child);
+                let _ = child.wait();
+                return Err(ChildOutputError::Failed(e.to_string()));
+            }
+        }
+        if started.elapsed() >= deadline {
+            kill_group(&child);
+            let _ = child.wait();
+            return Err(ChildOutputError::TimedOut);
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let (stdout, stderr) = readers.finish();
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// Exactly `cargo metadata --no-deps --format-version 1 --locked --offline` in
 /// `workspace_dir`, with the three target variables and every `GIT_*` removed (F9).
 pub fn resolve(workspace_dir: &Path) -> Result<Resolved, String> {
@@ -156,9 +286,11 @@ pub fn resolve(workspace_dir: &Path) -> Result<Resolved, String> {
             cmd.env_remove(&key);
         }
     }
-    let out = cmd
-        .output()
-        .map_err(|e| format!("could not run cargo metadata: {e}"))?;
+    let out = output_with_deadline(&mut cmd, METADATA_DEADLINE, || false).map_err(|e| match e {
+        ChildOutputError::TimedOut => "cargo metadata exceeded its deadline".to_string(),
+        ChildOutputError::Cancelled => "cargo metadata was cancelled".to_string(),
+        ChildOutputError::Failed(message) => format!("could not run cargo metadata: {message}"),
+    })?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(format!(
@@ -322,6 +454,20 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_package_dir_is_not_treated_as_not_a_target() {
+        let root = scratch("unreadable-pkg");
+        let dir = root.join("target");
+        tag(&dir, TAG_LINE);
+        let pkg = dir.join("debug/build/serde");
+        mkdir(pkg.join("0123456789abcdef/fingerprint"));
+        fs::set_permissions(&pkg, fs::Permissions::from_mode(0o000)).unwrap();
+        let got = identify(&dir);
+        fs::set_permissions(&pkg, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(&got, Some(Err(why)) if !why.is_empty()), "{got:?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn a_missing_tail_is_appended_to_the_realpath_of_its_nearest_existing_ancestor() {
         let root = scratch("lossy");
         assert_eq!(
@@ -329,5 +475,32 @@ mod tests {
             root.canonicalize().unwrap().join("a/b")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_short_deadline_kills_a_sleeping_child() {
+        assert_eq!(METADATA_DEADLINE, Duration::from_secs(60));
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let started = Instant::now();
+        let err = output_with_deadline(&mut cmd, Duration::from_millis(200), || false)
+            .expect_err("a 30s sleep must not finish inside the deadline");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "sleep was still running after {:?}",
+            started.elapsed()
+        );
+        assert!(matches!(err, ChildOutputError::TimedOut), "{err:?}");
+    }
+
+    #[test]
+    fn a_cancel_kills_the_child_instead_of_waiting_out_the_deadline() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let started = Instant::now();
+        let err = output_with_deadline(&mut cmd, Duration::from_secs(60), || true)
+            .expect_err("cancel stops the child");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(matches!(err, ChildOutputError::Cancelled), "{err:?}");
     }
 }

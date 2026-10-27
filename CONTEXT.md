@@ -14,6 +14,10 @@ _Avoid_: main-only, locked checkout
 A linked worktree inside its own main, or a checkout under a secondary root. Agents may apply plans to it, and hive may seed it.
 _Avoid_: scratch checkout, temp worktree
 
+**Missing**:
+A flag on a protected checkout whose directory is gone, not a third checkout class.
+_Avoid_: missing class, deleted checkout
+
 **Secondary root**:
 A configured directory whose checkouts are secondary. The defaults are `/private/tmp` and `$TMPDIR`.
 _Avoid_: temp root (the default is only one example)
@@ -45,8 +49,8 @@ _Avoid_: crate (a crate has many units), artifact
 The exact shape hive accepts for a unit: the 11 JSON keys with fixed types, `deps` as `[u64, string, bool, u64]`, and a 16-hex hash file. Any other shape is unsupported.
 _Avoid_: fingerprint version
 
-**Orphan target**:
-A Cargo target dir that is neither the target directory nor the build directory Cargo resolves for any known checkout.
+**Orphan candidate**:
+The status name for a target no checkout owns when resolution succeeded. It is a Cargo target dir that is neither the target directory nor the build directory Cargo resolves for any known checkout.
 _Avoid_: stale target, dead target
 
 **Store**:

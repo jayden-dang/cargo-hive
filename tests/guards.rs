@@ -126,6 +126,39 @@ fn repo_add_status_and_doctor_leave_checkouts_targets_and_cargo_home_unchanged()
 }
 
 #[test]
+fn repo_add_status_and_doctor_leave_a_scratch_cargo_home_unchanged() {
+    let hive = Hive::ready();
+    let s = Scratch::new("cargo-guard");
+    let repo = init_repo(&s.path.join("app"), "");
+    let cargo_home = Scratch::new("cargo-tree");
+    fs::write(cargo_home.path.join("marker"), b"keep").unwrap();
+    let before = tree(&cargo_home.path);
+    let runs: Vec<Vec<&str>> = vec![
+        vec!["repo", "add", repo.to_str().unwrap()],
+        vec!["status", "--no-sizes"],
+        vec!["doctor"],
+    ];
+    for args in runs {
+        let out = hive
+            .command(&args)
+            .env("CARGO_HOME", &cargo_home.path)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_eq!(
+        changed(&before, &tree(&cargo_home.path)),
+        Vec::<String>::new(),
+        "hive changed the scratch CARGO_HOME"
+    );
+}
+
+#[test]
 fn cargo_builds_a_registered_checkout_exactly_as_without_hive() {
     let hive = Hive::ready();
     let s = Scratch::new("as-before");

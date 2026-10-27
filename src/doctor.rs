@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +17,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 pub const CAPABILITIES_FILE: &str = "capabilities.json";
 pub const MACOS_FLOOR: u32 = 27;
+pub const PROBE_DEADLINE: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -595,32 +595,34 @@ fn check_format(
             fs.write_file(&path, body.as_bytes())?;
         }
         std::fs::create_dir_all(&cargo_home)?;
-        let stderr_path = dir.join("f-cargo.stderr");
-        let mut child = probe_command(tc, &krate, &target, &cargo_home)
-            .stderr(std::fs::File::create(&stderr_path)?)
-            .process_group(0)
-            .spawn()?;
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
-            if CANCEL.load(Ordering::SeqCst) {
-                // SAFETY: the child leads its own process group; this signals only that group.
-                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-                let _ = child.wait();
-                return Ok(Err(DoctorError::Cancelled));
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        if !status.success() {
-            let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+        let mut cmd = probe_command(tc, &krate, &target, &cargo_home);
+        let output =
+            match crate::cargo_target::output_with_deadline(&mut cmd, PROBE_DEADLINE, || {
+                CANCEL.load(Ordering::SeqCst)
+            }) {
+                Err(crate::cargo_target::ChildOutputError::Cancelled) => {
+                    return Ok(Err(DoctorError::Cancelled));
+                }
+                Err(crate::cargo_target::ChildOutputError::TimedOut) => {
+                    return Ok(Ok(failed(
+                        CheckId::F,
+                        "the probe build exceeded its deadline",
+                    )));
+                }
+                Err(crate::cargo_target::ChildOutputError::Failed(message)) => {
+                    return Ok(Ok(failed(CheckId::F, message)));
+                }
+                Ok(output) => output,
+            };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(Ok(Check {
                 id: CheckId::F,
                 verdict: Verdict::Fail,
                 measured: Measures::from([
                     (
                         "cargo_status".to_string(),
-                        Measured::Text(status.to_string()),
+                        Measured::Text(output.status.to_string()),
                     ),
                     (
                         "stderr_tail".to_string(),
@@ -728,6 +730,11 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
+
+    #[test]
+    fn the_probe_build_deadline_is_two_minutes() {
+        assert_eq!(PROBE_DEADLINE.as_secs(), 120);
+    }
 
     #[derive(Clone)]
     struct Knobs {
