@@ -437,8 +437,9 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
         && selected
             .iter()
             .all(|s| reg.repos.iter().any(|r| r.main == s.main));
-    let mut scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot);
-    if doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst) {
+    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let mut scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot, cancelled);
+    if cancelled() {
         b.finding("error", None, "status was cancelled");
         return emit(state, out, b.finish(), &human, 130);
     }
@@ -454,6 +455,10 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
     } else {
         let mut bytes = 0u64;
         for t in &mut scan.targets {
+            if cancelled() {
+                b.finding("error", None, "status was cancelled");
+                return emit(state, out, b.finish(), &human, 130);
+            }
             let key = format!("bytes:{}", t.path.display());
             if let Some(why) = &t.unreadable {
                 b.unmeasured(&key, format!("the target dir is unreadable: {why}"));
@@ -473,16 +478,27 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
         b.count("bytes", bytes);
     }
     report_targets(&mut b, &mut human, &scan);
-    if let Err(e) = state.locked(|tx| {
+    let wrote = match state.locked(|tx| {
+        if cancelled() {
+            return Ok(false);
+        }
         let disk = tx.read(SNAPSHOT_FILE)?;
         tx.write(
             SNAPSHOT_FILE,
             &discover::merge_snapshot(snapshot, disk, &scan.cleared_profiles),
-        )
+        )?;
+        Ok(true)
     }) {
-        eprintln!("cargo-hive: {e}");
-        b.finding("error", None, e.to_string());
-        return emit(state, out, b.finish(), &human, 1);
+        Ok(wrote) => wrote,
+        Err(e) => {
+            eprintln!("cargo-hive: {e}");
+            b.finding("error", None, e.to_string());
+            return emit(state, out, b.finish(), &human, 1);
+        }
+    };
+    if !wrote {
+        b.finding("error", None, "status was cancelled");
+        return emit(state, out, b.finish(), &human, 130);
     }
     emit(state, out, b.finish(), &human, code)
 }

@@ -145,7 +145,7 @@ Targets are found by walking each known checkout up to 3 levels and each cache r
 
 Satisfies: CORE-4.5, CORE-4.10, CORE-4.12, CORE-4.13
 Reuse: 4 — `cargo metadata` (Decision 4); 3 — `std::fs` for tag and layout probes
-Interface: `is_cargo_target(dir) -> Option<Layout::{Fingerprint, NewBuildDir}>` · `resolve(workspace_dir) -> Resolved{target_directory, build_directory, workspace_root} | Unresolved(reason)` · `TargetDir{path, owner: Owned(checkout) | Unresolved(reason) | OrphanCandidate{owned_under_caller_env: Option<checkout>}, profiles: Vec<fingerprint::ProfileReport>, size: Option<u64>, readable: Result<(), Reason>}`
+Interface: `is_cargo_target(dir) -> Option<Layout::{Fingerprint, NewBuildDir}>` · `resolve(workspace_dir, cancel: impl FnMut() -> bool) -> Resolved{target_directory, build_directory, workspace_root} | Unresolved(reason)` · `TargetDir{path, owner: Owned(checkout) | Unresolved(reason) | OrphanCandidate{owned_under_caller_env: Option<checkout>}, profiles: Vec<fingerprint::ProfileReport}, size: Option<u64>, readable: Result<(), Reason>}`
 Depth: deletion test — callers would still need to know "is this a Cargo target, and who owns it (or that it's unknown)". These stay hidden: the exact tag line, the two layout probes, the child flags and environment, JSON extraction, the `build_directory` fallback, and the caller-environment comparison.
 Locality: new `src/cargo_target.rs`; calls `fingerprint` for each profile dir.
 

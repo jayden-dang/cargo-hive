@@ -377,6 +377,7 @@ fn resolve_workspaces(
     checkouts: &[PathBuf],
     snapshot: &mut Snapshot,
     faults: &mut Vec<WalkFault>,
+    cancel: &(impl Fn() -> bool + Sync),
 ) -> Vec<Resolution> {
     let mut by_depth: BTreeMap<usize, BTreeSet<PathBuf>> = BTreeMap::new();
     for checkout in checkouts {
@@ -405,19 +406,13 @@ fn resolve_workspaces(
             }
         }
         for chunk in uncached.chunks(4) {
-            if crate::doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst) {
+            if cancel() {
                 break;
             }
             let results: Vec<Result<Resolved, String>> = std::thread::scope(|s| {
                 let handles: Vec<_> = chunk
                     .iter()
-                    .map(|d| {
-                        s.spawn(move || {
-                            cargo_target::resolve(d, || {
-                                crate::doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst)
-                            })
-                        })
-                    })
+                    .map(|d| s.spawn(move || cargo_target::resolve(d, cancel)))
                     .collect();
                 handles
                     .into_iter()
@@ -485,6 +480,7 @@ pub fn targets(
     cfg: &Config,
     all_repos: bool,
     snapshot: &mut Snapshot,
+    cancel: impl Fn() -> bool + Sync,
 ) -> TargetScan {
     let live: Vec<PathBuf> = checkouts
         .iter()
@@ -492,7 +488,7 @@ pub fn targets(
         .map(|c| c.path.clone())
         .collect();
     let mut walk_faults = Vec::new();
-    let resolutions = resolve_workspaces(&live, snapshot, &mut walk_faults);
+    let resolutions = resolve_workspaces(&live, snapshot, &mut walk_faults, &cancel);
     let resolved: Vec<&Resolved> = resolutions
         .iter()
         .filter_map(|r| r.result.as_ref().ok())

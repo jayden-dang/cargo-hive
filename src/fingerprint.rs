@@ -133,6 +133,19 @@ fn check_types(obj: &Map<String, Value>) -> Result<Vec<u64>, String> {
         .collect()
 }
 
+fn read_capped(reader: &mut impl Read) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_JSON_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_JSON_BYTES {
+        return Err("larger than 4 MiB".into());
+    }
+    Ok(bytes)
+}
+
 fn read_unit(dir: &Path, json_name: &str) -> Result<Unit, String> {
     let stem = json_name.trim_end_matches(".json");
     let hash = fs::read(dir.join(stem)).map_err(|e| format!("hash file `{stem}`: {e}"))?;
@@ -149,14 +162,7 @@ fn read_unit(dir: &Path, json_name: &str) -> Result<Unit, String> {
         return Err(format!("{json_name}: larger than 4 MiB"));
     }
     let mut file = fs::File::open(&json_path).map_err(|e| format!("{json_name}: {e}"))?;
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(MAX_JSON_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("{json_name}: {e}"))?;
-    if bytes.len() as u64 > MAX_JSON_BYTES {
-        return Err(format!("{json_name}: larger than 4 MiB"));
-    }
+    let bytes = read_capped(&mut file).map_err(|e| format!("{json_name}: {e}"))?;
     let value: Value = serde_json::from_slice(&bytes).map_err(|e| format!("{json_name}: {e}"))?;
     let obj = value
         .as_object()
@@ -516,6 +522,39 @@ mod tests {
         );
         assert_eq!(r.edges, None);
         fs::remove_dir_all(p).unwrap();
+    }
+
+    struct CountingReader {
+        remaining: u64,
+        pulled: u64,
+    }
+
+    impl Read for CountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 || buf.is_empty() {
+                return Ok(0);
+            }
+            let n = std::cmp::min(self.remaining, buf.len() as u64) as usize;
+            buf[..n].fill(b'x');
+            self.remaining -= n as u64;
+            self.pulled += n as u64;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_capped_body_read_rejects_an_oversize_stream_without_pulling_past_the_cap() {
+        let mut source = CountingReader {
+            remaining: MAX_JSON_BYTES + 100,
+            pulled: 0,
+        };
+        let err = read_capped(&mut source).expect_err("oversize body");
+        assert!(err.contains("4 MiB"), "expected a size error, got {err:?}");
+        assert!(
+            source.pulled <= MAX_JSON_BYTES + 1,
+            "pulled {} bytes past the cap",
+            source.pulled
+        );
     }
 
     #[test]

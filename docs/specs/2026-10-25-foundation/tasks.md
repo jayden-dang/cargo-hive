@@ -4557,11 +4557,11 @@ _Requirements: CORE-1.4, CORE-1.10_
 - Produces:
   - `cargo_target::{TAG_LINE, TARGET_VARS, Layout::{Fingerprint, NewBuildDir}}`
   - `cargo_target::identify(&Path) -> Option<Result<Vec<(PathBuf, Layout)>, String>>`
-  - `cargo_target::Resolved{workspace_root, target_directory, build_directory}` and `cargo_target::resolve(&Path) -> Result<Resolved, String>`
+  - `cargo_target::Resolved{workspace_root, target_directory, build_directory}` and `cargo_target::resolve(&Path, impl FnMut() -> bool) -> Result<Resolved, String>`
   - `cargo_target::{realpath_lossy, caller_overrides}`
   - `cargo_target::Owner::{Owned{checkout}, Unresolved{reason}, OrphanCandidate{owned_under_caller_env: Option<String>}}`
   - `cargo_target::TargetDir{path, owner, profiles: Vec<ProfileReport>, size: Option<u64>, unreadable: Option<String>}`
-  - `discover::{SNAPSHOT_FILE, Snapshot{metadata, unsupported_profiles}, CachedMetadata{stamp, resolved}, workspace_dirs, find_targets, TargetScan{targets, metadata_calls, metadata_cache_hits, ignored_vars}, targets(&[Checkout], &Config, all_repos: bool, &mut Snapshot) -> TargetScan}`
+  - `discover::{SNAPSHOT_FILE, Snapshot{metadata, unsupported_profiles}, CachedMetadata{stamp, resolved}, workspace_dirs, find_targets, TargetScan{targets, metadata_calls, metadata_cache_hits, ignored_vars, cleared_profiles}, targets(&[Checkout], &Config, all_repos: bool, &mut Snapshot) -> TargetScan}`
   - Receipt names:
     - counts `targets`, `owned`, `orphan_candidates`, `unresolved_owners`, `unreadable`, `unsupported_profiles`, `units`, `edges_resolved`, `edges_unresolved`, `edges_ambiguous`, `metadata_calls`, `metadata_cache_hits`, plus `units:<profile>` and `edges_{resolved,unresolved,ambiguous}:<profile>` for each profile dir
     - findings `target.owned`, `target.orphan_candidate`, `target.unresolved`, `target.unreadable`, `profile.unsupported`
@@ -5028,7 +5028,7 @@ pub struct Resolved {
 
 /// Exactly `cargo metadata --no-deps --format-version 1 --locked --offline` in
 /// `workspace_dir`, with the three target variables and every `GIT_*` removed (F9).
-pub fn resolve(workspace_dir: &Path) -> Result<Resolved, String> {
+pub fn resolve(workspace_dir: &Path, cancel: impl FnMut() -> bool) -> Result<Resolved, String> {
     let mut cmd = Command::new("cargo");
     cmd.args(["metadata", "--no-deps", "--format-version", "1", "--locked", "--offline"])
         .current_dir(workspace_dir)
@@ -5251,6 +5251,7 @@ pub struct TargetScan {
     pub metadata_calls: u64,
     pub metadata_cache_hits: u64,
     pub ignored_vars: Vec<String>,
+    pub cleared_profiles: BTreeSet<PathBuf>,
 }
 
 /// Every Cargo target dir of the live `checkouts` (3 levels) and the cache roots (2 levels),
@@ -5328,6 +5329,7 @@ pub fn targets(checkouts: &[Checkout], cfg: &Config, all_repos: bool, snapshot: 
         metadata_calls: resolutions.iter().filter(|r| !r.cached).count() as u64,
         metadata_cache_hits: resolutions.iter().filter(|r| r.cached).count() as u64,
         ignored_vars: overrides.into_iter().map(|(name, _)| name).collect(),
+        cleared_profiles: BTreeSet::new(),
     }
 }
 ```

@@ -1,6 +1,7 @@
 mod common;
 use common::{init_repo, Hive, Scratch};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Output, Stdio};
@@ -553,5 +554,77 @@ fn an_interrupted_status_exits_130_and_kills_cargo_metadata() {
     assert!(
         !hive.home.path.join("snapshot.json").exists(),
         "a cancelled status must not publish snapshot.json"
+    );
+}
+
+#[test]
+fn an_interrupted_status_waiting_on_the_state_lock_exits_130_without_writing_the_snapshot() {
+    let hive = Hive::ready();
+    let s = Scratch::new("status-lock-signal");
+    hive.config(&format!(
+        r#"{{"secondary_roots":["{}"],"cache_roots":["{}"]}}"#,
+        s.path.join("no-secondary").display(),
+        s.path.join("no-cache").display()
+    ));
+    let repo = init_repo(&s.path.join("app"), "");
+    register(&hive, &repo);
+    let primed = hive.run(&["status", repo.to_str().unwrap(), "--no-sizes", "--json"]);
+    assert!(
+        primed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&primed.stderr)
+    );
+    let snapshot_path = hive.home.path.join("snapshot.json");
+    let before = fs::read(&snapshot_path).unwrap();
+    let lock_path = hive.home.path.join(".lock");
+    assert!(lock_path.exists(), "a prior status creates the state lock");
+    let mut holder = hive
+        .command(&["__hold-lock", "flock", lock_path.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut held = String::new();
+    BufReader::new(holder.stdout.take().unwrap())
+        .read_line(&mut held)
+        .unwrap();
+    assert_eq!(held.trim(), "held");
+    let child = hive
+        .command(&["status", repo.to_str().unwrap(), "--no-sizes", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let hive_pid = child.id();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        assert!(
+            pid_alive(hive_pid),
+            "status should still be blocked on the state lock"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(std::process::Command::new("kill")
+        .args(["-INT", &hive_pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    holder.kill().unwrap();
+    let _ = holder.wait();
+    let out = wait_within(child, Duration::from_secs(30));
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
+    let logged = fs::read_dir(hive.home.path.join("receipts"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            let text = fs::read_to_string(e.path()).unwrap_or_default();
+            text.contains("\"command\":\"status\"") && text.contains("status was cancelled")
+        });
+    assert!(logged, "a cancelled status appends a receipt");
+    assert_eq!(
+        fs::read(&snapshot_path).unwrap(),
+        before,
+        "a cancelled status must leave snapshot.json unchanged"
     );
 }
