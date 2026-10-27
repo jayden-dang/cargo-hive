@@ -55,8 +55,33 @@ impl Hive {
         }
     }
 
+    /// Writes config.json. `cache_roots` defaults to `<home>/no-cache`, so tests never walk
+    /// the real ~/.cache/cargo-target; pass it explicitly to override.
     pub fn config(&self, json: &str) {
-        fs::write(self.home.path.join("config.json"), json).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .entry("cache_roots")
+            .or_insert_with(|| serde_json::json!([self.home.path.join("no-cache")]));
+        fs::write(self.home.path.join("config.json"), value.to_string()).unwrap();
+    }
+
+    /// A hive whose doctor results are recorded for the active toolchain with every
+    /// capability enabled, and whose cache root is a scratch dir.
+    pub fn ready() -> Hive {
+        let hive = Hive::new();
+        hive.write_ready_capabilities();
+        hive.config("{}");
+        hive
+    }
+
+    pub fn write_ready_capabilities(&self) {
+        let release = cargo_hive::doctor::resolve_toolchain(&self.home.path)
+            .expect("the proof machine has a Rust toolchain")
+            .release;
+        let caps = serde_json::json!({ "toolchain_release": release, "disabled": {} });
+        fs::write(self.home.path.join("capabilities.json"), caps.to_string()).unwrap();
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
