@@ -33,6 +33,11 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// Check which hive capabilities work on this machine
+    Doctor {
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// Hold a lock until killed (used by doctor's lock check)
     #[command(name = "__hold-lock", hide = true)]
     HoldLock {
@@ -98,6 +103,7 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
             command: RepoCommand::List(out),
         } => repo_list(&state, out),
         Command::Status { repos, out } => status(&state, &repos, out),
+        Command::Doctor { out } => doctor_cmd(&state, out),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
     }
 }
@@ -204,6 +210,89 @@ fn repo_list(state: &State, out: OutputArgs) -> i32 {
         ));
     }
     emit(state, out, b.finish(), &human, 0)
+}
+
+fn measured_text(m: &std::collections::BTreeMap<String, crate::receipt::Measured>) -> String {
+    use crate::receipt::Measured;
+    m.iter()
+        .map(|(k, v)| match v {
+            Measured::Int(n) => format!("{k}={n}"),
+            Measured::Bool(b) => format!("{k}={b}"),
+            Measured::Text(t) => format!("{k}={t:?}"),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
+    use crate::doctor::{self, DoctorEnv, Verdict};
+    use crate::receipt::CheckRecord;
+    let Ok(platform) = platform::current() else {
+        eprintln!("{MACOS_ONLY_MESSAGE}");
+        return 2;
+    };
+    let macos = platform::os_version();
+    let env = DoctorEnv {
+        tmp_parent: std::env::temp_dir(),
+        macos: macos.clone(),
+        toolchain: doctor::resolve_toolchain(state.root()),
+    };
+    let report = match doctor::run(&*platform.fs, &*platform.approve, &env) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("cargo-hive: {e}");
+            return 1;
+        }
+    };
+    let caps = doctor::capabilities_for(&report);
+    if let Err(e) = state.locked(|tx| tx.write(doctor::CAPABILITIES_FILE, &caps)) {
+        eprintln!("cargo-hive: {e}");
+        return 1;
+    }
+    let mut b = Receipt::with_os("doctor", Scope::default(), macos);
+    b.toolchain(report.toolchain_release.clone());
+    if let Err(reason) = &env.toolchain {
+        b.unmeasured("toolchain", reason.clone());
+    }
+    let mut human = String::new();
+    let (mut pass, mut fail, mut unavailable) = (0u64, 0u64, 0u64);
+    for c in &report.checks {
+        match c.verdict {
+            Verdict::Pass => pass += 1,
+            Verdict::Fail => fail += 1,
+            Verdict::Unavailable => unavailable += 1,
+        }
+        human.push_str(&format!(
+            "({}) {:<11} {}\n",
+            c.id.letter(),
+            c.verdict.as_str(),
+            measured_text(&c.measured)
+        ));
+        b.check(CheckRecord {
+            id: c.id.letter().into(),
+            verdict: c.verdict.as_str().into(),
+            measured: c.measured.clone(),
+        });
+    }
+    for (cap, checks) in &caps.disabled {
+        let ids: Vec<String> = checks.iter().map(|c| format!("({})", c.letter())).collect();
+        let line = format!(
+            "{} is disabled: doctor check {} did not pass",
+            cap.describe(),
+            ids.join(", ")
+        );
+        human.push_str(&format!("{line}\n"));
+        b.finding("capability.disabled", None, line);
+    }
+    if let Some(line) = doctor::floor_note(&report) {
+        human.push_str(&format!("{line}\n"));
+        b.note(line);
+    }
+    b.count("pass", pass)
+        .count("fail", fail)
+        .count("unavailable", unavailable)
+        .count("stale_temp_dirs_removed", report.stale_removed);
+    emit(state, out, b.finish(), &human, i32::from(fail > 0))
 }
 
 fn status(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
