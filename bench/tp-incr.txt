@@ -1,0 +1,61 @@
+time:   0.000; rss:   40MB ->   41MB (   +1MB)	parse_crate
+time:   0.064; rss:   41MB ->   41MB (   +0MB)	incr_comp_prepare_session_directory
+time:   0.014; rss:  379MB ->  379MB (   +0MB)	incr_comp_garbage_collect_session_directories
+time:   0.000; rss:  440MB ->  440MB (   +0MB)	crate_injection
+time:   0.768; rss:  440MB ->  746MB ( +306MB)	expand_crate
+time:   0.768; rss:  440MB ->  746MB ( +306MB)	macro_expand_crate
+time:   0.011; rss:  746MB ->  747MB (   +0MB)	AST_validation
+time:   0.006; rss:  747MB ->  747MB (   +0MB)	finalize_imports
+time:   0.001; rss:  747MB ->  747MB (   +0MB)	compute_effective_visibilities
+time:   0.000; rss:  747MB ->  747MB (   +0MB)	lint_reexports
+time:   0.004; rss:  747MB ->  747MB (   +0MB)	finalize_macro_resolutions
+time:   0.090; rss:  747MB ->  796MB (  +49MB)	late_resolve_crate
+time:   0.000; rss:  796MB ->  796MB (   +0MB)	resolve_main
+time:   0.003; rss:  796MB ->  796MB (   +0MB)	resolve_check_unused
+time:   0.007; rss:  796MB ->  797MB (   +0MB)	resolve_postprocess
+time:   0.111; rss:  747MB ->  797MB (  +50MB)	resolve_crate
+{"$message_type":"artifact","artifact":"/tmp/klynt-bench/n-base/debug/build/persistence/89e44bcb769b23da/out/persistence-89e44bcb769b23da.d","emit":"dep-info"}
+time:   0.004; rss:  797MB ->  798MB (   +0MB)	write_dep_info
+time:   0.003; rss:  798MB ->  798MB (   +0MB)	complete_gated_feature_checking
+time:   0.000; rss:  938MB ->  938MB (   +0MB)	check_externally_implementable_items
+time:   0.000; rss:  938MB ->  938MB (   +0MB)	looking_for_derive_registrar
+time:   0.000; rss:  940MB ->  941MB (   +0MB)	unused_lib_feature_checking
+time:   0.007; rss:  938MB ->  947MB (   +9MB)	misc_checking_1
+time:   0.132; rss:  947MB -> 1001MB (  +54MB)	coherence_checking
+time:   0.148; rss:  947MB -> 1008MB (  +61MB)	type_check_crate
+time:   0.059; rss: 1008MB -> 1095MB (  +87MB)	MIR_borrow_checking
+time:   0.000; rss: 1095MB -> 1095MB (   +0MB)	abi_testing
+{"$message_type":"diagnostic","message":"constant `LOCK_ASSET` is never used","code":{"code":"dead_code","explanation":null},"level":"warning","spans":[{"file_name":"crates/infra/persistence/src/repositories/asset/lock.rs","byte_start":195,"byte_end":205,"line_start":8,"line_end":8,"column_start":7,"column_end":17,"is_primary":true,"text":[{"text":"const LOCK_ASSET: &str =","highlight_start":7,"highlight_end":17}],"label":null,"suggested_replacement":null,"suggestion_applicability":null,"expansion":null}],"children":[{"message":"`#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default","code":null,"level":"note","spans":[],"children":[],"rendered":null}],"rendered":"\u001b[1m\u001b[33mwarning\u001b[0m\u001b[1m: constant `LOCK_ASSET` is never used\u001b[0m\n \u001b[1m\u001b[94m--> \u001b[0mcrates/infra/persistence/src/repositories/asset/lock.rs:8:7\n  \u001b[1m\u001b[94m|\u001b[0m\n\u001b[1m\u001b[94m8\u001b[0m \u001b[1m\u001b[94m|\u001b[0m const LOCK_ASSET: &str =\n  \u001b[1m\u001b[94m|\u001b[0m       \u001b[1m\u001b[33m^^^^^^^^^^\u001b[0m\n  \u001b[1m\u001b[94m|\u001b[0m\n  \u001b[1m\u001b[94m= \u001b[0m\u001b[1mnote\u001b[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default\n\n"}
+{"$message_type":"diagnostic","message":"constant `STAMP_CHANNEL` is never used","code":{"code":"dead_code","explanation":null},"level":"warning","spans":[{"file_name":"crates/infra/persistence/src/repositories/asset/lock.rs","byte_start":305,"byte_end":318,"line_start":10,"line_end":10,"column_start":7,"column_end":20,"is_primary":true,"text":[{"text":"const STAMP_CHANNEL: &str = \"UPDATE assets SET ref_channels = ARRAY(SELECT DISTINCT unnest(ref_channels || $2::text[]) ORDER BY 1), updated_at = clock_timestamp() WHERE id = $1\";","highlight_start":7,"highlight_end":20}],"label":null,"suggested_replacement":null,"suggestion_applicability":null,"expansion":null}],"children":[],"rendered":"\u001b[1m\u001b[33mwarning\u001b[0m\u001b[1m: constant `STAMP_CHANNEL` is never used\u001b[0m\n  \u001b[1m\u001b[94m--> \u001b[0mcrates/infra/persistence/src/repositories/asset/lock.rs:10:7\n   \u001b[1m\u001b[94m|\u001b[0m\n\u001b[1m\u001b[94m10\u001b[0m \u001b[1m\u001b[94m|\u001b[0m const STAMP_CHANNEL: &str = \"UPDATE assets SET ref_channels = ARRAY(SELECT DISTINCT unnest(ref_channels || $2::text[]) ORDER BY 1), \u001b[1m\u001b[94m...\u001b[0m\n   \u001b[1m\u001b[94m|\u001b[0m       \u001b[1m\u001b[33m^^^^^^^^^^^^^\u001b[0m\n\n"}
+{"$message_type":"diagnostic","message":"function `lock_asset_for_reference` is never used","code":{"code":"dead_code","explanation":null},"level":"warning","spans":[{"file_name":"crates/infra/persistence/src/repositories/asset/lock.rs","byte_start":1313,"byte_end":1337,"line_start":43,"line_end":43,"column_start":21,"column_end":45,"is_primary":true,"text":[{"text":"pub(crate) async fn lock_asset_for_reference(","highlight_start":21,"highlight_end":45}],"label":null,"suggested_replacement":null,"suggestion_applicability":null,"expansion":null}],"children":[],"rendered":"\u001b[1m\u001b[33mwarning\u001b[0m\u001b[1m: function `lock_asset_for_reference` is never used\u001b[0m\n  \u001b[1m\u001b[94m--> \u001b[0mcrates/infra/persistence/src/repositories/asset/lock.rs:43:21\n   \u001b[1m\u001b[94m|\u001b[0m\n\u001b[1m\u001b[94m43\u001b[0m \u001b[1m\u001b[94m|\u001b[0m pub(crate) async fn lock_asset_for_reference(\n   \u001b[1m\u001b[94m|\u001b[0m                     \u001b[1m\u001b[33m^^^^^^^^^^^^^^^^^^^^^^^^\u001b[0m\n\n"}
+time:   0.003; rss: 1208MB -> 1208MB (   +1MB)	module_lints
+time:   0.003; rss: 1208MB -> 1208MB (   +1MB)	lint_checking
+time:   0.006; rss: 1208MB -> 1209MB (   +1MB)	privacy_checking_modules
+time:   0.000; rss: 1209MB -> 1209MB (   +0MB)	check_lint_expectations
+time:   0.083; rss: 1095MB -> 1209MB ( +114MB)	misc_checking_3
+time:   0.003; rss: 1399MB -> 1399MB (   +0MB)	monomorphization_collector_root_collections
+time:   0.192; rss: 1399MB -> 1537MB ( +137MB)	monomorphization_collector_graph_walk
+time:   0.184; rss: 1540MB -> 1640MB ( +100MB)	partition_and_assert_distinct_symbols
+time:   0.701; rss: 1209MB -> 1622MB ( +413MB)	generate_crate_metadata
+{"$message_type":"artifact","artifact":"/tmp/klynt-bench/n-base/debug/build/persistence/89e44bcb769b23da/out/libpersistence-89e44bcb769b23da.rmeta","emit":"metadata"}
+time:   0.011; rss: 1623MB -> 1623MB (   +0MB)	find_cgu_reuse
+time:   0.000; rss: 1623MB -> 1630MB (   +7MB)	codegen_to_LLVM_IR
+time:   0.040; rss: 1622MB -> 1630MB (   +8MB)	codegen_crate
+time:   0.000; rss: 1630MB -> 1630MB (   +0MB)	assert_dep_graph
+time:   0.030; rss: 1623MB -> 1629MB (   +5MB)	LLVM_passes
+time:   0.004; rss: 1630MB -> 1628MB (   -2MB)	incr_comp_persist_dep_graph
+time:   0.116; rss: 1493MB -> 1508MB (  +16MB)	encode_query_values
+time:   0.129; rss: 1493MB -> 1498MB (   +6MB)	incr_comp_serialize_result_cache
+time:   0.167; rss: 1628MB -> 1498MB ( -130MB)	incr_comp_persist_result_cache
+time:   0.170; rss: 1630MB -> 1498MB ( -132MB)	serialize_dep_graph
+time:   0.000; rss: 1106MB -> 1106MB (   +0MB)	join_worker_thread
+time:   0.000; rss: 1106MB -> 1106MB (   +0MB)	copy_all_cgu_workproducts_to_incr_comp_cache_dir
+time:   0.000; rss: 1106MB -> 1106MB (   +0MB)	finish_ongoing_codegen
+time:   0.000; rss: 1106MB -> 1106MB (   +0MB)	serialize_work_products
+time:   0.057; rss:  619MB ->  661MB (  +41MB)	link_rlib
+{"$message_type":"artifact","artifact":"/tmp/klynt-bench/n-base/debug/build/persistence/89e44bcb769b23da/out/libpersistence-89e44bcb769b23da.rlib","emit":"link"}
+time:   0.059; rss:  619MB ->  661MB (  +41MB)	link_binary
+time:   0.060; rss:  619MB ->  621MB (   +2MB)	link_crate
+time:   0.064; rss: 1106MB ->  621MB ( -485MB)	link
+{"$message_type":"diagnostic","message":"3 warnings emitted","code":null,"level":"warning","spans":[],"children":[],"rendered":"\u001b[1m\u001b[33mwarning\u001b[0m\u001b[1m: 3 warnings emitted\u001b[0m\n\n"}
+time:   2.684; rss:   27MB ->  193MB ( +166MB)	total
