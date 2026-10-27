@@ -100,6 +100,57 @@ impl State {
     }
 }
 
+pub const CONFIG_FILE: &str = "config.json";
+
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ConfigFile {
+    secondary_roots: Option<Vec<PathBuf>>,
+    cache_roots: Option<Vec<PathBuf>>,
+}
+
+/// Effective configuration: a key set in `config.json` replaces its default list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Config {
+    pub secondary_roots: Vec<PathBuf>,
+    pub cache_roots: Vec<PathBuf>,
+}
+
+impl State {
+    pub fn config(&self) -> Result<Config, StateError> {
+        let file: ConfigFile = self.read(CONFIG_FILE)?;
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let normalize = |p: PathBuf| -> PathBuf {
+            let p = match (p.strip_prefix("~"), &home) {
+                (Ok(rest), Some(h)) => h.join(rest),
+                _ => p,
+            };
+            p.canonicalize().unwrap_or(p)
+        };
+        let dedup = |v: Vec<PathBuf>| {
+            let mut out: Vec<PathBuf> = Vec::new();
+            for p in v.into_iter().map(normalize) {
+                if !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+            out
+        };
+        let secondary = file.secondary_roots.unwrap_or_else(|| {
+            let mut v = vec![PathBuf::from("/private/tmp")];
+            v.extend(std::env::var_os("TMPDIR").map(PathBuf::from));
+            v
+        });
+        let cache = file
+            .cache_roots
+            .unwrap_or_else(|| home.iter().map(|h| h.join(".cache/cargo-target")).collect());
+        Ok(Config {
+            secondary_roots: dedup(secondary),
+            cache_roots: dedup(cache),
+        })
+    }
+}
+
 pub struct Tx<'a> {
     root: &'a Path,
 }
