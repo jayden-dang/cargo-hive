@@ -32,7 +32,7 @@ fn register(hive: &Hive, repo: &Path) {
 
 #[test]
 fn main_worktrees_and_clones_are_listed_with_their_class() {
-    let hive = Hive::new();
+    let hive = Hive::ready();
     let s = Scratch::new("classes");
     let sec = s.path.join("sec");
     std::fs::create_dir_all(&sec).unwrap();
@@ -76,7 +76,7 @@ fn main_worktrees_and_clones_are_listed_with_their_class() {
 
 #[test]
 fn a_missing_worktree_is_listed_as_missing_even_when_locked() {
-    let hive = Hive::new();
+    let hive = Hive::ready();
     let s = Scratch::new("missing");
     let main = init_repo(&s.path.join("main"), "");
     let gone = main.join(".worktrees/gone");
@@ -108,7 +108,7 @@ fn a_missing_worktree_is_listed_as_missing_even_when_locked() {
 
 #[test]
 fn secondary_roots_are_compared_as_realpaths() {
-    let hive = Hive::new();
+    let hive = Hive::ready();
     let s = Scratch::new("realpath");
     let real_root = s.path.join("real-sec");
     std::fs::create_dir_all(&real_root).unwrap();
@@ -127,7 +127,7 @@ fn secondary_roots_are_compared_as_realpaths() {
 
 #[test]
 fn without_configuration_private_tmp_is_a_secondary_root() {
-    let hive = Hive::new();
+    let hive = Hive::ready();
     let s = Scratch::new("defaults"); // lives under /private/tmp
     let main = init_repo(&s.path.join("main"), "");
     git(&s.path, &["clone", "-q", main.to_str().unwrap(), "clone"]);
@@ -144,7 +144,7 @@ fn without_configuration_private_tmp_is_a_secondary_root() {
 
 #[test]
 fn configured_secondary_roots_replace_the_defaults() {
-    let hive = Hive::new();
+    let hive = Hive::ready();
     let s = Scratch::new("replace");
     let other = s.path.join("other");
     std::fs::create_dir_all(&other).unwrap();
@@ -166,7 +166,7 @@ fn configured_secondary_roots_replace_the_defaults() {
 
 #[test]
 fn status_without_arguments_reports_every_registered_repo_from_any_cwd() {
-    let hive = Hive::new();
+    let hive = Hive::ready();
     let s = Scratch::new("all");
     let a = init_repo(&s.path.join("a"), "");
     let b = init_repo(&s.path.join("b"), "");
@@ -193,7 +193,7 @@ fn status_without_arguments_reports_every_registered_repo_from_any_cwd() {
 
 #[test]
 fn discovery_stops_at_two_levels_and_never_enters_node_modules() {
-    let hive = Hive::new();
+    let hive = Hive::ready();
     let s = Scratch::new("bounded");
     let sec = s.path.join("sec");
     std::fs::create_dir_all(sec.join("a/b")).unwrap();
@@ -218,7 +218,7 @@ fn discovery_stops_at_two_levels_and_never_enters_node_modules() {
 
 #[test]
 fn an_unregistered_repo_argument_is_refused() {
-    let hive = Hive::new();
+    let hive = Hive::ready();
     let s = Scratch::new("unknown");
     let (out, receipt) = hive.json(&["status", s.path.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(1));

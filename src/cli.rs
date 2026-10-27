@@ -322,6 +322,25 @@ fn status(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
             .collect::<Vec<_>>()
             .join(", ")
     ));
+    let caps: crate::doctor::Capabilities = match state.read(crate::doctor::CAPABILITIES_FILE) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("cargo-hive: {e}");
+            return 1;
+        }
+    };
+    let release = crate::doctor::resolve_toolchain(state.root())
+        .ok()
+        .map(|t| t.release);
+    b.toolchain(release.clone());
+    if let Err(refusal) = crate::doctor::require(
+        &caps,
+        crate::doctor::Capability::FingerprintReading,
+        release.as_deref(),
+    ) {
+        b.finding("refusal", None, refusal.to_string());
+        return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
+    }
     let mut code = 0;
     let mut selected = Vec::new();
     if args.is_empty() {
