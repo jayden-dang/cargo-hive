@@ -30,6 +30,9 @@ pub enum Command {
     Status {
         /// Registered repos to report; none means every registered repo
         repos: Vec<std::path::PathBuf>,
+        /// Skip size accounting (sizes are then reported as not measured)
+        #[arg(long)]
+        no_sizes: bool,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -102,7 +105,11 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
         Command::Repo {
             command: RepoCommand::List(out),
         } => repo_list(&state, out),
-        Command::Status { repos, out } => status(&state, &repos, out),
+        Command::Status {
+            repos,
+            no_sizes,
+            out,
+        } => status(&state, &repos, no_sizes, out),
         Command::Doctor { out } => doctor_cmd(&state, out),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
     }
@@ -303,7 +310,7 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
     emit(state, out, b.finish(), &human, i32::from(fail > 0))
 }
 
-fn status(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
+fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: OutputArgs) -> i32 {
     use crate::classify::Class;
     use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
     use crate::doctor::{self, Capabilities, Capability};
@@ -404,7 +411,30 @@ fn status(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
         && selected
             .iter()
             .all(|s| reg.repos.iter().any(|r| r.main == s.main));
-    let scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot);
+    let mut scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot);
+    if no_sizes {
+        b.unmeasured("sizes", "--no-sizes was given");
+    } else {
+        let mut bytes = 0u64;
+        for t in &mut scan.targets {
+            let key = format!("bytes:{}", t.path.display());
+            if let Some(why) = &t.unreadable {
+                b.unmeasured(&key, format!("the target dir is unreadable: {why}"));
+                continue;
+            }
+            match crate::size::allocated_bytes(&t.path, crate::size::MAX_DEPTH) {
+                Ok(n) => {
+                    t.size = Some(n);
+                    bytes += n;
+                    b.count(&key, n);
+                }
+                Err(e) => {
+                    b.unmeasured(&key, e.to_string());
+                }
+            }
+        }
+        b.count("bytes", bytes);
+    }
     report_targets(&mut b, &mut human, &scan);
     if let Err(e) = state.locked(|tx| tx.write(SNAPSHOT_FILE, &snapshot)) {
         eprintln!("cargo-hive: {e}");

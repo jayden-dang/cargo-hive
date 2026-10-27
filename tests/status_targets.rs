@@ -238,6 +238,19 @@ fn an_unreadable_target_is_reported_and_the_others_are_still_listed() {
             .contains("ermission denied"),
         "{r}"
     );
+    let field = format!("bytes:{}", repo.join("target").display());
+    assert!(
+        r["unmeasured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u["field"] == serde_json::json!(field)),
+        "{r}"
+    );
+    assert!(
+        r["counts"].get(&field).is_none(),
+        "an unmeasured size is omitted, not reported as a number"
+    );
     assert!(target_kind(&r, &repo.join("extra")).is_some());
 }
 
@@ -380,4 +393,33 @@ fn a_different_cargo_home_is_not_a_metadata_cache_hit() {
         (Some(1), Some(0)),
         "{second}"
     );
+}
+
+#[test]
+fn each_target_reports_its_allocated_bytes_unless_sizes_are_skipped() {
+    let hive = Hive::ready();
+    let s = Scratch::new("sizes");
+    let repo = init_repo(&s.path.join("app"), "");
+    hive.build_crate(&repo, None);
+    register(&hive, &repo);
+    let target = repo.join("target");
+    let r = status(&hive, &[repo.to_str().unwrap()]);
+    let expected = cargo_hive::size::allocated_bytes(&target, cargo_hive::size::MAX_DEPTH).unwrap();
+    assert!(expected > 0);
+    assert_eq!(
+        count(&r, &format!("bytes:{}", target.display())),
+        Some(expected)
+    );
+    let skipped = status(&hive, &[repo.to_str().unwrap(), "--no-sizes"]);
+    assert!(
+        skipped["counts"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|k| !k.starts_with("bytes")),
+        "{skipped}"
+    );
+    assert!(skipped["unmeasured"].as_array().unwrap().iter().any(|u| {
+        u["field"] == "sizes" && u["reason"].as_str().unwrap().contains("--no-sizes")
+    }));
 }

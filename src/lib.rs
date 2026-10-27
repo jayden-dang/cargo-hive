@@ -8,4 +8,5 @@ pub mod git;
 pub mod platform;
 pub mod receipt;
 pub mod registry;
+pub mod size;
 pub mod state;
