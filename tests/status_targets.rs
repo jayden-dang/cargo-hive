@@ -3,6 +3,8 @@ use common::{init_repo, Hive, Scratch};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Output, Stdio};
+use std::time::{Duration, Instant};
 
 const TAG: &str = "# This file is a cache directory tag created by cargo.";
 
@@ -127,7 +129,13 @@ fn naming_one_repo_twice_does_not_treat_a_cache_root_target_as_an_orphan() {
     let hive = Hive::ready();
     let s = Scratch::new("dup-arg");
     let cache = s.path.join("cache");
-    hive.config(&format!("{{\"cache_roots\": [\"{}\"]}}", cache.display()));
+    let secondary = s.path.join("no-secondary");
+    fs::create_dir_all(&secondary).unwrap();
+    hive.config(&format!(
+        "{{\"cache_roots\": [\"{}\"], \"secondary_roots\": [\"{}\"]}}",
+        cache.display(),
+        secondary.display()
+    ));
     let a = init_repo(&s.path.join("a"), "");
     let b = init_repo(&s.path.join("b"), "");
     fake_target(&cache.join("unowned"));
@@ -455,4 +463,95 @@ fn each_target_reports_its_allocated_bytes_unless_sizes_are_skipped() {
     assert!(skipped["unmeasured"].as_array().unwrap().iter().any(|u| {
         u["field"] == "sizes" && u["reason"].as_str().unwrap().contains("--no-sizes")
     }));
+}
+
+fn wait_within(mut child: Child, limit: Duration) -> Output {
+    let started = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > limit {
+            let _ = child.kill();
+            panic!("status did not finish within {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child.wait_with_output().unwrap()
+}
+
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn an_interrupted_status_exits_130_and_kills_cargo_metadata() {
+    let hive = Hive::ready();
+    let s = Scratch::new("status-signal");
+    let repo = init_repo(&s.path.join("app"), "");
+    register(&hive, &repo);
+    let bin = s.path.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let sentinel = s.path.join("cargo.pid");
+    fs::write(
+        bin.join("cargo"),
+        "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$HIVE_CARGO_SENTINEL\"\nsleep 300\n",
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("cargo"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let child = hive
+        .command(&["status", repo.to_str().unwrap(), "--no-sizes", "--json"])
+        .env("PATH", &path)
+        .env("HIVE_CARGO_SENTINEL", &sentinel)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let hive_pid = child.id();
+    let started = Instant::now();
+    let cargo_pid = loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "cargo metadata never wrote its pid"
+        );
+        if let Ok(text) = fs::read_to_string(&sentinel) {
+            if let Ok(pid) = text.trim().parse::<u32>() {
+                break pid;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        pid_alive(cargo_pid),
+        "sleeper should be running before SIGINT"
+    );
+    assert!(std::process::Command::new("kill")
+        .args(["-INT", &hive_pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let out = wait_within(child, Duration::from_secs(30));
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
+    assert!(
+        !pid_alive(cargo_pid),
+        "cargo metadata sleeper must be dead after status returns"
+    );
+    let logged = fs::read_dir(hive.home.path.join("receipts"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            fs::read_to_string(e.path())
+                .unwrap_or_default()
+                .contains("\"command\":\"status\"")
+        });
+    assert!(logged, "a cancelled status appends a receipt");
+    assert!(
+        !hive.home.path.join("snapshot.json").exists(),
+        "a cancelled status must not publish snapshot.json"
+    );
 }

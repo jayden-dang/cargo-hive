@@ -6,7 +6,10 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
 
 pub const KEYS: [&str; 11] = [
     "rustc",
@@ -142,10 +145,18 @@ fn read_unit(dir: &Path, json_name: &str) -> Result<Unit, String> {
     let len = fs::metadata(&json_path)
         .map_err(|e| format!("{json_name}: {e}"))?
         .len();
-    if len > 4 * 1024 * 1024 {
+    if len > MAX_JSON_BYTES {
         return Err(format!("{json_name}: larger than 4 MiB"));
     }
-    let bytes = fs::read(&json_path).map_err(|e| format!("{json_name}: {e}"))?;
+    let mut file = fs::File::open(&json_path).map_err(|e| format!("{json_name}: {e}"))?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(MAX_JSON_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{json_name}: {e}"))?;
+    if bytes.len() as u64 > MAX_JSON_BYTES {
+        return Err(format!("{json_name}: larger than 4 MiB"));
+    }
     let value: Value = serde_json::from_slice(&bytes).map_err(|e| format!("{json_name}: {e}"))?;
     let obj = value
         .as_object()
@@ -464,6 +475,39 @@ mod tests {
             ),
         )
         .unwrap();
+        let r = read_profile(&p);
+        assert!(
+            matches!(r.format, Format::Unsupported(ref why) if why.contains("4 MiB")),
+            "{:?}",
+            r.format
+        );
+        assert_eq!(r.edges, None);
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_fingerprint_json_of_exactly_four_mebibytes_is_not_rejected_for_size() {
+        let p = scratch();
+        let dir = p.join(".fingerprint/edge-0000000000000001");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib-edge"), le_hex(1)).unwrap();
+        fs::write(dir.join("lib-edge.json"), vec![b'x'; 4 * 1024 * 1024]).unwrap();
+        let r = read_profile(&p);
+        assert!(
+            matches!(r.format, Format::Unsupported(ref why) if !why.contains("4 MiB")),
+            "exact 4 MiB must reach the parser: {:?}",
+            r.format
+        );
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_fingerprint_json_one_byte_over_four_mebibytes_is_unsupported() {
+        let p = scratch();
+        let dir = p.join(".fingerprint/over-0000000000000001");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib-over"), le_hex(1)).unwrap();
+        fs::write(dir.join("lib-over.json"), vec![b'x'; 4 * 1024 * 1024 + 1]).unwrap();
         let r = read_profile(&p);
         assert!(
             matches!(r.format, Format::Unsupported(ref why) if why.contains("4 MiB")),

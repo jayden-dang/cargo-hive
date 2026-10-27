@@ -424,11 +424,24 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
         .count("protected", protected)
         .count("secondary", secondary)
         .count("missing", missing);
+    if let Err(e) = doctor::install_signal_handlers() {
+        return emit_failure(
+            state,
+            out,
+            "status",
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
+    }
     let all_repos = selected.len() == reg.repos.len()
         && selected
             .iter()
             .all(|s| reg.repos.iter().any(|r| r.main == s.main));
     let mut scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot);
+    if doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst) {
+        b.finding("error", None, "status was cancelled");
+        return emit(state, out, b.finish(), &human, 130);
+    }
     for fault in &scan.walk_faults {
         b.finding(
             "walk.unreadable",
@@ -462,7 +475,10 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
     report_targets(&mut b, &mut human, &scan);
     if let Err(e) = state.locked(|tx| {
         let disk = tx.read(SNAPSHOT_FILE)?;
-        tx.write(SNAPSHOT_FILE, &discover::merge_snapshot(snapshot, disk))
+        tx.write(
+            SNAPSHOT_FILE,
+            &discover::merge_snapshot(snapshot, disk, &scan.cleared_profiles),
+        )
     }) {
         eprintln!("cargo-hive: {e}");
         b.finding("error", None, e.to_string());

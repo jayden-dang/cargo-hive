@@ -265,7 +265,7 @@ pub fn output_with_deadline(
 
 /// Exactly `cargo metadata --no-deps --format-version 1 --locked --offline` in
 /// `workspace_dir`, with the three target variables and every `GIT_*` removed (F9).
-pub fn resolve(workspace_dir: &Path) -> Result<Resolved, String> {
+pub fn resolve(workspace_dir: &Path, cancel: impl FnMut() -> bool) -> Result<Resolved, String> {
     let mut cmd = Command::new("cargo");
     cmd.args([
         "metadata",
@@ -286,7 +286,7 @@ pub fn resolve(workspace_dir: &Path) -> Result<Resolved, String> {
             cmd.env_remove(&key);
         }
     }
-    let out = output_with_deadline(&mut cmd, METADATA_DEADLINE, || false).map_err(|e| match e {
+    let out = output_with_deadline(&mut cmd, METADATA_DEADLINE, cancel).map_err(|e| match e {
         ChildOutputError::TimedOut => "cargo metadata exceeded its deadline".to_string(),
         ChildOutputError::Cancelled => "cargo metadata was cancelled".to_string(),
         ChildOutputError::Failed(message) => format!("could not run cargo metadata: {message}"),

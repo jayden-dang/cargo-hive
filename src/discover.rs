@@ -405,10 +405,19 @@ fn resolve_workspaces(
             }
         }
         for chunk in uncached.chunks(4) {
+            if crate::doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             let results: Vec<Result<Resolved, String>> = std::thread::scope(|s| {
                 let handles: Vec<_> = chunk
                     .iter()
-                    .map(|d| s.spawn(move || cargo_target::resolve(d)))
+                    .map(|d| {
+                        s.spawn(move || {
+                            cargo_target::resolve(d, || {
+                                crate::doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst)
+                            })
+                        })
+                    })
                     .collect();
                 handles
                     .into_iter()
@@ -465,6 +474,8 @@ pub struct TargetScan {
     pub metadata_cache_hits: u64,
     pub ignored_vars: Vec<String>,
     pub walk_faults: Vec<WalkFault>,
+    /// Profile paths this run found supported; merge must drop them even if disk still lists them.
+    pub cleared_profiles: BTreeSet<PathBuf>,
 }
 
 /// Every Cargo target dir of the live `checkouts` (3 levels) and the cache roots (2 levels),
@@ -542,6 +553,7 @@ pub fn targets(
             .collect()
     });
     let mut targets = Vec::new();
+    let mut cleared_profiles = BTreeSet::new();
     for ((real, identified, from_cache_root), profiles) in entries.into_iter().zip(reports) {
         let matches: Vec<&Resolved> = resolved
             .iter()
@@ -568,6 +580,7 @@ pub fn targets(
                 }
                 Format::Supported => {
                     snapshot.unsupported_profiles.remove(&p.path);
+                    cleared_profiles.insert(p.path.clone());
                 }
             }
         }
@@ -585,6 +598,7 @@ pub fn targets(
         metadata_cache_hits: resolutions.iter().filter(|r| r.cached).count() as u64,
         ignored_vars: overrides.into_iter().map(|(name, _)| name).collect(),
         walk_faults,
+        cleared_profiles,
     }
 }
 
@@ -605,24 +619,74 @@ fn protected_owner(matches: &[&Resolved], live: &[PathBuf], checkouts: &[Checkou
     owner_checkout(&matches[0].workspace_root, live)
 }
 
-fn stamp_generation(stamp: &BTreeMap<PathBuf, Option<u64>>) -> Option<u64> {
-    stamp.values().copied().flatten().max()
+fn stamp_path_cmp(left: Option<&Option<u64>>, right: Option<&Option<u64>>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(None), Some(None)) => Ordering::Equal,
+        (Some(None), Some(Some(_))) => Ordering::Less,
+        (Some(Some(_)), Some(None)) => Ordering::Greater,
+        (Some(Some(a)), Some(Some(b))) => a.cmp(b),
+    }
 }
 
-/// Unions metadata and unsupported profiles. A disk metadata entry whose stamp is
-/// strictly newer than the incoming one is kept.
-pub fn merge_snapshot(incoming: Snapshot, disk: Snapshot) -> Snapshot {
-    let mut metadata = disk.metadata;
-    for (dir, incoming_entry) in incoming.metadata {
-        let keep_disk = metadata.get(&dir).is_some_and(|on_disk| {
-            stamp_generation(&on_disk.stamp) > stamp_generation(&incoming_entry.stamp)
-        });
-        if !keep_disk {
-            metadata.insert(dir, incoming_entry);
+/// True when `left` is not equal to `right`, every path compares left ≥ right, and at least one path is left > right.
+fn stamp_dominates(
+    left: &BTreeMap<PathBuf, Option<u64>>,
+    right: &BTreeMap<PathBuf, Option<u64>>,
+) -> bool {
+    use std::cmp::Ordering;
+    let mut any_greater = false;
+    let mut keys = BTreeSet::new();
+    keys.extend(left.keys().cloned());
+    keys.extend(right.keys().cloned());
+    for key in keys {
+        match stamp_path_cmp(left.get(&key), right.get(&key)) {
+            Ordering::Less => return false,
+            Ordering::Equal => {}
+            Ordering::Greater => any_greater = true,
+        }
+    }
+    any_greater
+}
+
+/// Merges metadata by stamp dominance and unsupported profiles by incoming-over-disk,
+/// then drops every profile path this run found supported.
+pub fn merge_snapshot(
+    incoming: Snapshot,
+    disk: Snapshot,
+    cleared_profiles: &BTreeSet<PathBuf>,
+) -> Snapshot {
+    let mut metadata = BTreeMap::new();
+    let mut dirs = BTreeSet::new();
+    dirs.extend(incoming.metadata.keys().cloned());
+    dirs.extend(disk.metadata.keys().cloned());
+    for dir in dirs {
+        match (incoming.metadata.get(&dir), disk.metadata.get(&dir)) {
+            (Some(inc), Some(on_disk)) => {
+                if stamp_dominates(&inc.stamp, &on_disk.stamp) {
+                    metadata.insert(dir, inc.clone());
+                } else if stamp_dominates(&on_disk.stamp, &inc.stamp) || inc.stamp == on_disk.stamp
+                {
+                    metadata.insert(dir, on_disk.clone());
+                }
+            }
+            (Some(inc), None) => {
+                metadata.insert(dir, inc.clone());
+            }
+            (None, Some(on_disk)) => {
+                metadata.insert(dir, on_disk.clone());
+            }
+            (None, None) => {}
         }
     }
     let mut unsupported_profiles = disk.unsupported_profiles;
     unsupported_profiles.extend(incoming.unsupported_profiles);
+    for path in cleared_profiles {
+        unsupported_profiles.remove(path);
+    }
     Snapshot {
         metadata,
         unsupported_profiles,
@@ -636,9 +700,9 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
-    fn cached(root: &str, mtime: Option<u64>) -> CachedMetadata {
+    fn cached_with(root: &str, stamp: BTreeMap<PathBuf, Option<u64>>) -> CachedMetadata {
         CachedMetadata {
-            stamp: BTreeMap::from([(PathBuf::from(root).join("Cargo.lock"), mtime)]),
+            stamp,
             resolved: Resolved {
                 workspace_root: PathBuf::from(root),
                 target_directory: PathBuf::from(root).join("target"),
@@ -647,8 +711,15 @@ mod tests {
         }
     }
 
+    fn cached(root: &str, mtime: Option<u64>) -> CachedMetadata {
+        cached_with(
+            root,
+            BTreeMap::from([(PathBuf::from(root).join("Cargo.lock"), mtime)]),
+        )
+    }
+
     #[test]
-    fn a_newer_disk_stamp_survives_and_profiles_are_unioned() {
+    fn a_dominating_disk_stamp_survives_and_a_cleared_profile_stays_gone() {
         let incoming = Snapshot {
             metadata: BTreeMap::from([
                 (PathBuf::from("/w/shared"), cached("/w/shared", Some(1))),
@@ -664,11 +735,19 @@ mod tests {
             unsupported_profiles: BTreeMap::from([
                 (PathBuf::from("/p/shared"), "disk".into()),
                 (PathBuf::from("/p/disk"), "disk".into()),
+                (PathBuf::from("/p/cleared"), "stale".into()),
             ]),
         };
-        let merged = merge_snapshot(incoming, disk);
+        let cleared = BTreeSet::from([PathBuf::from("/p/cleared")]);
+        let merged = merge_snapshot(incoming, disk, &cleared);
         let shared = merged.metadata.get(Path::new("/w/shared")).unwrap();
-        assert_eq!(super::stamp_generation(&shared.stamp), Some(9));
+        assert_eq!(
+            shared
+                .stamp
+                .get(&PathBuf::from("/w/shared/Cargo.lock"))
+                .copied(),
+            Some(Some(9))
+        );
         assert!(merged.metadata.contains_key(Path::new("/w/disk")));
         assert!(merged.metadata.contains_key(Path::new("/w/incoming")));
         assert_eq!(
@@ -685,5 +764,97 @@ mod tests {
                 .map(String::as_str),
             Some("disk")
         );
+        assert!(!merged
+            .unsupported_profiles
+            .contains_key(Path::new("/p/cleared")));
+    }
+
+    #[test]
+    fn an_incoming_stamp_that_dominates_disk_is_stored() {
+        let lock = PathBuf::from("/w/a/Cargo.lock");
+        let toml = PathBuf::from("/w/a/Cargo.toml");
+        let incoming = Snapshot {
+            metadata: BTreeMap::from([(
+                PathBuf::from("/w/a"),
+                cached_with(
+                    "/w/a",
+                    BTreeMap::from([(lock.clone(), Some(5)), (toml.clone(), Some(3))]),
+                ),
+            )]),
+            unsupported_profiles: BTreeMap::new(),
+        };
+        let disk = Snapshot {
+            metadata: BTreeMap::from([(
+                PathBuf::from("/w/a"),
+                cached_with(
+                    "/w/a",
+                    BTreeMap::from([(lock.clone(), Some(4)), (toml.clone(), Some(3))]),
+                ),
+            )]),
+            unsupported_profiles: BTreeMap::new(),
+        };
+        let merged = merge_snapshot(incoming, disk, &BTreeSet::new());
+        let entry = merged.metadata.get(Path::new("/w/a")).unwrap();
+        assert_eq!(entry.stamp.get(&lock).copied(), Some(Some(5)));
+    }
+
+    #[test]
+    fn equal_stamps_keep_the_disk_entry() {
+        let incoming = Snapshot {
+            metadata: BTreeMap::from([(PathBuf::from("/w/a"), cached("/w/a", Some(3)))]),
+            unsupported_profiles: BTreeMap::new(),
+        };
+        let disk = Snapshot {
+            metadata: BTreeMap::from([(
+                PathBuf::from("/w/a"),
+                CachedMetadata {
+                    stamp: BTreeMap::from([(PathBuf::from("/w/a/Cargo.lock"), Some(3))]),
+                    resolved: Resolved {
+                        workspace_root: PathBuf::from("/w/a-disk"),
+                        target_directory: PathBuf::from("/w/a-disk/target"),
+                        build_directory: PathBuf::from("/w/a-disk/target"),
+                    },
+                },
+            )]),
+            unsupported_profiles: BTreeMap::new(),
+        };
+        let merged = merge_snapshot(incoming, disk, &BTreeSet::new());
+        assert_eq!(
+            merged
+                .metadata
+                .get(Path::new("/w/a"))
+                .unwrap()
+                .resolved
+                .workspace_root,
+            PathBuf::from("/w/a-disk")
+        );
+    }
+
+    #[test]
+    fn incomparable_stamps_drop_the_workspace_key() {
+        let lock = PathBuf::from("/w/a/Cargo.lock");
+        let toml = PathBuf::from("/w/a/Cargo.toml");
+        let incoming = Snapshot {
+            metadata: BTreeMap::from([(
+                PathBuf::from("/w/a"),
+                cached_with(
+                    "/w/a",
+                    BTreeMap::from([(lock.clone(), Some(9)), (toml.clone(), Some(1))]),
+                ),
+            )]),
+            unsupported_profiles: BTreeMap::new(),
+        };
+        let disk = Snapshot {
+            metadata: BTreeMap::from([(
+                PathBuf::from("/w/a"),
+                cached_with(
+                    "/w/a",
+                    BTreeMap::from([(lock.clone(), Some(2)), (toml.clone(), Some(8))]),
+                ),
+            )]),
+            unsupported_profiles: BTreeMap::new(),
+        };
+        let merged = merge_snapshot(incoming, disk, &BTreeSet::new());
+        assert!(!merged.metadata.contains_key(Path::new("/w/a")));
     }
 }
