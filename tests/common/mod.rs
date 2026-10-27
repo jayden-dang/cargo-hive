@@ -99,6 +99,27 @@ impl Hive {
         self.command(args).output().unwrap()
     }
 
+    /// `cargo build --offline` in `dir` with the scratch CARGO_HOME, into `dir/target`
+    /// unless `target_dir` is given.
+    pub fn build_crate(&self, dir: &Path, target_dir: Option<&Path>) {
+        let mut cmd = Command::new("cargo");
+        cmd.args(["build", "--offline", "--quiet"])
+            .current_dir(dir)
+            .env("CARGO_HOME", &self.cargo_home.path)
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET_DIR")
+            .env_remove("CARGO_BUILD_BUILD_DIR");
+        if let Some(t) = target_dir {
+            cmd.env("CARGO_TARGET_DIR", t);
+        }
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "cargo build failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     /// Runs with `--json` and parses stdout as exactly one JSON value.
     pub fn json(&self, args: &[&str]) -> (Output, serde_json::Value) {
         let mut all = args.to_vec();

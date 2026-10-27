@@ -1,7 +1,7 @@
 //! Thin adapter: arguments → library calls → one receipt.
 
 use crate::platform::{self, MACOS_ONLY_MESSAGE};
-use crate::receipt::{Receipt, Scope};
+use crate::receipt::{Receipt, ReceiptBuilder, Scope};
 use crate::registry::{self, Registry};
 use crate::state::State;
 use clap::{Args, Parser, Subcommand};
@@ -305,47 +305,38 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
 
 fn status(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
     use crate::classify::Class;
-    use crate::discover;
-    let (reg, cfg) = match (state.read::<Registry>(registry::FILE), state.config()) {
-        (Ok(r), Ok(c)) => (r, c),
-        (Err(e), _) | (_, Err(e)) => {
-            eprintln!("cargo-hive: {e}");
-            return 1;
-        }
-    };
-    let mut b = Receipt::new("status", Scope::default());
-    b.note(format!(
-        "secondary_roots: {}",
-        cfg.secondary_roots
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
-    b.note(format!(
-        "cache_roots: {}",
-        cfg.cache_roots
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
-    let caps: crate::doctor::Capabilities = match state.read(crate::doctor::CAPABILITIES_FILE) {
-        Ok(c) => c,
+    use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
+    use crate::doctor::{self, Capabilities, Capability};
+    let loaded = (|| -> Result<_, crate::state::StateError> {
+        Ok((
+            state.read::<Registry>(registry::FILE)?,
+            state.config()?,
+            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+            state.read::<Snapshot>(SNAPSHOT_FILE)?,
+        ))
+    })();
+    let (reg, cfg, caps, mut snapshot) = match loaded {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("cargo-hive: {e}");
             return 1;
         }
     };
-    let release = crate::doctor::resolve_toolchain(state.root())
+    let mut b = Receipt::new("status", Scope::default());
+    let list = |v: &[std::path::PathBuf]| {
+        v.iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    b.note(format!("secondary_roots: {}", list(&cfg.secondary_roots)));
+    b.note(format!("cache_roots: {}", list(&cfg.cache_roots)));
+    let release = doctor::resolve_toolchain(state.root())
         .ok()
         .map(|t| t.release);
     b.toolchain(release.clone());
-    if let Err(refusal) = crate::doctor::require(
-        &caps,
-        crate::doctor::Capability::FingerprintReading,
-        release.as_deref(),
-    ) {
+    if let Err(refusal) = doctor::require(&caps, Capability::FingerprintReading, release.as_deref())
+    {
         b.finding("refusal", None, refusal.to_string());
         return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
     }
@@ -371,6 +362,7 @@ fn status(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
     let mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
     let (mut total, mut protected, mut secondary, mut missing) = (0u64, 0u64, 0u64, 0u64);
     let mut human = String::new();
+    let mut all_checkouts = Vec::new();
     for repo in &selected {
         b.scope_mut().repos.push(repo.main.clone());
         human.push_str(&format!("{}\n", repo.main.display()));
@@ -396,12 +388,102 @@ fn status(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
                 Some(c.path.clone()),
                 c.reason.clone(),
             );
-            b.scope_mut().checkouts.push(c.path);
+            b.scope_mut().checkouts.push(c.path.clone());
+            all_checkouts.push(c);
         }
     }
     b.count("checkouts", total)
         .count("protected", protected)
         .count("secondary", secondary)
         .count("missing", missing);
+    let all_repos = selected.len() == reg.repos.len();
+    let scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot);
+    report_targets(&mut b, &mut human, &scan);
+    if let Err(e) = state.locked(|tx| tx.write(SNAPSHOT_FILE, &snapshot)) {
+        eprintln!("cargo-hive: {e}");
+        return 1;
+    }
     emit(state, out, b.finish(), &human, code)
+}
+
+fn report_targets(b: &mut ReceiptBuilder, human: &mut String, scan: &crate::discover::TargetScan) {
+    use crate::cargo_target::Owner;
+    use crate::fingerprint::Format;
+    let (mut owned, mut orphans, mut unresolved, mut unreadable, mut unsupported) =
+        (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut units, mut resolved, mut dangling, mut ambiguous) = (0u64, 0u64, 0u64, 0u64);
+    human.push_str("targets\n");
+    for t in &scan.targets {
+        let (kind, detail) = match &t.owner {
+            Owner::Owned { checkout } => {
+                owned += 1;
+                ("target.owned", format!("owned by {}", checkout.display()))
+            }
+            Owner::OrphanCandidate {
+                owned_under_caller_env,
+            } => {
+                orphans += 1;
+                let base = "no known checkout resolves to this dir".to_string();
+                (
+                    "target.orphan_candidate",
+                    match owned_under_caller_env {
+                        Some(var) => format!("{base}; it would be owned under the caller's {var}"),
+                        None => base,
+                    },
+                )
+            }
+            Owner::Unresolved { reason } => {
+                unresolved += 1;
+                ("target.unresolved", reason.clone())
+            }
+        };
+        let size = t.size.map(|n| format!("  {n} bytes")).unwrap_or_default();
+        human.push_str(&format!("  {}{size}  {detail}\n", t.path.display()));
+        b.finding(kind, Some(t.path.clone()), detail);
+        if let Some(why) = &t.unreadable {
+            unreadable += 1;
+            human.push_str(&format!("    unreadable: {why}\n"));
+            b.finding("target.unreadable", Some(t.path.clone()), why.clone());
+        }
+        for p in &t.profiles {
+            let key = p.path.display().to_string();
+            b.count(&format!("units:{key}"), p.units as u64);
+            units += p.units as u64;
+            match (&p.format, &p.edges) {
+                (Format::Supported, Some(e)) => {
+                    b.count(&format!("edges_resolved:{key}"), e.resolved)
+                        .count(&format!("edges_unresolved:{key}"), e.unresolved)
+                        .count(&format!("edges_ambiguous:{key}"), e.ambiguous);
+                    resolved += e.resolved;
+                    dangling += e.unresolved;
+                    ambiguous += e.ambiguous;
+                    human.push_str(&format!(
+                        "    {key}  {} units, edges {} resolved / {} unresolved / {} ambiguous\n",
+                        p.units, e.resolved, e.unresolved, e.ambiguous
+                    ));
+                }
+                (Format::Unsupported(why), _) => {
+                    unsupported += 1;
+                    human.push_str(&format!("    {key}  unsupported: {why}\n"));
+                    b.finding("profile.unsupported", Some(p.path.clone()), why.clone());
+                }
+                (Format::Supported, None) => {}
+            }
+        }
+    }
+    b.count("targets", scan.targets.len() as u64)
+        .count("owned", owned)
+        .count("orphan_candidates", orphans)
+        .count("unresolved_owners", unresolved)
+        .count("unreadable", unreadable)
+        .count("unsupported_profiles", unsupported)
+        .count("units", units)
+        .count("edges_resolved", resolved)
+        .count("edges_unresolved", dangling)
+        .count("edges_ambiguous", ambiguous)
+        .count("metadata_calls", scan.metadata_calls)
+        .count("metadata_cache_hits", scan.metadata_cache_hits);
+    for var in &scan.ignored_vars {
+        b.note(format!("{var} is set in the caller's environment and was ignored: ownership comes from each checkout's own Cargo configuration"));
+    }
 }

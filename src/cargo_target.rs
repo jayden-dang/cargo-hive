@@ -1,0 +1,333 @@
+//! Cargo target dirs: identification by tag and fingerprint layout, and
+//! ownership through `cargo metadata` with the caller's target overrides scrubbed (Decision 4).
+
+use crate::fingerprint::ProfileReport;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+pub const TAG_LINE: &str = "# This file is a cache directory tag created by cargo.";
+pub const TARGET_VARS: [&str; 3] = [
+    "CARGO_TARGET_DIR",
+    "CARGO_BUILD_TARGET_DIR",
+    "CARGO_BUILD_BUILD_DIR",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layout {
+    Fingerprint,
+    NewBuildDir,
+}
+
+fn is_dir(path: &Path) -> Result<bool, String> {
+    match fs::metadata(path) {
+        Ok(m) => Ok(m.is_dir()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+fn is_hex16(name: &str) -> bool {
+    name.len() == 16
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    Ok(dirs)
+}
+
+/// `Some(layout)` when `dir` holds `.fingerprint/` or `build/<pkg>/<16 hex>/fingerprint/`.
+fn profile_layout(dir: &Path) -> Result<Option<Layout>, String> {
+    if is_dir(&dir.join(".fingerprint"))? {
+        return Ok(Some(Layout::Fingerprint));
+    }
+    let build = dir.join("build");
+    if !is_dir(&build)? {
+        return Ok(None);
+    }
+    for pkg in sorted_dirs(&build)? {
+        let Ok(hashes) = sorted_dirs(&pkg) else {
+            continue;
+        };
+        if hashes.iter().any(|h| {
+            h.file_name().and_then(|n| n.to_str()).is_some_and(is_hex16)
+                && h.join("fingerprint").is_dir()
+        }) {
+            return Ok(Some(Layout::NewBuildDir));
+        }
+    }
+    Ok(None)
+}
+
+/// Profile dirs: direct children, or `<triple>/<profile>/` under `--target` builds.
+fn profile_dirs(target: &Path) -> Result<Vec<(PathBuf, Layout)>, String> {
+    let mut out = Vec::new();
+    for child in sorted_dirs(target)? {
+        if let Some(layout) = profile_layout(&child)? {
+            out.push((child, layout));
+            continue;
+        }
+        if let Ok(grandchildren) = sorted_dirs(&child) {
+            for g in grandchildren {
+                if let Some(layout) = profile_layout(&g)? {
+                    out.push((g, layout));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// `Some(Ok(profiles))` for a Cargo target dir; `Some(Err(reason))` for a dir
+/// Cargo tagged whose profiles cannot be read; `None` for anything else.
+pub fn identify(dir: &Path) -> Option<Result<Vec<(PathBuf, Layout)>, String>> {
+    let tag = fs::read(dir.join("CACHEDIR.TAG")).ok()?;
+    if !String::from_utf8_lossy(&tag)
+        .lines()
+        .any(|l| l.trim_end() == TAG_LINE)
+    {
+        return None;
+    }
+    match profile_dirs(dir) {
+        Ok(profiles) if profiles.is_empty() => None,
+        Ok(profiles) => Some(Ok(profiles)),
+        Err(why) => Some(Err(why)),
+    }
+}
+
+/// The realpath of `p`, or of its nearest existing ancestor with the missing tail appended.
+pub fn realpath_lossy(p: &Path) -> PathBuf {
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cur = p;
+    loop {
+        if let Ok(real) = cur.canonicalize() {
+            return tail.iter().rev().fold(real, |acc, name| acc.join(name));
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name);
+                cur = parent;
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Resolved {
+    pub workspace_root: PathBuf,
+    pub target_directory: PathBuf,
+    pub build_directory: PathBuf,
+}
+
+/// Exactly `cargo metadata --no-deps --format-version 1 --locked --offline` in
+/// `workspace_dir`, with the three target variables and every `GIT_*` removed (F9).
+pub fn resolve(workspace_dir: &Path) -> Result<Resolved, String> {
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "metadata",
+        "--no-deps",
+        "--format-version",
+        "1",
+        "--locked",
+        "--offline",
+    ])
+    .current_dir(workspace_dir)
+    .env("RUSTUP_AUTO_INSTALL", "0")
+    .stdin(Stdio::null());
+    for var in TARGET_VARS {
+        cmd.env_remove(var);
+    }
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            cmd.env_remove(&key);
+        }
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("could not run cargo metadata: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "cargo metadata failed: {}",
+            stderr
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("no output")
+                .trim()
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("cargo metadata printed invalid JSON: {e}"))?;
+    let path = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from)
+    };
+    let target_directory =
+        path("target_directory").ok_or("cargo metadata printed no target_directory")?;
+    let build_directory = path("build_directory").unwrap_or_else(|| target_directory.clone());
+    let workspace_root =
+        path("workspace_root").ok_or("cargo metadata printed no workspace_root")?;
+    Ok(Resolved {
+        workspace_root: realpath_lossy(&workspace_root),
+        target_directory: realpath_lossy(&target_directory),
+        build_directory: realpath_lossy(&build_directory),
+    })
+}
+
+/// The target variables set in hive's own environment, with their realpaths.
+pub fn caller_overrides() -> Vec<(String, PathBuf)> {
+    TARGET_VARS
+        .iter()
+        .filter_map(|var| {
+            std::env::var_os(var)
+                .filter(|v| !v.is_empty())
+                .map(|v| (var.to_string(), realpath_lossy(Path::new(&v))))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Owner {
+    Owned {
+        checkout: PathBuf,
+    },
+    Unresolved {
+        reason: String,
+    },
+    OrphanCandidate {
+        owned_under_caller_env: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TargetDir {
+    pub path: PathBuf,
+    pub owner: Owner,
+    pub profiles: Vec<ProfileReport>,
+    pub size: Option<u64>,
+    pub unreadable: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!(
+            "hive-target-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn tag(dir: &Path, line: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join("CACHEDIR.TAG"),
+            format!("Signature: 8a477f597d28d172789f06886806bc55\n{line}\n"),
+        )
+        .unwrap();
+    }
+
+    fn mkdir(p: PathBuf) {
+        fs::create_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_target_needs_cargos_tag_line_and_a_profile_with_fingerprints() {
+        let root = scratch("identify");
+        let plain = root.join("plain");
+        mkdir(plain.join("debug/.fingerprint"));
+        assert_eq!(identify(&plain), None, "no tag");
+        let other = root.join("other");
+        tag(
+            &other,
+            "# This file is a cache directory tag created by someone else.",
+        );
+        mkdir(other.join("debug/.fingerprint"));
+        assert_eq!(identify(&other), None, "someone else's tag");
+        let artifacts = root.join("artifacts");
+        tag(&artifacts, TAG_LINE);
+        mkdir(artifacts.join("debug/deps"));
+        assert_eq!(
+            identify(&artifacts),
+            None,
+            "uplifted artifacts only (a target dir whose build dir is elsewhere)"
+        );
+        let old = root.join("old");
+        tag(&old, TAG_LINE);
+        for p in [
+            "debug/.fingerprint",
+            "release/.fingerprint",
+            "aarch64-apple-darwin/debug/.fingerprint",
+            "doc/fixture",
+        ] {
+            mkdir(old.join(p));
+        }
+        assert_eq!(
+            identify(&old),
+            Some(Ok(vec![
+                (old.join("aarch64-apple-darwin/debug"), Layout::Fingerprint),
+                (old.join("debug"), Layout::Fingerprint),
+                (old.join("release"), Layout::Fingerprint)
+            ]))
+        );
+        let new = root.join("new");
+        tag(&new, TAG_LINE);
+        mkdir(new.join("debug/build/serde/0123456789abcdef/fingerprint"));
+        assert_eq!(
+            identify(&new),
+            Some(Ok(vec![(new.join("debug"), Layout::NewBuildDir)]))
+        );
+        let not_hash = root.join("not-hash");
+        tag(&not_hash, TAG_LINE);
+        mkdir(not_hash.join("debug/build/serde-0123/out"));
+        assert_eq!(identify(&not_hash), None);
+        let locked = root.join("locked");
+        tag(&locked, TAG_LINE);
+        mkdir(locked.join("debug/.fingerprint"));
+        fs::set_permissions(locked.join("debug"), fs::Permissions::from_mode(0o000)).unwrap();
+        let got = identify(&locked);
+        fs::set_permissions(locked.join("debug"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(&got, Some(Err(why)) if why.contains("debug")),
+            "{got:?}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_tail_is_appended_to_the_realpath_of_its_nearest_existing_ancestor() {
+        let root = scratch("lossy");
+        assert_eq!(
+            realpath_lossy(&root.join("a/b")),
+            root.canonicalize().unwrap().join("a/b")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}

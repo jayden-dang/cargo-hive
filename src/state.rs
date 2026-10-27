@@ -354,6 +354,36 @@ mod tests {
     }
 
     #[test]
+    fn without_a_config_file_the_documented_defaults_apply_per_key() {
+        let root = scratch("defaults");
+        let state = State::open_at(root.clone()).unwrap();
+        let canon = |p: PathBuf| p.canonicalize().unwrap_or(p);
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let cfg = state.config().unwrap();
+        assert_eq!(
+            cfg.cache_roots,
+            vec![canon(home.join(".cache/cargo-target"))]
+        );
+        assert_eq!(cfg.secondary_roots[0], canon(PathBuf::from("/private/tmp")));
+        if let Some(t) = std::env::var_os("TMPDIR") {
+            assert!(cfg.secondary_roots.contains(&canon(PathBuf::from(t))));
+        }
+        fs::write(
+            root.join(CONFIG_FILE),
+            br#"{"cache_roots": ["/private/tmp"]}"#,
+        )
+        .unwrap();
+        let cfg = state.config().unwrap();
+        assert_eq!(cfg.cache_roots, vec![PathBuf::from("/private/tmp")]);
+        assert_eq!(
+            cfg.secondary_roots[0],
+            PathBuf::from("/private/tmp"),
+            "an unset key keeps its default"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn utc_formatting_matches_known_instants() {
         assert_eq!(utc_timestamp(UNIX_EPOCH), "1970-01-01T00:00:00Z");
         assert_eq!(
