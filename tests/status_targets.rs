@@ -123,6 +123,26 @@ fn a_cache_root_target_no_checkout_resolves_to_is_an_orphan_candidate_only_when_
 }
 
 #[test]
+fn naming_one_repo_twice_does_not_treat_a_cache_root_target_as_an_orphan() {
+    let hive = Hive::ready();
+    let s = Scratch::new("dup-arg");
+    let cache = s.path.join("cache");
+    hive.config(&format!("{{\"cache_roots\": [\"{}\"]}}", cache.display()));
+    let a = init_repo(&s.path.join("a"), "");
+    let b = init_repo(&s.path.join("b"), "");
+    fake_target(&cache.join("unowned"));
+    register(&hive, &a);
+    register(&hive, &b);
+    let path = a.to_str().unwrap();
+    let r = status(&hive, &[path, path]);
+    let (kind, detail) = target_kind(&r, &cache.join("unowned")).unwrap();
+    assert_eq!(kind, "target.unresolved");
+    assert!(detail.contains("without arguments"), "{detail}");
+    assert_eq!(count(&r, "orphan_candidates"), Some(0), "{r}");
+    assert_eq!(count(&r, "checkouts"), Some(1), "{r}");
+}
+
+#[test]
 fn a_build_dir_outside_every_search_root_is_owned_and_its_artifact_dir_is_not_a_target() {
     let hive = Hive::ready();
     let s = Scratch::new("builddir");

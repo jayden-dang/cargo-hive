@@ -348,7 +348,11 @@ fn status(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
     for arg in args {
         let real = arg.canonicalize().unwrap_or(arg.clone());
         match reg.repos.iter().find(|r| r.main == real) {
-            Some(r) => selected.push(r.clone()),
+            Some(r) => {
+                if !selected.iter().any(|s| s.main == r.main) {
+                    selected.push(r.clone());
+                }
+            }
             None => {
                 b.finding(
                     "refusal",
@@ -396,7 +400,10 @@ fn status(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
         .count("protected", protected)
         .count("secondary", secondary)
         .count("missing", missing);
-    let all_repos = selected.len() == reg.repos.len();
+    let all_repos = selected.len() == reg.repos.len()
+        && selected
+            .iter()
+            .all(|s| reg.repos.iter().any(|r| r.main == s.main));
     let scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot);
     report_targets(&mut b, &mut human, &scan);
     if let Err(e) = state.locked(|tx| tx.write(SNAPSHOT_FILE, &snapshot)) {
