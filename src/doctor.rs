@@ -458,6 +458,123 @@ fn check_lock_probe(fs: &dyn Fs, dir: &Path) -> Check {
     attempt().unwrap_or_else(|e| failed(CheckId::D, e))
 }
 
+/// A crate with a lib, a bin, a build script and an integration test, and no dependencies.
+pub const PROBE_CRATE: [(&str, &str); 5] = [
+    ("Cargo.toml", "[package]\nname = \"hive-doctor-probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n"),
+    ("build.rs", "fn main() {\n    println!(\"cargo:rerun-if-changed=build.rs\");\n}\n"),
+    ("src/lib.rs", "pub fn answer() -> u32 {\n    42\n}\n"),
+    ("src/main.rs", "fn main() {\n    println!(\"{}\", hive_doctor_probe::answer());\n}\n"),
+    ("tests/it.rs", "#[test]\nfn answers() {\n    assert_eq!(hive_doctor_probe::answer(), 42);\n}\n"),
+];
+
+/// The allowlisted environment for the probe build (Decision 7); nothing else is inherited.
+fn probe_command(tc: &Toolchain, krate: &Path, target: &Path, cargo_home: &Path) -> Command {
+    let mut cmd = Command::new(&tc.cargo);
+    cmd.args(["build", "--offline", "--all-targets", "--quiet"])
+        .current_dir(krate)
+        .env_clear();
+    for key in ["PATH", "HOME", "TMPDIR", "RUSTUP_HOME"] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    if let Some(name) = &tc.name {
+        cmd.env("RUSTUP_TOOLCHAIN", name);
+    }
+    cmd.env("RUSTUP_AUTO_INSTALL", "0")
+        .env("CARGO_HOME", cargo_home)
+        .env("CARGO_TARGET_DIR", target)
+        .env("RUSTC", &tc.rustc)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
+    cmd
+}
+
+fn tail(text: &str, max: usize) -> String {
+    let start = text.len().saturating_sub(max);
+    let start = (start..=text.len())
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(text.len());
+    text[start..].trim().to_string()
+}
+
+/// (f) The fingerprints the active toolchain writes match the supported signature.
+fn check_format(fs: &dyn Fs, dir: &Path, toolchain: &Result<Toolchain, String>) -> Check {
+    let tc = match toolchain {
+        Ok(t) => t,
+        Err(reason) => {
+            return Check {
+                id: CheckId::F,
+                verdict: Verdict::Unavailable,
+                measured: Measures::from([("reason".to_string(), Measured::Text(reason.clone()))]),
+            }
+        }
+    };
+    let attempt = || -> io::Result<Check> {
+        let (krate, target, cargo_home) = (
+            dir.join("f-crate"),
+            dir.join("f-target"),
+            dir.join("f-cargo-home"),
+        );
+        for (rel, body) in PROBE_CRATE {
+            let path = krate.join(rel);
+            std::fs::create_dir_all(path.parent().expect("probe files live in the crate"))?;
+            fs.write_file(&path, body.as_bytes())?;
+        }
+        std::fs::create_dir_all(&cargo_home)?;
+        let stderr_path = dir.join("f-cargo.stderr");
+        let mut child = probe_command(tc, &krate, &target, &cargo_home)
+            .stderr(std::fs::File::create(&stderr_path)?)
+            .spawn()?;
+        let status = child.wait()?;
+        if !status.success() {
+            let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+            return Ok(Check {
+                id: CheckId::F,
+                verdict: Verdict::Fail,
+                measured: Measures::from([
+                    (
+                        "cargo_status".to_string(),
+                        Measured::Text(status.to_string()),
+                    ),
+                    (
+                        "stderr_tail".to_string(),
+                        Measured::Text(tail(&stderr, 600)),
+                    ),
+                ]),
+            });
+        }
+        let report = crate::fingerprint::read_profile(&target.join("debug"));
+        let mut measured = Measures::from([
+            ("toolchain".to_string(), Measured::Text(tc.release.clone())),
+            ("units".to_string(), Measured::Int(report.units as u64)),
+        ]);
+        let ok = match (&report.format, &report.edges) {
+            (crate::fingerprint::Format::Supported, Some(e)) => {
+                measured.insert("format".into(), Measured::Text("supported".into()));
+                measured.insert("edges_resolved".into(), Measured::Int(e.resolved));
+                measured.insert("edges_unresolved".into(), Measured::Int(e.unresolved));
+                measured.insert("edges_ambiguous".into(), Measured::Int(e.ambiguous));
+                report.units > 0 && e.resolved > 0 && e.unresolved == 0 && e.ambiguous == 0
+            }
+            (crate::fingerprint::Format::Unsupported(why), _) => {
+                measured.insert(
+                    "format".into(),
+                    Measured::Text(format!("unsupported: {why}")),
+                );
+                false
+            }
+            (crate::fingerprint::Format::Supported, None) => false,
+        };
+        Ok(Check {
+            id: CheckId::F,
+            verdict: verdict(ok),
+            measured,
+        })
+    };
+    attempt().unwrap_or_else(|e| failed(CheckId::F, e))
+}
+
 /// (e) Owner authentication: availability only, never a dialog.
 fn check_owner_auth(approve: &dyn Approve) -> Check {
     match approve.owner_auth_available() {
@@ -497,6 +614,7 @@ pub fn run(
     for step in steps {
         checks.push(step());
     }
+    checks.push(check_format(fs, dir, &env.toolchain));
     Ok(DoctorReport {
         macos: env.macos.clone(),
         below_floor: env

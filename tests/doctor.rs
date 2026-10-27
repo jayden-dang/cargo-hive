@@ -31,7 +31,7 @@ fn doctor(hive: &Hive) -> (Output, serde_json::Value) {
     (out, receipt)
 }
 
-const EXPECTED_IDS: [&str; 5] = ["a", "b", "c", "d", "e"];
+const EXPECTED_IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
 
 #[test]
 fn doctor_reports_every_check_with_its_measured_value_and_records_capabilities() {
@@ -63,4 +63,22 @@ fn doctor_reports_every_check_with_its_measured_value_and_records_capabilities()
             .unwrap();
     assert_eq!(caps["toolchain_release"], receipt["toolchain"]);
     assert!(receipt["toolchain"].as_str().is_some());
+}
+
+#[test]
+fn doctor_finishes_with_no_terminal_attached() {
+    // `doctor()` spawns with stdin from /dev/null and no TTY; `wait_within` fails on a hang.
+    let hive = Hive::new();
+    let (_, receipt) = doctor(&hive);
+    let f = receipt["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "f")
+        .unwrap()
+        .clone();
+    assert_eq!(f["verdict"], "pass", "{f}");
+    assert!(f["measured"]["units"].as_u64().unwrap() >= 4, "{f}");
+    assert_eq!(f["measured"]["edges_unresolved"], 0, "{f}");
+    assert_eq!(f["measured"]["edges_ambiguous"], 0, "{f}");
 }
