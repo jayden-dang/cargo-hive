@@ -33,6 +33,12 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// Hold a lock until killed (used by doctor's lock check)
+    #[command(name = "__hold-lock", hide = true)]
+    HoldLock {
+        kind: String,
+        path: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -74,6 +80,9 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
             return e.exit_code();
         }
     };
+    if let Command::HoldLock { kind, path } = &cli.command {
+        return hold_lock(kind, path);
+    }
     let state = match State::open() {
         Ok(s) => s,
         Err(e) => {
@@ -89,6 +98,24 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
             command: RepoCommand::List(out),
         } => repo_list(&state, out),
         Command::Status { repos, out } => status(&state, &repos, out),
+        Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
+    }
+}
+
+fn hold_lock(kind: &str, path: &std::path::Path) -> i32 {
+    let Some(kind) = platform::LockKind::parse(kind) else {
+        eprintln!("cargo-hive: unknown lock kind {kind:?} (expected flock or fcntl)");
+        return 2;
+    };
+    match platform::hold_lock_forever(kind, path) {
+        Ok(never) => match never {},
+        Err(e) => {
+            eprintln!(
+                "cargo-hive: could not hold the lock on {}: {e}",
+                path.display()
+            );
+            1
+        }
     }
 }
 

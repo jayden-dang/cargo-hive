@@ -71,6 +71,95 @@ pub struct Sharing {
     pub shares_all: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompressOutcome {
+    Compressed,
+    SkippedHardLink,
+    Failed(String),
+}
+
+impl std::fmt::Display for CompressOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompressOutcome::Compressed => write!(f, "compressed"),
+            CompressOutcome::SkippedHardLink => write!(f, "skipped: hard link"),
+            CompressOutcome::Failed(why) => write!(f, "failed: {why}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockKind {
+    Flock,
+    Fcntl,
+}
+
+impl LockKind {
+    pub fn as_arg(self) -> &'static str {
+        match self {
+            LockKind::Flock => "flock",
+            LockKind::Fcntl => "fcntl",
+        }
+    }
+
+    pub fn parse(arg: &str) -> Option<LockKind> {
+        match arg {
+            "flock" => Some(LockKind::Flock),
+            "fcntl" => Some(LockKind::Fcntl),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockState {
+    Free,
+    Held,
+}
+
+/// A lock held on hive's behalf. Releasing or dropping it lets the lock go.
+pub struct LockHolder {
+    release: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl LockHolder {
+    pub fn new(release: impl FnOnce() + Send + 'static) -> LockHolder {
+        LockHolder {
+            release: Some(Box::new(release)),
+        }
+    }
+
+    pub fn release(mut self) {
+        if let Some(f) = self.release.take() {
+            f();
+        }
+    }
+}
+
+impl Drop for LockHolder {
+    fn drop(&mut self) {
+        if let Some(f) = self.release.take() {
+            f();
+        }
+    }
+}
+
+/// Body of the hidden `__hold-lock` command: take the lock, print `held`, wait to be killed.
+pub fn hold_lock_forever(kind: LockKind, path: &Path) -> io::Result<std::convert::Infallible> {
+    #[cfg(target_os = "macos")]
+    {
+        apfs::hold_lock_forever(kind, path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (kind, path);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            MACOS_ONLY_MESSAGE,
+        ))
+    }
+}
+
 /// The filesystem operations hive needs. Doctor's checks run through this trait so they
 /// can be exercised against a fake.
 pub trait Fs {
@@ -84,6 +173,12 @@ pub trait Fs {
     fn inode(&self, path: &Path) -> io::Result<u64>;
     fn clone_file(&self, src: &Path, dst: &Path) -> io::Result<()>;
     fn sharing(&self, path: &Path) -> io::Result<Sharing>;
+    /// Applesauce LZFSE compression of one file. A file with other hard links is skipped.
+    fn compress(&self, path: &Path) -> CompressOutcome;
+    /// Holds `kind` on `path` in another process until the holder is released.
+    fn hold_lock(&self, kind: LockKind, path: &Path) -> io::Result<LockHolder>;
+    /// `flock(LOCK_SH | LOCK_NB)` on a read-only descriptor; never waits.
+    fn probe_lock(&self, path: &Path) -> io::Result<LockState>;
 }
 
 #[cfg(test)]

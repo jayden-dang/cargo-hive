@@ -1,12 +1,20 @@
 //! macOS `Fs`: APFS clones and sharing attributes through `libc`.
 
-use super::{Fs, Sharing, TempDir};
+use super::{CompressOutcome, Fs, LockHolder, LockKind, LockState, Sharing, TempDir};
+use applesauce::compressor::Kind;
+use applesauce::progress::{Progress, SkipReason, Task};
+use applesauce::FileCompressor;
 use std::ffi::{CString, OsString};
 use std::fs;
-use std::io;
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::macos::fs::MetadataExt as _;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 /// `<sys/attr.h>` extended flags that `libc` does not define.
@@ -125,11 +133,162 @@ impl Fs for Apfs {
             shares_all: flags & EF_SHARES_ALL_BLOCKS != 0,
         })
     }
+
+    fn compress(&self, path: &Path) -> CompressOutcome {
+        let watch = Watch::default();
+        let mut compressor = FileCompressor::new();
+        let _stats = compressor.recursive_compress([path], Kind::Lzfse, 0.95, 5, &watch, true);
+        if let Some(why) = watch
+            .failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            return CompressOutcome::Failed(why);
+        }
+        if watch.hard_link.load(Ordering::SeqCst) {
+            return CompressOutcome::SkippedHardLink;
+        }
+        match fs::symlink_metadata(path) {
+            Ok(m) if m.st_flags() & libc::UF_COMPRESSED != 0 => CompressOutcome::Compressed,
+            Ok(_) => {
+                CompressOutcome::Failed("the file is not marked UF_COMPRESSED afterwards".into())
+            }
+            Err(e) => CompressOutcome::Failed(e.to_string()),
+        }
+    }
+
+    fn hold_lock(&self, kind: LockKind, path: &Path) -> io::Result<LockHolder> {
+        let mut child = Command::new(&self.holder)
+            .arg("__hold-lock")
+            .arg(kind.as_arg())
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut line = String::new();
+        let read = child
+            .stdout
+            .take()
+            .map(|o| BufReader::new(o).read_line(&mut line));
+        if line.trim() != "held" {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other(format!(
+                "the lock holder did not take the lock ({read:?})"
+            )));
+        }
+        Ok(LockHolder::new(move || {
+            let _ = child.kill();
+            let _ = child.wait();
+        }))
+    }
+
+    fn probe_lock(&self, path: &Path) -> io::Result<LockState> {
+        let file = fs::File::open(path)?;
+        // SAFETY: `file` owns a valid descriptor for the call; closing it drops the shared lock.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+            return Ok(LockState::Free);
+        }
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            Ok(LockState::Held)
+        } else {
+            Err(err)
+        }
+    }
+}
+
+fn record(slot: &Mutex<Option<String>>, why: String) {
+    slot.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_or_insert(why);
+}
+
+/// Turns Applesauce's progress callbacks into one outcome for one file.
+#[derive(Default)]
+struct Watch {
+    hard_link: AtomicBool,
+    failure: Arc<Mutex<Option<String>>>,
+}
+
+struct WatchTask {
+    failure: Arc<Mutex<Option<String>>>,
+}
+
+impl Progress for Watch {
+    type Task = WatchTask;
+
+    fn error(&self, path: &Path, message: &str) {
+        record(&self.failure, format!("{}: {message}", path.display()));
+    }
+
+    fn file_skipped(&self, _path: &Path, why: SkipReason) {
+        match why {
+            SkipReason::HardLink => self.hard_link.store(true, Ordering::SeqCst),
+            other => record(&self.failure, format!("skipped: {other}")),
+        }
+    }
+
+    fn file_task(&self, _path: &Path, _size: u64) -> WatchTask {
+        WatchTask {
+            failure: Arc::clone(&self.failure),
+        }
+    }
+}
+
+impl Task for WatchTask {
+    fn increment(&self, _amt: u64) {}
+
+    fn error(&self, message: &str) {
+        record(&self.failure, message.to_string());
+    }
+
+    fn not_compressible_enough(&self, _path: &Path) {
+        record(&self.failure, "not compressible enough".to_string());
+    }
+}
+
+/// Body of `__hold-lock`: take the lock (blocking), report it, then wait to be killed.
+pub fn hold_lock_forever(kind: LockKind, path: &Path) -> io::Result<std::convert::Infallible> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    let fd = file.as_raw_fd();
+    let rc = match kind {
+        // SAFETY: `fd` is valid while `file` lives, which is forever below.
+        LockKind::Flock => unsafe { libc::flock(fd, libc::LOCK_EX) },
+        LockKind::Fcntl => {
+            // SAFETY: an all-zero `flock` struct is valid; the fields that matter are set next.
+            let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+            lock.l_type = libc::F_WRLCK as libc::c_short;
+            lock.l_whence = libc::SEEK_SET as libc::c_short;
+            // SAFETY: `lock` outlives the call and `fd` is valid.
+            unsafe { libc::fcntl(fd, libc::F_SETLKW, &lock) }
+        }
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut out = io::stdout().lock();
+    writeln!(out, "held")?;
+    out.flush()?;
+    drop(out);
+    loop {
+        std::thread::park();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::CompressOutcome;
+    use std::fs;
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn apfs() -> Apfs {
         Apfs::new(PathBuf::from("/nonexistent/cargo-hive"))
@@ -187,5 +346,32 @@ mod tests {
         let fixed = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
         apfs().set_mtime(&a, fixed).unwrap();
         assert_eq!(apfs().mtime(&b).unwrap(), fixed);
+    }
+
+    #[test]
+    fn compression_keeps_content_and_mtime_and_skips_hardlinked_files() {
+        let t = tmp("compress");
+        let content: Vec<u8> = (0..4 << 20).map(|i| (i % 251) as u8).collect();
+        let fixed = UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let single = t.path().join("single");
+        apfs().write_file(&single, &content).unwrap();
+        apfs().set_mtime(&single, fixed).unwrap();
+        assert_eq!(apfs().compress(&single), CompressOutcome::Compressed);
+        assert_eq!(apfs().read(&single).unwrap(), content);
+        assert_eq!(apfs().mtime(&single).unwrap(), fixed);
+
+        let (a, b) = (t.path().join("a"), t.path().join("b"));
+        apfs().write_file(&a, &content[..1 << 20]).unwrap();
+        apfs().hardlink(&a, &b).unwrap();
+        apfs().set_mtime(&a, fixed).unwrap();
+        let inode = apfs().inode(&a).unwrap();
+        assert_eq!(apfs().compress(&a), CompressOutcome::SkippedHardLink);
+        assert_eq!(apfs().inode(&a).unwrap(), inode);
+        assert_eq!(apfs().read(&a).unwrap(), &content[..1 << 20]);
+        assert_eq!(apfs().mtime(&a).unwrap(), fixed);
+        assert_eq!(
+            fs::symlink_metadata(&a).unwrap().st_flags() & libc::UF_COMPRESSED,
+            0
+        );
     }
 }
