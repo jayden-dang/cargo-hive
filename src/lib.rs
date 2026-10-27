@@ -1,6 +1,7 @@
 pub mod classify;
 pub mod cli;
 pub mod discover;
+pub mod fingerprint;
 pub mod git;
 pub mod platform;
 pub mod receipt;
