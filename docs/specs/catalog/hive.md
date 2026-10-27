@@ -9,4 +9,4 @@ nobody is notified.
 
 | Code | Feature | Spec | Status | Owner | Roadmap item | Match terms | Surface roots |
 |---|---|---|---|---|---|---|---|
-| CORE | Foundation: repo registry, checkout discovery and classification, Cargo target identification, fingerprint reader, receipts, doctor | ../2026-10-25-foundation/ | Approved |  | ROAD-1 | registry, repo add, checkout, worktree, classify, protected, secondary, target dir, CACHEDIR.TAG, fingerprint, receipt, doctor | `src/` |
+| CORE | Foundation: repo registry, checkout discovery and classification, Cargo target identification, fingerprint reader, receipts, doctor | ../2026-10-25-foundation/ | In-progress |  | ROAD-1 | registry, repo add, checkout, worktree, classify, protected, secondary, target dir, CACHEDIR.TAG, fingerprint, receipt, doctor | `src/` |

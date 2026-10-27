@@ -1,7 +1,7 @@
 # Requirements: Foundation (registry, discovery, classification, target identification, fingerprint reader, receipts, doctor)
 
 Feature code: CORE
-Status: Approved
+Status: In-progress
 Date: 2026-10-25
 
 <!--

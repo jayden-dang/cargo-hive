@@ -9,7 +9,7 @@
 Feature code: CORE
 Status: Approved
 Date: 2026-10-25
-Execution-mode: unset
+Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
