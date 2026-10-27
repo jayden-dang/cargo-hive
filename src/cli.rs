@@ -30,6 +30,12 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum RepoCommand {
+    /// Register a repository by its main checkout (any path inside it)
+    Add {
+        path: std::path::PathBuf,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// List registered repositories
     List(OutputArgs),
 }
@@ -70,6 +76,9 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
     };
     match cli.command {
         Command::Repo {
+            command: RepoCommand::Add { path, out },
+        } => repo_add(&state, &path, out),
+        Command::Repo {
             command: RepoCommand::List(out),
         } => repo_list(&state, out),
     }
@@ -89,6 +98,46 @@ pub fn emit(state: &State, out: OutputArgs, receipt: Receipt, human: &str, code:
         print!("{human}");
     }
     code
+}
+
+fn repo_add(state: &State, path: &std::path::Path, out: OutputArgs) -> i32 {
+    use crate::registry::{register, RegisterOutcome};
+    let result = state.locked(|tx| register(path, tx));
+    let mut b = Receipt::new("repo add", Scope::default());
+    match result {
+        Err(e) => {
+            eprintln!("cargo-hive: {e}");
+            1
+        }
+        Ok(Ok(RegisterOutcome::Registered(repo))) => {
+            b.count("registered", 1);
+            b.scope_mut().repos.push(repo.main.clone());
+            emit(
+                state,
+                out,
+                b.finish(),
+                &format!("registered {}\n", repo.main.display()),
+                0,
+            )
+        }
+        Ok(Ok(RegisterOutcome::AlreadyRegistered(repo))) => {
+            b.count("registered", 0);
+            b.scope_mut().repos.push(repo.main.clone());
+            b.note(format!("{} is already registered", repo.main.display()));
+            emit(
+                state,
+                out,
+                b.finish(),
+                &format!("{} is already registered\n", repo.main.display()),
+                0,
+            )
+        }
+        Ok(Err(refusal)) => {
+            b.count("registered", 0);
+            b.finding("refusal", Some(path.to_path_buf()), refusal.to_string());
+            emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1)
+        }
+    }
 }
 
 fn repo_list(state: &State, out: OutputArgs) -> i32 {
