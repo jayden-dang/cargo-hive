@@ -1654,7 +1654,7 @@ _Requirements: AUTOGC-5.1, AUTOGC-5.2, AUTOGC-5.5_
   - `gc::{CRATE_DIR_CAP (100_000), DEPS_CAP (1_000_000)}`
   - `gc::Scope::{All, Checkouts(Vec<PathBuf>)}`
   - `gc::RunOpts { dry_run: bool, now: SystemTime, account_bytes: bool }`
-  - `gc::Counts { sessions_deleted, session_lock_files_deleted, temp_entries_deleted, skipped_held, skipped_lock_unopenable: u64, freed_bytes: Option<u64>, deleted_bytes_still_shared: Option<u64> }`
+  - `gc::Counts { sessions_deleted, session_lock_files_deleted, temp_entries_deleted, skipped_held, skipped_lock_unopenable, bytes: Option<Bytes> }`. When `bytes` is present it supplies both `freed_bytes` and `deleted_bytes_still_shared`; when absent, both are omitted.
   - `gc::Skip { path: PathBuf, reason: String }`
   - `gc::GcReport { per_target: Vec<(PathBuf, Counts)>, totals: Counts, skipped: Vec<Skip>, unmeasured: Vec<(PathBuf, String)>, unmeasured_more: u64, cancelled: bool }`
   - `gc::run(fs: &dyn Fs, targets: &[TargetDir], scope: &Scope, opts: &RunOpts, cancel: &dyn Fn() -> bool) -> GcReport`

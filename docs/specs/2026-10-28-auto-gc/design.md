@@ -51,16 +51,17 @@ The second constraint is honesty of the byte count (ARCH-11). rustc hard-links s
    1. take the guard on `lock`;
    2. `symlink_metadata(dir)`;
    3. if `dir` is gone, stop: the session finalized or was removed meanwhile. The lock file now belongs to whatever replaced the dir, so it is **left untouched** and nothing is counted (AUTOGC-2.14);
-   4. otherwise scan for the ledger, `remove_tree(dir)`, then `remove_file(lock)`, then drop the guard.
+   4. if the stat fails for another reason, stop. The entry stays, nothing is counted, and the receipt gets a `gc.skipped` finding naming the path (AUTOGC-2.14);
+   5. otherwise scan for the ledger, `remove_tree(dir)`, then `remove_file(lock)`, then drop the guard.
 
-   While hive holds the guard no rustc can hold that lock, and only the lock's holder renames the session, so the session cannot change name between steps 2 and 4.
+   While hive holds the guard no rustc can hold that lock, and only the lock's holder renames the session, so the session cannot change name between steps 2 and 5.
 
-   For `DeleteOrphanLock{lock}`: take the guard, re-list the crate dir, and remove the lock file only if no entry shares its three-field key.
+   For `DeleteOrphanLock{lock}`: take the guard, re-list the crate dir, and remove the lock file only if no entry shares its three-field key. A list error leaves the lock in place and records a `gc.skipped` finding. It is not treated as a session having appeared.
 
    SIGKILL at any step leaves one of three states: nothing changed; a partly removed *older* session with its lock file; or an orphan lock file. rustc chooses its copy source as the newest finalized dir by name timestamp, with no lock-file test (`fs.rs:516-555`). Its own GC always keeps the newest candidate (`fs.rs:719-760, 867-881`). So the kept session `K` survives every interruption, and a partly removed older session is never promoted while `K` exists. Only something other than rustc or hive removing `K` (`cargo clean` removes everything) could promote it.
 
    The dir goes before the lock file, so hive never manufactures a lockless finalized session.
-3. **Lockless dirs are re-checked, not trusted.** A single `read_dir` can miss a lock file that rustc created before the dir, because listing order is not creation order. Immediately before deleting a `DeleteLockless{dir}`, the runner `symlink_metadata`s the matching lock path. If it now exists, the dir is left alone this run. This needs no requirement change: AUTOGC-2.7 still deletes a dir that has no lock file.
+3. **Lockless dirs are re-checked, not trusted.** A single `read_dir` can miss a lock file that rustc created before the dir, because listing order is not creation order. Immediately before deleting a `DeleteLockless{dir}`, the runner `symlink_metadata`s the matching lock path. If it now exists, the dir is left alone this run. If that stat fails for a reason other than a missing path, the dir stays and a `gc.skipped` finding names the lock path (AUTOGC-2.14). A missing lock file still means AUTOGC-2.7: delete the dir, with no age gate.
 4. **Pure planner, effectful runner, effects through `Fs`.**
    - Deciding what to delete in a crate dir is a pure function of the listing and `now`.
    - The runner performs every effect through `Fs`: lock, stat, list, `remove_tree`, `remove_file` and `volume_free`. A recording fake can then pin the order "lock → re-check → scan → dir → lock file → drop", inject `NotFound`, and stop mid-run.
@@ -103,7 +104,7 @@ The second constraint is honesty of the byte count (ARCH-11). rustc hard-links s
 14. **Cancellation mirrors `status`, and is not a requirement.**
     - Handlers (`doctor::install_signal_handlers`) are installed **before the first walk**.
     - `doctor::CANCEL` is checked after `discover::targets` and between entries, never inside a locked deletion.
-    - On cancel, `gc` emits the receipt of what it did with a finding `error` "gc was cancelled", skips the snapshot merge, and exits 130, as `status` does (`src/cli.rs:427-502`).
+    - On cancel (SIGINT or SIGTERM), `gc` emits the receipt of what it did with a finding `error` "gc was cancelled", skips the snapshot merge, and exits 130, as `status` does (`src/cli.rs`).
     - A second Ctrl-C does not interrupt a running `remove_tree`.
 15. **Doctor check (d) measures the production primitive.**
     - The four old keys are replaced by the AUTOGC-1.1 and AUTOGC-1.2 matrix.
@@ -260,7 +261,7 @@ Surface:
 
 Interface:
 - `cargo hive gc [<repo>…] [--dry-run] [--json]`.
-- Exit codes: 0 done; 1 for any refusal (gate, unknown argument); 130 when cancelled.
+- Exit codes: 0 done; 1 for any refusal (gate, unknown argument); 130 when cancelled by SIGINT or SIGTERM.
 
 Depth: n/a — a thin adapter, like `status`.
 Locality: extend — `src/cli.rs`, `README.md`. `status` itself is not refactored, so its output cannot drift (AUTOGC-7.3).
