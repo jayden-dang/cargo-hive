@@ -123,3 +123,9 @@ None. No architecture spine exists.
 ## Amendment 2026-10-25 (design-solution, F9)
 
 The lock "GC never invokes cargo" now reads: GC never compiles and never replays a build. Ownership is the one exception: it may run exactly `cargo metadata --no-deps --format-version 1 --locked --offline` with `RUSTUP_AUTO_INSTALL=0`, with `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR` and `GIT_*` scrubbed, and no other cargo subcommand. At ROAD-6 apply time ownership is resolved fresh, never from the `snapshot.json` cache.
+
+## Amendment 2026-10-28 (define-project)
+
+The Desired line in the Problem lock is narrowed to the wording in `docs/product/vision.md`: dead bytes are reclaimed with zero deletion-caused rebuilds, and a new secondary checkout's first build recompiles zero seeded registry units at about zero private bytes, all shown in receipts. The original line stays above as confirmed. It overstated both halves:
+- **Time.** A deps-only seed in a foreign checkout rebuilt 0 of 434 registry units, yet the first build still took 56.2 s against 77.1 s cold, because the 42 workspace crates compile cold (SPIKES.md §7). N worktrees still pay N workspace compiles.
+- **Disk.** Main's live `incremental/` was 17.33 GB (SPIKES.md §8), and Cargo uses incremental compilation only for workspace members and path dependencies, so that state stays private to each checkout. Seeding shares the registry part only.

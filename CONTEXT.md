@@ -2,6 +2,10 @@
 
 Terms settled during the 2026-10-25 interview and the CORE design. One canonical term per concept.
 
+**hive**:
+The product (crate `cargo-hive`). Invoked as `cargo hive <sub>`, or as `cargo-hive <sub>` with the same arguments, the form MCP registration and agents that cannot call Cargo subcommands use.
+_Avoid_: `hive <cmd>` written as a command; no `hive` binary exists
+
 **Checkout**:
 A working tree of a registered repo: the main checkout, a linked worktree, or a clone.
 _Avoid_: workspace (that is Cargo's term), copy
@@ -76,11 +80,11 @@ _Avoid_: reachability GC, mark phase
 GC that runs without a plan: `rustc*`/`rmeta*` temp entries and superseded incremental sessions, always after taking the owner's lock.
 
 **Plan tier**:
-GC through `hive gc --plan` then `apply`: closure deletion and whole orphan targets.
+GC through `cargo hive gc --plan` then `apply`: closure deletion and whole orphan targets.
 
 **Receipt**:
 The deterministic counters a hive command returns. It never contains durations or estimated time saved.
 _Avoid_: report, summary
 
 **needs-human**:
-The status `apply` returns for a protected plan. Only `hive approve <id>` opens the owner-authentication dialog.
+The status `apply` returns for a protected plan. Only `cargo hive approve <id>` opens the owner-authentication dialog.

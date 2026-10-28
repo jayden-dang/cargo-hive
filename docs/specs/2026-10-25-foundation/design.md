@@ -95,11 +95,12 @@ state ◄── written only via cli (registry, capabilities, snapshot, receipts
 
 ### state
 
-Satisfies: CORE-2.6, CORE-3.5, CORE-3.6, CORE-4.3, CORE-5.2, CORE-6.3, CORE-6.5, CORE-7.1
+Satisfies: CORE-2.6, CORE-3.5, CORE-3.6, CORE-4.3, CORE-5.2, CORE-6.3, CORE-6.5, CORE-6.6, CORE-6.7, CORE-7.1
 Reuse: 3 — `std::fs` and `std::os::unix` for files, `fsync` and `rename`; 5 — `libc::flock` for the lock, `serde_json` for the shapes
 Interface: `State::open() -> Result<State, StateError>` (creates `$HIVE_HOME` or `~/.hive/` on first use) · `state.locked(|tx| …)`, which runs a closure holding the state lock where `tx` reads and writes `registry`, `capabilities`, `snapshot` and `append_receipt` · `state.config() -> Result<Config>` (read-only; defaults `secondary_roots = [/private/tmp, realpath($TMPDIR)]`, `cache_roots = [~/.cache/cargo-target]`; a set key replaces its default list) · `StateError::Malformed{file}`
 Depth: deletion test — callers would still need only "registry, config with defaults, capabilities, a discovery snapshot and a receipt log, changed only inside `locked`". The lock file, the temp, `fsync` and `rename` protocol, the daily receipt files and fail-closed parsing stay hidden.
 Locality: new `src/state.rs`. All of hive's own file writes outside doctor's temp dir go through it (CORE-6.3). For CORE-7.1, `state` guarantees that hive's own code never writes into checkouts, targets or `~/.cargo`. Child processes are constrained by `cargo_target` (Decision 4) and `doctor` (Decision 7).
+Landed after execution (2026-10-28, CORE-6.6/6.7): `locked_or_cancelled(cancel, body)` tries the lock with `LOCK_NB`, retries every 10 ms, and returns `StateError::Cancelled` only while another process holds the lock and `cancel` fires; `locked` is the same wait with a cancel that never fires.
 
 ### git (infrastructure)
 
@@ -181,13 +182,14 @@ Locality: new `src/platform/{mod.rs, apfs.rs, local_auth.rs, unsupported.rs}`. `
 
 ### doctor
 
-Satisfies: CORE-1.1, CORE-1.2, CORE-1.3, CORE-1.4, CORE-1.7, CORE-1.8, CORE-1.9, CORE-1.10
+Satisfies: CORE-1.1, CORE-1.2, CORE-1.3, CORE-1.4, CORE-1.7, CORE-1.8, CORE-1.9, CORE-1.10, CORE-1.11, CORE-1.12
 Reuse: none — new code (rung 7), composing `platform`, `fingerprint` and `state`
 Interface: `run(&dyn Fs, &dyn Approve, &Toolchain) -> DoctorReport{macos, below_floor, toolchain_release, checks: [Check{id: a..f, verdict: Pass | Fail | Unavailable, measured: Value}]}` · `capabilities_from(&DoctorReport) -> Capabilities` · `require(&Capabilities, Capability, active_release) -> Result<(), CapabilityRefusal{check | RunDoctor}>`
 Depth: deletion test — callers would still need to know "run six checks and get verdicts with measured values, a capability map tied to a toolchain release, and a gate". These stay hidden: the fixtures, the throwaway crate with its isolated environment, the CORE-1.3 check → capability map, the signal flag and the stale-dir sweep.
 Locality: new `src/doctor.rs`. `require` is the gate every capability-dependent command calls from ROAD-2 onward (CORE-1.4, CORE-1.10).
 
 The macOS version comes from `sw_vers -productVersion`. Below 27 sets `below_floor` and every check still runs (CORE-1.7). Cleanup follows Decision 15 (CORE-1.8, CORE-1.9).
+Landed after execution (2026-10-28, CORE-1.11/1.12): `drop_directory_toolchain` removes `RUSTUP_TOOLCHAIN` and `RUSTUP_TOOLCHAIN_SOURCE` from `rustup which` and from `cargo_target::resolve`'s `cargo metadata` unless the source is `cli`, `env` or `default`.
 
 ### receipt
 
@@ -226,7 +228,7 @@ Every live ID in requirements.md appears in exactly one `Satisfies:` line:
 
 | Module | IDs |
 |---|---|
-| state | 2.6, 3.5, 3.6, 4.3, 5.2, 6.3, 6.5, 7.1 |
+| state | 2.6, 3.5, 3.6, 4.3, 5.2, 6.3, 6.5–6.7, 7.1 |
 | registry | 2.1–2.5, 2.7–2.9 |
 | classify | 3.2, 3.4 |
 | discover | 3.1, 3.3, 3.7, 4.2, 4.15, 6.1, 6.2 |
@@ -234,7 +236,7 @@ Every live ID in requirements.md appears in exactly one `Satisfies:` line:
 | fingerprint | 4.7, 4.8, 4.14 |
 | size | 4.6, 4.11 |
 | platform | 1.6, 6.4 |
-| doctor | 1.1–1.4, 1.7–1.10 |
+| doctor | 1.1–1.4, 1.7–1.12 |
 | receipt | 5.3–5.6 |
 | cli | 3.8, 5.1, 5.7, 7.2 |
 

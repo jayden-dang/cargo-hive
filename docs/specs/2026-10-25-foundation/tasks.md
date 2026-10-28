@@ -26,10 +26,12 @@ There is no `docs/standards/`, `docs/product/guidelines.md` or `docs/agents/proj
 
 | Source | sha256 (first 16) |
 |---|---|
-| `.skills/CORE/close-package.md` (locks A1–A6, D1–D8, S1–S2, C1, I1–I4, F9 amendment) | `efb97ca2fbc6607e` |
-| `docs/specs/2026-10-25-foundation/design.md` (Decisions 1–15) | `b06c89ff85ddb3e1` |
+| `.skills/CORE/close-package.md` (locks A1–A6, D1–D8, S1–S2, C1, I1–I4, F9 amendment, 2026-10-28 amendment) | `5d2077befae8a6c6` |
+| `docs/specs/2026-10-25-foundation/design.md` (Decisions 1–15) | `11e491d01940fc2f` |
 | `docs/adr/0001-read-cargo-internal-fingerprints.md` | `49753555c2cb1f39` |
-| `CONTEXT.md` (glossary; use its terms) | `6d39ad7c7a2c334e` |
+| `CONTEXT.md` (glossary; use its terms) | `2324238c330dc529` |
+
+Re-pinned 2026-10-28 after CORE was Implemented: the close package gained its define-project amendment (Desired narrowed to `docs/product/vision.md`); `design.md` and `CONTEXT.md` had changed during the close-fix rounds and gained the 2026-10-28 `Satisfies:` lines and the **hive** entry. The 2026-10-27 values were `efb97ca2fbc6607e`, `b06c89ff85ddb3e1` and `6d39ad7c7a2c334e`.
 
 Commands every task must leave green:
 - `cargo fmt --check`, after running `cargo fmt`. The code in this plan is the content to write; rustfmt owns the layout.
