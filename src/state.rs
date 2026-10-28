@@ -8,13 +8,21 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
 pub enum StateError {
-    Io { path: PathBuf, source: io::Error },
-    Malformed { file: PathBuf, detail: String },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Malformed {
+        file: PathBuf,
+        detail: String,
+    },
     NoHome,
+    /// The caller cancelled while another process held the state lock.
+    Cancelled,
 }
 
 impl fmt::Display for StateError {
@@ -29,11 +37,20 @@ impl fmt::Display for StateError {
                 )
             }
             StateError::NoHome => write!(f, "HOME is not set, so ~/.hive cannot be located"),
+            StateError::Cancelled => {
+                write!(
+                    f,
+                    "cancelled while another hive process held the state lock"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for StateError {}
+
+/// How often a waiter retries the state lock while another process holds it.
+const LOCK_POLL: Duration = Duration::from_millis(10);
 
 fn io_err(path: &Path, source: io::Error) -> StateError {
     StateError::Io {
@@ -96,6 +113,17 @@ impl State {
         &self,
         body: impl FnOnce(&Tx<'_>) -> Result<T, StateError>,
     ) -> Result<T, StateError> {
+        self.locked_or_cancelled(|| false, body)
+    }
+
+    /// Like `locked`, but while another process holds the lock it polls `cancel` and
+    /// returns `StateError::Cancelled` once it is true. A free lock is taken even
+    /// after cancellation, so a cancelled command can still log its receipt.
+    pub fn locked_or_cancelled<T>(
+        &self,
+        mut cancel: impl FnMut() -> bool,
+        body: impl FnOnce(&Tx<'_>) -> Result<T, StateError>,
+    ) -> Result<T, StateError> {
         let path = self.root.join(".lock");
         let file = OpenOptions::new()
             .create(true)
@@ -106,12 +134,15 @@ impl State {
             .map_err(|e| io_err(&path, e))?;
         loop {
             // SAFETY: `file` owns a valid descriptor for the whole call.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 break;
             }
             let err = io::Error::last_os_error();
-            if err.kind() != io::ErrorKind::Interrupted {
-                return Err(io_err(&path, err));
+            match err.kind() {
+                io::ErrorKind::Interrupted => continue,
+                io::ErrorKind::WouldBlock if cancel() => return Err(StateError::Cancelled),
+                io::ErrorKind::WouldBlock => std::thread::sleep(LOCK_POLL),
+                _ => return Err(io_err(&path, err)),
             }
         }
         let result = body(&Tx { root: &self.root });

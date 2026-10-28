@@ -112,6 +112,8 @@ Consult outcome: no `docs/product/metrics.md`, `docs/ops/reliability.md`, `docs/
 - **Security:** **CORE-6.3** THE SYSTEM SHALL create, modify, or delete files only under `~/.hive/` and inside doctor's own temporary directory, verified by a test that snapshots a fixture checkout and its target dir before and after `repo add`, `status`, and `doctor` and finds them byte-for-byte unchanged.
 - **Security:** **CORE-6.4** WHEN doctor checks device-owner authentication THE SYSTEM SHALL only query its availability and SHALL NOT present an authentication dialog, verified by running doctor under a test harness with no GUI session and observing that it completes without blocking.
 - **Reliability:** **CORE-6.5** IF a hive command is interrupted while writing its registry, state, or receipts log THEN THE SYSTEM SHALL leave each of those files either in its previous complete form or in its new complete form, verified by a kill-during-write test that parses every file afterwards.
+- **Reliability:** **CORE-6.6** (fix, 2026-10-28) IF SIGINT or SIGTERM arrives while a hive command waits for hive's state lock and another process holds it THEN THE SYSTEM SHALL stop waiting, exit with status 130, and, when the receipt could not be logged, still print it with `--json` and say on stderr that it was not logged.
+- **Reliability:** **CORE-6.7** (guard, 2026-10-28) WHEN a cancelled hive command finds hive's state lock free THE SYSTEM SHALL CONTINUE TO append its receipt to the receipts log.
 - **Accessibility:** None — headless CLI and JSON output; no UI a person perceives beyond terminal text.
 
 ## 7. Existing behavior this feature must not change

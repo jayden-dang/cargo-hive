@@ -292,6 +292,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -555,6 +556,43 @@ mod tests {
             "pulled {} bytes past the cap",
             source.pulled
         );
+    }
+
+    #[test]
+    fn a_fingerprint_stream_longer_than_its_size_is_cut_off_at_four_mebibytes() {
+        let p = scratch();
+        let dir = p.join(".fingerprint/fifo-0000000000000001");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lib-fifo"), le_hex(1)).unwrap();
+        let fifo = dir.join("lib-fifo.json");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        // A FIFO reports length 0, so only the capped read stands between hive and
+        // an unbounded body. The writer stops on its own after 12 MiB.
+        let writer = std::thread::spawn({
+            let fifo = fifo.clone();
+            move || {
+                let mut w = fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+                let _ = w.write_all(b"{\"rustc\":1,\"features\":\"");
+                let chunk = vec![b'x'; 1024 * 1024];
+                for _ in 0..12 {
+                    if w.write_all(&chunk).is_err() {
+                        return; // the reader stopped at the cap
+                    }
+                }
+            }
+        });
+        let r = read_profile(&p);
+        writer.join().unwrap();
+        assert!(
+            matches!(r.format, Format::Unsupported(ref why) if why.contains("4 MiB")),
+            "{:?}",
+            r.format
+        );
+        fs::remove_dir_all(p).unwrap();
     }
 
     #[test]

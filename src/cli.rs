@@ -3,7 +3,7 @@
 use crate::platform::{self, MACOS_ONLY_MESSAGE};
 use crate::receipt::{Receipt, ReceiptBuilder, Scope};
 use crate::registry::{self, Registry};
-use crate::state::State;
+use crate::state::{State, StateError};
 use clap::{Args, Parser, Subcommand};
 use std::ffi::OsString;
 
@@ -135,8 +135,21 @@ fn hold_lock(kind: &str, path: &std::path::Path) -> i32 {
 /// Logs the receipt, prints it (`--json`) or the human text, and returns `code`.
 pub fn emit(state: &State, out: OutputArgs, receipt: Receipt, human: &str, code: i32) -> i32 {
     let line = serde_json::to_string(&receipt).expect("receipts always serialize");
-    let logged = match state.locked(|tx| tx.append_receipt_line(&line).map(|_| ())) {
+    let cancelled = || crate::doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let logged = match state
+        .locked_or_cancelled(cancelled, |tx| tx.append_receipt_line(&line).map(|_| ()))
+    {
         Ok(()) => true,
+        Err(StateError::Cancelled) => {
+            eprintln!(
+                "cargo-hive: the receipt was not logged: {}",
+                StateError::Cancelled
+            );
+            if out.json {
+                println!("{line}");
+            }
+            return 130;
+        }
         Err(e) => {
             eprintln!("cargo-hive: could not log the receipt: {e}");
             false
@@ -478,7 +491,7 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
         b.count("bytes", bytes);
     }
     report_targets(&mut b, &mut human, &scan);
-    let wrote = match state.locked(|tx| {
+    let wrote = match state.locked_or_cancelled(cancelled, |tx| {
         if cancelled() {
             return Ok(false);
         }
@@ -490,6 +503,7 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
         Ok(true)
     }) {
         Ok(wrote) => wrote,
+        Err(StateError::Cancelled) => false,
         Err(e) => {
             eprintln!("cargo-hive: {e}");
             b.finding("error", None, e.to_string());

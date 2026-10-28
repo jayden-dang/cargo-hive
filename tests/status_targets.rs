@@ -649,3 +649,89 @@ fn a_toolchain_selected_by_the_callers_directory_does_not_decide_ownership() {
         "{r}"
     );
 }
+
+/// A process holding hive's state lock, killed when dropped so a failing test cannot
+/// leave it running.
+struct LockHolder(Child);
+
+impl Drop for LockHolder {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn hold_state_lock(hive: &Hive) -> LockHolder {
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-hive"))
+        .args(["__hold-lock", "flock"])
+        .arg(hive.home.path.join(".lock"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut held = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut held)
+        .unwrap();
+    assert_eq!(held.trim(), "held");
+    LockHolder(child)
+}
+
+/// Waits until process `pid` has `path` open, as `lsof` reports it.
+fn wait_until_open(pid: u32, path: &Path) {
+    let started = Instant::now();
+    loop {
+        let open = std::process::Command::new("lsof")
+            .args(["-a", "-p", &pid.to_string()])
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        if open {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{} never opened {}",
+            pid,
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn an_interrupted_status_waiting_for_the_state_lock_exits_130_without_waiting_for_the_holder() {
+    let hive = Hive::ready();
+    let s = Scratch::new("status-lock-signal");
+    let repo = init_repo(&s.path.join("app"), "");
+    register(&hive, &repo);
+    let _holder = hold_state_lock(&hive);
+    let child = hive
+        .command(&["status", repo.to_str().unwrap(), "--no-sizes", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The first state lock status takes is the snapshot write, after discovery.
+    wait_until_open(child.id(), &hive.home.path.join(".lock"));
+    assert!(std::process::Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let out = wait_within(child, Duration::from_secs(10));
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        receipt.to_string().contains("status was cancelled"),
+        "{receipt}"
+    );
+    assert!(
+        !hive.home.path.join("snapshot.json").exists(),
+        "a cancelled status must not publish snapshot.json"
+    );
+}
