@@ -10,4 +10,4 @@ nobody is notified.
 | Code | Feature | Spec | Status | Owner | Roadmap item | Match terms | Surface roots |
 |---|---|---|---|---|---|---|---|
 | CORE | Foundation: repo registry, checkout discovery and classification, Cargo target identification, fingerprint reader, receipts, doctor | ../2026-10-25-foundation/ | Implemented |  | ROAD-1 | registry, repo add, checkout, worktree, classify, protected, secondary, target dir, CACHEDIR.TAG, fingerprint, receipt, doctor | `src/` |
-| AUTOGC | Auto-tier GC: superseded incremental sessions and rustc temp entries, deleted under their owners' locks, with per-inode freed bytes | ../2026-10-28-auto-gc/ | Approved |  | ROAD-2 | gc, reclaim, incremental session, rustc temp, rmeta, try-lock, flock, dry-run, freed bytes | `src/` |
+| AUTOGC | Auto-tier GC: superseded incremental sessions and rustc temp entries, deleted under their owners' locks, with per-inode freed bytes | ../2026-10-28-auto-gc/ | In-progress |  | ROAD-2 | gc, reclaim, incremental session, rustc temp, rmeta, try-lock, flock, dry-run, freed bytes | `src/` |

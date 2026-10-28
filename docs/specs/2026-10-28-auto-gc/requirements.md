@@ -1,7 +1,7 @@
 # Requirements: Auto-tier GC (superseded incremental sessions and rustc temp entries)
 
 Feature code: AUTOGC
-Status: Approved
+Status: In-progress
 Date: 2026-10-28
 
 <!--
