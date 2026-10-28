@@ -349,7 +349,8 @@ impl Runner<'_> {
     /// the entry is, or in a dry run would be, gone. A vanished entry counts nothing.
     fn remove_measured(&mut self, target: &Path, path: &Path) -> bool {
         let files = match self.scan(path) {
-            Ok(files) => files,
+            Ok(None) => return false,
+            Ok(Some(files)) => files,
             Err(why) => {
                 self.skip(path, why);
                 return false;
@@ -377,15 +378,14 @@ impl Runner<'_> {
     }
 
     /// The regular files under `root`, without following links and at most `MAX_DEPTH` deep.
-    fn scan(&self, root: &Path) -> Result<Scanned, String> {
+    /// `Ok(None)` means the root vanished between listing and measure.
+    fn scan(&self, root: &Path) -> Result<Option<Scanned>, String> {
         let mut files = Vec::new();
         let mut stack = vec![(root.to_path_buf(), 0usize)];
         while let Some((dir, depth)) = stack.pop() {
             let entries = match self.fs.read_dir_bounded(&dir, CRATE_DIR_CAP) {
                 Ok(v) => v,
-                Err(e) if e.kind() == io::ErrorKind::NotFound && dir == root => {
-                    return Ok(Vec::new())
-                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound && dir == root => return Ok(None),
                 Err(e) => return Err(format!("could not list {}: {e}", dir.display())),
             };
             for (name, kind) in entries {
@@ -413,7 +413,7 @@ impl Runner<'_> {
                 }
             }
         }
-        Ok(files)
+        Ok(Some(files))
     }
 }
 
@@ -828,6 +828,24 @@ mod tests {
     }
 
     #[test]
+    fn a_dry_run_counts_nothing_when_a_lockless_dir_vanishes() {
+        let f = fixture("dry-vanish");
+        let (gone, gone_lock) = session(&f, 3600, "v1", "svh1", true);
+        session(&f, 60, "bb", "svh2", false);
+        let vanish = f.krate.join(&gone);
+        let rec = Rec::new();
+        rec.on_stat.lock().unwrap().insert(
+            gone_lock,
+            Box::new(move || {
+                let _ = std::fs::remove_dir_all(&vanish);
+            }),
+        );
+        let report = run(&rec, &[orphan(&f)], &Scope::All, &opts(true), &never());
+        assert_eq!(rec.removals(), 0);
+        assert_eq!(report.totals.sessions_deleted, 0);
+    }
+
+    #[test]
     fn an_orphan_lock_is_removed_unless_a_session_claims_it() {
         let f = fixture("orphan");
         let (d1, l1) = session(&f, 3600, "e1", "svh1", false);
@@ -900,6 +918,26 @@ mod tests {
                 .skipped
                 .iter()
                 .any(|s| s.reason.contains(".cargo-build-lock")),
+            "{:?}",
+            report.skipped
+        );
+    }
+
+    #[test]
+    fn an_unopenable_build_lock_leaves_temp_entries() {
+        let f = fixture("buildlock-unopen");
+        std::fs::create_dir_all(f.profile.join("deps/rmetaQ1")).unwrap();
+        let rec = Rec::new();
+        rec.scripted
+            .lock()
+            .unwrap()
+            .insert(".cargo-build-lock".into(), Scripted::Unopenable);
+        let report = run(&rec, &[orphan(&f)], &Scope::All, &opts(false), &never());
+        assert!(f.profile.join("deps/rmetaQ1").exists());
+        assert!(
+            report.skipped.iter().any(|s| {
+                s.path.ends_with(".cargo-build-lock") && s.reason.contains("could not open")
+            }),
             "{:?}",
             report.skipped
         );
