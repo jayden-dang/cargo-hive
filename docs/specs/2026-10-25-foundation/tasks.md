@@ -117,7 +117,7 @@ Retrieval: `load-subgraph` `blast_radius` on these paths and `cluster(CORE)` fou
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the manifest, the module list and the failing tests**
+- [x] **Step 1: Write the manifest, the module list and the failing tests**
 
 `Cargo.toml`:
 
@@ -260,7 +260,7 @@ mod tests {
 
 Run: `cargo test --lib state` — expect: compile errors, because `State`, `Tx`, `StateError`, `utc_date` and `utc_timestamp` are not defined.
 
-- [ ] **Step 2: Implement `src/state.rs` above the test module**
+- [x] **Step 2: Implement `src/state.rs` above the test module**
 
 ```rust
 //! hive's own state under `~/.hive/` (or `$HIVE_HOME`, test-only). This module is
@@ -443,7 +443,7 @@ fn civil(t: SystemTime) -> (i64, u32, u32, u32, u32, u32) {
 
 Run: `cargo test --lib state` — expect: 5 passed. Then run `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(state): crash-safe state root with one flock and atomic rewrites"`
 
@@ -481,7 +481,7 @@ _Requirements: CORE-2.6, CORE-6.5_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `tests/common/mod.rs`:
 
@@ -734,7 +734,7 @@ mod tests {
 
 Run: `cargo test` — expect: compile errors, because `cargo_hive::cli`, `receipt`, `platform` and `registry` are missing.
 
-- [ ] **Step 2: Implement `src/platform/mod.rs` (above its tests)**
+- [x] **Step 2: Implement `src/platform/mod.rs` (above its tests)**
 
 ```rust
 //! Platform layer. Task 2 adds the OS check and version; Tasks 7–9 add `Fs` and `Approve`.
@@ -770,7 +770,7 @@ pub fn major_version(version: &str) -> Option<u32> {
 }
 ```
 
-- [ ] **Step 3: Implement `src/receipt.rs` (above its tests)**
+- [x] **Step 3: Implement `src/receipt.rs` (above its tests)**
 
 ```rust
 //! Receipt schema v1: counted or measured values only. There is no float or duration slot.
@@ -900,7 +900,7 @@ impl ReceiptBuilder {
 }
 ```
 
-- [ ] **Step 4: Implement `src/registry.rs` (types and list), `src/cli.rs`, `src/main.rs`, `src/lib.rs`**
+- [x] **Step 4: Implement `src/registry.rs` (types and list), `src/cli.rs`, `src/main.rs`, `src/lib.rs`**
 
 `src/registry.rs`:
 
@@ -1058,7 +1058,7 @@ pub mod state;
 
 Run: `cargo test` — expect: all tests pass (5 state, 3 receipt, 2 platform, 5 receipts integration). Then run `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(cli): receipts on every command, json mode, and repo list"`
 
@@ -1093,7 +1093,7 @@ _Requirements: CORE-1.6, CORE-2.5, CORE-2.6, CORE-5.1, CORE-5.2, CORE-5.3, CORE-
 
 **Depends-on:** Task 2
 
-- [ ] **Step 1: Write the failing tests** — `tests/repo.rs`:
+- [x] **Step 1: Write the failing tests** — `tests/repo.rs`:
 
 ```rust
 mod common;
@@ -1211,7 +1211,7 @@ fn registering_twice_leaves_the_registry_unchanged() {
 
 Run: `cargo test --test repo` — expect: failure. `repo add` is an unrecognized subcommand (clap exit code 2), so every test fails.
 
-- [ ] **Step 2: Implement `src/git.rs`**
+- [x] **Step 2: Implement `src/git.rs`**
 
 ```rust
 //! `git` child processes with every `GIT_*` variable scrubbed (an inherited GIT_DIR
@@ -1357,7 +1357,7 @@ impl Git {
 }
 ```
 
-- [ ] **Step 3: Implement `register` in `src/registry.rs`**
+- [x] **Step 3: Implement `register` in `src/registry.rs`**
 
 Append to the existing file:
 
@@ -1460,7 +1460,7 @@ pub fn register(path: &Path, tx: &Tx<'_>) -> Result<Result<RegisterOutcome, Regi
 }
 ```
 
-- [ ] **Step 4: Wire `repo add` in `src/cli.rs` and add `pub mod git;` to `src/lib.rs`**
+- [x] **Step 4: Wire `repo add` in `src/cli.rs` and add `pub mod git;` to `src/lib.rs`**
 
 Add the variant to `RepoCommand`:
 
@@ -1509,7 +1509,7 @@ fn repo_add(state: &State, path: &std::path::Path, out: OutputArgs) -> i32 {
 
 Run: `cargo test --test repo` — expect: 8 passed. Then run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(registry): repo add with submodule, worktree, unborn and shallow refusals"`
 
@@ -1534,7 +1534,7 @@ _Requirements: CORE-2.1, CORE-2.2, CORE-2.3, CORE-2.4, CORE-2.5, CORE-2.7, CORE-
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing table test** at the bottom of `src/classify.rs`:
+- [x] **Step 1: Write the failing table test** at the bottom of `src/classify.rs`:
 
 ```rust
 #[cfg(test)]
@@ -1579,7 +1579,7 @@ mod tests {
 
 Run: `cargo test --lib classify` — expect: compile error, because `classify` and its types are not defined.
 
-- [ ] **Step 2: Implement `src/classify.rs` (above the tests)**
+- [x] **Step 2: Implement `src/classify.rs` (above the tests)**
 
 ```rust
 //! C1 classification: (1) a registered main is protected; (2) a linked worktree inside
@@ -1639,7 +1639,7 @@ pub fn classify(facts: &CheckoutFacts, registered_mains: &[PathBuf], secondary_r
 
 Run: `cargo test --lib classify` — expect: 1 passed (12 table rows).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(classify): pure C1 classification that fails closed"`
 
@@ -1666,7 +1666,7 @@ _Requirements: CORE-3.2, CORE-3.4_
 
 **Depends-on:** Task 3, Task 4
 
-- [ ] **Step 1: Write the failing tests** — `tests/status_checkouts.rs`:
+- [x] **Step 1: Write the failing tests** — `tests/status_checkouts.rs`:
 
 ```rust
 mod common;
@@ -1815,7 +1815,7 @@ fn an_unregistered_repo_argument_is_refused() {
 
 Run: `cargo test --test status_checkouts` — expect: failure, because `status` is an unrecognized subcommand.
 
-- [ ] **Step 2: Add `Config` to `src/state.rs`**
+- [x] **Step 2: Add `Config` to `src/state.rs`**
 
 ```rust
 pub const CONFIG_FILE: &str = "config.json";
@@ -1865,7 +1865,7 @@ impl State {
 }
 ```
 
-- [ ] **Step 3: Implement `src/discover.rs`**
+- [x] **Step 3: Implement `src/discover.rs`**
 
 ```rust
 //! Checkouts of a registered repo and (Task 13) its Cargo target dirs. Every walk is
@@ -1970,7 +1970,7 @@ pub fn checkouts(repo: &Repo, registered_mains: &[PathBuf], cfg: &Config) -> Vec
 }
 ```
 
-- [ ] **Step 4: Add `status` to `src/cli.rs`**
+- [x] **Step 4: Add `status` to `src/cli.rs`**
 
 Add the variant:
 
@@ -2047,7 +2047,7 @@ fn status(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
 
 Run: `cargo test --test status_checkouts` — expect: 8 passed. Then run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(status): list each checkout as protected, secondary or missing"`
 
@@ -2070,7 +2070,7 @@ _Requirements: CORE-3.1, CORE-3.3, CORE-3.5, CORE-3.6, CORE-3.7, CORE-3.8, CORE-
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing tests** at the bottom of `src/fingerprint.rs`:
+- [x] **Step 1: Write the failing tests** at the bottom of `src/fingerprint.rs`:
 
 ```rust
 #[cfg(test)]
@@ -2181,7 +2181,7 @@ mod tests {
 
 Run: `cargo test --lib fingerprint` — expect: compile error, because `read_profile`, `le_hex` and the types are missing.
 
-- [ ] **Step 2: Implement `src/fingerprint.rs` (above the tests)**
+- [x] **Step 2: Implement `src/fingerprint.rs` (above the tests)**
 
 ```rust
 //! Cargo `.fingerprint/` reader (ADR-0001). A unit dir holds exactly one `<H>.json`
@@ -2364,7 +2364,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
 
 Run: `cargo test --lib fingerprint` — expect: 5 passed.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(fingerprint): exact-signature reader with little-endian edge resolution"`
 
@@ -2391,7 +2391,7 @@ _Requirements: CORE-4.7, CORE-4.8, CORE-4.14_
 
 **Depends-on:** Task 2
 
-- [ ] **Step 1: Write the failing tests** at the bottom of the new `src/platform/apfs.rs`:
+- [x] **Step 1: Write the failing tests** at the bottom of the new `src/platform/apfs.rs`:
 
 ```rust
 #[cfg(test)]
@@ -2455,7 +2455,7 @@ The expected values come from a probe on the proof machine (2026-10-27, and SPIK
 
 Run: `cargo test --lib platform::apfs` — expect: compile error, because `Apfs`, `Fs` and `TempDir` are missing.
 
-- [ ] **Step 2: Add the types and the trait to `src/platform/mod.rs`** (above its tests)
+- [x] **Step 2: Add the types and the trait to `src/platform/mod.rs`** (above its tests)
 
 ```rust
 use std::io;
@@ -2512,7 +2512,7 @@ pub trait Fs {
 }
 ```
 
-- [ ] **Step 3: Implement `src/platform/apfs.rs`** (above its tests)
+- [x] **Step 3: Implement `src/platform/apfs.rs`** (above its tests)
 
 ```rust
 //! macOS `Fs`: APFS clones and sharing attributes through `libc`.
@@ -2635,7 +2635,7 @@ impl Fs for Apfs {
 
 Run: `cargo test --lib platform::apfs` — expect: 3 passed. Then run `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(platform): APFS temp dirs, clones and block-sharing attributes"`
 
@@ -2666,7 +2666,7 @@ _Requirements: CORE-1.1_
 
 **Depends-on:** Task 3, Task 7
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module of `src/platform/apfs.rs`:
 
@@ -2756,7 +2756,7 @@ fn the_lock_holder_never_creates_hive_state() {
 
 Run: `cargo test --lib platform::apfs` and `cargo test --test platform_locks`. Expect compile errors: `compress`, `hold_lock`, `probe_lock`, `LockKind` and the rest are missing.
 
-- [ ] **Step 2: Add the types and trait methods to `src/platform/mod.rs`**
+- [x] **Step 2: Add the types and trait methods to `src/platform/mod.rs`**
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2855,7 +2855,7 @@ Add to `trait Fs`:
     fn probe_lock(&self, path: &Path) -> io::Result<LockState>;
 ```
 
-- [ ] **Step 3: Implement them in `src/platform/apfs.rs`**
+- [x] **Step 3: Implement them in `src/platform/apfs.rs`**
 
 Add the imports `use super::{CompressOutcome, LockHolder, LockKind, LockState};`, `use applesauce::compressor::Kind;`, `use applesauce::progress::{Progress, SkipReason, Task};`, `use applesauce::FileCompressor;`, `use std::io::{BufRead, BufReader, Write};`, `use std::os::macos::fs::MetadataExt as _;`, `use std::os::unix::io::AsRawFd;`, `use std::process::{Command, Stdio};`, `use std::sync::atomic::{AtomicBool, Ordering};` and `use std::sync::{Arc, Mutex, PoisonError};`. Then add:
 
@@ -2992,7 +2992,7 @@ Add to `impl Fs for Apfs`:
     }
 ```
 
-- [ ] **Step 4: Add the hidden command to `src/cli.rs`**
+- [x] **Step 4: Add the hidden command to `src/cli.rs`**
 
 Add the variant to `Command`:
 
@@ -3030,7 +3030,7 @@ fn hold_lock(kind: &str, path: &std::path::Path) -> i32 {
 
 Run: `cargo test --lib platform::apfs` and `cargo test --test platform_locks` — expect: 4 and 3 passed. Then run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(platform): applesauce compression, lock holder process and non-blocking probe"`
 
@@ -3058,7 +3058,7 @@ _Requirements: CORE-1.1_
 
 **Depends-on:** Task 8
 
-- [ ] **Step 1: Write the failing test** at the bottom of the new `src/platform/local_auth.rs`:
+- [x] **Step 1: Write the failing test** at the bottom of the new `src/platform/local_auth.rs`:
 
 ```rust
 #[cfg(test)]
@@ -3083,7 +3083,7 @@ mod tests {
 
 Run: `cargo test --lib platform::local_auth` — expect: compile error, because `LocalAuth`, `Approve` and `Availability` are missing.
 
-- [ ] **Step 2: Add to `src/platform/mod.rs`**
+- [x] **Step 2: Add to `src/platform/mod.rs`**
 
 ```rust
 #[cfg(target_os = "macos")]
@@ -3117,7 +3117,7 @@ pub fn current() -> Result<Platform, NotMacOs> {
 }
 ```
 
-- [ ] **Step 3: Implement `src/platform/local_auth.rs`** (above its test)
+- [x] **Step 3: Implement `src/platform/local_auth.rs`** (above its test)
 
 ```rust
 //! macOS `Approve`: device-owner authentication availability. `canEvaluatePolicy:error:`
@@ -3145,7 +3145,7 @@ impl Approve for LocalAuth {
 
 Run: `cargo test --lib platform::local_auth` — expect: 1 passed. Then run `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(platform): owner-authentication availability without any dialog"`
 
@@ -3185,7 +3185,7 @@ _Requirements: CORE-1.1_
 
 Rule settled here: a check whose verdict is not `pass` disables its capabilities, so `unavailable` disables them too. CORE-1.3 names failures. An unavailable check, for example owner authentication with no enrolled credential, cannot be trusted either, so the gate fails closed.
 
-- [ ] **Step 1: Write the failing unit tests** at the bottom of the new `src/doctor.rs`:
+- [x] **Step 1: Write the failing unit tests** at the bottom of the new `src/doctor.rs`:
 
 ```rust
 #[cfg(test)]
@@ -3422,7 +3422,7 @@ mod tests {
 
 Run: `cargo test --lib doctor` — expect: compile error, because the doctor module does not exist.
 
-- [ ] **Step 2: Implement `src/doctor.rs`** (above the tests)
+- [x] **Step 2: Implement `src/doctor.rs`** (above the tests)
 
 ```rust
 //! `cargo hive doctor`: capability checks in a fresh temp dir, the check → capability map,
@@ -3807,7 +3807,7 @@ pub fn run(fs: &dyn Fs, approve: &dyn Approve, env: &DoctorEnv) -> Result<Doctor
 
 Run: `cargo test --lib doctor` — expect: 7 passed.
 
-- [ ] **Step 3: Write the failing integration test** — the new `tests/doctor.rs`:
+- [x] **Step 3: Write the failing integration test** — the new `tests/doctor.rs`:
 
 ```rust
 #![cfg(target_os = "macos")]
@@ -3861,7 +3861,7 @@ fn doctor_reports_every_check_with_its_measured_value_and_records_capabilities()
 
 Run: `cargo test --test doctor` — expect: failure, because `doctor` is an unrecognized subcommand.
 
-- [ ] **Step 4: Add `doctor` to `src/cli.rs`**
+- [x] **Step 4: Add `doctor` to `src/cli.rs`**
 
 Add the variant:
 
@@ -3944,7 +3944,7 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
 
 Run: `cargo test --test doctor` — expect: 1 passed. Then run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(doctor): filesystem, lock and auth checks with a capability gate"`
 
@@ -3966,7 +3966,7 @@ _Requirements: CORE-1.1, CORE-1.2, CORE-1.3, CORE-1.4, CORE-1.7, CORE-1.10_
 
 **Depends-on:** Task 6, Task 10
 
-- [ ] **Step 1: Make the integration test expect six checks**
+- [x] **Step 1: Make the integration test expect six checks**
 
 In `tests/doctor.rs`, change `EXPECTED_IDS` to `["a", "b", "c", "d", "e", "f"]` with type `[&str; 6]`. Then add:
 
@@ -3986,7 +3986,7 @@ fn doctor_finishes_with_no_terminal_attached() {
 
 Run: `cargo test --test doctor` — expect: both tests fail, because only five checks are reported.
 
-- [ ] **Step 2: Implement check f in `src/doctor.rs`**
+- [x] **Step 2: Implement check f in `src/doctor.rs`**
 
 ```rust
 /// A crate with a lib, a bin, a build script and an integration test, and no dependencies.
@@ -4077,7 +4077,7 @@ In `run`, after the loop over `steps`, add `checks.push(check_format(fs, dir, &e
 
 Run: `cargo test --test doctor` — expect: 2 passed. Then run `cargo test --lib doctor`. Expect 7 passed: the unit tests pass `toolchain: Err(..)`, so f is `unavailable` there, and `caps_a_to_e` ignores it.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(doctor): check f builds a throwaway crate and reads its fingerprints"`
 
@@ -4100,7 +4100,7 @@ _Requirements: CORE-1.1, CORE-1.2, CORE-6.4_
 
 **Depends-on:** Task 11
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to the `tests` module of `src/doctor.rs`. Add `panic_in_compress: bool` to `Knobs` with default `false`, and make `FakeFs::compress` start with `assert!(!self.knobs.panic_in_compress, "injected panic");`. `CANCEL` is process-global, so these tests serialize on `SERIAL`. Then:
 
@@ -4211,7 +4211,7 @@ fn an_interrupted_doctor_exits_130_and_removes_its_temp_dir() {
 
 Run: `cargo test --lib doctor` and `cargo test --test doctor` — expect: compile errors, because `CANCEL`, `sweep_stale` and `DoctorError::Cancelled` are missing.
 
-- [ ] **Step 2: Implement in `src/doctor.rs`**
+- [x] **Step 2: Implement in `src/doctor.rs`**
 
 ```rust
 use std::os::unix::process::CommandExt;
@@ -4371,7 +4371,7 @@ pub fn run(fs: &dyn Fs, approve: &dyn Approve, env: &DoctorEnv) -> Result<Doctor
 
 Every return path, including `?` on `Cancelled`, drops `tmp` and so removes the temp dir.
 
-- [ ] **Step 3: Handle cancellation in `src/cli.rs`**
+- [x] **Step 3: Handle cancellation in `src/cli.rs`**
 
 In `doctor_cmd`, before `doctor::run`:
 
@@ -4386,7 +4386,7 @@ Then add the match arm `Err(doctor::DoctorError::Cancelled) => { eprintln!("carg
 
 Run: `cargo test --lib doctor` and `cargo test --test doctor` — expect: 10 and 4 passed. Then run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(doctor): remove the temp dir on signals and panics, sweep dead runs"`
 
@@ -4410,7 +4410,7 @@ _Requirements: CORE-1.8, CORE-1.9_
 
 **Depends-on:** Task 5, Task 10
 
-- [ ] **Step 1: Add the helpers to `tests/common/mod.rs`**
+- [x] **Step 1: Add the helpers to `tests/common/mod.rs`**
 
 Replace `Hive::config` and add two methods:
 
@@ -4441,7 +4441,7 @@ Replace `Hive::config` and add two methods:
 
 In `tests/status_checkouts.rs`, replace every `Hive::new()` with `Hive::ready()`.
 
-- [ ] **Step 2: Write the failing tests** — `tests/capability_gate.rs`:
+- [x] **Step 2: Write the failing tests** — `tests/capability_gate.rs`:
 
 ```rust
 mod common;
@@ -4509,7 +4509,7 @@ fn doctor_results_for_the_active_toolchain_let_status_run() {
 
 Run: `cargo test --test capability_gate` — expect: the first three tests fail, because `status` exits 0 with no refusal.
 
-- [ ] **Step 3: Add the gate to `status` in `src/cli.rs`**
+- [x] **Step 3: Add the gate to `status` in `src/cli.rs`**
 
 Right after the two `b.note(…)` lines, insert:
 
@@ -4531,7 +4531,7 @@ Right after the two `b.note(…)` lines, insert:
 
 Run: `cargo test --test capability_gate --test status_checkouts` — expect: 4 and 8 passed. Then run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(status): refuse until doctor results exist for the active toolchain"`
 
@@ -4561,7 +4561,7 @@ _Requirements: CORE-1.4, CORE-1.10_
   - `cargo_target::{realpath_lossy, caller_overrides}`
   - `cargo_target::Owner::{Owned{checkout}, Unresolved{reason}, OrphanCandidate{owned_under_caller_env: Option<String>}}`
   - `cargo_target::TargetDir{path, owner, profiles: Vec<ProfileReport>, size: Option<u64>, unreadable: Option<String>}`
-  - `discover::{SNAPSHOT_FILE, Snapshot{metadata, unsupported_profiles}, CachedMetadata{stamp, resolved}, workspace_dirs, find_targets, TargetScan{targets, metadata_calls, metadata_cache_hits, ignored_vars, cleared_profiles}, targets(&[Checkout], &Config, all_repos: bool, &mut Snapshot) -> TargetScan}`
+  - `discover::{SNAPSHOT_FILE, Snapshot{metadata, unsupported_profiles}, CachedMetadata{stamp, resolved}, workspace_dirs, find_targets, TargetScan{targets, metadata_calls, metadata_cache_hits, ignored_vars, walk_faults, cleared_profiles}, targets(&[Checkout], &Config, all_repos: bool, &mut Snapshot, cancel: impl Fn() -> bool + Sync) -> TargetScan}`
   - Receipt names:
     - counts `targets`, `owned`, `orphan_candidates`, `unresolved_owners`, `unreadable`, `unsupported_profiles`, `units`, `edges_resolved`, `edges_unresolved`, `edges_ambiguous`, `metadata_calls`, `metadata_cache_hits`, plus `units:<profile>` and `edges_{resolved,unresolved,ambiguous}:<profile>` for each profile dir
     - findings `target.owned`, `target.orphan_candidate`, `target.unresolved`, `target.unreadable`, `profile.unsupported`
@@ -4578,7 +4578,9 @@ The build-dir probe (2026-10-25) found the following with `build.build-dir` set:
 - The build dir has `CACHEDIR.TAG` and `debug/.fingerprint`, so it is a target here.
 - The artifact dir has a tag and uplifted artifacts but no fingerprints, so it is not a target under CORE-4.12. Its bytes go unreported in this feature; ROAD-3 (explain) is where to surface them.
 
-- [ ] **Step 1: Write the failing unit tests** at the bottom of the new `src/cargo_target.rs`:
+Realigned 2026-10-28: the close-fix rounds (`19c48ba`, `c4393ca`, `a80b443`) added the `walk_faults` list and the `cancel` callback to `targets` and `resolve_workspaces`, and `status` installs its signal handlers before calling `targets`. The signatures and calls in this task now show those parameters; the bodies below are the plan as executed, and `src/discover.rs` is the current code.
+
+- [x] **Step 1: Write the failing unit tests** at the bottom of the new `src/cargo_target.rs`:
 
 ```rust
 #[cfg(test)]
@@ -4907,7 +4909,7 @@ fn metadata_results_are_cached_until_a_stamped_file_changes() {
 
 Run: `cargo test --lib -- cargo_target state` and `cargo test --test status_targets`. Expect compile errors and failures: `cargo_target` does not exist, and status reports no targets.
 
-- [ ] **Step 2: Implement `src/cargo_target.rs`** (above its tests)
+- [x] **Step 2: Implement `src/cargo_target.rs`** (above its tests)
 
 ```rust
 //! Cargo target dirs: identification by tag and fingerprint layout, and
@@ -5085,7 +5087,7 @@ pub struct TargetDir {
 }
 ```
 
-- [ ] **Step 3: Add target discovery to `src/discover.rs`**
+- [x] **Step 3: Add target discovery to `src/discover.rs`**
 
 Change the imports to also bring in `crate::cargo_target::{self, Layout, Owner, Resolved, TargetDir}`, `crate::fingerprint::{self, Format}`, `serde::Deserialize`, `std::collections::BTreeMap` and `std::time::UNIX_EPOCH`. Then append:
 
@@ -5195,7 +5197,7 @@ struct Resolution {
 
 /// Shallowest dirs first; a dir inside an already resolved workspace root is not queried.
 /// Uncached calls run up to 4 at a time.
-fn resolve_workspaces(checkouts: &[PathBuf], snapshot: &mut Snapshot) -> Vec<Resolution> {
+fn resolve_workspaces(checkouts: &[PathBuf], snapshot: &mut Snapshot, faults: &mut Vec<WalkFault>, cancel: &(impl Fn() -> bool + Sync)) -> Vec<Resolution> {
     let mut by_depth: BTreeMap<usize, BTreeSet<PathBuf>> = BTreeMap::new();
     for checkout in checkouts {
         for (depth, dir) in workspace_dirs(checkout) {
@@ -5256,9 +5258,10 @@ pub struct TargetScan {
 
 /// Every Cargo target dir of the live `checkouts` (3 levels) and the cache roots (2 levels),
 /// plus every resolved build directory wherever it lies, with owner and fingerprint reports.
-pub fn targets(checkouts: &[Checkout], cfg: &Config, all_repos: bool, snapshot: &mut Snapshot) -> TargetScan {
+pub fn targets(checkouts: &[Checkout], cfg: &Config, all_repos: bool, snapshot: &mut Snapshot, cancel: impl Fn() -> bool + Sync) -> TargetScan {
     let live: Vec<PathBuf> = checkouts.iter().filter(|c| !c.missing).map(|c| c.path.clone()).collect();
-    let resolutions = resolve_workspaces(&live, snapshot);
+    let mut walk_faults = Vec::new();
+    let resolutions = resolve_workspaces(&live, snapshot, &mut walk_faults, &cancel);
     let resolved: Vec<&Resolved> = resolutions.iter().filter_map(|r| r.result.as_ref().ok()).collect();
     let failure = resolutions.iter().find_map(|r| r.result.as_ref().err().map(|e| format!("ownership unknown: cargo metadata failed in {}: {e}", r.dir.display())));
     let overrides = cargo_target::caller_overrides();
@@ -5334,7 +5337,7 @@ pub fn targets(checkouts: &[Checkout], cfg: &Config, all_repos: bool, snapshot: 
 }
 ```
 
-- [ ] **Step 4: Replace `status` in `src/cli.rs`**, and add `report_targets`
+- [x] **Step 4: Replace `status` in `src/cli.rs`**, and add `report_targets`
 
 Add `ReceiptBuilder` to the `crate::receipt` import. Then:
 
@@ -5405,7 +5408,8 @@ fn status(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
     }
     b.count("checkouts", total).count("protected", protected).count("secondary", secondary).count("missing", missing);
     let all_repos = selected.len() == reg.repos.len();
-    let scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot);
+    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot, cancelled);
     report_targets(&mut b, &mut human, &scan);
     if let Err(e) = state.locked(|tx| tx.write(SNAPSHOT_FILE, &snapshot)) {
         eprintln!("cargo-hive: {e}");
@@ -5490,7 +5494,7 @@ fn report_targets(b: &mut ReceiptBuilder, human: &mut String, scan: &crate::disc
 
 Run: `cargo test --lib -- cargo_target state` and `cargo test --test status_targets` — expect: all pass (2 + 6 unit tests, 9 integration tests). Then run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(status): Cargo target dirs with owners, orphan candidates and fingerprint reports"`
 
@@ -5517,7 +5521,7 @@ _Requirements: CORE-4.2, CORE-4.3, CORE-4.5, CORE-4.7, CORE-4.8, CORE-4.10, CORE
 
 **Depends-on:** Task 14
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 At the bottom of the new `src/size.rs`:
 
@@ -5592,7 +5596,7 @@ In `an_unreadable_target_is_reported_and_the_others_are_still_listed`, add befor
 
 Run: `cargo test --lib size` and `cargo test --test status_targets` — expect: compile errors (`size` missing) and failures (`--no-sizes` unknown).
 
-- [ ] **Step 2: Implement `src/size.rs`** (above its tests)
+- [x] **Step 2: Implement `src/size.rs`** (above its tests)
 
 ```rust
 //! Allocated bytes of a tree: Σ st_blocks × 512 over regular files, each (dev, inode)
@@ -5646,7 +5650,7 @@ pub fn allocated_bytes(root: &Path, max_depth: usize) -> Result<u64, SizeError> 
 }
 ```
 
-- [ ] **Step 3: Wire sizes into `status`**
+- [x] **Step 3: Wire sizes into `status`**
 
 In `src/cli.rs`, add to the `Status` variant:
 
@@ -5688,7 +5692,7 @@ Change the dispatch to `Command::Status { repos, no_sizes, out } => status(&stat
 
 Run: `cargo test --lib size` and `cargo test --test status_targets` — expect: 2 and 10 passed. Then run `cargo test` and `cargo clippy --all-targets -- -D warnings`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(status): inode-deduplicated allocated bytes per target, and --no-sizes"`
 
@@ -5710,7 +5714,7 @@ _Requirements: CORE-4.6, CORE-4.11, CORE-5.5_
 
 **Depends-on:** Task 12, Task 15
 
-- [ ] **Step 1: Write the tests** — `tests/guards.rs`:
+- [x] **Step 1: Write the tests** — `tests/guards.rs`:
 
 ```rust
 // The snapshot helpers serve only the macOS guard below.
@@ -5903,7 +5907,7 @@ fn status_on_klynt_finishes_within_two_seconds_cold_and_warm() {
 
 Run: `cargo test --test guards`. Expect 4 passed and 1 ignored. These tests guard behavior earlier tasks built, so they should pass on first run. A failure is a real defect in an earlier task: stop and report it, and do not weaken the test. Then run `cargo test --test guards -- --ignored` on the proof machine and record the printed cold and warm timings in the task report.
 
-- [ ] **Step 2: Write `README.md`**
+- [x] **Step 2: Write `README.md`**
 
 ````markdown
 # cargo-hive
@@ -5963,12 +5967,64 @@ cargo uninstall cargo-hive && rm -rf ~/.hive
 ```
 ````
 
-- [ ] **Step 3: Check that the non-macOS build compiles**
+- [x] **Step 3: Check that the non-macOS build compiles**
 
 Run `rustup target list --installed`. If `x86_64-unknown-linux-gnu` is listed, run `cargo check --target x86_64-unknown-linux-gnu`; expect success. If it is not listed, do not install it: that would write under `~/.rustup`. Record "non-macOS compile check not run: target not installed" in the task report.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "test: guards for untouched checkouts and cargo, crash-safe state, and the README"`
 
 _Requirements: CORE-6.1, CORE-6.3, CORE-6.5, CORE-7.1, CORE-7.2_
+
+### Task 17: A toolchain selected by the caller's directory stays out of hive's children
+
+Added after execution by `root-cause` (2026-10-28). The rustup proxy hands every cargo subcommand `RUSTUP_TOOLCHAIN`, which beats directory resolution, so doctor and the `status` gate resolved the caller's directory toolchain instead of the state root's. Landed as `51e1166`.
+
+**Files:**
+- Modify: `src/doctor.rs` (`drop_directory_toolchain`, used by `rustup_which`)
+- Modify: `src/cargo_target.rs` (`resolve`)
+- Test: `tests/capability_gate.rs`
+- Test: `tests/status_targets.rs`
+
+**Reuse:** existing — `tests/common::{Hive, Scratch, init_repo}` and `Hive::{ready, command, build_crate}`
+
+**Interfaces:**
+- Consumes: `doctor::resolve_toolchain` (Task 9), `cargo_target::resolve` (Task 14)
+- Produces: `doctor::drop_directory_toolchain(&mut Command)`, crate-visible
+
+**Depends-on:** Task 14
+
+- [x] **Step 1: Write the failing tests** — in `tests/capability_gate.rs`, `status` launched with `RUSTUP_TOOLCHAIN` naming a toolchain that is not installed passes the gate when `RUSTUP_TOOLCHAIN_SOURCE` is `toolchain-file` or `path-override`, or absent, and is still refused when the source is `cli` or `env`. In `tests/status_targets.rs`, the same `toolchain-file` selection leaves a built checkout's target `target.owned`. Run `cargo test --test capability_gate --test status_targets`; the three directory cases fail with "the active Rust toolchain could not be determined" and `target.unresolved`.
+
+- [x] **Step 2: Implement** — `drop_directory_toolchain` removes `RUSTUP_TOOLCHAIN` and `RUSTUP_TOOLCHAIN_SOURCE` from a child unless the source is `cli`, `env` or `default`; `rustup_which` and `cargo_target::resolve` call it. Run the same tests; expect all to pass, and the guard to fail if the function always removes the variables.
+
+- [x] **Step 3: Verify and commit** — run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, and `cargo check --target x86_64-unknown-linux-gnu`; all exit 0 (117 passed, 1 ignored). Commit `fix: keep a directory-selected toolchain out of hive's rustup and cargo children`.
+
+_Requirements: CORE-1.11, CORE-1.12_
+
+### Task 18: A cancelled command stops waiting for hive's state lock
+
+Added after execution by `root-cause` (2026-10-28), from the third whole-branch re-review. Once `status` installs its signal handlers, SIGINT only sets the cancel flag, and `State::locked` waited in a blocking `flock(LOCK_EX)` that never read it. Landed as `d6f7e67`, which also routes the fingerprint read-cap test through `read_profile`.
+
+**Files:**
+- Modify: `src/state.rs` (`StateError::Cancelled`, `locked_or_cancelled`; `locked` delegates to it)
+- Modify: `src/cli.rs` (`emit` and the `status` snapshot write wait with the cancel flag)
+- Test: `tests/status_targets.rs`
+- Test: `src/fingerprint.rs` (`#[cfg(test)]`)
+
+**Reuse:** existing — `doctor::CANCEL`, the `__hold-lock flock` subcommand, `tests/status_targets.rs::wait_within`
+
+**Interfaces:**
+- Consumes: `State::locked` (Task 2), `emit` (Task 3), `status` (Task 14)
+- Produces: `State::locked_or_cancelled(impl FnMut() -> bool, body) -> Result<T, StateError>` and `StateError::Cancelled`
+
+**Depends-on:** Task 14
+
+- [x] **Step 1: Write the failing tests** — in `tests/status_targets.rs`, `status` runs while another process holds `$HIVE_HOME/.lock` through `cargo-hive __hold-lock flock`, a `Drop` guard kills the holder, and SIGINT is sent once `lsof` shows `status` holding the lock file open; expect exit 130 within 10 s, one JSON receipt saying the status was cancelled, and no `snapshot.json`. In `src/fingerprint.rs`, `read_profile` reads a `lib-fifo.json` FIFO fed 12 MiB and must report the 4 MiB error. Run them; the lock test fails with "status did not finish within 10s".
+
+- [x] **Step 2: Implement** — the state lock is tried with `LOCK_EX | LOCK_NB` and retried every 10 ms; `locked_or_cancelled` returns `StateError::Cancelled` when `cancel` fires while the lock is held elsewhere, and takes a free lock even after cancellation. `status` passes its cancel flag to the snapshot write; `emit` passes it to the receipt log and, when cancelled, prints the receipt under `--json`, says on stderr that it was not logged, and exits 130. Run the tests; expect them to pass, the lock test to fail with the fix reverted, and the FIFO test to fail when `read_unit` reads without the cap.
+
+- [x] **Step 3: Verify and commit** — run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, and `cargo check --target x86_64-unknown-linux-gnu`; all exit 0 (119 passed, 1 ignored). Commit `fix: stop waiting for hive's state lock once a command is cancelled`.
+
+_Requirements: CORE-6.6, CORE-6.7_
