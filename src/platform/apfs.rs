@@ -1,6 +1,9 @@
 //! macOS `Fs`: APFS clones and sharing attributes through `libc`.
 
-use super::{CompressOutcome, Fs, LockHolder, LockKind, LockState, Sharing, TempDir};
+use super::{
+    CompressOutcome, Fs, HeldLock, LockHolder, LockKind, LockState, Sharing, TempDir, TryLock,
+    CHILD_DEADLINE,
+};
 use applesauce::compressor::Kind;
 use applesauce::progress::{Progress, SkipReason, Task};
 use applesauce::FileCompressor;
@@ -10,12 +13,12 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::macos::fs::MetadataExt as _;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// `<sys/attr.h>` extended flags that `libc` does not define.
 const EF_MAY_SHARE_BLOCKS: u64 = 0x1;
@@ -167,16 +170,12 @@ impl Fs for Apfs {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
-        let mut line = String::new();
-        let read = child
-            .stdout
-            .take()
-            .map(|o| BufReader::new(o).read_line(&mut line));
-        if line.trim() != "held" {
+        let line = first_line_within(&mut child, CHILD_DEADLINE);
+        if !matches!(&line, Ok(l) if l.trim() == "held") {
             let _ = child.kill();
             let _ = child.wait();
             return Err(io::Error::other(format!(
-                "the lock holder did not take the lock ({read:?})"
+                "the lock holder did not take the lock ({line:?})"
             )));
         }
         Ok(LockHolder::new(move || {
@@ -196,6 +195,68 @@ impl Fs for Apfs {
             Ok(LockState::Held)
         } else {
             Err(err)
+        }
+    }
+
+    fn try_lock_exclusive(&self, path: &Path) -> TryLock {
+        let p = match c_path(path) {
+            Ok(p) => p,
+            Err(e) => return TryLock::Unopenable(e),
+        };
+        // SAFETY: `p` is a valid NUL-terminated path for the duration of the call.
+        let fd = unsafe {
+            libc::open(
+                p.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let err = io::Error::last_os_error();
+            return if err.kind() == io::ErrorKind::NotFound {
+                TryLock::Gone
+            } else {
+                TryLock::Unopenable(err)
+            };
+        }
+        // SAFETY: `fd` was just opened by this process and nothing else owns it.
+        let file = unsafe { fs::File::from_raw_fd(fd) };
+        match file.metadata() {
+            Ok(m) if m.file_type().is_file() => {}
+            Ok(_) => {
+                return TryLock::Unopenable(io::Error::other("the lock path is not a regular file"))
+            }
+            Err(e) => return TryLock::Unopenable(e),
+        }
+        // SAFETY: `file` owns a valid descriptor for the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let err = io::Error::last_os_error();
+            return if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                TryLock::Held
+            } else {
+                TryLock::Unlockable(err)
+            };
+        }
+        TryLock::Acquired(HeldLock::new(move || drop(file)))
+    }
+
+    fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState> {
+        let mut child = Command::new(&self.holder)
+            .arg("__try-lock")
+            .arg(kind.as_arg())
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let line = first_line_within(&mut child, CHILD_DEADLINE);
+        let _ = child.kill();
+        let _ = child.wait();
+        match line?.trim() {
+            "acquired" => Ok(LockState::Free),
+            "refused" => Ok(LockState::Held),
+            other => Err(io::Error::other(format!(
+                "the lock child answered {other:?}"
+            ))),
         }
     }
 }
@@ -256,6 +317,60 @@ pub fn private_byte_count(private: i64) -> io::Result<u64> {
         .map_err(|_| io::Error::other(format!("private byte count is negative: {private}")))
 }
 
+/// The first stdout line of `child`, or an error once `limit` passes. The caller kills the child.
+fn first_line_within(child: &mut Child, limit: Duration) -> io::Result<String> {
+    let out = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("the lock child has no stdout"))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = tx.send(BufReader::new(out).read_line(&mut line).map(|_| line));
+    });
+    match rx.recv_timeout(limit) {
+        Ok(read) => read,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("the lock child did not answer within {limit:?}"),
+        )),
+    }
+}
+
+/// Body of `__try-lock`: one non-blocking attempt, released when this returns.
+pub fn try_lock_once(kind: LockKind, path: &Path) -> io::Result<LockState> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    let fd = file.as_raw_fd();
+    let rc = match kind {
+        // SAFETY: `fd` is valid while `file` lives.
+        LockKind::Flock => unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) },
+        LockKind::Fcntl | LockKind::FcntlRead => {
+            // SAFETY: an all-zero `flock` struct is valid; the fields that matter are set next.
+            let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+            lock.l_type = (if kind == LockKind::FcntlRead {
+                libc::F_RDLCK
+            } else {
+                libc::F_WRLCK
+            }) as libc::c_short;
+            lock.l_whence = libc::SEEK_SET as libc::c_short;
+            // SAFETY: `lock` outlives the call and `fd` is valid.
+            unsafe { libc::fcntl(fd, libc::F_SETLK, &lock) }
+        }
+    };
+    if rc == 0 {
+        return Ok(LockState::Free);
+    }
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::EWOULDBLOCK) | Some(libc::EACCES) => Ok(LockState::Held),
+        _ => Err(err),
+    }
+}
+
 /// Body of `__hold-lock`: take the lock (blocking), report it, then wait to be killed.
 /// The file must already exist; this never creates one.
 pub fn hold_lock_forever(kind: LockKind, path: &Path) -> io::Result<std::convert::Infallible> {
@@ -268,10 +383,14 @@ pub fn hold_lock_forever(kind: LockKind, path: &Path) -> io::Result<std::convert
     let rc = match kind {
         // SAFETY: `fd` is valid while `file` lives, which is forever below.
         LockKind::Flock => unsafe { libc::flock(fd, libc::LOCK_EX) },
-        LockKind::Fcntl => {
+        LockKind::Fcntl | LockKind::FcntlRead => {
             // SAFETY: an all-zero `flock` struct is valid; the fields that matter are set next.
             let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-            lock.l_type = libc::F_WRLCK as libc::c_short;
+            lock.l_type = (if kind == LockKind::FcntlRead {
+                libc::F_RDLCK
+            } else {
+                libc::F_WRLCK
+            }) as libc::c_short;
             lock.l_whence = libc::SEEK_SET as libc::c_short;
             // SAFETY: `lock` outlives the call and `fd` is valid.
             unsafe { libc::fcntl(fd, libc::F_SETLKW, &lock) }

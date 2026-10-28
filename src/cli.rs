@@ -47,6 +47,12 @@ pub enum Command {
         kind: String,
         path: std::path::PathBuf,
     },
+    /// Try a lock once without waiting and print `acquired` or `refused` (doctor's lock check)
+    #[command(name = "__try-lock", hide = true)]
+    TryLock {
+        kind: String,
+        path: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -91,6 +97,9 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
     if let Command::HoldLock { kind, path } = &cli.command {
         return hold_lock(kind, path);
     }
+    if let Command::TryLock { kind, path } = &cli.command {
+        return try_lock(kind, path);
+    }
     let state = match State::open() {
         Ok(s) => s,
         Err(e) => {
@@ -112,12 +121,13 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
         } => status(&state, &repos, no_sizes, out),
         Command::Doctor { out } => doctor_cmd(&state, out),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
+        Command::TryLock { .. } => unreachable!("handled before the state root is opened"),
     }
 }
 
 fn hold_lock(kind: &str, path: &std::path::Path) -> i32 {
     let Some(kind) = platform::LockKind::parse(kind) else {
-        eprintln!("cargo-hive: unknown lock kind {kind:?} (expected flock or fcntl)");
+        eprintln!("cargo-hive: unknown lock kind {kind:?} (expected flock, fcntl or fcntl-read)");
         return 2;
     };
     match platform::hold_lock_forever(kind, path) {
@@ -125,6 +135,30 @@ fn hold_lock(kind: &str, path: &std::path::Path) -> i32 {
         Err(e) => {
             eprintln!(
                 "cargo-hive: could not hold the lock on {}: {e}",
+                path.display()
+            );
+            1
+        }
+    }
+}
+
+fn try_lock(kind: &str, path: &std::path::Path) -> i32 {
+    let Some(kind) = platform::LockKind::parse(kind) else {
+        eprintln!("cargo-hive: unknown lock kind {kind:?} (expected flock, fcntl or fcntl-read)");
+        return 2;
+    };
+    match platform::try_lock_once(kind, path) {
+        Ok(platform::LockState::Free) => {
+            println!("acquired");
+            0
+        }
+        Ok(platform::LockState::Held) => {
+            println!("refused");
+            0
+        }
+        Err(e) => {
+            eprintln!(
+                "cargo-hive: could not try the lock on {}: {e}",
                 path.display()
             );
             1

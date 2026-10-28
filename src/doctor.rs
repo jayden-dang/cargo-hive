@@ -738,7 +738,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{Availability, Sharing, TempDir};
+    use crate::platform::{Availability, HeldLock, Sharing, TempDir, TryLock};
     use std::collections::HashMap;
     use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -877,6 +877,16 @@ mod tests {
                     LockState::Free
                 },
             )
+        }
+        fn try_lock_exclusive(&self, _path: &Path) -> TryLock {
+            if self.knobs.probe_sees_locks && self.held.load(Ordering::SeqCst) {
+                TryLock::Held
+            } else {
+                TryLock::Acquired(HeldLock::new(|| {}))
+            }
+        }
+        fn try_lock_elsewhere(&self, _kind: LockKind, _path: &Path) -> io::Result<LockState> {
+            Ok(LockState::Held)
         }
     }
 

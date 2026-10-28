@@ -95,6 +95,7 @@ impl std::fmt::Display for CompressOutcome {
 pub enum LockKind {
     Flock,
     Fcntl,
+    FcntlRead,
 }
 
 impl LockKind {
@@ -102,6 +103,7 @@ impl LockKind {
         match self {
             LockKind::Flock => "flock",
             LockKind::Fcntl => "fcntl",
+            LockKind::FcntlRead => "fcntl-read",
         }
     }
 
@@ -109,10 +111,14 @@ impl LockKind {
         match arg {
             "flock" => Some(LockKind::Flock),
             "fcntl" => Some(LockKind::Fcntl),
+            "fcntl-read" => Some(LockKind::FcntlRead),
             _ => None,
         }
     }
 }
+
+/// How long hive waits for a lock child (`__hold-lock`, `__try-lock`) to answer.
+pub const CHILD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockState {
@@ -147,11 +153,69 @@ impl Drop for LockHolder {
     }
 }
 
+/// A lock this process holds. Dropping it releases the lock.
+pub struct HeldLock {
+    release: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl HeldLock {
+    pub fn new(release: impl FnOnce() + Send + 'static) -> HeldLock {
+        HeldLock {
+            release: Some(Box::new(release)),
+        }
+    }
+}
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        if let Some(f) = self.release.take() {
+            f();
+        }
+    }
+}
+
+impl std::fmt::Debug for HeldLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HeldLock")
+    }
+}
+
+/// The outcome of one non-blocking exclusive try on a lock file.
+#[derive(Debug)]
+pub enum TryLock {
+    /// The lock is ours until the guard is dropped.
+    Acquired(HeldLock),
+    /// Another process holds a lock on the file.
+    Held,
+    /// The file does not exist.
+    Gone,
+    /// The file could not be opened, or is not a regular file.
+    Unopenable(io::Error),
+    /// The file opened, but `flock` failed for a reason other than another holder.
+    Unlockable(io::Error),
+}
+
 /// Body of the hidden `__hold-lock` command: take the lock, print `held`, wait to be killed.
 pub fn hold_lock_forever(kind: LockKind, path: &Path) -> io::Result<std::convert::Infallible> {
     #[cfg(target_os = "macos")]
     {
         apfs::hold_lock_forever(kind, path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (kind, path);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            MACOS_ONLY_MESSAGE,
+        ))
+    }
+}
+
+/// Body of the hidden `__try-lock` command: try `kind` on `path` once without waiting.
+pub fn try_lock_once(kind: LockKind, path: &Path) -> io::Result<LockState> {
+    #[cfg(target_os = "macos")]
+    {
+        apfs::try_lock_once(kind, path)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -182,6 +246,11 @@ pub trait Fs {
     fn hold_lock(&self, kind: LockKind, path: &Path) -> io::Result<LockHolder>;
     /// `flock(LOCK_SH | LOCK_NB)` on a read-only descriptor; never waits.
     fn probe_lock(&self, path: &Path) -> io::Result<LockState>;
+    /// `flock(LOCK_EX | LOCK_NB)` on `path`, opened read-only with `O_NOFOLLOW | O_NONBLOCK`
+    /// and never created; the lock lasts until the returned guard is dropped.
+    fn try_lock_exclusive(&self, path: &Path) -> TryLock;
+    /// Has another process try `kind` on `path` once, without waiting.
+    fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,5 +300,19 @@ mod tests {
         assert_eq!(major_version("27.0.1"), Some(27));
         assert_eq!(major_version("26.6.2"), Some(26));
         assert_eq!(major_version("x"), None);
+    }
+
+    #[test]
+    fn lock_children_get_five_seconds_to_answer() {
+        assert_eq!(CHILD_DEADLINE.as_secs(), 5);
+    }
+
+    #[test]
+    fn lock_kinds_round_trip_their_argument() {
+        for kind in [LockKind::Flock, LockKind::Fcntl, LockKind::FcntlRead] {
+            assert_eq!(LockKind::parse(kind.as_arg()), Some(kind));
+        }
+        assert_eq!(LockKind::FcntlRead.as_arg(), "fcntl-read");
+        assert_eq!(LockKind::parse("nope"), None);
     }
 }
