@@ -4580,7 +4580,7 @@ The build-dir probe (2026-10-25) found the following with `build.build-dir` set:
 - The build dir has `CACHEDIR.TAG` and `debug/.fingerprint`, so it is a target here.
 - The artifact dir has a tag and uplifted artifacts but no fingerprints, so it is not a target under CORE-4.12. Its bytes go unreported in this feature; ROAD-3 (explain) is where to surface them.
 
-Realigned 2026-10-28: the close-fix rounds (`19c48ba`, `c4393ca`, `a80b443`) added the `walk_faults` list and the `cancel` callback to `targets` and `resolve_workspaces`, and `status` installs its signal handlers before calling `targets`. The signatures and calls in this task now show those parameters; the bodies below are the plan as executed, and `src/discover.rs` is the current code.
+Realigned 2026-10-28: the close-fix rounds (`6edf221`, `55c9827`, `5505db9`) added the `walk_faults` list and the `cancel` callback to `targets` and `resolve_workspaces`, and `status` installs its signal handlers before calling `targets`. The signatures and calls in this task now show those parameters; the bodies below are the plan as executed, and `src/discover.rs` is the current code.
 
 - [x] **Step 1: Write the failing unit tests** at the bottom of the new `src/cargo_target.rs`:
 
@@ -5981,7 +5981,7 @@ _Requirements: CORE-6.1, CORE-6.3, CORE-6.5, CORE-7.1, CORE-7.2_
 
 ### Task 17: A toolchain selected by the caller's directory stays out of hive's children
 
-Added after execution by `root-cause` (2026-10-28). The rustup proxy hands every cargo subcommand `RUSTUP_TOOLCHAIN`, which beats directory resolution, so doctor and the `status` gate resolved the caller's directory toolchain instead of the state root's. Landed as `51e1166`.
+Added after execution by `root-cause` (2026-10-28). The rustup proxy hands every cargo subcommand `RUSTUP_TOOLCHAIN`, which beats directory resolution, so doctor and the `status` gate resolved the caller's directory toolchain instead of the state root's. Landed as `451222a`.
 
 **Files:**
 - Modify: `src/doctor.rs` (`drop_directory_toolchain`, used by `rustup_which`)
@@ -6007,7 +6007,7 @@ _Requirements: CORE-1.11, CORE-1.12_
 
 ### Task 18: A cancelled command stops waiting for hive's state lock
 
-Added after execution by `root-cause` (2026-10-28), from the third whole-branch re-review. Once `status` installs its signal handlers, SIGINT only sets the cancel flag, and `State::locked` waited in a blocking `flock(LOCK_EX)` that never read it. Landed as `d6f7e67`, which also routes the fingerprint read-cap test through `read_profile`.
+Added after execution by `root-cause` (2026-10-28), from the third whole-branch re-review. Once `status` installs its signal handlers, SIGINT only sets the cancel flag, and `State::locked` waited in a blocking `flock(LOCK_EX)` that never read it. Landed as `d432461`, which also routes the fingerprint read-cap test through `read_profile`.
 
 **Files:**
 - Modify: `src/state.rs` (`StateError::Cancelled`, `locked_or_cancelled`; `locked` delegates to it)

@@ -47,7 +47,7 @@ Merge gate (testing standard). Every task must leave all four commands green:
 - `cargo test`
 - `cargo check --target x86_64-unknown-linux-gnu`
 
-Known pre-existing flake, outside this feature: `tests/status_targets.rs::an_interrupted_status_waiting_on_the_state_lock_exits_130_without_writing_the_snapshot` fails intermittently in full-suite runs. It failed 3 of 4 times on an untouched d109157 and passes alone, per the plan review. Do not fix it inside an AUTOGC task. If it fails, rerun the suite and report it; it is tracked as a separate change.
+Known pre-existing flake, outside this feature: `tests/status_targets.rs::an_interrupted_status_waiting_on_the_state_lock_exits_130_without_writing_the_snapshot` fails intermittently in full-suite runs. It failed 3 of 4 times on an untouched d6e0aff and passes alone, per the plan review. Do not fix it inside an AUTOGC task. If it fails, rerun the suite and report it; it is tracked as a separate change.
 
 Commits: each commit step is `cargo fmt`, then `git add -A && git commit -m "<subject>"`. Work happens on the feature branch the execute skill creates.
 
@@ -2580,7 +2580,7 @@ _Requirements: AUTOGC-2.2, AUTOGC-2.3, AUTOGC-2.4, AUTOGC-2.9, AUTOGC-2.10, AUTO
 - Modify: `tests/common/mod.rs`, adding `Hive::build_with_sessions`, `crate_dirs`, `sessions_in`, `plant_session`, `Hive::hold_lock_child` and `wait_within`.
 - Test: `tests/gc.rs`
 
-**Reuse:** 2 — mirrors `cli::status` (`src/cli.rs:342-518` at d109157; the design cites 329-504), `emit`, `discover::merge_snapshot` (`discover.rs:653`) and `doctor::{require, install_signal_handlers, CANCEL}`; 5 — `clap` derive
+**Reuse:** 2 — mirrors `cli::status` (`src/cli.rs:342-518` at d6e0aff; the design cites 329-504), `emit`, `discover::merge_snapshot` (`discover.rs:653`) and `doctor::{require, install_signal_handlers, CANCEL}`; 5 — `clap` derive
 
 **Interfaces:**
 - Consumes:

@@ -7,7 +7,7 @@ Requirements: ./requirements.md
 
 ## Context
 
-CORE (on `main`, a0d60ed after its realign) already does three things:
+CORE (on `main`, 84c74e4 after its realign) already does three things:
 - It finds every Cargo target dir of the registered repos. For each one it reports an owner (`Owned` / `OrphanCandidate` / `Unresolved`), whether the dir is readable, and every profile dir's fingerprint format (`src/discover.rs:478`, `src/cargo_target.rs:355`).
 - It gates capabilities on doctor results for the active toolchain (`src/doctor.rs:254`). `Capability::Deletion` exists, disabled by check (d) or check (f), but no command requires it yet.
 - Its platform layer can clone, read sharing attributes and hold a lock in a child process (`__hold-lock`, `src/platform/apfs.rs:161, 261`). It cannot hold a lock in hive's own process, cannot take an fcntl read lock, and cannot read a link count.
