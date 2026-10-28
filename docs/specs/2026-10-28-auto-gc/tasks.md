@@ -78,6 +78,7 @@ House rules for this plan:
 | `docs/specs/2026-10-25-foundation/{design,requirements}.md` | CORE realign (Decision 16), through `realign-spec` |
 | `docs/agents/verify.md` | `gc` drive; check (d) named as an exclusive lock proof |
 | `docs/standards/errors-logging.md` | cancel exit code 130 |
+| `docs/specs/catalog/hive.md` | catalog row for this feature |
 
 Retrieval:
 - `load-subgraph` `blast_radius` on these paths: every `src/` and `tests/` path is OWNED by CORE (`docs/specs/2026-10-25-foundation/tasks.md`), the only other registered feature.
