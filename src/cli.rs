@@ -41,7 +41,7 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
-    /// Delete superseded incremental sessions and leftover rustc temp dirs, under their owners' locks
+    /// Delete superseded incremental sessions and leftover rustc temp dirs. A session with a lock file is deleted under that lock
     Gc {
         /// Registered repos to clean; none means every target hive knows
         repos: Vec<std::path::PathBuf>,
@@ -663,11 +663,11 @@ fn put_counts(b: &mut ReceiptBuilder, suffix: &str, c: &crate::gc::Counts) {
             &format!("skipped_lock_unopenable{suffix}"),
             c.skipped_lock_unopenable,
         );
-    if let Some(n) = c.freed_bytes {
-        b.count(&format!("freed_bytes{suffix}"), n);
-    }
-    if let Some(n) = c.deleted_bytes_still_shared {
-        b.count(&format!("deleted_bytes_still_shared{suffix}"), n);
+    if let Some(bytes) = c.bytes {
+        b.count(&format!("freed_bytes{suffix}"), bytes.freed).count(
+            &format!("deleted_bytes_still_shared{suffix}"),
+            bytes.still_shared,
+        );
     }
 }
 
@@ -832,8 +832,8 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             path.display(),
             c.sessions_deleted,
             c.temp_entries_deleted,
-            c.freed_bytes
-                .map(|n| format!(", {n} bytes freed"))
+            c.bytes
+                .map(|bytes| format!(", {} bytes freed", bytes.freed))
                 .unwrap_or_default()
         ));
     }

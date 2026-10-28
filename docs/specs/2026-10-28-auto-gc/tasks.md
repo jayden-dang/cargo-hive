@@ -15,7 +15,7 @@ Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
 
-**Goal:** Ship `cargo hive gc [<repo>…] [--dry-run]`, which deletes superseded rustc incremental sessions and leftover rustc temp dirs in Cargo target dirs. Every deletion happens under its owner's lock, re-checked under that lock. The receipt counts freed bytes per inode, and doctor check (d) proves the lock primitive on each machine.
+**Goal:** Ship `cargo hive gc [<repo>…] [--dry-run]`, which deletes superseded rustc incremental sessions and leftover rustc temp dirs in Cargo target dirs. A session with a lock file is deleted under that lock, re-checked under it; a session with no lock file is deleted without one. Temp entries are deleted under `.cargo-build-lock`. The receipt counts freed bytes per inode, reported as totals, and doctor check (d) proves the lock primitive on each machine.
 
 **Architecture:**
 - **Platform** gains one lock primitive: `flock(LOCK_EX|LOCK_NB)` on an fd opened `O_NOFOLLOW|O_NONBLOCK`, held as a guard. It also gains a cross-process try (`__try-lock`) and no-follow stat, list, remove and `statfs`.
@@ -1290,7 +1290,8 @@ use crate::platform::EntryKind;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// A lock-free `-working` session or an orphan lock file must be at least this old by its name.
+/// A `-working` session that still has its lock file, or an orphan lock file, must be at
+/// least this old by its name. A session directory with no lock file has no age gate.
 pub const MIN_AGE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]

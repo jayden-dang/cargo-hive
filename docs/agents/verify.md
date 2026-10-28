@@ -115,10 +115,10 @@ Leave `.skills/verify/`.
 
 ### gc
 
-- **Sub-features:** delete superseded incremental sessions and rustc temp dirs under their locks; `--dry-run` reports the same counts without deleting; cancel (SIGINT) exits 130 with a receipt.
+- **Sub-features:** delete superseded incremental sessions and rustc temp dirs; a session with a lock file is deleted under that lock, and a session with none is deleted without one; `--dry-run` reports the same counts without deleting; cancel (SIGINT or SIGTERM) exits 130 with a receipt.
 - **How to get to it (user POV):** `cargo hive gc <repo>` after a build has left old sessions; optionally `--dry-run`.
 - **Driving it with the shell:** `"$HIVE" gc "$SCRATCH/app" --json > gc.json`; assert exit 0 and counts such as `sessions_deleted` / `freed_bytes`. A dry run (`--dry-run`) leaves the target tree unchanged. Cancel returns exit 130 and still appends a receipt whose `command` is `gc`.
-- **Gotchas:** gc refuses until doctor results exist for the active lock check; held session or build locks are skipped (`skipped_held`).
+- **Gotchas:** gc refuses until doctor results for the active toolchain allow both deletion and fingerprint reading, which includes the current lock check; held session or build locks are skipped (`skipped_held`).
 - **Persist check:** presentational for deletions; the receipt line is the persisted record (see Receipt log). A dry run must leave `$SCRATCH/app/target` byte-identical to before.
 
 ### Receipt log

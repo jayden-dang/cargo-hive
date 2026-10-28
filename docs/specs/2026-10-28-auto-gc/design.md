@@ -213,7 +213,7 @@ Respects: ARCH-2, ARCH-3, ARCH-4, ARCH-9, ARCH-11, ARCH-18, ARCH-19
 Interface:
 - `run(fs: &dyn Fs, targets: &[TargetDir], scope: Scope::{All, Checkouts(Vec<PathBuf>)}, opts: RunOpts{dry_run, now, account_bytes}, cancel: &dyn Fn() -> bool) -> GcReport`
 - `GcReport{per_target: Vec<(PathBuf, Counts)>, totals: Counts, skipped: Vec<Skip{path, reason}>, unmeasured: Vec<(PathBuf, String)>, unmeasured_more: u64, cancelled: bool}`
-- `Counts{sessions_deleted, session_lock_files_deleted, temp_entries_deleted, skipped_held, skipped_lock_unopenable, freed_bytes, deleted_bytes_still_shared}`
+- `Counts{sessions_deleted, session_lock_files_deleted, temp_entries_deleted, skipped_held, skipped_lock_unopenable, bytes: Option<Bytes>}`. When `bytes` is present it supplies both receipt counts `freed_bytes` and `deleted_bytes_still_shared`; when absent, both are omitted.
 - `is_temp_entry(name, EntryKind) -> bool`
 - `MIN_AGE` (10 s)
 

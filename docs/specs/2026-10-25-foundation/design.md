@@ -64,7 +64,7 @@ Fresh retrieval (`load-subgraph`, seeded with CODE `CORE` and the requirement te
 10. **Owner-authentication availability only.** Doctor calls `LAContext::new()` then `canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthentication)`, and never `evaluatePolicy` (CORE-6.4).
 11. **Lock check (d) proves the exclusive lock both ways (F16; amended by AUTOGC-1.1/1.2).**
    - A hidden subcommand `cargo-hive __hold-lock <flock|fcntl|fcntl-read> <path>` holds the lock until it is killed.
-   - Doctor spawns it for each of flock, fcntl-read and fcntl-write, and probes the way production will: `flock(LOCK_EX | LOCK_NB)` on a read-only fd.
+   - Doctor spawns it for each of flock, fcntl and fcntl-read, and probes the way production will: `flock(LOCK_EX | LOCK_NB)` on a read-only fd. The `fcntl` argument is the write lock; its measured key is `fcntl_write`.
    - It also measures the reverse: while hive holds that exclusive flock, another process's non-blocking fcntl read and write tries on the same file are refused.
    - The check passes only if every forward refusal and success, and both reverse refusals, are observed without waiting.
 12. **Receipt schema v1.** Fields: `schema`, `hive_version`, `macos_version`, `toolchain` (the `rustc -vV` release line, or unmeasured), `command`, `ts` (when the command ran), `scope` (repos and checkouts, from arguments), `counts` (named integers only), `checks` (doctor), `findings` (unsupported profile dirs, unresolved owners, missing worktrees), `unmeasured` (list of `{field, reason}`), `notes`. There is no field for durations or time saved (CORE-5.4).

@@ -6,18 +6,68 @@ use crate::platform::EntryKind;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// A lock-free `-working` session or an orphan lock file must be at least this old by its name.
+/// A `-working` session that still has its lock file, or an orphan lock file, must be at
+/// least this old by its name. A session directory with no lock file has no age gate.
 pub const MIN_AGE: Duration = Duration::from_secs(10);
+
+/// A session directory and the lock file of that same session key.
+///
+/// Built only here. `lock` is `<key>.lock` and `dir` is `<key>-<suffix>`, so a directory
+/// and a lock from different sessions cannot be paired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionPair {
+    dir: String,
+    lock: String,
+}
+
+impl SessionPair {
+    pub(crate) fn dir(&self) -> &str {
+        &self.dir
+    }
+
+    pub(crate) fn lock(&self) -> &str {
+        &self.lock
+    }
+
+    /// `None` when `lock` is not the lock file for `dir`'s session key.
+    pub(crate) fn from_names(dir: &str, lock: &str) -> Option<SessionPair> {
+        let key = lock.strip_suffix(".lock")?;
+        let rest = dir.strip_prefix(key)?;
+        let suffix = rest.strip_prefix('-')?;
+        (!suffix.is_empty()).then(|| SessionPair {
+            dir: dir.to_string(),
+            lock: lock.to_string(),
+        })
+    }
+}
+
+/// A session lock file name that `parse_lock` accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrphanLock {
+    name: String,
+}
+
+impl OrphanLock {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn parse(name: &str) -> Option<OrphanLock> {
+        parse_lock(name).map(|_| OrphanLock {
+            name: name.to_string(),
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
 pub(crate) enum Action {
-    /// A superseded finalized session, or a `-working` one old enough; delete it under `lock`.
-    DeleteLocked { dir: String, lock: String },
+    /// A superseded finalized session, or a `-working` one old enough; delete it under its lock.
+    DeleteLocked(SessionPair),
     /// A lock file with no session; delete it under itself.
-    DeleteOrphanLock { lock: String },
-    /// A session directory with no lock file; `lock` is the path to re-check before deleting.
-    DeleteLockless { dir: String, lock: String },
+    DeleteOrphanLock(OrphanLock),
+    /// A session directory with no lock file; the pair's lock is re-checked before deleting.
+    DeleteLockless(SessionPair),
 }
 
 fn base36_lower(field: &str) -> bool {
@@ -108,21 +158,23 @@ pub(crate) fn crate_dir(entries: &[(String, EntryKind)], now: SystemTime) -> Vec
                 let superseded = *finalized && newest.is_some_and(|n| *ts < n);
                 let abandoned = !*finalized && old_enough(*ts);
                 if superseded || abandoned {
-                    actions.push(Action::DeleteLocked {
-                        dir: dir.clone(),
-                        lock: lock.clone(),
-                    });
+                    actions.push(Action::DeleteLocked(
+                        SessionPair::from_names(dir, lock)
+                            .expect("a session dir and its lock share a key"),
+                    ));
                 }
             }
-            None => actions.push(Action::DeleteLockless {
-                dir: dir.clone(),
-                lock: format!("{key}.lock"),
-            }),
+            None => actions.push(Action::DeleteLockless(
+                SessionPair::from_names(dir, &format!("{key}.lock"))
+                    .expect("a lockless session's re-check names its own lock"),
+            )),
         }
     }
     for (key, (lock, ts)) in &locks {
         if !sessions.contains_key(key) && old_enough(*ts) {
-            actions.push(Action::DeleteOrphanLock { lock: lock.clone() });
+            actions.push(Action::DeleteOrphanLock(
+                OrphanLock::parse(lock).expect("the lock name was parsed"),
+            ));
         }
     }
     actions
@@ -181,10 +233,8 @@ mod tests {
         let mut names: Vec<String> = actions
             .iter()
             .map(|a| match a {
-                Action::DeleteLocked { dir, .. } | Action::DeleteLockless { dir, .. } => {
-                    dir.clone()
-                }
-                Action::DeleteOrphanLock { lock } => lock.clone(),
+                Action::DeleteLocked(pair) | Action::DeleteLockless(pair) => pair.dir().to_string(),
+                Action::DeleteOrphanLock(lock) => lock.name().to_string(),
             })
             .collect();
         names.sort();
@@ -286,14 +336,22 @@ mod tests {
             session(old, "cc", "svh3"),
         ];
         let actions = crate_dir(&entries, now());
-        assert!(actions.contains(&Action::DeleteLocked {
-            dir: session(old, "aa", "svh1").0,
-            lock: lock(old, "aa").0
-        }));
-        assert!(actions.contains(&Action::DeleteLockless {
-            dir: session(old, "cc", "svh3").0,
-            lock: lock(old, "cc").0
-        }));
+        assert!(actions.contains(&Action::DeleteLocked(
+            SessionPair::from_names(&session(old, "aa", "svh1").0, &lock(old, "aa").0).unwrap()
+        )));
+        assert!(actions.contains(&Action::DeleteLockless(
+            SessionPair::from_names(&session(old, "cc", "svh3").0, &lock(old, "cc").0).unwrap()
+        )));
+    }
+
+    #[test]
+    fn a_session_pair_rejects_a_lock_from_another_session() {
+        let dir = "s-10-aa-svh1";
+        assert!(SessionPair::from_names(dir, "s-10-aa.lock").is_some());
+        assert!(SessionPair::from_names(dir, "s-10-bb.lock").is_none());
+        assert!(SessionPair::from_names(dir, "s-10-aa").is_none());
+        assert!(OrphanLock::parse("s-10-aa.lock").is_some());
+        assert!(OrphanLock::parse("not-a-lock").is_none());
     }
 
     #[test]

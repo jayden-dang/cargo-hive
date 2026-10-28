@@ -3,7 +3,7 @@
 //! plan made from a stale listing therefore never deletes what replaced its entry.
 
 use super::is_temp_entry;
-use super::ledger::Ledger;
+use super::ledger::{Bytes, Ledger};
 use super::plan::{self, Action};
 use crate::cargo_target::{Owner, TargetDir};
 use crate::fingerprint::Format;
@@ -41,8 +41,8 @@ pub struct Counts {
     pub temp_entries_deleted: u64,
     pub skipped_held: u64,
     pub skipped_lock_unopenable: u64,
-    pub freed_bytes: Option<u64>,
-    pub deleted_bytes_still_shared: Option<u64>,
+    /// Both byte totals, or neither. Absent when doctor check (c) has not passed.
+    pub bytes: Option<Bytes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,9 +147,7 @@ pub fn run(
     let mut totals = Counts::default();
     for (path, c) in &mut per_target {
         if opts.account_bytes {
-            let b = tally.per_target.get(path).copied().unwrap_or_default();
-            c.freed_bytes = Some(b.freed);
-            c.deleted_bytes_still_shared = Some(b.still_shared);
+            c.bytes = Some(tally.per_target.get(path).copied().unwrap_or_default());
         }
         totals.sessions_deleted += c.sessions_deleted;
         totals.session_lock_files_deleted += c.session_lock_files_deleted;
@@ -158,8 +156,7 @@ pub fn run(
         totals.skipped_lock_unopenable += c.skipped_lock_unopenable;
     }
     if opts.account_bytes {
-        totals.freed_bytes = Some(tally.total.freed);
-        totals.deleted_bytes_still_shared = Some(tally.total.still_shared);
+        totals.bytes = Some(tally.total);
     }
     GcReport {
         per_target,
@@ -233,15 +230,21 @@ impl Runner<'_> {
                     return;
                 }
                 match action {
-                    Action::DeleteLocked { dir, lock } => {
-                        self.delete_locked(target, &crate_dir.join(dir), &crate_dir.join(lock), c)
+                    Action::DeleteLocked(pair) => self.delete_locked(
+                        target,
+                        &crate_dir.join(pair.dir()),
+                        &crate_dir.join(pair.lock()),
+                        c,
+                    ),
+                    Action::DeleteOrphanLock(lock) => {
+                        self.delete_orphan_lock(&crate_dir, lock.name(), c)
                     }
-                    Action::DeleteOrphanLock { lock } => {
-                        self.delete_orphan_lock(&crate_dir, &lock, c)
-                    }
-                    Action::DeleteLockless { dir, lock } => {
-                        self.delete_lockless(target, &crate_dir.join(dir), &crate_dir.join(lock), c)
-                    }
+                    Action::DeleteLockless(pair) => self.delete_lockless(
+                        target,
+                        &crate_dir.join(pair.dir()),
+                        &crate_dir.join(pair.lock()),
+                        c,
+                    ),
                 }
             }
         }
@@ -252,10 +255,23 @@ impl Runner<'_> {
             return;
         };
         // Re-check under the lock. A session that finalized after the listing has a new name,
-        // and this lock file now belongs to it, so neither is touched.
-        if !matches!(self.fs.entry_stat(dir), Ok(s) if s.kind == EntryKind::Dir) {
-            drop(guard);
-            return;
+        // and this lock file now belongs to it, so neither is touched. A stat error other than
+        // a missing path is a failure: the entry stays, and the receipt says why.
+        match self.fs.entry_stat(dir) {
+            Ok(s) if s.kind == EntryKind::Dir => {}
+            Ok(_) => {
+                drop(guard);
+                return;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                drop(guard);
+                return;
+            }
+            Err(e) => {
+                self.skip(dir, format!("could not stat it: {e}"));
+                drop(guard);
+                return;
+            }
         }
         if self.remove_measured(target, dir) {
             c.sessions_deleted += 1;
@@ -271,9 +287,14 @@ impl Runner<'_> {
         };
         let prefix = format!("{}-", lock_name.trim_end_matches(".lock"));
         // Re-check under the lock: a session that appeared since the listing owns this file.
+        // A list error leaves the lock in place and is reported; it is not "a session appeared".
         let claimed = match self.fs.read_dir_bounded(crate_dir, CRATE_DIR_CAP) {
             Ok(entries) => entries.iter().any(|(n, _)| n.starts_with(&prefix)),
-            Err(_) => true,
+            Err(e) => {
+                self.skip(crate_dir, format!("could not list it: {e}"));
+                drop(guard);
+                return;
+            }
         };
         if !claimed {
             self.remove_lock_file(&lock, c);
@@ -283,10 +304,12 @@ impl Runner<'_> {
 
     fn delete_lockless(&mut self, target: &Path, dir: &Path, lock: &Path, c: &mut Counts) {
         // rustc creates a session's lock file before its dir, so a lock file that exists now
-        // means the listing missed it: leave the dir for a later run.
+        // means the listing missed it: leave the dir for a later run. A stat error other than
+        // a missing path is a failure, reported the same way, and the dir stays.
         match self.fs.entry_stat(lock) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            _ => return,
+            Err(e) => return self.skip(lock, format!("could not stat it: {e}")),
+            Ok(_) => return,
         }
         if self.remove_measured(target, dir) {
             c.sessions_deleted += 1;
@@ -449,6 +472,8 @@ mod tests {
         stat_fails: Mutex<BTreeSet<String>>,
         cap_override: Option<usize>,
         fs_type: String,
+        /// Sharing attributes returned for a file name. Absent names are unshared.
+        shares: Mutex<HashMap<String, Sharing>>,
     }
 
     fn name(p: &Path) -> String {
@@ -478,6 +503,7 @@ mod tests {
                 stat_fails: Mutex::new(BTreeSet::new()),
                 cap_override: None,
                 fs_type: "apfs".into(),
+                shares: Mutex::new(HashMap::new()),
             }
         }
         fn log(&self, e: String) {
@@ -537,13 +563,19 @@ mod tests {
         fn try_lock_elsewhere(&self, _: LockKind, _: &Path) -> io::Result<LockState> {
             Err(io::Error::other("not used by gc"))
         }
-        fn sharing(&self, _: &Path) -> io::Result<Sharing> {
-            Ok(Sharing {
-                private_bytes: 0,
-                clone_id: 0,
-                may_share: false,
-                shares_all: false,
-            })
+        fn sharing(&self, path: &Path) -> io::Result<Sharing> {
+            Ok(self
+                .shares
+                .lock()
+                .unwrap()
+                .get(&name(path))
+                .copied()
+                .unwrap_or(Sharing {
+                    private_bytes: 0,
+                    clone_id: 0,
+                    may_share: false,
+                    shares_all: false,
+                }))
         }
         fn try_lock_exclusive(&self, path: &Path) -> TryLock {
             let n = name(path);
@@ -752,7 +784,36 @@ mod tests {
             ),
             (1, 1)
         );
-        assert!(report.totals.freed_bytes.unwrap() > 0);
+        assert!(report.totals.bytes.unwrap().freed > 0);
+    }
+
+    #[test]
+    fn a_cloned_file_frees_only_its_private_bytes() {
+        let f = fixture("clone");
+        let (old, _) = session(&f, 3600, "aa", "svh1", false);
+        session(&f, 60, "bb", "svh2", false);
+        let file = f.krate.join(&old).join("query-cache.bin");
+        let all = std::fs::symlink_metadata(&file).unwrap().blocks() * 512;
+        let private = 1024;
+        assert!(
+            all > private,
+            "the fixture file allocates {all} bytes, which is not above the private size"
+        );
+        let rec = Rec::new();
+        rec.shares.lock().unwrap().insert(
+            "query-cache.bin".into(),
+            Sharing {
+                private_bytes: private,
+                clone_id: 7,
+                may_share: true,
+                shares_all: false,
+            },
+        );
+        let report = run(&rec, &[orphan(&f)], &Scope::All, &opts(false), &never());
+        assert_eq!(report.totals.sessions_deleted, 1);
+        let bytes = report.totals.bytes.unwrap();
+        assert_eq!(bytes.freed, private);
+        assert_eq!(bytes.still_shared, all - private);
     }
 
     #[test]
@@ -774,6 +835,35 @@ mod tests {
         assert!(f.krate.join(&finalized).exists());
         assert_eq!(rec.removals(), 0);
         assert_eq!(report.totals.sessions_deleted, 0);
+        assert!(
+            report.skipped.is_empty(),
+            "a vanished session is not a failure: {:?}",
+            report.skipped
+        );
+    }
+
+    #[test]
+    fn a_locked_session_whose_directory_cannot_be_statted_is_left_and_reported() {
+        let f = fixture("stat-fail");
+        let (old, old_lock) = session(&f, 3600, "aa", "svh1", false);
+        session(&f, 60, "bb", "svh2", false);
+        let rec = Rec::new();
+        rec.stat_fails.lock().unwrap().insert(old.clone());
+        let report = run(&rec, &[orphan(&f)], &Scope::All, &opts(false), &never());
+        assert!(f.krate.join(&old).exists(), "the session was deleted");
+        assert!(
+            f.krate.join(&old_lock).exists(),
+            "the lock file was removed"
+        );
+        assert_eq!(report.totals.sessions_deleted, 0);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.path.ends_with(&old) && s.reason.contains("could not stat it")),
+            "{:?}",
+            report.skipped
+        );
     }
 
     #[test]
@@ -825,6 +915,26 @@ mod tests {
         assert!(!f.krate.join(&gone).exists());
         assert!(f.krate.join(&kept).exists());
         assert_eq!(report.totals.sessions_deleted, 1);
+    }
+
+    #[test]
+    fn a_lockless_session_whose_lock_cannot_be_statted_is_left_and_reported() {
+        let f = fixture("lockless-stat");
+        let (dir, lock) = session(&f, 3600, "d1", "svh1", true);
+        session(&f, 60, "bb", "svh2", false);
+        let rec = Rec::new();
+        rec.stat_fails.lock().unwrap().insert(lock.clone());
+        let report = run(&rec, &[orphan(&f)], &Scope::All, &opts(false), &never());
+        assert!(f.krate.join(&dir).exists(), "the session was deleted");
+        assert_eq!(report.totals.sessions_deleted, 0);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.path.ends_with(&lock) && s.reason.contains("could not stat it")),
+            "{:?}",
+            report.skipped
+        );
     }
 
     #[test]
@@ -1090,13 +1200,7 @@ mod tests {
             ..opts(true)
         };
         let report = run(&Rec::new(), &[orphan(&f)], &Scope::All, &off, &never());
-        assert_eq!(
-            (
-                report.totals.freed_bytes,
-                report.totals.deleted_bytes_still_shared
-            ),
-            (None, None)
-        );
+        assert_eq!(report.totals.bytes, None);
         assert_eq!(report.totals.sessions_deleted, 1);
     }
 
@@ -1182,11 +1286,20 @@ mod tests {
                 std::fs::set_permissions(krate, std::fs::Permissions::from_mode(0o000)).unwrap()
             }),
         );
-        run(&rec, &[orphan(&f)], &Scope::All, &opts(false), &never());
+        let report = run(&rec, &[orphan(&f)], &Scope::All, &opts(false), &never());
         std::fs::set_permissions(&f.krate, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
             f.krate.join(&lock).exists(),
             "a lock file was removed although the re-check could not list its dir"
+        );
+        assert_eq!(report.totals.session_lock_files_deleted, 0);
+        assert!(
+            report
+                .skipped
+                .iter()
+                .any(|s| s.path == f.krate && s.reason.contains("could not list it")),
+            "{:?}",
+            report.skipped
         );
     }
 
@@ -1207,8 +1320,8 @@ mod tests {
             "{:?}",
             report.unmeasured
         );
-        let counted =
-            report.totals.freed_bytes.unwrap() + report.totals.deleted_bytes_still_shared.unwrap();
+        let bytes = report.totals.bytes.unwrap();
+        let counted = bytes.freed + bytes.still_shared;
         assert!(
             counted < 65536,
             "the unmeasured file was counted: {counted}"

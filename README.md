@@ -28,7 +28,7 @@ cargo hive status          # every registered repo; add --json for one machine-r
 | `cargo hive repo add <path>` | Registers the main checkout containing `<path>` |
 | `cargo hive repo list` | Lists registered repositories and their root commits |
 | `cargo hive status [<repo>…] [--no-sizes]` | Lists checkouts (protected, secondary, missing) and Cargo target dirs (owner or orphan candidate, size, units and edges) |
-| `cargo hive gc [<repo>…] [--dry-run]` | Deletes superseded incremental sessions and `deps/rustc*`/`rmeta*` temp dirs under their owners' locks; reports freed bytes per inode. `--dry-run` deletes nothing |
+| `cargo hive gc [<repo>…] [--dry-run]` | Deletes superseded incremental sessions and `deps/rustc*`/`rmeta*` temp dirs. Freed bytes are counted per inode and reported as totals. `--dry-run` deletes nothing |
 
 Every command accepts `--json`. It then prints exactly one receipt on stdout, and every
 receipt is also appended to `~/.hive/receipts/<date>.jsonl`. Receipts carry counts and
@@ -39,7 +39,8 @@ measured values only, never durations or estimated time saved.
 `cargo hive gc` deletes superseded incremental sessions and leftover rustc temp dirs
 inside Cargo target dirs:
 
-- each session is deleted under its own lock, and temp entries under `.cargo-build-lock`;
+- a session that has a lock file is deleted under that lock; a session with no lock file is deleted without one;
+- temp entries are deleted under `.cargo-build-lock`;
 - held entries are skipped;
 - output kept with `-C save-temps` matches the temp-entry rule and is reclaimed;
 - targets off APFS are skipped.
