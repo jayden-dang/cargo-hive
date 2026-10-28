@@ -32,6 +32,12 @@ None — the 2026-10-28 interview ratified no rule beyond the `test-first` skill
 - Tests never write under the real `~/.cargo`, `~/.rustup`, `~/.cache`, or any repo outside their scratch dir.
 - Integration fixtures live in `/private/tmp/hive-it-*` and are removed on drop.
 - `HIVE_HOME` exists for tests only.
+- Exception (approved 2026-10-28 for AUTOGC-5.4 and AUTOGC-6.4): a test may create an APFS disk image with `hdiutil`, under these conditions:
+  - the image lives in its `/private/tmp/hive-it-*` scratch dir;
+  - it is attached with `-nobrowse` and `-mountpoint` inside that dir, never under `/Volumes`;
+  - it contains `.metadata_never_index`;
+  - it is detached on drop;
+  - stale `hive-it-*` images and mounts are swept at test start.
 
 ## Not a substitute for acceptance
 

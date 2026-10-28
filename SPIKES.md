@@ -24,6 +24,7 @@ Before building cargo-hive we tested the assumptions its architecture rests on. 
 | 12 | Seeded build-script paths after the source is deleted; wrapper needed? | **PASS**, no wrapper needed | Y builds with X deleted (0 deps rebuilt); binary has 0 refs to X; Cargo re-roots `output` paths on read. `DEP_*` re-rooted too (addendum) |
 | 13 | Discovery cost and target-dir identity | **PASS**, with a rule | `git worktree list` 39 ms; tag lookup 53 ms. `CACHEDIR.TAG` is generic (moon uses it): require "created by cargo" + a profile dir with `.fingerprint/` |
 | 14 | Cargo detects a content-swapped artifact | **NO** (by design, confirmed) | Corrupted rlib with preserved mtime stays "Fresh"; a dependent compiles against it silently. Only deletion is self-detecting |
+| 16 | Hive can delete sessions and temp entries under the owner's lock, using flock only | **PASS** on macOS 27 | Every holder kind (flock SH/EX, fcntl RD/WR) blocks a non-blocking flock EX, and hive's flock EX blocks rustc-style fcntl RD/WR tries. Opening+closing a second fd drops a held fcntl lock but not a flock. 12 builds with a concurrent GC: 0 failures, 0 warnings, 26 superseded sessions deleted, 739/739 `-working` skipped, then 0 units compiled. `.cargo-build-lock` was free only in a cargo process's first ~30 ms; temp entries while it was free: 0/2,215 samples |
 
 ## 1. Path independence
 
@@ -475,3 +476,57 @@ The interview's concurrency evidence (`evidence/build-concurrency.py`) first rea
 - Store files must be single-link copies (link count 1) to be compressible. The store fill must copy, not hardlink.
 - Doctor's round-trip check uses a single-link file, and separately verifies that hardlinked files are left untouched.
 - Applesauce does expose a library API (`FileCompressor::recursive_compress` / `recursive_decompress`), so embedding it (I1) stands.
+
+## 16. Deleting sessions and temp entries under the owner's lock (ROAD-2)
+
+*2026-10-28 · macOS 27, APFS · cargo and rustc 1.97.1 · scratch crate under `/private/tmp` (6,000 small functions, lib + bin) · throwaway Python using `fcntl.flock` / `fcntl.lockf` · load average about 3*
+
+**Question.** ROAD-2 deletes rustc incremental sessions under each session's `s-*.lock`, and leftover `deps/rustc*` and `deps/rmeta*` under the build dir's `.cargo-build-lock`. The lock is held in hive's process from the try to the end of the delete. Open points:
+- Can hive use one lock call (flock, non-blocking exclusive) for both kinds of lock file? rustc locks sessions with POSIX `fcntl` (`rustc_data_structures/src/flock/unix.rs` at rustc 8bab26f4f). Cargo locks `.cargo-build-lock` with std `File::lock` (flock on macOS) at cargo c980f4866, `core/compiler/layout.rs`.
+- Does deleting during real builds break anything (S-2)?
+
+**Q1. Conflict matrix, two processes, holder × non-blocking exclusive try.**
+
+| Holder | flock `LOCK_EX\|LOCK_NB` | fcntl `F_WRLCK` `F_SETLK` |
+|---|---|---|
+| none | acquired | acquired |
+| flock SH | blocked | blocked |
+| flock EX | blocked | blocked |
+| fcntl RD (rustc copying from a session) | blocked | blocked |
+| fcntl WR (rustc's own `-working`) | blocked | blocked |
+
+- Every try returned in ≤ 0.1 ms. After the holder died, every try acquired.
+- Reverse direction: while hive holds flock EX, a rustc-style fcntl RD NB try is blocked, and so is an fcntl WR NB try.
+- **The second-fd trap:**
+  - A process that holds an **fcntl** lock and then opens and closes another fd on the same file loses the lock; another process then acquires it.
+  - A **flock** survives the same sequence.
+  - So flock-only removes the "one lock file, one fd" rule. This holds on macOS only: on Linux, flock and fcntl locks do not conflict (§10), and Linux is a v1 non-goal.
+
+**Q2. End to end.**
+- A GC loop ran every 10 ms during 12 edit-and-build cycles. On each pass it:
+  1. takes the newest finalized session by name timestamp, never by mtime;
+  2. for every other session, opens its lock read-only (never creating it) and tries flock EX NB;
+  3. on success, removes the dir and then the lock file, and only then closes.
+- Result: 901 passes. **0 build failures and 0 warnings.** 26 superseded finalized sessions were deleted. 739 of 739 `-working` sightings were skipped because they were held, so 0 were deleted.
+- Natural steady state before GC: 2 sessions per crate dir, the same shape as klynt's 246 of 294. After GC: 1 per crate dir.
+- **S-2:** `cargo build` with no edit after GC compiled nothing (`Finished … in 0.00s`).
+- **Incremental still reused:** an edit-and-build after GC took 0.91 / 0.92 / 0.92 s. With all sessions removed first it took 1.50 / 1.51 / 1.51 s.
+
+**Q3. Temp entries and `.cargo-build-lock`.**
+- 15 builds, sampled every 5 ms: 2,215 samples.
+- The lock was free in 78 samples. All 78 fall in the first ~30 ms of a cargo process, before it takes the lock.
+- `rmeta*` or `rustc*` entries were present in 205 samples, and **never while the lock was free (0 of 2,215)**. None were left after a clean finish.
+- If hive takes the lock in that first window, cargo waits on it ("Blocking waiting for file lock") until hive releases. It does not race.
+
+**Answers.**
+- On macOS, hive can use **one primitive, flock `LOCK_EX|LOCK_NB` on a read-only fd, never creating the file**, for both rustc session locks and Cargo's build lock. The lock is held until the deletion finishes.
+- Mirroring rustc's own rule (keep the newest finalized session by name timestamp; never delete a held session) caused no failures and no rebuilds, and incremental reuse continued.
+- Doctor check (d) must measure what production relies on: a child holding **fcntl F_RDLCK** and **F_WRLCK** must block the parent's flock EX NB. If it does not, Deletion is disabled.
+
+**Not measured.**
+- The newer build-dir layout.
+- A target shared by several worktrees.
+- rust-analyzer and `cargo watch` running live against the target.
+- Any filesystem other than local APFS.
+- A rustc started outside Cargo in the same `deps/`.
+
