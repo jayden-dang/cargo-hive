@@ -76,6 +76,8 @@ House rules for this plan:
 | `tests/gc_disk_image.rs` | Freed bytes ≤ measured increase, on a test-created APFS image |
 | `README.md` | `gc` row and section; the "reads only" lines corrected |
 | `docs/specs/2026-10-25-foundation/{design,requirements}.md` | CORE realign (Decision 16), through `realign-spec` |
+| `docs/agents/verify.md` | `gc` drive; check (d) named as an exclusive lock proof |
+| `docs/standards/errors-logging.md` | cancel exit code 130 |
 
 Retrieval:
 - `load-subgraph` `blast_radius` on these paths: every `src/` and `tests/` path is OWNED by CORE (`docs/specs/2026-10-25-foundation/tasks.md`), the only other registered feature.
@@ -109,7 +111,7 @@ Retrieval:
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests.** Replace `tests/platform_locks.rs` with:
+- [x] **Step 1: Write the failing tests.** Replace `tests/platform_locks.rs` with:
 
 ```rust
 #![cfg(target_os = "macos")]
@@ -243,7 +245,7 @@ In the `tests` module of `src/platform/mod.rs`, add:
 
 Run `cargo test --test platform_locks` and `cargo test --lib platform`. Expect compile errors: `TryLock`, `try_lock_exclusive`, `try_lock_elsewhere`, `LockKind::FcntlRead` and `CHILD_DEADLINE` do not exist.
 
-- [ ] **Step 2: Add the types and trait methods to `src/platform/mod.rs`**
+- [x] **Step 2: Add the types and trait methods to `src/platform/mod.rs`**
 
 Extend `LockKind` and add the new items above `pub trait Fs`:
 
@@ -341,7 +343,7 @@ Add these two methods to `trait Fs`. Leave `probe_lock` in place; Task 2 removes
     fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState>;
 ```
 
-- [ ] **Step 3: Implement them in `src/platform/apfs.rs`**
+- [x] **Step 3: Implement them in `src/platform/apfs.rs`**
 
 Imports:
 - Add `HeldLock`, `TryLock` and `CHILD_DEADLINE` to the `use super::{…}` line.
@@ -491,7 +493,7 @@ In the `tests` module of `src/doctor.rs`, add to `impl Fs for FakeFs`. Task 2 re
 
 Add `HeldLock` and `TryLock` to that test module's `use crate::platform::{…}` line.
 
-- [ ] **Step 4: Add the hidden `__try-lock` command to `src/cli.rs`**
+- [x] **Step 4: Add the hidden `__try-lock` command to `src/cli.rs`**
 
 Add the variant beside `HoldLock`:
 
@@ -542,7 +544,7 @@ fn try_lock(kind: &str, path: &std::path::Path) -> i32 {
 
 Run `cargo test --test platform_locks` and `cargo test --lib`. Expect 6 integration tests passing and every unit test passing. Then run the merge gate.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(platform): exclusive in-process lock try and a cross-process lock probe"`.
 
@@ -573,7 +575,7 @@ _Requirements: AUTOGC-1.1, AUTOGC-1.2_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In the `tests` module of `src/doctor.rs`:
 1. Add two knobs to `Knobs`:
@@ -701,7 +703,7 @@ fn check_d_reports_the_lock_matrix_and_passes_on_this_mac() {
 
 Run `cargo test --lib doctor` and `cargo test --test doctor`. Expect compile errors (`reverse_refused`, `lock_check` and `LOCK_CHECK_VERSION` do not exist) and failures from the old measured keys.
 
-- [ ] **Step 2: Implement in `src/doctor.rs`**
+- [x] **Step 2: Implement in `src/doctor.rs`**
 
 Add `pub const LOCK_CHECK_VERSION: u32 = 1;`, then add this field to `Capabilities`:
 
@@ -770,7 +772,7 @@ fn check_lock_probe(fs: &dyn Fs, dir: &Path) -> Check {
 
 Add `TryLock` to `doctor.rs`'s `use crate::platform::{…}` line.
 
-- [ ] **Step 3: Remove `probe_lock`, and update the test helper**
+- [x] **Step 3: Remove `probe_lock`, and update the test helper**
 
 Delete `fn probe_lock` from `trait Fs` (`src/platform/mod.rs`) and from `impl Fs for Apfs` (`src/platform/apfs.rs`). In `tests/common/mod.rs`, `write_ready_capabilities` writes:
 
@@ -780,7 +782,7 @@ Delete `fn probe_lock` from `trait Fs` (`src/platform/mod.rs`) and from `impl Fs
 
 Run `cargo test --lib`, `cargo test --test doctor` and `cargo test --test capability_gate`. Expect every test passing, including the three new unit tests, the new table row and the new doctor integration test. Then run the merge gate.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(doctor): check (d) proves the exclusive lock both ways; deletion requires that proof"`.
 
@@ -815,7 +817,7 @@ _Requirements: AUTOGC-1.1, AUTOGC-1.2, AUTOGC-1.3, AUTOGC-7.4_
 
 **Depends-on:** Task 2
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In the `tests` module of `src/platform/mod.rs`:
 
@@ -920,7 +922,7 @@ In the `tests` module of `src/platform/apfs.rs`:
 
 The last test passes once `sharing` stops following the link: the call then describes the link itself, or fails, and never reports the target's 1 MiB. Run `cargo test --lib platform`. Expect compile errors: `container_key`, `entry_stat`, `read_dir_bounded`, `remove_tree`, `volume` and `EntryKind` do not exist.
 
-- [ ] **Step 2: Add the types and trait methods to `src/platform/mod.rs`**
+- [x] **Step 2: Add the types and trait methods to `src/platform/mod.rs`**
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -976,7 +978,7 @@ Add to `trait Fs`:
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo>;
 ```
 
-- [ ] **Step 3: Implement them in `src/platform/apfs.rs`, and in the `FakeFs` test double**
+- [x] **Step 3: Implement them in `src/platform/apfs.rs`, and in the `FakeFs` test double**
 
 Add `EntryKind`, `EntryStat`, `VolumeInfo` and `container_key` to the `use super::{…}` line, plus `use std::ffi::CStr;`. In `sharing`, change the last argument of `getattrlist` to `libc::FSOPT_ATTR_CMN_EXTENDED | libc::FSOPT_NOFOLLOW`. That option affects only the last path component, which doctor needs because its temp dir is under the `/var` symlink. Then add to `impl Fs for Apfs`:
 
@@ -1096,7 +1098,7 @@ In the `tests` module of `src/doctor.rs`:
 
 Run `cargo test --lib`. Expect every test passing: the 6 new platform tests, and the CORE `sharing` tests with unchanged results. Then run the merge gate, including `cargo check --target x86_64-unknown-linux-gnu`. `container_key` and the types are portable, and `Apfs` is macOS-only.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(platform): no-follow stat, bounded listing, removal and statfs through Fs"`.
 
@@ -1124,7 +1126,7 @@ _Requirements: AUTOGC-2.13, AUTOGC-4.5, AUTOGC-5.4_
 
 **Depends-on:** Task 3
 
-- [ ] **Step 1: Write the failing tests** at the bottom of the new `src/gc/plan.rs`:
+- [x] **Step 1: Write the failing tests** at the bottom of the new `src/gc/plan.rs`:
 
 ```rust
 #[cfg(test)]
@@ -1276,7 +1278,7 @@ mod tests {
 
 Run `cargo test --lib gc::plan`. Expect a compile error: the module does not exist.
 
-- [ ] **Step 2: Implement `src/gc/plan.rs`** (above the tests)
+- [x] **Step 2: Implement `src/gc/plan.rs`** (above the tests)
 
 ```rust
 //! rustc's incremental-session rules for one crate directory, as a pure function of the
@@ -1416,7 +1418,7 @@ Add `pub mod gc;` to `src/lib.rs`, in alphabetical order.
 
 Run `cargo test --lib gc::plan`. Expect 4 tests passing. Then run the merge gate.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(gc): pure planner for rustc's session rules and the temp-entry rule"`.
 
@@ -1449,7 +1451,7 @@ The rules (design Decision 8):
 
 **Depends-on:** Task 4
 
-- [ ] **Step 1: Write the failing tests** at the bottom of the new `src/gc/ledger.rs`:
+- [x] **Step 1: Write the failing tests** at the bottom of the new `src/gc/ledger.rs`:
 
 ```rust
 #[cfg(test)]
@@ -1529,7 +1531,7 @@ mod tests {
 
 Run `cargo test --lib gc::ledger`. Expect a compile error: the module does not exist.
 
-- [ ] **Step 2: Implement `src/gc/ledger.rs`** (above the tests)
+- [x] **Step 2: Implement `src/gc/ledger.rs`** (above the tests)
 
 ```rust
 //! Per-inode accounting of the bytes a gc run frees. Bytes a surviving hard link or clone
@@ -1623,7 +1625,7 @@ In `src/gc.rs`, add `#[cfg_attr(not(test), allow(dead_code))] mod ledger;` and `
 
 Run `cargo test --lib gc::ledger`. Expect 3 tests passing. Then run the merge gate.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(gc): per-inode ledger that never counts surviving links or clones as freed"`.
 
@@ -1657,7 +1659,7 @@ _Requirements: AUTOGC-5.1, AUTOGC-5.2, AUTOGC-5.5_
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1: Write the failing tests** at the bottom of the new `src/gc/run.rs`:
+- [x] **Step 1: Write the failing tests** at the bottom of the new `src/gc/run.rs`:
 
 ```rust
 #[cfg(test)]
@@ -2188,7 +2190,7 @@ mod tests {
 
 Run `cargo test --lib gc::run`. Expect a compile error: `run`, `Scope`, `RunOpts`, `Counts` and `GcReport` do not exist.
 
-- [ ] **Step 2: Implement `src/gc/run.rs`** (above the tests)
+- [x] **Step 2: Implement `src/gc/run.rs`** (above the tests)
 
 ```rust
 //! Runs the planner over selected targets. Every effect goes through `Fs` in a fixed order:
@@ -2565,7 +2567,7 @@ pub use run::{run, Counts, GcReport, RunOpts, Scope, Skip, CRATE_DIR_CAP, DEPS_C
 
 Run `cargo test --lib gc`. Expect every test passing: 4 planner tests, 3 ledger tests and 17 runner tests. Then run the merge gate.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(gc): runner deletes under the owner's lock, re-checked, in an observable order"`.
 
@@ -2605,7 +2607,7 @@ _Requirements: AUTOGC-2.2, AUTOGC-2.3, AUTOGC-2.4, AUTOGC-2.9, AUTOGC-2.10, AUTO
 
 **Depends-on:** Task 6
 
-- [ ] **Step 1: Add the shared test helpers to `tests/common/mod.rs`**
+- [x] **Step 1: Add the shared test helpers to `tests/common/mod.rs`**
 
 Add `use std::process::{Child, Stdio};` and `use std::time::{Duration, Instant};` beside the existing imports. Then add these two methods to `impl Hive`:
 
@@ -2702,7 +2704,7 @@ pub fn wait_within(mut child: Child, limit: Duration) -> Output {
 
 `AtomicU32`, `Ordering`, `SystemTime` and `UNIX_EPOCH` are already imported by `Scratch`. If any is missing, add it to the `use` lines.
 
-- [ ] **Step 2: Write the failing integration tests:** the new `tests/gc.rs`
+- [x] **Step 2: Write the failing integration tests:** the new `tests/gc.rs`
 
 ```rust
 #![cfg(target_os = "macos")]
@@ -3140,7 +3142,7 @@ The existing `tests/guards.rs` (repo add, status and doctor stay write-free; car
 
 Run `cargo test --test gc`. Expect every test failing: `gc` is an unrecognized subcommand.
 
-- [ ] **Step 3: Add `gc` to `src/cli.rs`**
+- [x] **Step 3: Add `gc` to `src/cli.rs`**
 
 Add the variant:
 
@@ -3337,7 +3339,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
 
 Run `cargo test --test gc` and `cargo test --test guards`. Expect 15 and all passed. Then run the merge gate.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(cli): cargo hive gc, with --dry-run, scoped by arguments and gated on doctor"`.
 
@@ -3358,7 +3360,7 @@ _Requirements: AUTOGC-2.7, AUTOGC-2.6, AUTOGC-2.15, AUTOGC-3.3, AUTOGC-3.4, AUTO
 
 **Depends-on:** Task 7
 
-- [ ] **Step 1: Write the test.** The new `tests/gc_disk_image.rs`:
+- [x] **Step 1: Write the test.** The new `tests/gc_disk_image.rs`:
 
 ```rust
 #![cfg(target_os = "macos")]
@@ -3461,7 +3463,7 @@ fn freed_bytes_never_exceed_the_space_the_volume_gains() {
 
 Run `cargo test --test gc_disk_image`. Expect 1 test passing. The test exercises Tasks 1–7. A failure means a real defect in those tasks: stop and report it, and do not loosen the bound.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 Run `cargo fmt`, then `git add -A && git commit -m "test(gc): freed bytes never exceed the space an APFS volume gains"`.
 
@@ -3483,7 +3485,7 @@ _Requirements: AUTOGC-5.4, AUTOGC-6.4_
 
 **Depends-on:** Task 8
 
-- [ ] **Step 1: Edit `README.md`**
+- [x] **Step 1: Edit `README.md`**
   1. Replace the paragraph starting "This release (foundation) reads only" with: "It registers repositories, lists their checkouts and Cargo target dirs, and says how hive may treat each one. `cargo hive gc` deletes superseded rustc incremental sessions and leftover rustc temp dirs, each under its owner's lock. It compresses and seeds nothing yet."
   2. Add the table row: `` | `cargo hive gc [<repo>…] [--dry-run]` | Deletes superseded incremental sessions and `deps/rustc*`/`rmeta*` temp dirs under their owners' locks; reports freed bytes per inode. `--dry-run` deletes nothing | ``
   3. Replace "It writes only under `~/.hive/` and inside doctor's own temporary directory." with: "It writes only under `~/.hive/` and doctor's temporary directory. Outside those, it only deletes, through `gc`, inside Cargo target dirs."
@@ -3492,13 +3494,13 @@ _Requirements: AUTOGC-5.4, AUTOGC-6.4_
      - held entries are skipped;
      - output kept with `-C save-temps` matches the temp-entry rule and is reclaimed;
      - targets off APFS are skipped.
-- [ ] **Step 2: Realign CORE.** Invoke the `realign-spec` skill for feature CORE. It must make three changes:
+- [x] **Step 2: Realign CORE.** Invoke the `realign-spec` skill for feature CORE. It must make three changes:
   - reword CORE `design.md:66-69` and `:179` so doctor (d) tries `flock(LOCK_EX|LOCK_NB)` on a read-only fd against flock, fcntl-read and fcntl-write holders, and measures the reverse;
   - drop `probe_lock` from the interface line;
   - align CORE-1.1(d)'s wording with AUTOGC-1.1 and AUTOGC-1.2.
 
   Leave the open question of whether check (a) should gate private-byte receipts as an Open Question in CORE (owner decision O1).
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Run `git add -A && git commit -m "docs: gc in the README; realign CORE's doctor lock check"`.
 
