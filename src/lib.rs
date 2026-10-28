@@ -4,6 +4,7 @@ pub mod cli;
 pub mod discover;
 pub mod doctor;
 pub mod fingerprint;
+pub mod gc;
 pub mod git;
 pub mod platform;
 pub mod receipt;

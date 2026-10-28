@@ -109,6 +109,28 @@ fn doctor_reports_every_check_with_its_measured_value_and_records_capabilities()
 }
 
 #[test]
+fn check_d_reports_the_lock_matrix_and_passes_on_this_mac() {
+    let hive = Hive::new();
+    let (_, receipt) = doctor(&hive);
+    let d = receipt["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "d")
+        .unwrap()
+        .clone();
+    assert_eq!(d["measured"].as_object().unwrap().len(), 8, "{d}");
+    for (key, value) in d["measured"].as_object().unwrap() {
+        assert_eq!(value, &serde_json::json!(true), "{key}: {d}");
+    }
+    assert_eq!(d["verdict"], "pass", "{d}");
+    let caps: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(hive.home.path.join("capabilities.json")).unwrap())
+            .unwrap();
+    assert_eq!(caps["lock_check"], 1);
+}
+
+#[test]
 fn doctor_finishes_with_no_terminal_attached() {
     // `doctor()` spawns with stdin from /dev/null and no TTY; `wait_within` fails on a hang.
     let hive = Hive::new();

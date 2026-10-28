@@ -78,11 +78,12 @@ Leave `.skills/verify/`.
 | `repo add` / `repo list` | `cargo hive repo add <path>`, `cargo hive repo list` | `counts.registered = 1`; `registry.json` re-read lists the main checkout and its root commit |
 | `status` — checkouts | `cargo hive status <repo>` | `counts.checkouts`, `protected`, `secondary`; a `checkout.protected` finding for the main |
 | `status` — target dirs | `cargo hive status <repo>` | `counts.targets = 1`, `owned = 1`, `bytes > 0`; a `target.owned` finding; `snapshot.json` written |
+| `gc` | `cargo hive gc [<repo>…] [--dry-run]` | Receipt counts (`sessions_deleted`, `freed_bytes`, …); dry-run changes nothing; cancel exits 130 |
 | Receipt log | any command | Each command appends one line to `$HIVE_HOME/receipts/<date>.jsonl` |
 
 ### doctor
 
-- **Sub-features:** checks (a) clone sharing, (b) Applesauce compression, (c) clone id, (d) lock probes, (e) owner-auth availability, (f) fingerprint format.
+- **Sub-features:** checks (a) clone sharing, (b) Applesauce compression, (c) clone id, (d) exclusive lock proof, (e) owner-auth availability, (f) fingerprint format.
 - **How to get to it (user POV):** run `cargo hive doctor` after install, and again after a toolchain change.
 - **Driving it with the shell:** `"$HIVE" doctor --json > doctor.json`; assert exit 0 and `[c["id"], c["verdict"]]` for each of `doctor.json["checks"]`.
 - **Gotchas:** below macOS 27 it still runs every check and reports the floor; check (e) never shows a dialog.
@@ -111,6 +112,14 @@ Leave `.skills/verify/`.
 - **Driving it with the shell:** the same command → `counts.targets == 1`, `counts.owned == 1`, `counts.bytes > 0`, and a `target.owned` finding for `$SCRATCH/app/target`.
 - **Gotchas:** `cargo metadata` runs offline and locked; a second run within the same stamp is a cache hit (`counts.metadata_cache_hits`).
 - **Persist check:** re-read `$HIVE_HOME/snapshot.json` (present after the run); a second `status` reports `metadata_cache_hits >= 1` and `metadata_calls == 0`.
+
+### gc
+
+- **Sub-features:** delete superseded incremental sessions and rustc temp dirs; a session with a lock file is deleted under that lock, and a session with none is deleted without one; `--dry-run` reports the same counts without deleting; cancel (SIGINT or SIGTERM) exits 130 with a receipt.
+- **How to get to it (user POV):** `cargo hive gc <repo>` after a build has left old sessions; optionally `--dry-run`.
+- **Driving it with the shell:** `"$HIVE" gc "$SCRATCH/app" --json > gc.json`; assert exit 0 and counts such as `sessions_deleted` / `freed_bytes`. A dry run (`--dry-run`) leaves the target tree unchanged. Cancel returns exit 130 and still appends a receipt whose `command` is `gc`.
+- **Gotchas:** gc refuses until doctor results for the active toolchain allow both deletion and fingerprint reading, which includes the current lock check; held session or build locks are skipped (`skipped_held`).
+- **Persist check:** presentational for deletions; the receipt line is the persisted record (see Receipt log). A dry run must leave `$SCRATCH/app/target` byte-identical to before.
 
 ### Receipt log
 

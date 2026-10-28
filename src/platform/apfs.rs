@@ -1,21 +1,24 @@
 //! macOS `Fs`: APFS clones and sharing attributes through `libc`.
 
-use super::{CompressOutcome, Fs, LockHolder, LockKind, LockState, Sharing, TempDir};
+use super::{
+    container_key, entry_kind, CompressOutcome, EntryKind, EntryStat, Fs, HeldLock, LockHolder,
+    LockKind, LockState, Sharing, TempDir, TryLock, VolumeInfo, CHILD_DEADLINE,
+};
 use applesauce::compressor::Kind;
 use applesauce::progress::{Progress, SkipReason, Task};
 use applesauce::FileCompressor;
-use std::ffi::{CString, OsString};
+use std::ffi::{CStr, CString, OsString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::macos::fs::MetadataExt as _;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// `<sys/attr.h>` extended flags that `libc` does not define.
 const EF_MAY_SHARE_BLOCKS: u64 = 0x1;
@@ -108,7 +111,7 @@ impl Fs for Apfs {
                 (&mut list as *mut libc::attrlist).cast(),
                 buf.as_mut_ptr().cast(),
                 buf.len(),
-                libc::FSOPT_ATTR_CMN_EXTENDED,
+                libc::FSOPT_ATTR_CMN_EXTENDED | libc::FSOPT_NOFOLLOW,
             )
         };
         if rc != 0 {
@@ -167,16 +170,12 @@ impl Fs for Apfs {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
-        let mut line = String::new();
-        let read = child
-            .stdout
-            .take()
-            .map(|o| BufReader::new(o).read_line(&mut line));
-        if line.trim() != "held" {
+        let line = first_line_within(&mut child, CHILD_DEADLINE);
+        if !matches!(&line, Ok(l) if l.trim() == "held") {
             let _ = child.kill();
             let _ = child.wait();
             return Err(io::Error::other(format!(
-                "the lock holder did not take the lock ({read:?})"
+                "the lock holder did not take the lock ({line:?})"
             )));
         }
         Ok(LockHolder::new(move || {
@@ -185,18 +184,133 @@ impl Fs for Apfs {
         }))
     }
 
-    fn probe_lock(&self, path: &Path) -> io::Result<LockState> {
-        let file = fs::File::open(path)?;
-        // SAFETY: `file` owns a valid descriptor for the call; closing it drops the shared lock.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
-            return Ok(LockState::Free);
+    fn try_lock_exclusive(&self, path: &Path) -> TryLock {
+        let p = match c_path(path) {
+            Ok(p) => p,
+            Err(e) => return TryLock::Unopenable(e),
+        };
+        // SAFETY: `p` is a valid NUL-terminated path for the duration of the call.
+        let fd = unsafe {
+            libc::open(
+                p.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let err = io::Error::last_os_error();
+            return if err.kind() == io::ErrorKind::NotFound {
+                TryLock::Gone
+            } else {
+                TryLock::Unopenable(err)
+            };
         }
-        let err = io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            Ok(LockState::Held)
-        } else {
-            Err(err)
+        // SAFETY: `fd` was just opened by this process and nothing else owns it.
+        let file = unsafe { fs::File::from_raw_fd(fd) };
+        match file.metadata() {
+            Ok(m) if m.file_type().is_file() => {}
+            Ok(_) => {
+                return TryLock::Unopenable(io::Error::other("the lock path is not a regular file"))
+            }
+            Err(e) => return TryLock::Unopenable(e),
         }
+        // SAFETY: `file` owns a valid descriptor for the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let err = io::Error::last_os_error();
+            return if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                TryLock::Held
+            } else {
+                TryLock::Unlockable(err)
+            };
+        }
+        TryLock::Acquired(HeldLock::new(move || drop(file)))
+    }
+
+    fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState> {
+        let mut child = Command::new(&self.holder)
+            .arg("__try-lock")
+            .arg(kind.as_arg())
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let line = first_line_within(&mut child, CHILD_DEADLINE);
+        let _ = child.kill();
+        let _ = child.wait();
+        match line?.trim() {
+            "acquired" => Ok(LockState::Free),
+            "refused" => Ok(LockState::Held),
+            other => Err(io::Error::other(format!(
+                "the lock child answered {other:?}"
+            ))),
+        }
+    }
+
+    fn entry_stat(&self, path: &Path) -> io::Result<EntryStat> {
+        let m = fs::symlink_metadata(path)?;
+        let kind = entry_kind(m.file_type());
+        Ok(EntryStat {
+            dev: m.dev(),
+            ino: m.ino(),
+            nlink: m.nlink(),
+            blocks: m.blocks(),
+            kind,
+            compressed: m.st_flags() & libc::UF_COMPRESSED != 0,
+        })
+    }
+
+    fn read_dir_bounded(&self, dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>> {
+        let mut out = Vec::new();
+        for (seen, entry) in fs::read_dir(dir)?.enumerate() {
+            if seen >= cap {
+                return Err(io::Error::other(format!(
+                    "{} has more than {cap} entries",
+                    dir.display()
+                )));
+            }
+            let entry = entry?;
+            let kind = entry_kind(entry.file_type()?);
+            if let Ok(name) = entry.file_name().into_string() {
+                out.push((name, kind));
+            }
+        }
+        Ok(out)
+    }
+
+    fn remove_tree(&self, path: &Path) -> io::Result<()> {
+        // std's remove_dir_all opens every level with O_NOFOLLOW and unlinks a symlink root.
+        fs::remove_dir_all(path)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        fs::remove_file(path)
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        let p = c_path(path)?;
+        // SAFETY: an all-zero `statfs` struct is valid output space.
+        let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `p` is NUL-terminated and `s` is writable; both outlive the call.
+        if unsafe { libc::statfs(p.as_ptr(), &mut s) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the kernel NUL-terminates these fixed-size name fields.
+        let text = |field: &[libc::c_char]| {
+            unsafe { CStr::from_ptr(field.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let (fs_type, from, on) = (
+            text(&s.f_fstypename),
+            text(&s.f_mntfromname),
+            text(&s.f_mntonname),
+        );
+        Ok(VolumeInfo {
+            container: container_key(&from).unwrap_or_else(|| format!("mount:{on}")),
+            fs_type,
+            mount: PathBuf::from(on),
+            available_bytes: s.f_bavail.saturating_mul(u64::from(s.f_bsize)),
+        })
     }
 }
 
@@ -256,6 +370,60 @@ pub fn private_byte_count(private: i64) -> io::Result<u64> {
         .map_err(|_| io::Error::other(format!("private byte count is negative: {private}")))
 }
 
+/// The first stdout line of `child`, or an error once `limit` passes. The caller kills the child.
+fn first_line_within(child: &mut Child, limit: Duration) -> io::Result<String> {
+    let out = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("the lock child has no stdout"))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = tx.send(BufReader::new(out).read_line(&mut line).map(|_| line));
+    });
+    match rx.recv_timeout(limit) {
+        Ok(read) => read,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("the lock child did not answer within {limit:?}"),
+        )),
+    }
+}
+
+/// Body of `__try-lock`: one non-blocking attempt, released when this returns.
+pub fn try_lock_once(kind: LockKind, path: &Path) -> io::Result<LockState> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    let fd = file.as_raw_fd();
+    let rc = match kind {
+        // SAFETY: `fd` is valid while `file` lives.
+        LockKind::Flock => unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) },
+        LockKind::Fcntl | LockKind::FcntlRead => {
+            // SAFETY: an all-zero `flock` struct is valid; the fields that matter are set next.
+            let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+            lock.l_type = (if kind == LockKind::FcntlRead {
+                libc::F_RDLCK
+            } else {
+                libc::F_WRLCK
+            }) as libc::c_short;
+            lock.l_whence = libc::SEEK_SET as libc::c_short;
+            // SAFETY: `lock` outlives the call and `fd` is valid.
+            unsafe { libc::fcntl(fd, libc::F_SETLK, &lock) }
+        }
+    };
+    if rc == 0 {
+        return Ok(LockState::Free);
+    }
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::EWOULDBLOCK) | Some(libc::EACCES) => Ok(LockState::Held),
+        _ => Err(err),
+    }
+}
+
 /// Body of `__hold-lock`: take the lock (blocking), report it, then wait to be killed.
 /// The file must already exist; this never creates one.
 pub fn hold_lock_forever(kind: LockKind, path: &Path) -> io::Result<std::convert::Infallible> {
@@ -268,10 +436,14 @@ pub fn hold_lock_forever(kind: LockKind, path: &Path) -> io::Result<std::convert
     let rc = match kind {
         // SAFETY: `fd` is valid while `file` lives, which is forever below.
         LockKind::Flock => unsafe { libc::flock(fd, libc::LOCK_EX) },
-        LockKind::Fcntl => {
+        LockKind::Fcntl | LockKind::FcntlRead => {
             // SAFETY: an all-zero `flock` struct is valid; the fields that matter are set next.
             let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-            lock.l_type = libc::F_WRLCK as libc::c_short;
+            lock.l_type = (if kind == LockKind::FcntlRead {
+                libc::F_RDLCK
+            } else {
+                libc::F_WRLCK
+            }) as libc::c_short;
             lock.l_whence = libc::SEEK_SET as libc::c_short;
             // SAFETY: `lock` outlives the call and `fd` is valid.
             unsafe { libc::fcntl(fd, libc::F_SETLKW, &lock) }
@@ -400,5 +572,93 @@ mod tests {
             fs::symlink_metadata(&a).unwrap().st_flags() & libc::UF_COMPRESSED,
             0
         );
+    }
+
+    use crate::platform::EntryKind;
+
+    #[test]
+    fn entry_stat_never_follows_a_link_and_sees_links_and_compression() {
+        let t = tmp("stat");
+        let (a, b, link) = (
+            t.path().join("a"),
+            t.path().join("b"),
+            t.path().join("link"),
+        );
+        apfs().write_file(&a, &vec![3u8; 8192]).unwrap();
+        let one = apfs().entry_stat(&a).unwrap();
+        assert_eq!(
+            (one.kind, one.nlink, one.compressed),
+            (EntryKind::File, 1, false)
+        );
+        apfs().hardlink(&a, &b).unwrap();
+        let two = apfs().entry_stat(&b).unwrap();
+        assert_eq!((two.ino, two.nlink), (one.ino, 2));
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        assert_eq!(apfs().entry_stat(&link).unwrap().kind, EntryKind::Symlink);
+        assert_eq!(apfs().entry_stat(t.path()).unwrap().kind, EntryKind::Dir);
+        let packed = t.path().join("packed");
+        let content: Vec<u8> = (0..4 << 20).map(|i| (i % 251) as u8).collect();
+        apfs().write_file(&packed, &content).unwrap();
+        assert_eq!(apfs().compress(&packed), CompressOutcome::Compressed);
+        assert!(apfs().entry_stat(&packed).unwrap().compressed);
+    }
+
+    #[test]
+    fn a_bounded_listing_fails_one_entry_past_its_cap() {
+        let t = tmp("list");
+        for name in ["x", "y"] {
+            apfs().write_file(&t.path().join(name), b"").unwrap();
+        }
+        std::os::unix::fs::symlink("x", t.path().join("z")).unwrap();
+        let mut listed = apfs().read_dir_bounded(t.path(), 3).unwrap();
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![
+                ("x".into(), EntryKind::File),
+                ("y".into(), EntryKind::File),
+                ("z".into(), EntryKind::Symlink)
+            ]
+        );
+        assert!(apfs().read_dir_bounded(t.path(), 2).is_err());
+    }
+
+    #[test]
+    fn removing_a_tree_never_follows_a_link_out_of_it() {
+        let t = tmp("remove");
+        let outside = t.path().join("outside");
+        apfs().write_file(&outside, b"keep").unwrap();
+        let tree = t.path().join("tree");
+        std::fs::create_dir_all(tree.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&outside, tree.join("sub/link")).unwrap();
+        std::os::unix::fs::symlink(t.path(), tree.join("up")).unwrap();
+        apfs().remove_tree(&tree).unwrap();
+        assert!(!tree.exists());
+        assert_eq!(apfs().read(&outside).unwrap(), b"keep");
+        let root_link = t.path().join("root-link");
+        std::os::unix::fs::symlink(&outside, &root_link).unwrap();
+        apfs().remove_tree(&root_link).unwrap();
+        assert!(outside.exists() && std::fs::symlink_metadata(&root_link).is_err());
+    }
+
+    #[test]
+    fn the_scratch_volume_is_apfs_with_a_disk_container() {
+        let v = apfs().volume(Path::new("/private/tmp")).unwrap();
+        assert_eq!(v.fs_type, "apfs");
+        assert!(v.container.starts_with("disk"), "{v:?}");
+        assert!(v.available_bytes > 0);
+    }
+
+    #[test]
+    fn sharing_does_not_follow_a_final_symlink() {
+        let t = tmp("share-link");
+        let a = t.path().join("a");
+        apfs().write_file(&a, &vec![1u8; 1 << 20]).unwrap();
+        let link = t.path().join("link");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        // With FSOPT_NOFOLLOW the call describes the link itself (or refuses it), never the 1 MiB target.
+        if let Ok(s) = apfs().sharing(&link) {
+            assert_ne!(s.private_bytes, 1 << 20);
+        }
     }
 }

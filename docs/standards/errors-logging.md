@@ -14,7 +14,7 @@ How cargo-hive represents failures and refusals, and how a command ends. Receipt
 | Error types | Typed enums with a hand-written `Display` and `std::error::Error` impl; no `thiserror` or `anyhow` |
 | Error messages | Say what is wrong and what to do next |
 | Expected refusals | Data, not errors: `Result<Result<Outcome, Refusal>, Error>` keeps a refusal apart from an infrastructure failure |
-| Ending a command | Commands return an exit code: 0 ok, 1 refusal or failure, 2 unsupported OS. Nothing calls `process::exit` outside `main.rs` |
+| Ending a command | Commands return an exit code: 0 ok, 1 refusal or failure, 2 unsupported OS, 130 cancel (SIGINT or SIGTERM). Nothing calls `process::exit` outside `main.rs` |
 
 ## Logging
 

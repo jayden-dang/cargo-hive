@@ -62,11 +62,11 @@ Fresh retrieval (`load-subgraph`, seeded with CODE `CORE` and the requirement te
    - The fixture is a compressible 4 MiB single-link file plus a hardlinked pair.
    - Outcomes come from the progress callbacks. `SkipReason::HardLink` maps to `SkippedHardLink`. Every other skip reason, and "not compressible enough", maps to `Failed(reason)` (F17.4).
 10. **Owner-authentication availability only.** Doctor calls `LAContext::new()` then `canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthentication)`, and never `evaluatePolicy` (CORE-6.4).
-11. **Lock check (d) exercises both lock kinds (F16).**
-   - A hidden subcommand `cargo-hive __hold-lock <flock|fcntl> <path>` holds the lock until it is killed.
-   - Doctor spawns it once for each kind and probes the way production will: `flock(LOCK_SH | LOCK_NB)` on a read-only fd.
-   - The check passes only if both holders are reported held without waiting, and the probe succeeds after each holder is killed and reaped.
-   - Production probes of `.cargo-build-lock` and session `.lock` files belong to ROAD-2.
+11. **Lock check (d) proves the exclusive lock both ways (F16; amended by AUTOGC-1.1/1.2).**
+   - A hidden subcommand `cargo-hive __hold-lock <flock|fcntl|fcntl-read> <path>` holds the lock until it is killed.
+   - Doctor spawns it for each of flock, fcntl and fcntl-read, and probes the way production will: `flock(LOCK_EX | LOCK_NB)` on a read-only fd. The `fcntl` argument is the write lock; its measured key is `fcntl_write`.
+   - It also measures the reverse: while hive holds that exclusive flock, another process's non-blocking fcntl read and write tries on the same file are refused.
+   - The check passes only if every forward refusal and success, and both reverse refusals, are observed without waiting.
 12. **Receipt schema v1.** Fields: `schema`, `hive_version`, `macos_version`, `toolchain` (the `rustc -vV` release line, or unmeasured), `command`, `ts` (when the command ran), `scope` (repos and checkouts, from arguments), `counts` (named integers only), `checks` (doctor), `findings` (unsupported profile dirs, unresolved owners, missing worktrees), `unmeasured` (list of `{field, reason}`), `notes`. There is no field for durations or time saved (CORE-5.4).
 13. **Discovery is bounded explicitly.** There is no glob recursion. Walks are depth-counted `read_dir` loops: up to 3 levels in checkouts, up to 2 in cache roots, up to 2 in secondary roots. They never enter `node_modules`, `.git`, or a dir already identified as a Cargo target (CORE-6.2). Path containment is compared component-wise on realpaths, so `/private/tmpfoo` is not under `/private/tmp` (F15.6).
 14. **Doctor results are tied to a toolchain release (F17.2).** `capabilities.json` records the `rustc -vV` `release:` line of the toolchain doctor ran with. `require` refuses with "run `cargo hive doctor`" when the record is missing or the active release differs (CORE-1.10).
@@ -176,7 +176,7 @@ Locality: new `src/size.rs`. `discover` fills `TargetDir.size`. Under `--no-size
 
 Satisfies: CORE-1.6, CORE-6.4
 Reuse: 5 — `libc` (`clonefile`, `getattrlist`, `flock`, `fcntl`, `mkdtemp`, `sigaction`), `applesauce`, `objc2-local-authentication`; the trait shape is new (rung 7)
-Interface: `trait Fs { temp_dir(prefix) -> TempDir; write_file; read; hardlink; set_mtime; clone_file(src, dst); sharing(path) -> Sharing{private_bytes, clone_id, may_share, shares_all}; compress(path) -> CompressOutcome::{Compressed, SkippedHardLink, Failed(reason)}; hold_lock(kind, path) -> LockHolder; probe_lock(path) -> LockState::{Free, Held} }` · `trait Approve { owner_auth_available() -> Availability }` · `fn current() -> Result<Platform, NotMacOs>`
+Interface: `trait Fs { temp_dir(prefix) -> TempDir; write_file; read; hardlink; set_mtime; clone_file(src, dst); sharing(path) -> Sharing{private_bytes, clone_id, may_share, shares_all}; compress(path) -> CompressOutcome::{Compressed, SkippedHardLink, Failed(reason)}; hold_lock(kind, path) -> LockHolder; try_lock_exclusive(path) -> TryLock; try_lock_elsewhere(kind, path) -> LockState::{Free, Held} }` · `trait Approve { owner_auth_available() -> Availability }` · `fn current() -> Result<Platform, NotMacOs>`
 Depth: deletion test — callers would still need to know these filesystem operations and one auth question. These stay hidden: the FFI structs, the local EF constants, the Applesauce progress adapter, the hidden `__hold-lock` holder process, and the objc message sends.
 Locality: new `src/platform/{mod.rs, apfs.rs, local_auth.rs, unsupported.rs}`. `unsupported.rs` builds on non-macOS, and `current()` returns `NotMacOs` there (CORE-1.6). ROAD-2, 7, 8 and 9 extend these traits rather than adding new ones. `Approve` gains `evaluate` only in ROAD-7 (CORE-6.4).
 
