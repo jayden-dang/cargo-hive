@@ -2,9 +2,10 @@
 
 Cargo build artifacts across agent worktrees on macOS, with measured receipts.
 
-This release (foundation) reads only. It registers repositories, lists their checkouts
-and Cargo target dirs, and says how hive may treat each one. It deletes, compresses
-and seeds nothing yet.
+It registers repositories, lists their checkouts and Cargo target dirs, and says how
+hive may treat each one. `cargo hive gc` deletes superseded rustc incremental sessions
+and leftover rustc temp dirs, each under its owner's lock. It compresses and seeds
+nothing yet.
 
 ## Install from scratch
 
@@ -27,16 +28,28 @@ cargo hive status          # every registered repo; add --json for one machine-r
 | `cargo hive repo add <path>` | Registers the main checkout containing `<path>` |
 | `cargo hive repo list` | Lists registered repositories and their root commits |
 | `cargo hive status [<repo>…] [--no-sizes]` | Lists checkouts (protected, secondary, missing) and Cargo target dirs (owner or orphan candidate, size, units and edges) |
+| `cargo hive gc [<repo>…] [--dry-run]` | Deletes superseded incremental sessions and `deps/rustc*`/`rmeta*` temp dirs under their owners' locks; reports freed bytes per inode. `--dry-run` deletes nothing |
 
 Every command accepts `--json`. It then prints exactly one receipt on stdout, and every
 receipt is also appended to `~/.hive/receipts/<date>.jsonl`. Receipts carry counts and
 measured values only, never durations or estimated time saved.
 
+## gc
+
+`cargo hive gc` deletes superseded incremental sessions and leftover rustc temp dirs
+inside Cargo target dirs:
+
+- each session is deleted under its own lock, and temp entries under `.cargo-build-lock`;
+- held entries are skipped;
+- output kept with `-C save-temps` matches the temp-entry rule and is reclaimed;
+- targets off APFS are skipped.
+
 ## What hive never does
 
 - It installs no Cargo configuration, environment variable, rustc wrapper, cargo shim or
   hook. `cargo` and rust-analyzer build exactly as without hive.
-- It writes only under `~/.hive/` and inside doctor's own temporary directory.
+- It writes only under `~/.hive/` and doctor's temporary directory. Outside those, it
+  only deletes, through `gc`, inside Cargo target dirs.
 - It reads Cargo's internal `.fingerprint/` files only when their exact format is known
   (docs/adr/0001). Anything else is reported as unsupported.
 
