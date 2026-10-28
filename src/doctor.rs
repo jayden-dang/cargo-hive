@@ -522,7 +522,7 @@ fn check_sharing_flags(fs: &dyn Fs, dir: &Path) -> Check {
 }
 
 /// (d) The lock gc deletes under is refused while another process holds any lock kind rustc
-/// or Cargo use; while hive holds it, another process's fcntl and flock tries are refused.
+/// or Cargo use; while hive holds it, another process's fcntl read and fcntl write tries are refused.
 fn check_lock_probe(fs: &dyn Fs, dir: &Path) -> Check {
     let attempt = || -> io::Result<Check> {
         let mut measured = Measures::new();

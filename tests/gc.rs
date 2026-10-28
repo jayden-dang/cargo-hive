@@ -1,11 +1,22 @@
 #![cfg(target_os = "macos")]
 mod common;
 use common::{crate_dirs, init_repo, plant_session, sessions_in, wait_within, Hive, Scratch};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
 
 fn register(hive: &Hive, repo: &Path) {
     let out = hive.run(&["repo", "add", repo.to_str().unwrap()]);
@@ -455,6 +466,85 @@ fn killing_gc_at_any_point_never_costs_a_rebuild() {
     assert!(fresh_build_compiles_nothing(&hive, &repo));
     fs::write(repo.join("src/lib.rs"), "pub fn answer() -> u32 { 7 }\n").unwrap();
     hive.build_crate(&repo, None);
+    let kept_inos: BTreeSet<u64> = kept_files.values().copied().collect();
+    let mut shared = false;
+    for d in crate_dirs(&target) {
+        let newest = sessions_in(&d)
+            .into_iter()
+            .max_by_key(|n| n.split('-').nth(1).unwrap().to_string())
+            .unwrap();
+        for e in fs::read_dir(d.join(newest)).unwrap() {
+            let p = e.unwrap().path();
+            let ino = std::os::unix::fs::MetadataExt::ino(&fs::symlink_metadata(&p).unwrap());
+            if kept_inos.contains(&ino) {
+                shared = true;
+                break;
+            }
+        }
+        if shared {
+            break;
+        }
+    }
+    eprintln!("shared-inode overlap between new session and kept-session snapshot: {shared}");
+}
+
+#[test]
+fn an_interrupted_gc_exits_130() {
+    let hive = Hive::ready();
+    let s = Scratch::new("gc-signal");
+    let repo = init_repo(&s.path.join("app"), "");
+    hive.build_with_sessions(&repo, None);
+    register(&hive, &repo);
+    let bin = s.path.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let sentinel = s.path.join("cargo.pid");
+    fs::write(
+        bin.join("cargo"),
+        "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$HIVE_CARGO_SENTINEL\"\nsleep 300\n",
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("cargo"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let child = hive
+        .command(&["gc", repo.to_str().unwrap(), "--json"])
+        .env("PATH", &path)
+        .env("HIVE_CARGO_SENTINEL", &sentinel)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let hive_pid = child.id();
+    let started = Instant::now();
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "cargo metadata never wrote its pid"
+        );
+        if let Ok(text) = fs::read_to_string(&sentinel) {
+            if text.trim().parse::<u32>().is_ok() {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(pid_alive(hive_pid), "gc should be running before SIGINT");
+    assert!(Command::new("kill")
+        .args(["-INT", &hive_pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let out = wait_within(child, Duration::from_secs(30));
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
+    let logged = fs::read_dir(hive.home.path.join("receipts"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            fs::read_to_string(e.path())
+                .unwrap_or_default()
+                .contains("\"command\":\"gc\"")
+        });
+    assert!(logged, "a cancelled gc appends a receipt");
 }
 
 #[test]

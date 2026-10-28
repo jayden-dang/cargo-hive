@@ -144,7 +144,7 @@ Consult outcome: no `docs/product/metrics.md`, `docs/ops/reliability.md`, `docs/
 ## 7. Existing behavior this feature must not change
 
 Files and surfaces this change touches:
-- `src/platform/mod.rs`, `src/platform/apfs.rs`: the `Fs` trait gains a held-lock method; `probe_lock` and `hold_lock` already exist. Behavior at risk is guarded below.
+- `src/platform/mod.rs`, `src/platform/apfs.rs`: the `Fs` trait gains a held-lock method (`try_lock_exclusive` / `HeldLock`); `hold_lock` remains and `probe_lock` is gone. Platform lock behavior is what this feature changes; guarded below.
 - `src/doctor.rs`: check (d) changes; the other checks must not. Guarded below.
 - `src/cli.rs`: a new `gc` command; `status`, `repo add`, `repo list`, `doctor` and the hidden `__hold-lock` exist. Guarded below.
 - `src/discover.rs`, `src/cargo_target.rs`: target scope may need where each target was found. `status` output is at risk. Guarded below.
