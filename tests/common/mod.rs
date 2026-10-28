@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
@@ -135,6 +135,36 @@ impl Hive {
         });
         (out, value)
     }
+
+    /// Builds `repo` three times, editing its lib in between, so each incremental crate dir
+    /// holds a superseded session beside the newest one.
+    pub fn build_with_sessions(&self, repo: &Path, target_dir: Option<&Path>) {
+        for i in 0..3 {
+            fs::write(
+                repo.join("src/lib.rs"),
+                format!("pub fn answer() -> u32 {{ {} }}\n", 42 + i),
+            )
+            .unwrap();
+            self.build_crate(repo, target_dir);
+        }
+    }
+
+    /// Starts `__hold-lock <kind> <path>` and returns once it reports `held`.
+    pub fn hold_lock_child(&self, kind: &str, path: &Path) -> Child {
+        let mut child = self
+            .command(&["__hold-lock", kind, path.to_str().unwrap()])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().unwrap()),
+            &mut line,
+        )
+        .unwrap();
+        assert_eq!(line.trim(), "held");
+        child
+    }
 }
 
 pub fn git(dir: &Path, args: &[&str]) -> String {
@@ -188,4 +218,82 @@ pub fn init_repo(dir: &Path, crate_rel: &str) -> PathBuf {
         &["commit", "-q", "-m", &format!("init {}", dir.display())],
     );
     dir.canonicalize().unwrap()
+}
+
+/// Crate dirs under `<target>/debug/incremental`.
+pub fn crate_dirs(target: &Path) -> Vec<PathBuf> {
+    let inc = target.join("debug/incremental");
+    let mut dirs: Vec<PathBuf> = fs::read_dir(&inc)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// Session dir names in one crate dir (lock files excluded).
+pub fn sessions_in(crate_dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(crate_dir)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .filter(|e| e.file_type().unwrap().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn b36(mut n: u64) -> String {
+    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    loop {
+        out.push(digits[(n % 36) as usize]);
+        n /= 36;
+        if n == 0 {
+            break;
+        }
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap()
+}
+
+/// Plants a session `secs_ago` old (named as rustc names them) holding one 8 KiB file, plus
+/// its lock file unless `lockless`. Returns the (dir, lock) names.
+pub fn plant_session(
+    crate_dir: &Path,
+    secs_ago: u64,
+    last: &str,
+    lockless: bool,
+) -> (String, String) {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let micros = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
+        - Duration::from_secs(secs_ago))
+    .as_micros() as u64;
+    let key = format!("s-{}-p{}", b36(micros), NEXT.fetch_add(1, Ordering::SeqCst));
+    let dir = format!("{key}-{last}");
+    fs::create_dir_all(crate_dir.join(&dir)).unwrap();
+    fs::write(
+        crate_dir.join(&dir).join("query-cache.bin"),
+        vec![5u8; 8192],
+    )
+    .unwrap();
+    let lock = format!("{key}.lock");
+    if !lockless {
+        fs::write(crate_dir.join(&lock), b"").unwrap();
+    }
+    (dir, lock)
+}
+
+/// Waits for `child` up to `limit`; a hang fails the test instead of blocking the suite.
+pub fn wait_within(mut child: Child, limit: Duration) -> Output {
+    let started = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > limit {
+            let _ = child.kill();
+            panic!("the command did not finish within {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child.wait_with_output().unwrap()
 }

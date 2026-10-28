@@ -41,6 +41,16 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// Delete superseded incremental sessions and leftover rustc temp dirs, under their owners' locks
+    Gc {
+        /// Registered repos to clean; none means every target hive knows
+        repos: Vec<std::path::PathBuf>,
+        /// Report what would be deleted and freed, deleting nothing
+        #[arg(long)]
+        dry_run: bool,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// Hold a lock until killed (used by doctor's lock check)
     #[command(name = "__hold-lock", hide = true)]
     HoldLock {
@@ -120,6 +130,11 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
             out,
         } => status(&state, &repos, no_sizes, out),
         Command::Doctor { out } => doctor_cmd(&state, out),
+        Command::Gc {
+            repos,
+            dry_run,
+            out,
+        } => gc_cmd(&state, &repos, dry_run, out),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
         Command::TryLock { .. } => unreachable!("handled before the state root is opened"),
     }
@@ -631,4 +646,242 @@ fn report_targets(b: &mut ReceiptBuilder, human: &mut String, scan: &crate::disc
     for var in &scan.ignored_vars {
         b.note(format!("{var} is set in the caller's environment and was ignored: ownership comes from each checkout's own Cargo configuration"));
     }
+}
+
+fn put_counts(b: &mut ReceiptBuilder, suffix: &str, c: &crate::gc::Counts) {
+    b.count(&format!("sessions_deleted{suffix}"), c.sessions_deleted)
+        .count(
+            &format!("session_lock_files_deleted{suffix}"),
+            c.session_lock_files_deleted,
+        )
+        .count(
+            &format!("temp_entries_deleted{suffix}"),
+            c.temp_entries_deleted,
+        )
+        .count(&format!("skipped_held{suffix}"), c.skipped_held)
+        .count(
+            &format!("skipped_lock_unopenable{suffix}"),
+            c.skipped_lock_unopenable,
+        );
+    if let Some(n) = c.freed_bytes {
+        b.count(&format!("freed_bytes{suffix}"), n);
+    }
+    if let Some(n) = c.deleted_bytes_still_shared {
+        b.count(&format!("deleted_bytes_still_shared{suffix}"), n);
+    }
+}
+
+fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: OutputArgs) -> i32 {
+    use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
+    use crate::doctor::{self, Capabilities, Capability};
+    use crate::gc;
+    use std::collections::{BTreeMap, BTreeSet};
+    let command = if dry_run { "gc --dry-run" } else { "gc" };
+    if let Err(e) = doctor::install_signal_handlers() {
+        return emit_failure(
+            state,
+            out,
+            command,
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
+    }
+    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let loaded = (|| -> Result<_, StateError> {
+        Ok((
+            state.read::<Registry>(registry::FILE)?,
+            state.config()?,
+            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+            state.read::<Snapshot>(SNAPSHOT_FILE)?,
+        ))
+    })();
+    let (reg, cfg, caps, mut snapshot) = match loaded {
+        Ok(v) => v,
+        Err(e) => return emit_failure(state, out, command, &e.to_string(), 1),
+    };
+    let Ok(platform) = platform::current() else {
+        eprintln!("{MACOS_ONLY_MESSAGE}");
+        return 2;
+    };
+    let mut b = Receipt::new(command, Scope::default());
+    let release = doctor::resolve_toolchain(state.root())
+        .ok()
+        .map(|t| t.release);
+    b.toolchain(release.clone());
+    for cap in [Capability::FingerprintReading, Capability::Deletion] {
+        if let Err(refusal) = doctor::require(&caps, cap, release.as_deref()) {
+            b.finding("refusal", None, refusal.to_string());
+            return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
+        }
+    }
+    let mut code = 0;
+    let mut selected = Vec::new();
+    if args.is_empty() {
+        selected = reg.repos.clone();
+    }
+    for arg in args {
+        let real = arg.canonicalize().unwrap_or(arg.clone());
+        match reg.repos.iter().find(|r| r.main == real) {
+            Some(r) => {
+                if !selected
+                    .iter()
+                    .any(|s: &crate::registry::Repo| s.main == r.main)
+                {
+                    selected.push(r.clone());
+                }
+            }
+            None => {
+                b.finding(
+                    "refusal",
+                    Some(arg.clone()),
+                    "not a registered repository; run `cargo hive repo add` first",
+                );
+                code = 1;
+            }
+        }
+    }
+    let mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
+    let mut checkouts = Vec::new();
+    for repo in &selected {
+        b.scope_mut().repos.push(repo.main.clone());
+        let (rows, faults) = discover::checkouts(repo, &mains, &cfg);
+        for fault in faults {
+            b.finding("walk.unreadable", Some(fault.path), fault.detail);
+        }
+        for c in rows {
+            if !c.missing {
+                b.scope_mut().checkouts.push(c.path.clone());
+            }
+            checkouts.push(c);
+        }
+    }
+    let all_repos = selected.len() == reg.repos.len()
+        && selected
+            .iter()
+            .all(|s| reg.repos.iter().any(|r| r.main == s.main));
+    let scan = discover::targets(&checkouts, &cfg, all_repos, &mut snapshot, cancelled);
+    if cancelled() {
+        b.finding("error", None, "gc was cancelled");
+        return emit(state, out, b.finish(), "gc was cancelled\n", 130);
+    }
+    for fault in &scan.walk_faults {
+        b.finding(
+            "walk.unreadable",
+            Some(fault.path.clone()),
+            fault.detail.clone(),
+        );
+    }
+    let scope = if args.is_empty() {
+        gc::Scope::All
+    } else {
+        gc::Scope::Checkouts(
+            checkouts
+                .iter()
+                .filter(|c| !c.missing)
+                .map(|c| c.path.clone())
+                .collect(),
+        )
+    };
+    let account_bytes = !caps.disabled.contains_key(&Capability::EvictionAccounting);
+    let volumes = |fs: &dyn platform::Fs| -> BTreeMap<String, (std::path::PathBuf, u64)> {
+        scan.targets
+            .iter()
+            .filter_map(|t| fs.volume(&t.path).ok())
+            .map(|v| (v.container, (v.mount, v.available_bytes)))
+            .collect()
+    };
+    let before = if dry_run {
+        BTreeMap::new()
+    } else {
+        volumes(&*platform.fs)
+    };
+    let opts = gc::RunOpts {
+        dry_run,
+        now: std::time::SystemTime::now(),
+        account_bytes,
+    };
+    let report = gc::run(&*platform.fs, &scan.targets, &scope, &opts, &cancelled);
+    if !dry_run {
+        let after = volumes(&*platform.fs);
+        let deleted_on: BTreeSet<String> = report
+            .per_target
+            .iter()
+            .filter(|(_, c)| {
+                c.sessions_deleted + c.session_lock_files_deleted + c.temp_entries_deleted > 0
+            })
+            .filter_map(|(p, _)| platform.fs.volume(p).ok().map(|v| v.container))
+            .collect();
+        for container in &deleted_on {
+            if let (Some((mount, was)), Some((_, now))) =
+                (before.get(container), after.get(container))
+            {
+                let change = i128::from(*now) - i128::from(*was);
+                b.note(format!(
+                    "cross-check, not a count: available bytes in APFS container {container} (mounted at {}) changed by {change:+} during this run",
+                    mount.display()
+                ));
+            }
+        }
+    }
+    put_counts(&mut b, "", &report.totals);
+    let mut human = String::new();
+    for (path, c) in &report.per_target {
+        put_counts(&mut b, &format!(":{}", path.display()), c);
+        human.push_str(&format!(
+            "{}  {} sessions, {} temp entries{}\n",
+            path.display(),
+            c.sessions_deleted,
+            c.temp_entries_deleted,
+            c.freed_bytes
+                .map(|n| format!(", {n} bytes freed"))
+                .unwrap_or_default()
+        ));
+    }
+    if !account_bytes {
+        for name in ["freed_bytes", "deleted_bytes_still_shared"] {
+            b.unmeasured(name, "doctor check (c) did not pass");
+        }
+    }
+    for skip in &report.skipped {
+        b.finding("gc.skipped", Some(skip.path.clone()), skip.reason.clone());
+    }
+    for (path, why) in &report.unmeasured {
+        b.unmeasured(&path.display().to_string(), why.clone());
+    }
+    if report.unmeasured_more > 0 {
+        b.unmeasured(
+            "unmeasured_paths",
+            format!(
+                "{} more paths could not be measured and are not listed",
+                report.unmeasured_more
+            ),
+        );
+    }
+    if report.cancelled {
+        b.finding("error", None, "gc was cancelled");
+        return emit(state, out, b.finish(), &human, 130);
+    }
+    let wrote = match state.locked_or_cancelled(cancelled, |tx| {
+        if cancelled() {
+            return Ok(false);
+        }
+        let disk = tx.read(SNAPSHOT_FILE)?;
+        tx.write(
+            SNAPSHOT_FILE,
+            &discover::merge_snapshot(snapshot, disk, &scan.cleared_profiles),
+        )?;
+        Ok(true)
+    }) {
+        Ok(wrote) => wrote,
+        Err(StateError::Cancelled) => false,
+        Err(e) => {
+            b.finding("error", None, e.to_string());
+            return emit(state, out, b.finish(), &human, 1);
+        }
+    };
+    if !wrote {
+        b.finding("error", None, "gc was cancelled");
+        return emit(state, out, b.finish(), &human, 130);
+    }
+    emit(state, out, b.finish(), &human, code)
 }
