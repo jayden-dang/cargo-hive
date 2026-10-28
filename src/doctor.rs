@@ -3,7 +3,7 @@
 
 use crate::platform::major_version;
 use crate::platform::{
-    Approve, Availability, CompressOutcome, Fs, LockHolder, LockKind, LockState,
+    Approve, Availability, CompressOutcome, Fs, LockHolder, LockKind, LockState, TryLock,
 };
 use crate::receipt::Measured;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ use std::time::{Duration, UNIX_EPOCH};
 pub const CAPABILITIES_FILE: &str = "capabilities.json";
 pub const MACOS_FLOOR: u32 = 27;
 pub const PROBE_DEADLINE: Duration = Duration::from_secs(120);
+pub const LOCK_CHECK_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -116,6 +117,10 @@ pub struct Capabilities {
     /// `None` until doctor has run.
     pub toolchain_release: Option<String>,
     pub disabled: BTreeMap<Capability, BTreeSet<CheckId>>,
+    /// Version of check (d)'s lock proof these results come from. 0 means the results were
+    /// recorded before the exclusive-lock matrix existed.
+    #[serde(default)]
+    pub lock_check: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -261,6 +266,11 @@ pub fn require(
             "no doctor results are recorded for this toolchain".into(),
         ));
     };
+    if cap == Capability::Deletion && caps.lock_check < LOCK_CHECK_VERSION {
+        return Err(CapabilityRefusal::RunDoctor(
+            "no doctor results from the current lock check are recorded for this toolchain".into(),
+        ));
+    }
     let Some(active) = active_release else {
         return Err(CapabilityRefusal::RunDoctor(
             "the active Rust toolchain could not be determined".into(),
@@ -290,6 +300,7 @@ pub fn capabilities_for(report: &DoctorReport) -> Capabilities {
     Capabilities {
         toolchain_release: report.toolchain_release.clone(),
         disabled,
+        lock_check: LOCK_CHECK_VERSION,
     }
 }
 
@@ -510,28 +521,55 @@ fn check_sharing_flags(fs: &dyn Fs, dir: &Path) -> Check {
     attempt().unwrap_or_else(|e| failed(CheckId::C, e))
 }
 
-/// (d) A non-blocking probe sees a lock another process holds, for both lock kinds.
+/// (d) The lock gc deletes under is refused while another process holds any lock kind rustc
+/// or Cargo use; while hive holds it, another process's fcntl and flock tries are refused.
 fn check_lock_probe(fs: &dyn Fs, dir: &Path) -> Check {
     let attempt = || -> io::Result<Check> {
         let mut measured = Measures::new();
         let mut ok = true;
-        for kind in [LockKind::Flock, LockKind::Fcntl] {
-            let path = dir.join(format!("d-{}.lock", kind.as_arg()));
+        for (kind, name) in [
+            (LockKind::Flock, "flock"),
+            (LockKind::FcntlRead, "fcntl_read"),
+            (LockKind::Fcntl, "fcntl_write"),
+        ] {
+            let path = dir.join(format!("d-{name}.lock"));
             fs.write_file(&path, b"")?;
             let holder: LockHolder = fs.hold_lock(kind, &path)?;
-            let held = fs.probe_lock(&path)? == LockState::Held;
+            let refused = matches!(fs.try_lock_exclusive(&path), TryLock::Held);
             holder.release();
-            let free = fs.probe_lock(&path)? == LockState::Free;
+            let free = matches!(fs.try_lock_exclusive(&path), TryLock::Acquired(_));
             measured.insert(
-                format!("{}_reported_held", kind.as_arg()),
-                Measured::Bool(held),
+                format!("{name}_holder_refuses_try"),
+                Measured::Bool(refused),
             );
             measured.insert(
-                format!("{}_free_after_release", kind.as_arg()),
+                format!("{name}_holder_free_after_exit"),
                 Measured::Bool(free),
             );
-            ok &= held && free;
+            ok &= refused && free;
         }
+        let path = dir.join("d-reverse.lock");
+        fs.write_file(&path, b"")?;
+        let guard = match fs.try_lock_exclusive(&path) {
+            TryLock::Acquired(guard) => guard,
+            other => {
+                return Err(io::Error::other(format!(
+                    "could not take the lock to test the reverse direction: {other:?}"
+                )))
+            }
+        };
+        for (kind, name) in [
+            (LockKind::FcntlRead, "fcntl_read"),
+            (LockKind::Fcntl, "fcntl_write"),
+        ] {
+            let refused = fs.try_lock_elsewhere(kind, &path)? == LockState::Held;
+            measured.insert(
+                format!("held_flock_refuses_{name}"),
+                Measured::Bool(refused),
+            );
+            ok &= refused;
+        }
+        drop(guard);
         Ok(Check {
             id: CheckId::D,
             verdict: verdict(ok),
@@ -741,7 +779,7 @@ mod tests {
     use crate::platform::{Availability, HeldLock, Sharing, TempDir, TryLock};
     use std::collections::HashMap;
     use std::os::unix::fs::MetadataExt;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
 
@@ -760,6 +798,8 @@ mod tests {
         compress_touches_mtime: bool,
         probe_sees_locks: bool,
         panic_in_compress: bool,
+        reverse_refused: bool,
+        blind_kind: Option<LockKind>,
     }
 
     impl Default for Knobs {
@@ -773,6 +813,8 @@ mod tests {
                 compress_touches_mtime: false,
                 probe_sees_locks: true,
                 panic_in_compress: false,
+                reverse_refused: true,
+                blind_kind: None,
             }
         }
     }
@@ -782,7 +824,7 @@ mod tests {
         knobs: Knobs,
         ids: Mutex<HashMap<PathBuf, u64>>,
         next: AtomicU64,
-        held: Arc<AtomicBool>,
+        held_kind: Arc<Mutex<Option<LockKind>>>,
     }
 
     impl FakeFs {
@@ -791,7 +833,7 @@ mod tests {
                 knobs,
                 ids: Mutex::new(HashMap::new()),
                 next: AtomicU64::new(1),
-                held: Arc::new(AtomicBool::new(false)),
+                held_kind: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -864,29 +906,28 @@ mod tests {
                 _ => self.knobs.single.clone(),
             }
         }
-        fn hold_lock(&self, _kind: LockKind, _path: &Path) -> io::Result<LockHolder> {
-            self.held.store(true, Ordering::SeqCst);
-            let held = Arc::clone(&self.held);
-            Ok(LockHolder::new(move || held.store(false, Ordering::SeqCst)))
-        }
-        fn probe_lock(&self, _path: &Path) -> io::Result<LockState> {
-            Ok(
-                if self.knobs.probe_sees_locks && self.held.load(Ordering::SeqCst) {
-                    LockState::Held
-                } else {
-                    LockState::Free
-                },
-            )
+        fn hold_lock(&self, kind: LockKind, _path: &Path) -> io::Result<LockHolder> {
+            *self.held_kind.lock().unwrap() = Some(kind);
+            let held = Arc::clone(&self.held_kind);
+            Ok(LockHolder::new(move || *held.lock().unwrap() = None))
         }
         fn try_lock_exclusive(&self, _path: &Path) -> TryLock {
-            if self.knobs.probe_sees_locks && self.held.load(Ordering::SeqCst) {
+            let held_kind = *self.held_kind.lock().unwrap();
+            let seen = self.knobs.probe_sees_locks
+                && held_kind.is_some()
+                && held_kind != self.knobs.blind_kind;
+            if seen {
                 TryLock::Held
             } else {
                 TryLock::Acquired(HeldLock::new(|| {}))
             }
         }
         fn try_lock_elsewhere(&self, _kind: LockKind, _path: &Path) -> io::Result<LockState> {
-            Ok(LockState::Held)
+            Ok(if self.knobs.reverse_refused {
+                LockState::Held
+            } else {
+                LockState::Free
+            })
         }
     }
 
@@ -1026,6 +1067,24 @@ mod tests {
                 CheckId::D,
                 vec![Deletion],
             ),
+            (
+                "an fcntl read lock held elsewhere goes unseen",
+                Knobs {
+                    blind_kind: Some(LockKind::FcntlRead),
+                    ..Knobs::default()
+                },
+                CheckId::D,
+                vec![Deletion],
+            ),
+            (
+                "another process can lock while hive holds the lock",
+                Knobs {
+                    reverse_refused: false,
+                    ..Knobs::default()
+                },
+                CheckId::D,
+                vec![Deletion],
+            ),
         ];
         for (name, knobs, failing, mut want) in cases {
             let parent = scratch("table");
@@ -1140,6 +1199,7 @@ mod tests {
         let other = Capabilities {
             toolchain_release: Some("1.96.1".into()),
             disabled: BTreeMap::new(),
+            lock_check: 0,
         };
         let e = require(&other, Capability::FingerprintReading, Some("1.97.1"))
             .unwrap_err()
@@ -1157,12 +1217,76 @@ mod tests {
         let off = Capabilities {
             toolchain_release: Some("1.97.1".into()),
             disabled,
+            lock_check: 0,
         };
         let e = require(&off, Capability::FingerprintReading, Some("1.97.1"))
             .unwrap_err()
             .to_string();
         assert!(e.contains("(f)"), "{e}");
         assert_eq!(require(&off, Capability::Approval, Some("1.97.1")), Ok(()));
+    }
+
+    #[test]
+    fn check_d_reports_the_full_lock_matrix() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let parent = scratch("matrix");
+        let report = run(
+            &FakeFs::new(Knobs::default()),
+            &FakeApprove(Availability::Available),
+            &env(&parent, "27.0.1"),
+        )
+        .unwrap();
+        let d = report.checks.iter().find(|c| c.id == CheckId::D).unwrap();
+        let mut keys: Vec<&str> = d.measured.keys().map(String::as_str).collect();
+        keys.sort();
+        let mut want = vec![
+            "fcntl_read_holder_free_after_exit",
+            "fcntl_read_holder_refuses_try",
+            "fcntl_write_holder_free_after_exit",
+            "fcntl_write_holder_refuses_try",
+            "flock_holder_free_after_exit",
+            "flock_holder_refuses_try",
+            "held_flock_refuses_fcntl_read",
+            "held_flock_refuses_fcntl_write",
+        ];
+        want.sort();
+        assert_eq!(keys, want);
+        assert_eq!(d.verdict, Verdict::Pass, "{:?}", d.measured);
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn deletion_needs_results_from_the_current_lock_check() {
+        let old = Capabilities {
+            toolchain_release: Some("1.97.1".into()),
+            disabled: BTreeMap::new(),
+            lock_check: 0,
+        };
+        let e = require(&old, Capability::Deletion, Some("1.97.1")).unwrap_err();
+        assert!(matches!(e, CapabilityRefusal::RunDoctor(_)), "{e}");
+        assert!(e.to_string().contains("cargo hive doctor"), "{e}");
+        assert_eq!(
+            require(&old, Capability::FingerprintReading, Some("1.97.1")),
+            Ok(())
+        );
+        let current = Capabilities {
+            lock_check: LOCK_CHECK_VERSION,
+            ..old
+        };
+        assert_eq!(
+            require(&current, Capability::Deletion, Some("1.97.1")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn capabilities_recorded_before_the_lock_check_still_parse() {
+        let caps: Capabilities =
+            serde_json::from_str(r#"{"toolchain_release":"1.97.1","disabled":{}}"#).unwrap();
+        assert_eq!(caps.lock_check, 0);
+        assert_eq!(LOCK_CHECK_VERSION, 1);
     }
 
     #[test]

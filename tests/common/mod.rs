@@ -80,7 +80,8 @@ impl Hive {
         let release = cargo_hive::doctor::resolve_toolchain(&self.home.path)
             .expect("the proof machine has a Rust toolchain")
             .release;
-        let caps = serde_json::json!({ "toolchain_release": release, "disabled": {} });
+        let caps =
+            serde_json::json!({ "toolchain_release": release, "disabled": {}, "lock_check": 1 });
         fs::write(self.home.path.join("capabilities.json"), caps.to_string()).unwrap();
     }
 

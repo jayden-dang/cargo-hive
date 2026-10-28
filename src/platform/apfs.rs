@@ -184,20 +184,6 @@ impl Fs for Apfs {
         }))
     }
 
-    fn probe_lock(&self, path: &Path) -> io::Result<LockState> {
-        let file = fs::File::open(path)?;
-        // SAFETY: `file` owns a valid descriptor for the call; closing it drops the shared lock.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
-            return Ok(LockState::Free);
-        }
-        let err = io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            Ok(LockState::Held)
-        } else {
-            Err(err)
-        }
-    }
-
     fn try_lock_exclusive(&self, path: &Path) -> TryLock {
         let p = match c_path(path) {
             Ok(p) => p,

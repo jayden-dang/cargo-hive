@@ -244,8 +244,6 @@ pub trait Fs {
     fn compress(&self, path: &Path) -> CompressOutcome;
     /// Holds `kind` on `path` in another process until the holder is released.
     fn hold_lock(&self, kind: LockKind, path: &Path) -> io::Result<LockHolder>;
-    /// `flock(LOCK_SH | LOCK_NB)` on a read-only descriptor; never waits.
-    fn probe_lock(&self, path: &Path) -> io::Result<LockState>;
     /// `flock(LOCK_EX | LOCK_NB)` on `path`, opened read-only with `O_NOFOLLOW | O_NONBLOCK`
     /// and never created; the lock lasts until the returned guard is dropped.
     fn try_lock_exclusive(&self, path: &Path) -> TryLock;
