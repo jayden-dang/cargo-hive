@@ -59,7 +59,9 @@ impl Ledger {
                 target: target.to_path_buf(),
             });
         seen.links += 1;
-        seen.target = target.to_path_buf();
+        if seen.target.as_path() != target {
+            seen.target = target.to_path_buf();
+        }
         if let Some(s) = sharing {
             if (s.may_share || s.shares_all) && !stat.compressed {
                 seen.private = Some(s.private_bytes);

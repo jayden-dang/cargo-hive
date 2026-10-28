@@ -1,8 +1,8 @@
 //! macOS `Fs`: APFS clones and sharing attributes through `libc`.
 
 use super::{
-    container_key, CompressOutcome, EntryKind, EntryStat, Fs, HeldLock, LockHolder, LockKind,
-    LockState, Sharing, TempDir, TryLock, VolumeInfo, CHILD_DEADLINE,
+    container_key, entry_kind, CompressOutcome, EntryKind, EntryStat, Fs, HeldLock, LockHolder,
+    LockKind, LockState, Sharing, TempDir, TryLock, VolumeInfo, CHILD_DEADLINE,
 };
 use applesauce::compressor::Kind;
 use applesauce::progress::{Progress, SkipReason, Task};
@@ -248,16 +248,7 @@ impl Fs for Apfs {
 
     fn entry_stat(&self, path: &Path) -> io::Result<EntryStat> {
         let m = fs::symlink_metadata(path)?;
-        let t = m.file_type();
-        let kind = if t.is_symlink() {
-            EntryKind::Symlink
-        } else if t.is_dir() {
-            EntryKind::Dir
-        } else if t.is_file() {
-            EntryKind::File
-        } else {
-            EntryKind::Other
-        };
+        let kind = entry_kind(m.file_type());
         Ok(EntryStat {
             dev: m.dev(),
             ino: m.ino(),
@@ -278,16 +269,7 @@ impl Fs for Apfs {
                 )));
             }
             let entry = entry?;
-            let t = entry.file_type()?;
-            let kind = if t.is_symlink() {
-                EntryKind::Symlink
-            } else if t.is_dir() {
-                EntryKind::Dir
-            } else if t.is_file() {
-                EntryKind::File
-            } else {
-                EntryKind::Other
-            };
+            let kind = entry_kind(entry.file_type()?);
             if let Ok(name) = entry.file_name().into_string() {
                 out.push((name, kind));
             }

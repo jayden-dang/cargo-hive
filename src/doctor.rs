@@ -777,7 +777,8 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::platform::{
-        Availability, EntryKind, EntryStat, HeldLock, Sharing, TempDir, TryLock, VolumeInfo,
+        entry_kind, Availability, EntryKind, EntryStat, HeldLock, Sharing, TempDir, TryLock,
+        VolumeInfo,
     };
     use std::collections::HashMap;
     use std::os::unix::fs::MetadataExt;
@@ -933,15 +934,7 @@ mod tests {
         }
         fn entry_stat(&self, path: &Path) -> io::Result<EntryStat> {
             let m = std::fs::symlink_metadata(path)?;
-            let kind = if m.file_type().is_symlink() {
-                EntryKind::Symlink
-            } else if m.is_dir() {
-                EntryKind::Dir
-            } else if m.is_file() {
-                EntryKind::File
-            } else {
-                EntryKind::Other
-            };
+            let kind = entry_kind(m.file_type());
             Ok(EntryStat {
                 dev: m.dev(),
                 ino: m.ino(),

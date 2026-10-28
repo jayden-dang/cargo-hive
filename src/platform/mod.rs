@@ -1,4 +1,4 @@
-//! Platform layer. Task 2 adds the OS check and version; Tasks 7–9 add `Fs` and `Approve`.
+//! Platform layer: the OS gate, `Fs` and `Approve`, lock try and hold, bounded listing, and volume info.
 
 use std::process::Command;
 
@@ -71,6 +71,19 @@ pub enum EntryKind {
     Dir,
     Symlink,
     Other,
+}
+
+/// Kind of a `FileType` from `symlink_metadata` or `DirEntry::file_type` (neither follows a link).
+pub(crate) fn entry_kind(t: std::fs::FileType) -> EntryKind {
+    if t.is_symlink() {
+        EntryKind::Symlink
+    } else if t.is_dir() {
+        EntryKind::Dir
+    } else if t.is_file() {
+        EntryKind::File
+    } else {
+        EntryKind::Other
+    }
 }
 
 /// `lstat` of one entry: never the target of a symbolic link.
