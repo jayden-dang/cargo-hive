@@ -776,7 +776,9 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{Availability, HeldLock, Sharing, TempDir, TryLock};
+    use crate::platform::{
+        Availability, EntryKind, EntryStat, HeldLock, Sharing, TempDir, TryLock, VolumeInfo,
+    };
     use std::collections::HashMap;
     use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -927,6 +929,57 @@ mod tests {
                 LockState::Held
             } else {
                 LockState::Free
+            })
+        }
+        fn entry_stat(&self, path: &Path) -> io::Result<EntryStat> {
+            let m = std::fs::symlink_metadata(path)?;
+            let kind = if m.file_type().is_symlink() {
+                EntryKind::Symlink
+            } else if m.is_dir() {
+                EntryKind::Dir
+            } else if m.is_file() {
+                EntryKind::File
+            } else {
+                EntryKind::Other
+            };
+            Ok(EntryStat {
+                dev: m.dev(),
+                ino: m.ino(),
+                nlink: m.nlink(),
+                blocks: m.blocks(),
+                kind,
+                compressed: false,
+            })
+        }
+        fn read_dir_bounded(
+            &self,
+            dir: &Path,
+            _cap: usize,
+        ) -> io::Result<Vec<(String, EntryKind)>> {
+            std::fs::read_dir(dir)?
+                .map(|e| {
+                    let e = e?;
+                    let kind = if e.file_type()?.is_dir() {
+                        EntryKind::Dir
+                    } else {
+                        EntryKind::File
+                    };
+                    Ok((e.file_name().to_string_lossy().into_owned(), kind))
+                })
+                .collect()
+        }
+        fn remove_tree(&self, path: &Path) -> io::Result<()> {
+            std::fs::remove_dir_all(path)
+        }
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            std::fs::remove_file(path)
+        }
+        fn volume(&self, _path: &Path) -> io::Result<VolumeInfo> {
+            Ok(VolumeInfo {
+                fs_type: "apfs".into(),
+                container: "disk0".into(),
+                mount: PathBuf::from("/"),
+                available_bytes: 0,
             })
         }
     }

@@ -65,6 +65,44 @@ impl Drop for TempDir {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EntryKind {
+    File,
+    Dir,
+    Symlink,
+    Other,
+}
+
+/// `lstat` of one entry: never the target of a symbolic link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryStat {
+    pub dev: u64,
+    pub ino: u64,
+    pub nlink: u64,
+    pub blocks: u64,
+    pub kind: EntryKind,
+    /// APFS transparent compression (`UF_COMPRESSED`).
+    pub compressed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeInfo {
+    pub fs_type: String,
+    /// The APFS container (`disk<N>`) the volume belongs to, or `mount:<path>` when unknown.
+    pub container: String,
+    pub mount: PathBuf,
+    pub available_bytes: u64,
+}
+
+/// The container of a volume from `statfs.f_mntfromname`: the leading `disk<N>` after any
+/// `…@` snapshot prefix. Volumes of one APFS container share free space.
+pub fn container_key(mntfromname: &str) -> Option<String> {
+    let device = mntfromname.rsplit_once('@').map_or(mntfromname, |(_, d)| d);
+    let rest = device.strip_prefix("/dev/disk")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    (!digits.is_empty()).then(|| format!("disk{digits}"))
+}
+
 /// APFS block sharing of one file (`getattrlist` common-extended attributes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sharing {
@@ -249,6 +287,15 @@ pub trait Fs {
     fn try_lock_exclusive(&self, path: &Path) -> TryLock;
     /// Has another process try `kind` on `path` once, without waiting.
     fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState>;
+    /// `lstat`: never follows a symbolic link.
+    fn entry_stat(&self, path: &Path) -> io::Result<EntryStat>;
+    /// The UTF-8 names and no-follow kinds of `dir`'s entries; more than `cap` entries is an error.
+    fn read_dir_bounded(&self, dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>>;
+    /// Removes a directory tree, or a symbolic link given as the root, never following a link.
+    fn remove_tree(&self, path: &Path) -> io::Result<()>;
+    fn remove_file(&self, path: &Path) -> io::Result<()>;
+    /// `statfs` of the volume holding `path`.
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,5 +359,24 @@ mod tests {
         }
         assert_eq!(LockKind::FcntlRead.as_arg(), "fcntl-read");
         assert_eq!(LockKind::parse("nope"), None);
+    }
+
+    #[test]
+    fn the_container_is_the_leading_bsd_disk() {
+        let cases = [
+            ("/dev/disk3s1s1", Some("disk3")),
+            ("/dev/disk3s5", Some("disk3")),
+            ("/dev/disk12s2", Some("disk12")),
+            (
+                "com.apple.TimeMachine.2026-10-28-120000.backup@/dev/disk3s5",
+                Some("disk3"),
+            ),
+            ("map auto_home", None),
+            ("//user@host/share", None),
+            ("/dev/diskX", None),
+        ];
+        for (from, want) in cases {
+            assert_eq!(container_key(from).as_deref(), want, "{from}");
+        }
     }
 }

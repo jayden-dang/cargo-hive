@@ -1,13 +1,13 @@
 //! macOS `Fs`: APFS clones and sharing attributes through `libc`.
 
 use super::{
-    CompressOutcome, Fs, HeldLock, LockHolder, LockKind, LockState, Sharing, TempDir, TryLock,
-    CHILD_DEADLINE,
+    container_key, CompressOutcome, EntryKind, EntryStat, Fs, HeldLock, LockHolder, LockKind,
+    LockState, Sharing, TempDir, TryLock, VolumeInfo, CHILD_DEADLINE,
 };
 use applesauce::compressor::Kind;
 use applesauce::progress::{Progress, SkipReason, Task};
 use applesauce::FileCompressor;
-use std::ffi::{CString, OsString};
+use std::ffi::{CStr, CString, OsString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::macos::fs::MetadataExt as _;
@@ -111,7 +111,7 @@ impl Fs for Apfs {
                 (&mut list as *mut libc::attrlist).cast(),
                 buf.as_mut_ptr().cast(),
                 buf.len(),
-                libc::FSOPT_ATTR_CMN_EXTENDED,
+                libc::FSOPT_ATTR_CMN_EXTENDED | libc::FSOPT_NOFOLLOW,
             )
         };
         if rc != 0 {
@@ -244,6 +244,91 @@ impl Fs for Apfs {
                 "the lock child answered {other:?}"
             ))),
         }
+    }
+
+    fn entry_stat(&self, path: &Path) -> io::Result<EntryStat> {
+        let m = fs::symlink_metadata(path)?;
+        let t = m.file_type();
+        let kind = if t.is_symlink() {
+            EntryKind::Symlink
+        } else if t.is_dir() {
+            EntryKind::Dir
+        } else if t.is_file() {
+            EntryKind::File
+        } else {
+            EntryKind::Other
+        };
+        Ok(EntryStat {
+            dev: m.dev(),
+            ino: m.ino(),
+            nlink: m.nlink(),
+            blocks: m.blocks(),
+            kind,
+            compressed: m.st_flags() & libc::UF_COMPRESSED != 0,
+        })
+    }
+
+    fn read_dir_bounded(&self, dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>> {
+        let mut out = Vec::new();
+        for (seen, entry) in fs::read_dir(dir)?.enumerate() {
+            if seen >= cap {
+                return Err(io::Error::other(format!(
+                    "{} has more than {cap} entries",
+                    dir.display()
+                )));
+            }
+            let entry = entry?;
+            let t = entry.file_type()?;
+            let kind = if t.is_symlink() {
+                EntryKind::Symlink
+            } else if t.is_dir() {
+                EntryKind::Dir
+            } else if t.is_file() {
+                EntryKind::File
+            } else {
+                EntryKind::Other
+            };
+            if let Ok(name) = entry.file_name().into_string() {
+                out.push((name, kind));
+            }
+        }
+        Ok(out)
+    }
+
+    fn remove_tree(&self, path: &Path) -> io::Result<()> {
+        // std's remove_dir_all opens every level with O_NOFOLLOW and unlinks a symlink root.
+        fs::remove_dir_all(path)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        fs::remove_file(path)
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        let p = c_path(path)?;
+        // SAFETY: an all-zero `statfs` struct is valid output space.
+        let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `p` is NUL-terminated and `s` is writable; both outlive the call.
+        if unsafe { libc::statfs(p.as_ptr(), &mut s) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the kernel NUL-terminates these fixed-size name fields.
+        let text = |field: &[libc::c_char]| {
+            unsafe { CStr::from_ptr(field.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let (fs_type, from, on) = (
+            text(&s.f_fstypename),
+            text(&s.f_mntfromname),
+            text(&s.f_mntonname),
+        );
+        Ok(VolumeInfo {
+            container: container_key(&from).unwrap_or_else(|| format!("mount:{on}")),
+            fs_type,
+            mount: PathBuf::from(on),
+            available_bytes: s.f_bavail.saturating_mul(u64::from(s.f_bsize)),
+        })
     }
 }
 
@@ -505,5 +590,93 @@ mod tests {
             fs::symlink_metadata(&a).unwrap().st_flags() & libc::UF_COMPRESSED,
             0
         );
+    }
+
+    use crate::platform::EntryKind;
+
+    #[test]
+    fn entry_stat_never_follows_a_link_and_sees_links_and_compression() {
+        let t = tmp("stat");
+        let (a, b, link) = (
+            t.path().join("a"),
+            t.path().join("b"),
+            t.path().join("link"),
+        );
+        apfs().write_file(&a, &vec![3u8; 8192]).unwrap();
+        let one = apfs().entry_stat(&a).unwrap();
+        assert_eq!(
+            (one.kind, one.nlink, one.compressed),
+            (EntryKind::File, 1, false)
+        );
+        apfs().hardlink(&a, &b).unwrap();
+        let two = apfs().entry_stat(&b).unwrap();
+        assert_eq!((two.ino, two.nlink), (one.ino, 2));
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        assert_eq!(apfs().entry_stat(&link).unwrap().kind, EntryKind::Symlink);
+        assert_eq!(apfs().entry_stat(t.path()).unwrap().kind, EntryKind::Dir);
+        let packed = t.path().join("packed");
+        let content: Vec<u8> = (0..4 << 20).map(|i| (i % 251) as u8).collect();
+        apfs().write_file(&packed, &content).unwrap();
+        assert_eq!(apfs().compress(&packed), CompressOutcome::Compressed);
+        assert!(apfs().entry_stat(&packed).unwrap().compressed);
+    }
+
+    #[test]
+    fn a_bounded_listing_fails_one_entry_past_its_cap() {
+        let t = tmp("list");
+        for name in ["x", "y"] {
+            apfs().write_file(&t.path().join(name), b"").unwrap();
+        }
+        std::os::unix::fs::symlink("x", t.path().join("z")).unwrap();
+        let mut listed = apfs().read_dir_bounded(t.path(), 3).unwrap();
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![
+                ("x".into(), EntryKind::File),
+                ("y".into(), EntryKind::File),
+                ("z".into(), EntryKind::Symlink)
+            ]
+        );
+        assert!(apfs().read_dir_bounded(t.path(), 2).is_err());
+    }
+
+    #[test]
+    fn removing_a_tree_never_follows_a_link_out_of_it() {
+        let t = tmp("remove");
+        let outside = t.path().join("outside");
+        apfs().write_file(&outside, b"keep").unwrap();
+        let tree = t.path().join("tree");
+        std::fs::create_dir_all(tree.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&outside, tree.join("sub/link")).unwrap();
+        std::os::unix::fs::symlink(t.path(), tree.join("up")).unwrap();
+        apfs().remove_tree(&tree).unwrap();
+        assert!(!tree.exists());
+        assert_eq!(apfs().read(&outside).unwrap(), b"keep");
+        let root_link = t.path().join("root-link");
+        std::os::unix::fs::symlink(&outside, &root_link).unwrap();
+        apfs().remove_tree(&root_link).unwrap();
+        assert!(outside.exists() && std::fs::symlink_metadata(&root_link).is_err());
+    }
+
+    #[test]
+    fn the_scratch_volume_is_apfs_with_a_disk_container() {
+        let v = apfs().volume(Path::new("/private/tmp")).unwrap();
+        assert_eq!(v.fs_type, "apfs");
+        assert!(v.container.starts_with("disk"), "{v:?}");
+        assert!(v.available_bytes > 0);
+    }
+
+    #[test]
+    fn sharing_does_not_follow_a_final_symlink() {
+        let t = tmp("share-link");
+        let a = t.path().join("a");
+        apfs().write_file(&a, &vec![1u8; 1 << 20]).unwrap();
+        let link = t.path().join("link");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        // With FSOPT_NOFOLLOW the call describes the link itself (or refuses it), never the 1 MiB target.
+        if let Ok(s) = apfs().sharing(&link) {
+            assert_ne!(s.private_bytes, 1 << 20);
+        }
     }
 }
