@@ -37,6 +37,8 @@ Roadmap item: ROAD-1 (MILE-1, docs/roadmap/INDEX.md). Sources: `.skills/CORE/clo
 - **CORE-1.8** WHEN `cargo hive doctor` exits normally, after a failed check, after a panic, or on SIGINT or SIGTERM, THE SYSTEM SHALL have removed the temporary directory it created.
 - **CORE-1.9** WHEN `cargo hive doctor` starts THE SYSTEM SHALL remove any temporary directory left by an earlier doctor run whose process no longer exists.
 - **CORE-1.10** IF a command needs a capability and the recorded doctor results are missing or were recorded for a different Rust toolchain release than the active one THEN THE SYSTEM SHALL refuse that command and ask the user to run `cargo hive doctor`. The active toolchain is the one rustup selects with the working directory at the hive state root.
+- **CORE-1.11** (fix, 2026-10-28) WHEN a hive command runs with `RUSTUP_TOOLCHAIN` set and `RUSTUP_TOOLCHAIN_SOURCE` either absent or naming a directory selection (`toolchain-file`, `path-override`) THE SYSTEM SHALL remove both variables from the `rustup` and `cargo` processes it starts, so that neither the active toolchain nor `cargo metadata` follows a toolchain the caller's directory selected.
+- **CORE-1.12** (guard, 2026-10-28) WHEN a hive command runs with `RUSTUP_TOOLCHAIN_SOURCE` set to `cli`, `env` or `default` THE SYSTEM SHALL CONTINUE TO pass `RUSTUP_TOOLCHAIN` to the `rustup` and `cargo` processes it starts.
 
 ## 2. Register a repository
 

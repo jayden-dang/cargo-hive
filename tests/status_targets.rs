@@ -628,3 +628,24 @@ fn an_interrupted_status_waiting_on_the_state_lock_exits_130_without_writing_the
         "a cancelled status must leave snapshot.json unchanged"
     );
 }
+
+#[test]
+fn a_toolchain_selected_by_the_callers_directory_does_not_decide_ownership() {
+    let hive = Hive::ready();
+    let s = Scratch::new("dirpin-owner");
+    let repo = init_repo(&s.path.join("app"), "");
+    hive.build_crate(&repo, None);
+    register(&hive, &repo);
+    let out = hive
+        .command(&["status", "--no-sizes", repo.to_str().unwrap(), "--json"])
+        .env("RUSTUP_TOOLCHAIN", "hive-test-not-installed")
+        .env("RUSTUP_TOOLCHAIN_SOURCE", "toolchain-file")
+        .output()
+        .unwrap();
+    let r: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        target_kind(&r, &repo.join("target")).map(|k| k.0),
+        Some("target.owned".to_string()),
+        "{r}"
+    );
+}

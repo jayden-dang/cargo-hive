@@ -301,14 +301,28 @@ pub fn floor_note(report: &DoctorReport) -> Option<String> {
     })
 }
 
+/// The rustup proxy hands every cargo subcommand `RUSTUP_TOOLCHAIN`, which beats
+/// directory resolution in a child. A toolchain the caller's directory selected must
+/// not reach hive's children; one the caller asked for by name (`cli`, `env`), or the
+/// default, may. Without a source (rustup before 1.29.0, `rustup run`) the origin is
+/// unknown, so it is dropped too.
+pub(crate) fn drop_directory_toolchain(cmd: &mut Command) {
+    let named = std::env::var_os("RUSTUP_TOOLCHAIN_SOURCE")
+        .is_some_and(|s| s == "cli" || s == "env" || s == "default");
+    if !named {
+        cmd.env_remove("RUSTUP_TOOLCHAIN")
+            .env_remove("RUSTUP_TOOLCHAIN_SOURCE");
+    }
+}
+
 fn rustup_which(tool: &str, cwd: &Path) -> Result<Option<PathBuf>, String> {
-    match Command::new("rustup")
-        .args(["which", tool])
+    let mut cmd = Command::new("rustup");
+    cmd.args(["which", tool])
         .current_dir(cwd)
         .env("RUSTUP_AUTO_INSTALL", "0")
-        .stdin(Stdio::null())
-        .output()
-    {
+        .stdin(Stdio::null());
+    drop_directory_toolchain(&mut cmd);
+    match cmd.output() {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("could not run rustup: {e}")),
         Ok(out) if out.status.success() => Ok(Some(PathBuf::from(

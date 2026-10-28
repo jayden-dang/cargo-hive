@@ -264,7 +264,8 @@ pub fn output_with_deadline(
 }
 
 /// Exactly `cargo metadata --no-deps --format-version 1 --locked --offline` in
-/// `workspace_dir`, with the three target variables and every `GIT_*` removed (F9).
+/// `workspace_dir`, with the three target variables and every `GIT_*` removed (F9), and
+/// without a toolchain the caller's directory selected.
 pub fn resolve(workspace_dir: &Path, cancel: impl FnMut() -> bool) -> Result<Resolved, String> {
     let mut cmd = Command::new("cargo");
     cmd.args([
@@ -286,6 +287,7 @@ pub fn resolve(workspace_dir: &Path, cancel: impl FnMut() -> bool) -> Result<Res
             cmd.env_remove(&key);
         }
     }
+    crate::doctor::drop_directory_toolchain(&mut cmd);
     let out = output_with_deadline(&mut cmd, METADATA_DEADLINE, cancel).map_err(|e| match e {
         ChildOutputError::TimedOut => "cargo metadata exceeded its deadline".to_string(),
         ChildOutputError::Cancelled => "cargo metadata was cancelled".to_string(),
