@@ -714,6 +714,7 @@ mod tests {
                 format: Format::Supported,
                 units: 0,
                 not_current: 0,
+                not_current_units: Vec::new(),
                 edges: None,
                 graph: None,
             }],
