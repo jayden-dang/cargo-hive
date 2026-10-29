@@ -29,7 +29,7 @@ fn json_mode_prints_exactly_one_receipt_and_nothing_else() {
     let mut expected = RECEIPT_KEYS.to_vec();
     expected.sort();
     assert_eq!(keys, expected);
-    assert_eq!(receipt["schema"], 1);
+    assert_eq!(receipt["schema"], 2);
     assert_eq!(receipt["command"], "repo list");
     assert!(!receipt["hive_version"].as_str().unwrap().is_empty());
     assert!(
