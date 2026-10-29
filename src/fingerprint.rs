@@ -69,6 +69,8 @@ pub struct ProfileReport {
     pub path: PathBuf,
     pub format: Format,
     pub units: usize,
+    /// Unit dirs Cargo left mid-rebuild or after a failed compile: counted, never read as units.
+    pub not_current: usize,
     pub edges: Option<EdgeCounts>,
     #[serde(skip)]
     pub graph: Option<UnitGraph>,
@@ -146,10 +148,12 @@ fn read_capped(reader: &mut impl Read) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn read_unit(dir: &Path, json_name: &str) -> Result<Unit, String> {
+/// `Ok(None)` is a unit Cargo is rebuilding or failed to rebuild: it empties the hash file before
+/// compiling and rewrites it only on success, so the JSON beside it is stale.
+fn read_unit(dir: &Path, json_name: &str) -> Result<Option<Unit>, String> {
     let stem = json_name.trim_end_matches(".json");
     let hash = fs::read(dir.join(stem)).map_err(|e| format!("hash file `{stem}`: {e}"))?;
-    if !is_hash(&hash) {
+    if !hash.is_empty() && !is_hash(&hash) {
         return Err(format!(
             "hash file `{stem}` is not 16 lowercase hex characters"
         ));
@@ -168,7 +172,10 @@ fn read_unit(dir: &Path, json_name: &str) -> Result<Unit, String> {
         .as_object()
         .ok_or_else(|| format!("{json_name} is not a JSON object"))?;
     let deps = check_types(obj)?;
-    Ok(Unit {
+    if hash.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Unit {
         dir_name: dir
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -176,7 +183,17 @@ fn read_unit(dir: &Path, json_name: &str) -> Result<Unit, String> {
         kind: kind_of(stem),
         hash_hex: String::from_utf8(hash).expect("checked ASCII hex"),
         deps,
-    })
+    }))
+}
+
+/// The dir Cargo leaves for a unit whose first compile failed: its start stamp and its cached
+/// compiler messages, with no fingerprint written yet.
+fn never_compiled(names: &[String]) -> bool {
+    names.iter().any(|n| n == "invoked.timestamp")
+        && names.iter().any(|n| n.starts_with("output-"))
+        && names
+            .iter()
+            .all(|n| n == "invoked.timestamp" || n.starts_with("output-"))
 }
 
 pub fn read_profile(profile_dir: &Path) -> ProfileReport {
@@ -185,6 +202,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
         path: path.clone(),
         format: Format::Unsupported(reason),
         units,
+        not_current: 0,
         edges: None,
         graph: None,
     };
@@ -201,6 +219,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
     };
     let mut units = Vec::new();
     let mut counted = 0usize;
+    let mut not_current = 0usize;
     let mut problem: Option<String> = None;
     let mut dirs: Vec<PathBuf> = Vec::new();
     for entry in entries {
@@ -242,6 +261,10 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
         if names.is_empty() {
             continue;
         }
+        if never_compiled(&names) {
+            not_current += 1;
+            continue;
+        }
         let jsons: Vec<&String> = names.iter().filter(|n| n.ends_with(".json")).collect();
         if jsons.len() != 1 {
             problem.get_or_insert(format!(
@@ -251,10 +274,14 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
             ));
             continue;
         }
-        counted += 1;
         match read_unit(&dir, jsons[0]) {
-            Ok(u) => units.push(u),
+            Ok(Some(u)) => {
+                counted += 1;
+                units.push(u);
+            }
+            Ok(None) => not_current += 1,
             Err(reason) => {
+                counted += 1;
                 problem.get_or_insert(format!("{}: {reason}", dir.display()));
             }
         }
@@ -284,6 +311,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
         path,
         format: Format::Supported,
         units: counted,
+        not_current,
         edges: Some(counts),
         graph: Some(UnitGraph { units, edges }),
     }
@@ -607,6 +635,100 @@ mod tests {
         assert!(matches!(r.format, Format::Unsupported(_)), "{:?}", r.format);
         assert_eq!(r.edges, None);
         fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_unit_that_never_compiled_is_not_current_and_keeps_the_profile_supported() {
+        let p = scratch();
+        write_unit(&p, "ok-0000000000000001", "lib-ok", 1, &[]);
+        let failed = p.join(".fingerprint/failed-0000000000000002");
+        fs::create_dir_all(&failed).unwrap();
+        fs::write(failed.join("invoked.timestamp"), "").unwrap();
+        fs::write(
+            failed.join("output-lib-failed"),
+            "{\"$message_type\":\"diagnostic\"}",
+        )
+        .unwrap();
+        let r = read_profile(&p);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!((r.units, r.not_current), (1, 1));
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_unit_with_an_emptied_hash_file_is_not_current_and_keeps_the_profile_supported() {
+        for with_output in [false, true] {
+            let p = scratch();
+            write_unit(&p, "dep-0000000000000001", "lib-dep", 1, &[]);
+            write_unit(&p, "user-0000000000000002", "lib-user", 2, &[1]);
+            let dep = p.join(".fingerprint/dep-0000000000000001");
+            fs::write(dep.join("lib-dep"), "").unwrap();
+            fs::write(dep.join("dep-lib-dep"), "dep-info").unwrap();
+            if with_output {
+                fs::write(dep.join("output-lib-dep"), "{}").unwrap();
+            }
+            let r = read_profile(&p);
+            assert_eq!(r.format, Format::Supported, "output-*: {with_output}");
+            assert_eq!((r.units, r.not_current), (1, 1), "output-*: {with_output}");
+            assert_eq!(
+                r.edges,
+                Some(EdgeCounts {
+                    resolved: 0,
+                    unresolved: 1,
+                    ambiguous: 0
+                }),
+                "output-*: {with_output}"
+            );
+            fs::remove_dir_all(p).unwrap();
+        }
+    }
+
+    #[test]
+    fn near_misses_of_a_not_current_unit_still_make_the_profile_unsupported() {
+        type Shape = Box<dyn Fn(&Path)>;
+        let cases: Vec<(&str, Shape)> = vec![
+            (
+                "start stamp only",
+                Box::new(|d: &Path| fs::write(d.join("invoked.timestamp"), "").unwrap()),
+            ),
+            (
+                "cached messages beside an unknown file",
+                Box::new(|d: &Path| {
+                    fs::write(d.join("invoked.timestamp"), "").unwrap();
+                    fs::write(d.join("output-lib-q"), "{}").unwrap();
+                    fs::write(d.join("dep-lib-q"), "dep-info").unwrap();
+                }),
+            ),
+            (
+                "emptied hash beside a JSON off the signature",
+                Box::new(|d: &Path| {
+                    fs::write(d.join("lib-q"), "").unwrap();
+                    fs::write(
+                        d.join("lib-q.json"),
+                        unit_json(&[]).replace(",\"compile_kind\":0", ""),
+                    )
+                    .unwrap();
+                }),
+            ),
+            (
+                "JSON with no hash file",
+                Box::new(|d: &Path| fs::write(d.join("lib-q.json"), unit_json(&[])).unwrap()),
+            ),
+        ];
+        for (name, shape) in cases {
+            let p = scratch();
+            write_unit(&p, "ok-0000000000000001", "lib-ok", 1, &[]);
+            let d = p.join(".fingerprint/q-0000000000000002");
+            fs::create_dir_all(&d).unwrap();
+            shape(&d);
+            let r = read_profile(&p);
+            assert!(
+                matches!(r.format, Format::Unsupported(_)),
+                "{name}: {:?}",
+                r.format
+            );
+            fs::remove_dir_all(p).unwrap();
+        }
     }
 
     #[test]

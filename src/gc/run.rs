@@ -729,6 +729,7 @@ mod tests {
                 path: profile.to_path_buf(),
                 format: Format::Supported,
                 units: 0,
+                not_current: 0,
                 edges: None,
                 graph: None,
             }],
