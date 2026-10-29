@@ -6030,3 +6030,28 @@ Added after execution by `root-cause` (2026-10-28), from the third whole-branch 
 - [x] **Step 3: Verify and commit** — run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, and `cargo check --target x86_64-unknown-linux-gnu`; all exit 0 (119 passed, 1 ignored). Commit `fix: stop waiting for hive's state lock once a command is cancelled`.
 
 _Requirements: CORE-6.6, CORE-6.7_
+
+### Task 19: A unit that is not current leaves its profile supported
+
+Added after execution by `root-cause` (2026-10-29). A first compile that fails leaves only `invoked.timestamp` and `output-*`, and Cargo empties a unit's hash file before every rebuild and rewrites it only on success (cargo `fingerprint/mod.rs:146-150`, `536-544`, at the 1.97.1 commit). `read_profile` read both as format deviations, so one failing or rebuilding crate made the whole profile unsupported: klynt's `target/debug` was skipped by `status` and `gc`. Evidence: `.skills/research/2026-10-29-cargo-failed-unit-fingerprint-shape.md`.
+
+**Files:**
+- Modify: `src/fingerprint.rs` (`never_compiled`, `read_unit` returns `Ok(None)` for an emptied hash, `ProfileReport.not_current`)
+- Modify: `src/gc/run.rs` (test fixture sets `not_current`)
+- Test: `src/fingerprint.rs` (`#[cfg(test)]`)
+
+**Reuse:** existing — `check_types`, the `scratch`/`write_unit`/`unit_json` test helpers
+
+**Interfaces:**
+- Consumes: `read_profile` (Task 6)
+- Produces: `ProfileReport.not_current: usize`
+
+**Depends-on:** Task 6
+
+- [x] **Step 1: Write the failing tests** — a never-compiled unit dir and an emptied hash beside a signature-exact JSON (with and without `output-*`, and with a dependent unit whose edge to it becomes unresolved) each leave the profile supported with `not_current` 1. Both fail with the old reader's reasons: "0 fingerprint JSON files" and "hash file ... is not 16 lowercase hex characters".
+
+- [x] **Step 2: Implement** — then guard the boundary: a stamp-only dir, cached messages beside an unknown file, an emptied hash beside a JSON off the signature, and a JSON with no hash file stay unsupported. Each guard fails under a matching mutation of the new code.
+
+- [x] **Step 3: Verify** — `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (184 passed) and `cargo check --target x86_64-unknown-linux-gnu` (only the existing `entry_kind` warning). `status` on klynt reports `target/debug` supported with 2,423 units and 17,258 resolved edges.
+
+_Requirements: CORE-4.16, CORE-4.17_

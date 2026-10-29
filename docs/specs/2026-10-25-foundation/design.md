@@ -50,7 +50,7 @@ Fresh retrieval (`load-subgraph`, seeded with CODE `CORE` and the requirement te
    - its JSON has exactly the 11 keys `rustc`, `features`, `declared_features`, `target`, `profile`, `path`, `deps`, `local`, `rustflags`, `config`, `compile_kind`, with the scanned types;
    - every `deps` entry is `[u64, string, bool, u64]`, parsed as `u64`.
 
-   A directory with no files is ignored and is not evidence of format. A profile dir with no `.fingerprint/`, which includes the newer `build/<pkg>/<hash>/fingerprint/` layout, is unsupported as a whole (CORE-4.14).
+   A directory with no files is ignored and is not evidence of format. Two shapes Cargo leaves for a unit that is not current are counted as `not_current`, not as units, and give no edges (CORE-4.16): only `invoked.timestamp` plus `output-*` (a first compile failed), and an empty hash file beside a signature-exact JSON (Cargo empties the hash before a rebuild and rewrites it only on success). Every other deviation stays unsupported (CORE-4.17). Source, rust-lang/cargo at `c980f4866` (cargo 1.97.1): the fingerprint is written only "when the Unit successfully finishes" (`src/cargo/core/compiler/fingerprint/mod.rs:146-150`); `prepare_target` truncates an existing hash file before the build (`fingerprint/mod.rs:536-544`); `output-*` is the message cache, deleted before a dirty unit compiles (`build_runner/compilation_files.rs:344-347`, `compiler/mod.rs:2046-2049`). A not-current unit has no out-edges, so ROAD-5 must not read its dependencies as unreachable because of it. A profile dir with no `.fingerprint/`, which includes the newer `build/<pkg>/<hash>/fingerprint/` layout, is unsupported as a whole (CORE-4.14).
 7. **Doctor's format check (f) builds in isolation (F5, F17.8).**
    - It builds a throwaway crate in the doctor temp dir: lib, bin, `build.rs` and a test, with no dependencies.
    - The toolchain's real `cargo` and `rustc` come from `rustup which cargo|rustc`, run with cwd set to the temp dir so no `rust-toolchain.toml` elsewhere can change the answer. If rustup is absent, the `cargo` on `PATH` is used.
@@ -156,13 +156,13 @@ Ownership is a realpath match against `target_directory` or `build_directory` (C
 
 ### fingerprint
 
-Satisfies: CORE-4.7, CORE-4.8, CORE-4.14
+Satisfies: CORE-4.7, CORE-4.8, CORE-4.14, CORE-4.16, CORE-4.17
 Reuse: 5 — `serde_json` (`Value`, read as `u64`); the graph logic is new (rung 7)
 Interface: `read_profile(dir) -> ProfileReport{path, format: Supported | Unsupported(reason), units: usize, edges: Option<EdgeCounts{resolved, unresolved, ambiguous}>, graph: Option<UnitGraph>}` · `UnitGraph{units: Vec<Unit{dir_name, kind, hash_hex, deps}>, edges: Vec<(UnitIdx, UnitIdx)>}`
 Depth: deletion test — callers would still need to know "units, their edges, and whether the format is trusted". These stay hidden: the unit-dir rule, the 11-key and type signature, `[u64, str, bool, u64]` validation, and the little-endian hex index.
 Locality: new `src/fingerprint.rs`. `UnitGraph` is the type ROAD-5 (closure liveness) consumes unchanged. Unsupported profiles are written to `snapshot.json` by `cli` as "hive's state" (CORE-4.14, F14).
 
-Edges map each `deps[i][3]` to `hex(u64.to_le_bytes())`, looked up among unit hash files. One hit is resolved, none is unresolved, several are ambiguous. A single failing unit marks the whole profile dir `Unsupported`, and then no edges are reported (CORE-4.14).
+Edges map each `deps[i][3]` to `hex(u64.to_le_bytes())`, looked up among unit hash files. One hit is resolved, none is unresolved, several are ambiguous. A single failing unit marks the whole profile dir `Unsupported`, and then no edges are reported (CORE-4.14); a unit that is not current is not a failing unit (CORE-4.16).
 
 ### size
 
@@ -214,7 +214,7 @@ Scope always comes from the arguments. `status` with no repo means every registe
 | Seam | Kind | Covers |
 |---|---|---|
 | The `cargo-hive` binary run as a subprocess with `HIVE_HOME=<tmp>`. Fixtures are built under `/private/tmp`: git repos (main, linked worktree, submodule, unborn, shallow), tiny crates built for real target dirs, and copied fingerprint fixtures (newer layout, corrupted JSON, a `doc-lib` unit). Doctor runs against the real APFS proof machine and is machine-gated | integration | CORE-1.1, CORE-1.2, CORE-1.4, CORE-1.7, CORE-1.8, CORE-1.9, CORE-1.10, CORE-2.1–2.9, CORE-3.1, CORE-3.3, CORE-3.5–3.8, CORE-4.2, CORE-4.3, CORE-4.5, CORE-4.6, CORE-4.10–4.15, CORE-5.1, CORE-5.2, CORE-5.5–5.7, CORE-6.1, CORE-6.2, CORE-6.3, CORE-6.4, CORE-6.5, CORE-7.1, CORE-7.2 |
-| The `cargo_hive` library: `classify`; `fingerprint::read_profile`; `receipt`; `doctor::run` and `require` with fake `Fs` and `Approve`; `state` locking and atomic writes; and `platform::current` on a non-macOS cfg path through a `cfg(test)` OS override | unit | CORE-1.1, CORE-1.3, CORE-1.6, CORE-3.2, CORE-3.4, CORE-4.7, CORE-4.8, CORE-4.14, CORE-5.3, CORE-5.4 |
+| The `cargo_hive` library: `classify`; `fingerprint::read_profile`; `receipt`; `doctor::run` and `require` with fake `Fs` and `Approve`; `state` locking and atomic writes; and `platform::current` on a non-macOS cfg path through a `cfg(test)` OS override | unit | CORE-1.1, CORE-1.3, CORE-1.6, CORE-3.2, CORE-3.4, CORE-4.7, CORE-4.8, CORE-4.14, CORE-4.16, CORE-4.17, CORE-5.3, CORE-5.4 |
 
 There are two new seams, since no code exists to reuse. NFR checks:
 - **CORE-6.1:** timed runs against klynt (manual performance test, not CI).
@@ -233,7 +233,7 @@ Every live ID in requirements.md appears in exactly one `Satisfies:` line:
 | classify | 3.2, 3.4 |
 | discover | 3.1, 3.3, 3.7, 4.2, 4.15, 6.1, 6.2 |
 | cargo_target | 4.5, 4.10, 4.12, 4.13 |
-| fingerprint | 4.7, 4.8, 4.14 |
+| fingerprint | 4.7, 4.8, 4.14, 4.16, 4.17 |
 | size | 4.6, 4.11 |
 | platform | 1.6, 6.4 |
 | doctor | 1.1–1.4, 1.7–1.12 |
