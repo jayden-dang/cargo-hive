@@ -3,7 +3,7 @@
 Terms settled during the 2026-10-25 interview and the CORE design. One canonical term per concept.
 
 **hive**:
-The product (crate `cargo-hive`). Invoked as `cargo hive <sub>`, or as `cargo-hive <sub>` with the same arguments, the form MCP registration and agents that cannot call Cargo subcommands use.
+The product (crate `cargo-hive`). Invoked as `cargo hive <sub>`, or as `cargo-hive <sub>` with the same arguments, the form agents that cannot call Cargo subcommands use.
 _Avoid_: `hive <cmd>` written as a command; no `hive` binary exists
 
 **Checkout**:

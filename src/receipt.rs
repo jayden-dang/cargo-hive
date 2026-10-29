@@ -1,4 +1,4 @@
-//! Receipt schema v1: counted or measured values only. There is no float or duration slot.
+//! Receipt schema v2: counted or measured values only. There is no float or duration slot.
 
 use crate::state::utc_timestamp;
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(untagged)]
@@ -34,6 +34,8 @@ pub struct Finding {
     pub kind: String,
     pub path: Option<PathBuf>,
     pub detail: String,
+    #[serde(default)]
+    pub measured: BTreeMap<String, Measured>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -107,6 +109,22 @@ impl ReceiptBuilder {
             kind: kind.to_string(),
             path,
             detail: detail.into(),
+            measured: BTreeMap::new(),
+        });
+        self
+    }
+    pub fn finding_measured(
+        &mut self,
+        kind: &str,
+        path: Option<PathBuf>,
+        detail: impl Into<String>,
+        measured: BTreeMap<String, Measured>,
+    ) -> &mut Self {
+        self.r.findings.push(Finding {
+            kind: kind.to_string(),
+            path,
+            detail: detail.into(),
+            measured,
         });
         self
     }
@@ -165,6 +183,43 @@ mod tests {
         let value = serde_json::to_value(b.finish()).unwrap();
         assert!(!has_float(&value));
         assert_eq!(value["counts"]["units"], serde_json::json!(u64::MAX));
+    }
+
+    #[test]
+    fn a_finding_carries_measured_values_and_the_schema_is_2() {
+        let mut measured = BTreeMap::new();
+        measured.insert("copies".into(), Measured::Int(3));
+        measured.insert("crate".into(), Measured::Text("persistence".into()));
+        let mut b = Receipt::with_os("explain", Scope::default(), Some("27.0.1".into()));
+        b.finding_measured(
+            "copies.group",
+            Some(PathBuf::from("/profile")),
+            "3 copies",
+            measured,
+        );
+        let value = serde_json::to_value(b.finish()).unwrap();
+        assert_eq!(value["schema"], 2);
+        assert_eq!(value["findings"][0]["kind"], "copies.group");
+        assert_eq!(value["findings"][0]["measured"]["copies"], 3);
+        assert_eq!(value["findings"][0]["measured"]["crate"], "persistence");
+        assert_eq!(value["findings"][0]["detail"], "3 copies");
+    }
+
+    #[test]
+    fn a_finding_without_measured_values_serializes_an_empty_map() {
+        let mut b = Receipt::with_os("status", Scope::default(), Some("27.0.1".into()));
+        b.finding("target.owned", Some(PathBuf::from("/t")), "owned by /c");
+        let value = serde_json::to_value(b.finish()).unwrap();
+        assert_eq!(value["schema"], 2);
+        assert_eq!(value["findings"][0]["measured"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn a_schema_1_finding_without_measured_still_parses() {
+        let raw = r#"{"kind":"target.owned","path":"/t","detail":"owned"}"#;
+        let finding: Finding = serde_json::from_str(raw).unwrap();
+        assert!(finding.measured.is_empty());
+        assert_eq!(finding.kind, "target.owned");
     }
 
     #[test]

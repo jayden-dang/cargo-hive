@@ -6,7 +6,7 @@ never seen this app follows this file instead of inventing commands.
 
 **App:** `cargo-hive` (invoked by users as `cargo hive <sub>`)
 **Primary surface:** `CLI`
-**Other surfaces:** none (no server, no web UI; MCP arrives with ROAD-4)
+**Other surfaces:** none (no server, no web UI, no MCP; agents use the CLI through the hive skill, ROAD-12)
 
 ## Launch
 
