@@ -772,17 +772,13 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             fault.detail.clone(),
         );
     }
-    let scope = if args.is_empty() {
-        gc::Scope::All
-    } else {
-        gc::Scope::Checkouts(
-            checkouts
-                .iter()
-                .filter(|c| !c.missing)
-                .map(|c| c.path.clone())
-                .collect(),
-        )
-    };
+    let scope = gc::Scope::from_paths(
+        args.is_empty(),
+        checkouts
+            .iter()
+            .filter(|c| !c.missing)
+            .map(|c| c.path.clone()),
+    );
     let account_bytes = !caps.disabled.contains_key(&Capability::EvictionAccounting);
     let volumes = |fs: &dyn platform::Fs| -> BTreeMap<String, (std::path::PathBuf, u64)> {
         scan.targets
