@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+const DIVERGENCE_DETAIL: &str = "Feature sets in one mode can differ because invocations pass different feature flags, or because dev-dependency feature unification differs between build and test.";
+
 struct ProfileInput {
     target_dir: PathBuf,
     profile_dir: PathBuf,
@@ -46,7 +48,7 @@ pub struct Explanation {
     pub human: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Mode {
     Build,
     Check,
@@ -86,11 +88,19 @@ struct FeatureRow<'a> {
     units: Vec<&'a Unit>,
 }
 
+struct Divergence {
+    group_index: usize,
+    mode: Mode,
+    feature_sets: usize,
+}
+
 #[derive(Default)]
 struct TargetTotals {
     groups: u64,
     extra_units: u64,
     groups_shown: u64,
+    divergences: u64,
+    divergences_shown: u64,
 }
 
 fn analyse(inputs: &[ProfileInput], limits: Limits, failed: &FailedUnits) -> Explanation {
@@ -100,9 +110,25 @@ fn analyse(inputs: &[ProfileInput], limits: Limits, failed: &FailedUnits) -> Exp
     }
     groups.sort_by(rank_groups);
 
-    let keep = match limits.top {
+    let mut divergences = Vec::new();
+    for (index, group) in groups.iter().enumerate() {
+        for (mode, feature_sets) in divergent_modes(group) {
+            divergences.push(Divergence {
+                group_index: index,
+                mode,
+                feature_sets,
+            });
+        }
+    }
+    divergences.sort_by(|left, right| rank_divergences(&groups, left, right));
+
+    let groups_kept = match limits.top {
         Some(top) => top,
         None => groups.len(),
+    };
+    let divergences_kept = match limits.top {
+        Some(top) => top,
+        None => divergences.len(),
     };
 
     let mut by_target: BTreeMap<PathBuf, TargetTotals> = BTreeMap::new();
@@ -117,10 +143,27 @@ fn analyse(inputs: &[ProfileInput], limits: Limits, failed: &FailedUnits) -> Exp
         let totals = by_target.entry(group.target_dir.to_path_buf()).or_default();
         totals.groups += 1;
         totals.extra_units += as_u64(group.units.len() - 1);
-        if index < keep {
+        if index < groups_kept {
             totals.groups_shown += 1;
             findings.push(group_finding(group, &mut unmeasured, &mut deps_noted));
-            push_feature_findings(group, &mut findings, &mut unmeasured);
+            push_feature_findings(group, &mut findings, &mut unmeasured, None);
+        }
+    }
+
+    for (index, divergence) in divergences.iter().enumerate() {
+        let group = &groups[divergence.group_index];
+        let totals = by_target.entry(group.target_dir.to_path_buf()).or_default();
+        totals.divergences += 1;
+        if index < divergences_kept {
+            totals.divergences_shown += 1;
+            findings.push(divergence_finding(
+                group,
+                divergence.mode,
+                divergence.feature_sets,
+            ));
+            if divergence.group_index >= groups_kept {
+                push_feature_findings(group, &mut findings, &mut unmeasured, Some(divergence.mode));
+            }
         }
     }
 
@@ -143,8 +186,17 @@ fn analyse(inputs: &[ProfileInput], limits: Limits, failed: &FailedUnits) -> Exp
                 "groups_shown",
                 by_target.values().map(|totals| totals.groups_shown).sum(),
             ),
-            ("divergences", 0),
-            ("divergences_shown", 0),
+            (
+                "divergences",
+                by_target.values().map(|totals| totals.divergences).sum(),
+            ),
+            (
+                "divergences_shown",
+                by_target
+                    .values()
+                    .map(|totals| totals.divergences_shown)
+                    .sum(),
+            ),
         ],
         unmeasured,
         human: String::new(),
@@ -172,6 +224,46 @@ fn groups_in(input: &ProfileInput) -> Vec<Group<'_>> {
             deps: input.deps.as_deref(),
         })
         .collect()
+}
+
+fn divergent_modes(group: &Group<'_>) -> Vec<(Mode, usize)> {
+    let Some(deps) = group.deps else {
+        return Vec::new();
+    };
+    let mut features_by_mode: BTreeMap<Mode, BTreeSet<&str>> = BTreeMap::new();
+    for unit in &group.units {
+        features_by_mode
+            .entry(unit_mode(&unit.hash_hex, deps))
+            .or_default()
+            .insert(unit.features.as_ref());
+    }
+    features_by_mode
+        .into_iter()
+        .filter(|(_, features)| features.len() >= 2)
+        .map(|(mode, features)| (mode, features.len()))
+        .collect()
+}
+
+fn rank_divergences(
+    groups: &[Group<'_>],
+    left: &Divergence,
+    right: &Divergence,
+) -> std::cmp::Ordering {
+    let left_group = &groups[left.group_index];
+    let right_group = &groups[right.group_index];
+    right_group
+        .units
+        .len()
+        .cmp(&left_group.units.len())
+        .then_with(|| {
+            left_group
+                .profile_dir
+                .to_string_lossy()
+                .cmp(&right_group.profile_dir.to_string_lossy())
+        })
+        .then_with(|| left_group.dir_crate.cmp(&right_group.dir_crate))
+        .then_with(|| left_group.stem.cmp(&right_group.stem))
+        .then_with(|| left.mode.cmp(&right.mode))
 }
 
 fn rank_groups(left: &Group<'_>, right: &Group<'_>) -> std::cmp::Ordering {
@@ -301,9 +393,15 @@ fn push_feature_findings(
     group: &Group<'_>,
     findings: &mut Vec<Finding>,
     unmeasured: &mut Vec<(String, String)>,
+    only_mode: Option<Mode>,
 ) {
     let (crate_name, kind) = crate_and_kind(&group.stem);
     for row in feature_rows(group) {
+        if let Some(mode) = only_mode {
+            if row.mode != Some(mode) {
+                continue;
+            }
+        }
         let mut measured = BTreeMap::new();
         insert_text(&mut measured, "crate", &crate_name);
         insert_text(&mut measured, "target_kind", &kind);
@@ -356,13 +454,25 @@ fn totals_finding(path: &Path, totals: &TargetTotals, failed: &FailedUnits) -> F
     insert_int(&mut measured, "groups", totals.groups);
     insert_int(&mut measured, "extra_units", totals.extra_units);
     insert_int(&mut measured, "groups_shown", totals.groups_shown);
-    insert_int(&mut measured, "divergences", 0);
-    insert_int(&mut measured, "divergences_shown", 0);
+    insert_int(&mut measured, "divergences", totals.divergences);
+    insert_int(&mut measured, "divergences_shown", totals.divergences_shown);
     if matches!(failed, FailedUnits::Report) {
         insert_int(&mut measured, "failed_units", 0);
     }
     insert_int(&mut measured, "compiling_or_unknown_units", 0);
     finding("copies.totals", path, measured)
+}
+
+fn divergence_finding(group: &Group<'_>, mode: Mode, feature_sets: usize) -> Finding {
+    let (crate_name, kind) = crate_and_kind(&group.stem);
+    let mut measured = BTreeMap::new();
+    insert_text(&mut measured, "crate", &crate_name);
+    insert_text(&mut measured, "target_kind", &kind);
+    insert_text(&mut measured, "mode", mode.as_str());
+    insert_int(&mut measured, "feature_sets", as_u64(feature_sets));
+    let mut found = finding("copies.divergence", group.profile_dir, measured);
+    found.detail = DIVERGENCE_DETAIL.to_string();
+    found
 }
 
 fn finding(kind: &str, path: &Path, measured: BTreeMap<String, Measured>) -> Finding {
@@ -388,7 +498,7 @@ fn as_u64(value: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{analyse, FailedUnits, Limits, NotCurrentInput, ProfileInput};
+    use super::{analyse, FailedUnits, Limits, NotCurrentInput, ProfileInput, DIVERGENCE_DETAIL};
     use crate::fingerprint::{kind_of, Coverage, NotCurrentUnit};
     use crate::receipt::{Finding, Measured};
     use std::collections::BTreeMap;
@@ -1256,5 +1366,724 @@ mod tests {
                 "deps listing failed or was over its cap".to_string()
             )]
         );
+        assert!(exp
+            .findings
+            .iter()
+            .all(|finding| finding.kind != "copies.divergence"));
+    }
+
+    fn mode_artifact(hash: &str, mode: &str) -> String {
+        let ext = match mode {
+            "build" => "rlib",
+            "check" => "rmeta",
+            "unknown" => "d",
+            other => panic!("not a mode: {other}"),
+        };
+        format!("artifact-{hash}.{ext}")
+    }
+
+    #[test]
+    fn a_crate_with_two_feature_sets_in_one_mode_diverges() {
+        let units = vec![
+            unit(
+                "widget",
+                "lib-widget",
+                "1111111111111111",
+                "[\"testkit\"]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+            unit(
+                "widget",
+                "lib-widget",
+                "2222222222222222",
+                "[]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+            unit(
+                "widget",
+                "lib-widget",
+                "3333333333333333",
+                "[]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+            unit(
+                "widget",
+                "lib-widget",
+                "4444444444444444",
+                "[]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+        ];
+        let deps = vec![
+            "libwidget-1111111111111111.rmeta".to_string(),
+            "libwidget-2222222222222222.rmeta".to_string(),
+            "libwidget-3333333333333333.rlib".to_string(),
+            "libwidget-4444444444444444.rlib".to_string(),
+        ];
+        let no_mode = vec![
+            unit(
+                "widget",
+                "lib-widget",
+                "5555555555555555",
+                "[\"testkit\"]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+            unit(
+                "widget",
+                "lib-widget",
+                "6666666666666666",
+                "[]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+        ];
+        let failed = FailedUnits::Report;
+        let exp = analyse(
+            &[
+                profile("/targets/app", "/profiles/measured", units, Some(deps)),
+                profile("/targets/app", "/profiles/nolist", no_mode, None),
+            ],
+            Limits { top: Some(10) },
+            &failed,
+        );
+
+        let divergences: Vec<_> = exp
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == "copies.divergence")
+            .collect();
+        assert_eq!(divergences.len(), 1);
+        assert_eq!(
+            divergences[0].path.as_deref(),
+            Some(Path::new("/profiles/measured"))
+        );
+        let mut expected = BTreeMap::new();
+        expected.insert("crate".to_string(), text("widget"));
+        expected.insert("target_kind".to_string(), text("lib"));
+        expected.insert("mode".to_string(), text("check"));
+        expected.insert("feature_sets".to_string(), num(2));
+        assert_eq!(divergences[0].measured, expected);
+
+        let measured_features: Vec<_> = exp
+            .findings
+            .iter()
+            .filter(|finding| {
+                finding.kind == "copies.features"
+                    && finding.path.as_deref() == Some(Path::new("/profiles/measured"))
+            })
+            .map(|finding| {
+                (
+                    measured_text(finding, "mode"),
+                    measured_text(finding, "features"),
+                    measured_int(finding, "units"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            measured_features,
+            vec![
+                ("build".to_string(), "[]".to_string(), 2),
+                ("check".to_string(), "[\"testkit\"]".to_string(), 1),
+                ("check".to_string(), "[]".to_string(), 1),
+            ]
+        );
+
+        let bare: Vec<_> = exp
+            .findings
+            .iter()
+            .filter(|finding| {
+                finding.kind == "copies.features"
+                    && finding.path.as_deref() == Some(Path::new("/profiles/nolist"))
+            })
+            .collect();
+        assert!(bare
+            .iter()
+            .all(|finding| !finding.measured.contains_key("mode")));
+        assert_eq!(
+            bare.iter()
+                .map(|finding| (
+                    measured_text(finding, "features"),
+                    measured_int(finding, "units")
+                ))
+                .collect::<Vec<_>>(),
+            vec![("[\"testkit\"]".to_string(), 1), ("[]".to_string(), 1)]
+        );
+        assert_eq!(
+            exp.counts,
+            vec![
+                ("groups", 2),
+                ("extra_units", 4),
+                ("groups_shown", 2),
+                ("divergences", 1),
+                ("divergences_shown", 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn divergences_are_ranked_and_cut_like_groups() {
+        let plans = [
+            (
+                "/p/a",
+                "solo",
+                "lib-solo",
+                vec![(
+                    "build",
+                    vec!["[]", "[\"x\"]", "[]", "[]", "[]", "[]", "[]", "[]"],
+                )],
+            ),
+            (
+                "/p/a",
+                "aaa",
+                "lib-zzz",
+                vec![
+                    ("build", vec!["[]", "[\"x\"]"]),
+                    ("check", vec!["[]", "[\"z\"]"]),
+                ],
+            ),
+            (
+                "/p/a",
+                "mmm",
+                "lib-aaa",
+                vec![
+                    ("build", vec!["[\"y\"]", "[\"y\"]"]),
+                    ("check", vec!["[]", "[\"x\"]"]),
+                ],
+            ),
+            (
+                "/p/b",
+                "aaa",
+                "lib-aaa",
+                vec![("build", vec!["[]", "[\"x\"]", "[]", "[]"])],
+            ),
+            (
+                "/p/a",
+                "tie",
+                "bin-tie",
+                vec![("unknown", vec!["[]", "[\"x\"]", "[]"])],
+            ),
+            (
+                "/p/a",
+                "tie",
+                "lib-tie",
+                vec![("build", vec!["[]", "[\"x\"]", "[]"])],
+            ),
+            (
+                "/p/a",
+                "c1",
+                "lib-c1",
+                vec![("build", vec!["[]", "[\"x\"]"])],
+            ),
+            (
+                "/p/a",
+                "c2",
+                "lib-c2",
+                vec![("check", vec!["[]", "[\"x\"]"])],
+            ),
+            (
+                "/p/b",
+                "c3",
+                "lib-c3",
+                vec![("unknown", vec!["[]", "[\"x\"]"])],
+            ),
+            (
+                "/p/b",
+                "c4",
+                "lib-c4",
+                vec![("build", vec!["[]", "[\"x\"]"])],
+            ),
+            (
+                "/p/b",
+                "c5",
+                "lib-c5",
+                vec![("build", vec!["[]", "[\"x\"]"])],
+            ),
+        ];
+        let mut by_profile: BTreeMap<&str, (Vec<crate::fingerprint::Unit>, Vec<String>)> =
+            BTreeMap::new();
+        let mut n = 1_u32;
+        for (profile_dir, dir_crate, stem, arms) in plans.into_iter().rev() {
+            let entry = by_profile.entry(profile_dir).or_default();
+            for (mode, features) in arms {
+                for feature in features {
+                    let hash = format!("{n:016x}");
+                    n += 1;
+                    entry.0.push(unit(
+                        dir_crate,
+                        stem,
+                        &hash,
+                        feature,
+                        Coverage::None,
+                        (1, 1, 1),
+                    ));
+                    entry.1.push(mode_artifact(&hash, mode));
+                }
+            }
+        }
+        let inputs: Vec<_> = by_profile
+            .into_iter()
+            .map(|(profile_dir, (units, deps))| profile("/t", profile_dir, units, Some(deps)))
+            .collect();
+        let failed = FailedUnits::Report;
+        let identity = |finding: &Finding| {
+            (
+                finding.path.as_ref().unwrap().display().to_string(),
+                measured_text(finding, "crate"),
+                measured_text(finding, "target_kind"),
+                measured_text(finding, "mode"),
+                measured_int(finding, "feature_sets"),
+            )
+        };
+        let expected = [
+            ("/p/a", "solo", "lib", "build", 2),
+            ("/p/a", "zzz", "lib", "build", 2),
+            ("/p/a", "zzz", "lib", "check", 2),
+            ("/p/a", "aaa", "lib", "check", 2),
+            ("/p/b", "aaa", "lib", "build", 2),
+            ("/p/a", "tie", "bin", "unknown", 2),
+            ("/p/a", "tie", "lib", "build", 2),
+            ("/p/a", "c1", "lib", "build", 2),
+            ("/p/a", "c2", "lib", "check", 2),
+            ("/p/b", "c3", "lib", "unknown", 2),
+            ("/p/b", "c4", "lib", "build", 2),
+            ("/p/b", "c5", "lib", "build", 2),
+        ]
+        .into_iter()
+        .map(|(path, crate_name, kind, mode, sets)| {
+            (
+                path.to_string(),
+                crate_name.to_string(),
+                kind.to_string(),
+                mode.to_string(),
+                sets,
+            )
+        })
+        .collect::<Vec<_>>();
+
+        let listed = analyse(&inputs, Limits { top: Some(10) }, &failed);
+        let got: Vec<_> = listed
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == "copies.divergence")
+            .map(identity)
+            .collect();
+        assert_eq!(got, expected[..10]);
+        let totals: Vec<_> = listed
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == "copies.totals")
+            .collect();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(measured_int(totals[0], "divergences"), 12);
+        assert_eq!(measured_int(totals[0], "divergences_shown"), 10);
+        assert_eq!(
+            listed.counts,
+            vec![
+                ("groups", 11),
+                ("extra_units", 25),
+                ("groups_shown", 10),
+                ("divergences", 12),
+                ("divergences_shown", 10),
+            ]
+        );
+        let first_divergence = listed
+            .findings
+            .iter()
+            .position(|finding| finding.kind == "copies.divergence")
+            .unwrap();
+        let first_totals = listed
+            .findings
+            .iter()
+            .position(|finding| finding.kind == "copies.totals")
+            .unwrap();
+        assert!(listed.findings[..first_divergence]
+            .iter()
+            .any(|finding| finding.kind == "copies.group"));
+        assert!(listed.findings[first_divergence..first_totals]
+            .iter()
+            .all(|finding| finding.kind == "copies.divergence"));
+
+        let all = analyse(&inputs, Limits { top: None }, &failed);
+        let got_all: Vec<_> = all
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == "copies.divergence")
+            .map(identity)
+            .collect();
+        assert_eq!(got_all, expected);
+        assert_eq!(
+            all.counts,
+            vec![
+                ("groups", 11),
+                ("extra_units", 25),
+                ("groups_shown", 11),
+                ("divergences", 12),
+                ("divergences_shown", 12),
+            ]
+        );
+
+        let none = analyse(&inputs, Limits { top: Some(0) }, &failed);
+        assert!(none.findings.iter().all(|finding| {
+            finding.kind != "copies.group"
+                && finding.kind != "copies.features"
+                && finding.kind != "copies.divergence"
+        }));
+        assert_eq!(
+            none.counts,
+            vec![
+                ("groups", 11),
+                ("extra_units", 25),
+                ("groups_shown", 0),
+                ("divergences", 12),
+                ("divergences_shown", 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_feature_set_finding_is_reported_once() {
+        let rows = |dir_crate: &str, stem: &str, spec: &[(&str, &str)], start: u32| {
+            let mut units = Vec::new();
+            let mut deps = Vec::new();
+            for (offset, (features, mode)) in spec.iter().enumerate() {
+                let hash = format!("{:016x}", start + u32::try_from(offset).unwrap());
+                units.push(unit(
+                    dir_crate,
+                    stem,
+                    &hash,
+                    features,
+                    Coverage::None,
+                    (1, 1, 1),
+                ));
+                deps.push(mode_artifact(&hash, mode));
+            }
+            (units, deps)
+        };
+        let (shown, shown_deps) = rows(
+            "shown",
+            "lib-shown",
+            &[
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[\"testkit\"]", "check"),
+                ("[]", "check"),
+            ],
+            0x10,
+        );
+        let (mid, mid_deps) = rows(
+            "mid",
+            "lib-mid",
+            &[
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+            ],
+            0x30,
+        );
+        let (keep, keep_deps) = rows(
+            "keep",
+            "lib-keep",
+            &[
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+                ("[]", "build"),
+            ],
+            0x50,
+        );
+        let (cut, cut_deps) = rows(
+            "cut",
+            "lib-cut",
+            &[
+                ("[\"testkit\"]", "build"),
+                ("[]", "build"),
+                ("[\"other\"]", "check"),
+                ("[]", "check"),
+                ("[]", "unknown"),
+                ("[]", "unknown"),
+            ],
+            0x70,
+        );
+        let failed = FailedUnits::Report;
+        let exp = analyse(
+            &[
+                profile("/t", "/p/cut", cut, Some(cut_deps)),
+                profile("/t", "/p/keep", keep, Some(keep_deps)),
+                profile("/t", "/p/shown", shown, Some(shown_deps)),
+                profile("/t", "/p/mid", mid, Some(mid_deps)),
+            ],
+            Limits { top: Some(3) },
+            &failed,
+        );
+
+        let mark = |finding: &Finding| {
+            let mode = match finding.measured.get("mode") {
+                Some(Measured::Text(value)) => value.clone(),
+                Some(other) => panic!("mode is not text: {other:?}"),
+                None => String::new(),
+            };
+            let features = match finding.measured.get("features") {
+                Some(Measured::Text(value)) => value.clone(),
+                Some(other) => panic!("features is not text: {other:?}"),
+                None => String::new(),
+            };
+            let count_key = match finding.kind.as_str() {
+                "copies.group" => "copies",
+                "copies.features" => "units",
+                "copies.divergence" => "feature_sets",
+                other => panic!("no count on {other}"),
+            };
+            (
+                finding.kind.clone(),
+                finding.path.as_ref().unwrap().display().to_string(),
+                measured_text(finding, "crate"),
+                measured_text(finding, "target_kind"),
+                mode,
+                features,
+                measured_int(finding, count_key),
+            )
+        };
+        let got: Vec<_> = exp.findings[..exp.findings.len() - 1]
+            .iter()
+            .map(mark)
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "copies.group".to_string(),
+                    "/p/shown".to_string(),
+                    "shown".to_string(),
+                    "lib".to_string(),
+                    String::new(),
+                    String::new(),
+                    10
+                ),
+                (
+                    "copies.features".to_string(),
+                    "/p/shown".to_string(),
+                    "shown".to_string(),
+                    "lib".to_string(),
+                    "build".to_string(),
+                    "[]".to_string(),
+                    8
+                ),
+                (
+                    "copies.features".to_string(),
+                    "/p/shown".to_string(),
+                    "shown".to_string(),
+                    "lib".to_string(),
+                    "check".to_string(),
+                    "[\"testkit\"]".to_string(),
+                    1
+                ),
+                (
+                    "copies.features".to_string(),
+                    "/p/shown".to_string(),
+                    "shown".to_string(),
+                    "lib".to_string(),
+                    "check".to_string(),
+                    "[]".to_string(),
+                    1
+                ),
+                (
+                    "copies.group".to_string(),
+                    "/p/mid".to_string(),
+                    "mid".to_string(),
+                    "lib".to_string(),
+                    String::new(),
+                    String::new(),
+                    8
+                ),
+                (
+                    "copies.features".to_string(),
+                    "/p/mid".to_string(),
+                    "mid".to_string(),
+                    "lib".to_string(),
+                    "build".to_string(),
+                    "[]".to_string(),
+                    8
+                ),
+                (
+                    "copies.group".to_string(),
+                    "/p/keep".to_string(),
+                    "keep".to_string(),
+                    "lib".to_string(),
+                    String::new(),
+                    String::new(),
+                    7
+                ),
+                (
+                    "copies.features".to_string(),
+                    "/p/keep".to_string(),
+                    "keep".to_string(),
+                    "lib".to_string(),
+                    "build".to_string(),
+                    "[]".to_string(),
+                    7
+                ),
+                (
+                    "copies.divergence".to_string(),
+                    "/p/shown".to_string(),
+                    "shown".to_string(),
+                    "lib".to_string(),
+                    "check".to_string(),
+                    String::new(),
+                    2
+                ),
+                (
+                    "copies.divergence".to_string(),
+                    "/p/cut".to_string(),
+                    "cut".to_string(),
+                    "lib".to_string(),
+                    "build".to_string(),
+                    String::new(),
+                    2
+                ),
+                (
+                    "copies.features".to_string(),
+                    "/p/cut".to_string(),
+                    "cut".to_string(),
+                    "lib".to_string(),
+                    "build".to_string(),
+                    "[\"testkit\"]".to_string(),
+                    1
+                ),
+                (
+                    "copies.features".to_string(),
+                    "/p/cut".to_string(),
+                    "cut".to_string(),
+                    "lib".to_string(),
+                    "build".to_string(),
+                    "[]".to_string(),
+                    1
+                ),
+                (
+                    "copies.divergence".to_string(),
+                    "/p/cut".to_string(),
+                    "cut".to_string(),
+                    "lib".to_string(),
+                    "check".to_string(),
+                    String::new(),
+                    2
+                ),
+                (
+                    "copies.features".to_string(),
+                    "/p/cut".to_string(),
+                    "cut".to_string(),
+                    "lib".to_string(),
+                    "check".to_string(),
+                    "[\"other\"]".to_string(),
+                    1
+                ),
+                (
+                    "copies.features".to_string(),
+                    "/p/cut".to_string(),
+                    "cut".to_string(),
+                    "lib".to_string(),
+                    "check".to_string(),
+                    "[]".to_string(),
+                    1
+                ),
+            ]
+        );
+        assert_eq!(exp.findings.last().unwrap().kind, "copies.totals");
+        assert!(exp.unmeasured.is_empty());
+        assert_eq!(
+            exp.counts,
+            vec![
+                ("groups", 4),
+                ("extra_units", 27),
+                ("groups_shown", 3),
+                ("divergences", 3),
+                ("divergences_shown", 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_divergence_detail_names_both_sources_and_no_tool() {
+        assert_eq!(
+            DIVERGENCE_DETAIL,
+            "Feature sets in one mode can differ because invocations pass different feature flags, or because dev-dependency feature unification differs between build and test."
+        );
+        let units = vec![
+            unit(
+                "widget",
+                "lib-widget",
+                "aaaaaaaaaaaaaaaa",
+                "[]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+            unit(
+                "widget",
+                "lib-widget",
+                "bbbbbbbbbbbbbbbb",
+                "[\"a\"]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+            unit(
+                "widget",
+                "lib-widget",
+                "cccccccccccccccc",
+                "[]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+            unit(
+                "widget",
+                "lib-widget",
+                "dddddddddddddddd",
+                "[\"b\"]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+        ];
+        let deps = vec![
+            "libwidget-aaaaaaaaaaaaaaaa.rlib".to_string(),
+            "libwidget-bbbbbbbbbbbbbbbb.rlib".to_string(),
+            "libwidget-cccccccccccccccc.rmeta".to_string(),
+            "libwidget-dddddddddddddddd.rmeta".to_string(),
+        ];
+        let exp = analyse(
+            &[profile(
+                "/targets/app",
+                "/profiles/measured",
+                units,
+                Some(deps),
+            )],
+            Limits { top: None },
+            &FailedUnits::Report,
+        );
+        let divergences: Vec<_> = exp
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == "copies.divergence")
+            .collect();
+        assert!(divergences.len() >= 2);
+        assert!(divergences
+            .iter()
+            .all(|finding| finding.detail == DIVERGENCE_DETAIL));
     }
 }
