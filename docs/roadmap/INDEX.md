@@ -71,7 +71,7 @@ ID rules:
 - **ROAD-1** foundation-registry-discovery-receipts — After: none — Surfaces: None — the crate and module layout is set in design-solution. Expected components: repo registry, checkout discovery and C1 classification, Cargo target identification (`CACHEDIR.TAG` plus profile/.fingerprint), fingerprint reader with per-toolchain format check, receipt model, `doctor` capability checks, platform layer (`Fs`, `Approve`).
 - **ROAD-2** auto-tier-gc — After: ROAD-1 — Surfaces: None — the module layout is set in design-solution. Expected components: owner try-locks (Cargo build-dir lock, rustc session `.lock`), D6 session rule, `rustc*`/`rmeta*` temp sweep, per-file freed-byte accounting (D7).
 - **ROAD-3** explain-findings — After: ROAD-1 — Surfaces: None — the module layout is set in design-solution. Expected components: read-only findings on why a crate has N copies in a target dir (variant groups by feature set, mode and profile hash; feature divergence within one mode and target kind; failed units from the rustc summary line). Orphan candidates are left to `status`, which already reports them, and "emptied protected targets" is dropped, never having been defined (2026-10-29, ROAD-3 frame-change).
-- **ROAD-12** agent-skill — After: ROAD-2, ROAD-3 — Surfaces: None — the module layout is set in design-solution. Expected components: a hive agent skill (`SKILL.md`) kept in this repo and embedded in the binary, so it always matches that binary's flags and receipt schema; `cargo hive skill install` writing it into the agent's skills dir (Claude Code: `~/.claude/skills/hive/`); a `doctor` check that flags an installed skill from a different version. Agents drive every MILE-1 operation through the CLI with `--json`, taking scope from arguments.
+- **ROAD-12** agent-skill — After: ROAD-2, ROAD-3 — Surfaces: None — the module layout is set in design-solution. Expected components: a hive agent skill (`SKILL.md`) kept in this repo and embedded in the binary, so it always matches that binary's flags and receipt schema; its frame is the model from vision (protected versus secondary checkouts, auto versus plan tier, `needs-human`, agents never approve, scope from arguments) and its commands are MILE-1's only, each later item adding its own; `cargo hive skill install` writing it into the agent's skills dir (Claude Code: `~/.claude/skills/hive/`); a `doctor` check that flags an installed skill from a different version. Agents drive every MILE-1 operation through the CLI with `--json`, taking scope from arguments.
 **Depends-on:** none
 **Commitment:** Committed 2026-10-25
 **Closed:** None
@@ -86,7 +86,7 @@ ID rules:
 **Members:**
 - **ROAD-5** closure-liveness — After: MILE-1 — Surfaces: None — the module layout is set in design-solution. Expected components: `invoked.timestamp` window roots, fingerprint-graph closure (little-endian match), D5 deletion rule.
 - **ROAD-6** gc-plan-apply — After: ROAD-5 — Surfaces: None — the module layout is set in design-solution. Expected components: plan files, apply-time revalidation (liveness, try-locks, format), secondary-versus-protected scope (S2), orphan-target plans, CLI plan and apply whose JSON receipt carries `needs-human` and whose exit code is distinct for it, the hive skill extended to cover them.
-- **ROAD-7** owner-approval — After: ROAD-6 — Surfaces: None — the module layout is set in design-solution. Expected components: `cargo hive approve`, the TTY and argv-ancestry checks, `.deviceOwnerAuthentication` through objc bindings, 60 s expiry.
+- **ROAD-7** owner-approval — After: ROAD-6 — Surfaces: None — the module layout is set in design-solution. Expected components: `cargo hive approve`, the TTY and argv-ancestry checks, `.deviceOwnerAuthentication` through objc bindings, 60 s expiry, the hive skill extended to tell agents they never run `approve` and hand `needs-human` to the owner.
 **Depends-on:** MILE-1
 **Commitment:** Planned
 **Closed:** None
@@ -100,8 +100,9 @@ ID rules:
 **Members:**
 - **ROAD-8** store-fill-compress — After: MILE-2 — Surfaces: None — the module layout is set in design-solution. Expected components: D8 try-locked fill, D1 key, embedded Applesauce compression in the store, `store.db` (`size`, `filled_at`, `last_live_at`).
 - **ROAD-9** seed-secondary-checkouts — After: ROAD-8 — Surfaces: None — the module layout is set in design-solution. Expected components: clonefile out (D2), variant pick by newest `last_live_at`, `reused_fresh` receipts, a CLI `seed` command, the hive skill extended to cover it.
-- **ROAD-10** store-gc — After: ROAD-8 — Surfaces: None — the module layout is set in design-solution. Expected components: 30-day not-live eviction, rustc generation drop, cap by freeable bytes (D7), never evicting live units.
-- **ROAD-11** bench — After: ROAD-9 — Surfaces: None — the module layout is set in design-solution. Expected components: repeated cold-versus-seeded runs reporting median, p90, spread and load average.
+- **ROAD-10** store-gc — After: ROAD-8 — Surfaces: None — the module layout is set in design-solution. Expected components: 30-day not-live eviction, rustc generation drop, cap by freeable bytes (D7), never evicting live units, the hive skill extended to cover it.
+- **ROAD-11** bench — After: ROAD-9 — Surfaces: None — the module layout is set in design-solution. Expected components: repeated cold-versus-seeded runs reporting median, p90, spread and load average, the hive skill extended to cover it.
+- **ROAD-13** agent-skill-pass — After: ROAD-10, ROAD-11 — Surfaces: None — the hive skill from ROAD-12 and its per-item extensions. Expected components: one read of the whole skill once all three milestones' commands exist, rewriting it to read as one guide rather than a stack of per-item additions, checked against the binary's actual flags and receipts.
 **Depends-on:** MILE-2
 **Commitment:** Planned
 **Closed:** None
