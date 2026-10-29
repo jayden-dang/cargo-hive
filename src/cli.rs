@@ -431,14 +431,14 @@ fn select(reg: &Registry, args: &[std::path::PathBuf], b: &mut ReceiptBuilder) -
 
 fn live_checkouts(
     repos: &[registry::Repo],
+    registered_mains: &[std::path::PathBuf],
     cfg: &crate::state::Config,
     b: &mut ReceiptBuilder,
 ) -> Vec<crate::discover::Checkout> {
-    let mains: Vec<_> = repos.iter().map(|r| r.main.clone()).collect();
     let mut checkouts = Vec::new();
     for repo in repos {
         b.scope_mut().repos.push(repo.main.clone());
-        let (rows, faults) = crate::discover::checkouts(repo, &mains, cfg);
+        let (rows, faults) = crate::discover::checkouts(repo, registered_mains, cfg);
         for fault in faults {
             b.finding("walk.unreadable", Some(fault.path), fault.detail);
         }
@@ -757,7 +757,8 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
     }
     let selection = select(&reg, args, &mut b);
     let code = i32::from(selection.refused);
-    let checkouts = live_checkouts(&selection.repos, &cfg, &mut b);
+    let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
+    let checkouts = live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
     let all_repos = selection.all_repos;
     let scan = discover::targets(&checkouts, &cfg, all_repos, &mut snapshot, cancelled);
     if cancelled() {
