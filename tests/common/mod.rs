@@ -80,8 +80,12 @@ impl Hive {
         let release = cargo_hive::doctor::resolve_toolchain(&self.home.path)
             .expect("the proof machine has a Rust toolchain")
             .release;
-        let caps =
-            serde_json::json!({ "toolchain_release": release, "disabled": {}, "lock_check": 1 });
+        let caps = serde_json::json!({
+            "toolchain_release": release,
+            "disabled": {},
+            "lock_check": 1,
+            "failed_marker_check": 1
+        });
         fs::write(self.home.path.join("capabilities.json"), caps.to_string()).unwrap();
     }
 
@@ -117,6 +121,22 @@ impl Hive {
         assert!(
             out.status.success(),
             "cargo build failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    pub fn build_crate_failing(&self, dir: &Path) {
+        let mut cmd = Command::new("cargo");
+        cmd.args(["build", "--offline", "--quiet"])
+            .current_dir(dir)
+            .env("CARGO_HOME", &self.cargo_home.path)
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET_DIR")
+            .env_remove("CARGO_BUILD_BUILD_DIR");
+        let out = cmd.output().unwrap();
+        assert!(
+            !out.status.success(),
+            "cargo build succeeded: {}",
             String::from_utf8_lossy(&out.stderr)
         );
     }

@@ -24,11 +24,13 @@ cargo hive status          # every registered repo; add --json for one machine-r
 
 | Command | What it does |
 |---|---|
-| `cargo hive doctor` | Runs checks (a)–(f) in a temporary directory and records which capabilities are enabled for the active toolchain |
+| `cargo hive doctor` | Runs checks (a)–(g) in a temporary directory and records which capabilities are enabled for the active toolchain |
 | `cargo hive repo add <path>` | Registers the main checkout containing `<path>` |
 | `cargo hive repo list` | Lists registered repositories and their root commits |
 | `cargo hive status [<repo>…] [--no-sizes]` | Lists checkouts (protected, secondary, missing) and Cargo target dirs (owner or orphan candidate, size, units and edges) |
 | `cargo hive gc [<repo>…] [--dry-run]` | Deletes superseded incremental sessions and `deps/rustc*`/`rmeta*` temp dirs. Freed bytes are counted per inode and reported as totals. `--dry-run` deletes nothing |
+
+A failure of check (g) disables failed-unit reporting only.
 
 Every command accepts `--json`. It then prints exactly one receipt on stdout, and every
 receipt is also appended to `~/.hive/receipts/<date>.jsonl`. Receipts carry counts and
