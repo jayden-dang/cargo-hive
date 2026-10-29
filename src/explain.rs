@@ -1,15 +1,22 @@
 //! Groups fingerprint units that are copies of one crate, totals every target,
 //! and reports units whose last compile failed.
 //!
-//! `analyse` only reads values already in memory. `Explanation::human`
-//! stays empty for the caller to fill.
+//! `analyse` only reads values already in memory. `run` does the bounded
+//! reads and fills `Explanation::human`.
 
-#![cfg_attr(not(test), allow(dead_code))]
-
-use crate::fingerprint::{error_code, is_summary_line, kind_of, NotCurrentUnit, Unit};
+use crate::cargo_target::TargetDir;
+use crate::fingerprint::{
+    error_code, is_summary_line, kind_of, read_capped, Format, NotCurrentUnit, Unit,
+};
+use crate::gc::DEPS_CAP;
+use crate::platform::{
+    CompressOutcome, EntryKind, EntryStat, Fs, LockHolder, LockKind, LockState, Sharing, TempDir,
+    TryLock, VolumeInfo,
+};
 use crate::receipt::{Finding, Measured};
 use crate::state::utc_timestamp;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -241,7 +248,7 @@ fn divergent_modes(group: &Group<'_>) -> Vec<(Mode, usize)> {
     let mut features_by_mode: BTreeMap<Mode, BTreeSet<&str>> = BTreeMap::new();
     for unit in &group.units {
         features_by_mode
-            .entry(unit_mode(&unit.hash_hex, deps))
+            .entry(unit_mode(&unit.dir_name, &unit.hash_hex, deps))
             .or_default()
             .insert(unit.features.as_ref());
     }
@@ -289,10 +296,21 @@ fn rank_groups(left: &Group<'_>, right: &Group<'_>) -> std::cmp::Ordering {
 }
 
 fn directory_crate<'a>(dir_name: &'a str, hash_hex: &str) -> &'a str {
-    match dir_name.strip_suffix(hash_hex) {
-        Some(head) => head.strip_suffix('-').unwrap_or(dir_name),
+    if let Some(head) = dir_name
+        .strip_suffix(hash_hex)
+        .and_then(|head| head.strip_suffix('-'))
+    {
+        return head;
+    }
+    match directory_suffix(dir_name) {
+        Some(suffix) => &dir_name[..dir_name.len() - suffix.len() - 1],
         None => dir_name,
     }
+}
+
+fn directory_suffix(dir_name: &str) -> Option<&str> {
+    let (_, tail) = dir_name.rsplit_once('-')?;
+    is_lower_hex_16(tail).then_some(tail)
 }
 
 fn crate_and_kind(stem: &str) -> (String, String) {
@@ -306,10 +324,11 @@ fn crate_and_kind(stem: &str) -> (String, String) {
     (crate_name, kind)
 }
 
-fn unit_mode(hash_hex: &str, deps: &[String]) -> Mode {
+fn unit_mode(dir_name: &str, hash_hex: &str, deps: &[String]) -> Mode {
+    let hash = directory_suffix(dir_name).unwrap_or(hash_hex);
     let mut saw_rmeta = false;
     for name in deps {
-        let Some(ext) = matched_extension(name, hash_hex) else {
+        let Some(ext) = matched_extension(name, hash) else {
             continue;
         };
         if ext.is_empty() || ext == "rlib" || ext == "dylib" {
@@ -368,7 +387,7 @@ fn group_finding(
         let mut check = 0_u64;
         let mut unknown = 0_u64;
         for unit in &group.units {
-            match unit_mode(&unit.hash_hex, deps) {
+            match unit_mode(&unit.dir_name, &unit.hash_hex, deps) {
                 Mode::Build => build += 1,
                 Mode::Check => check += 1,
                 Mode::Unknown => unknown += 1,
@@ -432,7 +451,9 @@ fn push_feature_findings(
 fn feature_rows<'a>(group: &'a Group<'a>) -> Vec<FeatureRow<'a>> {
     let mut buckets: BTreeMap<(u8, &'a str), FeatureRow<'a>> = BTreeMap::new();
     for unit in &group.units {
-        let mode = group.deps.map(|deps| unit_mode(&unit.hash_hex, deps));
+        let mode = group
+            .deps
+            .map(|deps| unit_mode(&unit.dir_name, &unit.hash_hex, deps));
         let rank = mode.map(Mode::rank).unwrap_or(3);
         buckets
             .entry((rank, unit.features.as_ref()))
@@ -648,6 +669,269 @@ fn insert_int(measured: &mut BTreeMap<String, Measured>, key: &str, value: u64) 
 
 fn as_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+#[derive(Debug)]
+pub struct Cancelled;
+
+pub fn run(
+    targets: &[&TargetDir],
+    limits: Limits,
+    failed: FailedUnits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Explanation, Cancelled> {
+    let host = host_fs();
+    run_with(host.as_ref(), DEPS_CAP, targets, limits, failed, cancelled)
+}
+
+fn host_fs() -> Box<dyn Fs> {
+    #[cfg(target_os = "macos")]
+    if let Ok(platform) = crate::platform::current() {
+        return platform.fs;
+    }
+    Box::new(DirListFs)
+}
+
+struct DirListFs;
+
+fn unsupported() -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "not supported")
+}
+
+impl Fs for DirListFs {
+    fn temp_dir(&self, _parent: &Path, _prefix: &str) -> io::Result<TempDir> {
+        Err(unsupported())
+    }
+
+    fn write_file(&self, _path: &Path, _bytes: &[u8]) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    fn read(&self, _path: &Path) -> io::Result<Vec<u8>> {
+        Err(unsupported())
+    }
+
+    fn hardlink(&self, _src: &Path, _dst: &Path) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    fn set_mtime(&self, _path: &Path, _t: SystemTime) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    fn mtime(&self, _path: &Path) -> io::Result<SystemTime> {
+        Err(unsupported())
+    }
+
+    fn inode(&self, _path: &Path) -> io::Result<u64> {
+        Err(unsupported())
+    }
+
+    fn clone_file(&self, _src: &Path, _dst: &Path) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    fn sharing(&self, _path: &Path) -> io::Result<Sharing> {
+        Err(unsupported())
+    }
+
+    fn compress(&self, _path: &Path) -> CompressOutcome {
+        CompressOutcome::Failed("not supported".to_string())
+    }
+
+    fn hold_lock(&self, _kind: LockKind, _path: &Path) -> io::Result<LockHolder> {
+        Err(unsupported())
+    }
+
+    fn try_lock_exclusive(&self, _path: &Path) -> TryLock {
+        TryLock::Unopenable(unsupported())
+    }
+
+    fn try_lock_elsewhere(&self, _kind: LockKind, _path: &Path) -> io::Result<LockState> {
+        Err(unsupported())
+    }
+
+    fn entry_stat(&self, _path: &Path) -> io::Result<EntryStat> {
+        Err(unsupported())
+    }
+
+    fn read_dir_bounded(&self, dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>> {
+        read_dir_capped(dir, cap)
+    }
+
+    fn remove_tree(&self, _path: &Path) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    fn remove_file(&self, _path: &Path) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    fn volume(&self, _path: &Path) -> io::Result<VolumeInfo> {
+        Err(unsupported())
+    }
+}
+
+fn read_dir_capped(dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>> {
+    let mut out = Vec::new();
+    for (seen, entry) in std::fs::read_dir(dir)?.enumerate() {
+        if seen >= cap {
+            return Err(io::Error::other(format!(
+                "{} has more than {cap} entries",
+                dir.display()
+            )));
+        }
+        let entry = entry?;
+        let kind = crate::platform::entry_kind(entry.file_type()?);
+        if let Ok(name) = entry.file_name().into_string() {
+            out.push((name, kind));
+        }
+    }
+    Ok(out)
+}
+
+fn run_with(
+    fs: &dyn Fs,
+    deps_cap: usize,
+    targets: &[&TargetDir],
+    limits: Limits,
+    failed: FailedUnits,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Explanation, Cancelled> {
+    let inputs = profile_inputs(fs, deps_cap, targets, cancelled)?;
+    let mut explanation = analyse(&inputs, limits, &failed);
+    explanation.human = human_text(&explanation.findings);
+    Ok(explanation)
+}
+
+fn profile_inputs(
+    fs: &dyn Fs,
+    deps_cap: usize,
+    targets: &[&TargetDir],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<ProfileInput>, Cancelled> {
+    let mut inputs = Vec::new();
+    for target in targets {
+        if target.unreadable.is_some() {
+            continue;
+        }
+        for profile in &target.profiles {
+            if cancelled() {
+                return Err(Cancelled);
+            }
+            let Format::Supported = &profile.format else {
+                continue;
+            };
+            let mut input = ProfileInput {
+                target_dir: target.path.clone(),
+                profile_dir: profile.path.clone(),
+                units: profile
+                    .graph
+                    .as_ref()
+                    .map(|graph| graph.units.clone())
+                    .unwrap_or_default(),
+                deps: None,
+                not_current: Vec::new(),
+            };
+            if !groups_in(&input).is_empty() {
+                if cancelled() {
+                    return Err(Cancelled);
+                }
+                input.deps = list_deps(fs, &profile.path.join("deps"), deps_cap);
+            }
+            input.not_current = read_not_current(&profile.not_current_units);
+            inputs.push(input);
+        }
+    }
+    Ok(inputs)
+}
+
+fn list_deps(fs: &dyn Fs, dir: &Path, cap: usize) -> Option<Vec<String>> {
+    fs.read_dir_bounded(dir, cap)
+        .ok()
+        .map(|entries| entries.into_iter().map(|(name, _kind)| name).collect())
+}
+
+fn read_not_current(units: &[NotCurrentUnit]) -> Vec<NotCurrentInput> {
+    units
+        .iter()
+        .map(|unit| NotCurrentInput {
+            outputs: read_outputs(&unit.dir, &unit.outputs),
+            attempted_at: invoked_mtime(&unit.dir),
+            kind_from_output: None,
+            unit: unit.clone(),
+        })
+        .collect()
+}
+
+fn read_outputs(dir: &Path, names: &[String]) -> Result<Vec<String>, String> {
+    let mut texts = Vec::with_capacity(names.len());
+    for name in names {
+        texts.push(read_output(&dir.join(name))?);
+    }
+    Ok(texts)
+}
+
+fn read_output(path: &Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(path).map_err(|err| err.to_string())?;
+    let bytes = read_capped(&mut file)?;
+    String::from_utf8(bytes).map_err(|err| err.to_string())
+}
+
+fn invoked_mtime(dir: &Path) -> Option<SystemTime> {
+    std::fs::metadata(dir.join("invoked.timestamp"))
+        .and_then(|meta| meta.modified())
+        .ok()
+}
+
+fn human_text(findings: &[Finding]) -> String {
+    let mut text = String::new();
+    for finding in findings {
+        let Some(line) = human_line(finding) else {
+            continue;
+        };
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text
+}
+
+fn human_line(finding: &Finding) -> Option<String> {
+    let name = subject(finding);
+    match finding.kind.as_str() {
+        "copies.group" => Some(format!(
+            "{name}  {} copies",
+            measured_count(finding, "copies")
+        )),
+        "copies.divergence" => Some(format!(
+            "{name}  {} feature sets",
+            measured_count(finding, "feature_sets")
+        )),
+        "unit.failed" => Some(format!("{name}  1 failed")),
+        "copies.totals" => Some(format!(
+            "{name}  {} groups",
+            measured_count(finding, "groups")
+        )),
+        _ => None,
+    }
+}
+
+fn subject(finding: &Finding) -> String {
+    if let Some(Measured::Text(name)) = finding.measured.get("crate") {
+        return name.clone();
+    }
+    finding
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default()
+}
+
+fn measured_count(finding: &Finding, key: &str) -> u64 {
+    match finding.measured.get(key) {
+        Some(Measured::Int(value)) => *value,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -2797,6 +3081,228 @@ mod tests {
         assert_eq!(
             measured_int(&exp.findings[2], "compiling_or_unknown_units"),
             0
+        );
+    }
+
+    struct DirGuard(PathBuf);
+
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn sized_summary(total: usize) -> Vec<u8> {
+        let prefix =
+            br#"{"level":"error","message":"aborting due to 1 previous error","code":null,"pad":""#;
+        let suffix = br#""}"#;
+        let mut bytes = Vec::with_capacity(total);
+        bytes.extend_from_slice(prefix);
+        bytes.resize(total - suffix.len(), b'a');
+        bytes.extend_from_slice(suffix);
+        bytes
+    }
+
+    struct FakeFs;
+
+    fn unused_io() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::Unsupported, "not used by explain")
+    }
+
+    impl crate::platform::Fs for FakeFs {
+        fn temp_dir(&self, _: &Path, _: &str) -> std::io::Result<crate::platform::TempDir> {
+            Err(unused_io())
+        }
+        fn write_file(&self, _: &Path, _: &[u8]) -> std::io::Result<()> {
+            Err(unused_io())
+        }
+        fn read(&self, _: &Path) -> std::io::Result<Vec<u8>> {
+            Err(unused_io())
+        }
+        fn hardlink(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+            Err(unused_io())
+        }
+        fn set_mtime(&self, _: &Path, _: SystemTime) -> std::io::Result<()> {
+            Err(unused_io())
+        }
+        fn mtime(&self, _: &Path) -> std::io::Result<SystemTime> {
+            Err(unused_io())
+        }
+        fn inode(&self, _: &Path) -> std::io::Result<u64> {
+            Err(unused_io())
+        }
+        fn clone_file(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+            Err(unused_io())
+        }
+        fn sharing(&self, _: &Path) -> std::io::Result<crate::platform::Sharing> {
+            Err(unused_io())
+        }
+        fn compress(&self, _: &Path) -> crate::platform::CompressOutcome {
+            crate::platform::CompressOutcome::Failed("not used by explain".into())
+        }
+        fn hold_lock(
+            &self,
+            _: crate::platform::LockKind,
+            _: &Path,
+        ) -> std::io::Result<crate::platform::LockHolder> {
+            Err(unused_io())
+        }
+        fn try_lock_exclusive(&self, _: &Path) -> crate::platform::TryLock {
+            crate::platform::TryLock::Unopenable(unused_io())
+        }
+        fn try_lock_elsewhere(
+            &self,
+            _: crate::platform::LockKind,
+            _: &Path,
+        ) -> std::io::Result<crate::platform::LockState> {
+            Err(unused_io())
+        }
+        fn entry_stat(&self, _: &Path) -> std::io::Result<crate::platform::EntryStat> {
+            Err(unused_io())
+        }
+        fn read_dir_bounded(
+            &self,
+            dir: &Path,
+            cap: usize,
+        ) -> std::io::Result<Vec<(String, crate::platform::EntryKind)>> {
+            let mut out = Vec::new();
+            for (seen, entry) in std::fs::read_dir(dir)?.enumerate() {
+                if seen >= cap {
+                    return Err(std::io::Error::other(format!(
+                        "{} has more than {cap} entries",
+                        dir.display()
+                    )));
+                }
+                let entry = entry?;
+                let kind = if entry.file_type()?.is_dir() {
+                    crate::platform::EntryKind::Dir
+                } else {
+                    crate::platform::EntryKind::File
+                };
+                if let Ok(name) = entry.file_name().into_string() {
+                    out.push((name, kind));
+                }
+            }
+            Ok(out)
+        }
+        fn remove_tree(&self, _: &Path) -> std::io::Result<()> {
+            Err(unused_io())
+        }
+        fn remove_file(&self, _: &Path) -> std::io::Result<()> {
+            Err(unused_io())
+        }
+        fn volume(&self, _: &Path) -> std::io::Result<crate::platform::VolumeInfo> {
+            Err(unused_io())
+        }
+    }
+
+    #[test]
+    fn deps_listing_and_output_reads_are_bounded() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = PathBuf::from(format!(
+            "/private/tmp/hive-it-explain-cap-{}-{nanos}",
+            std::process::id()
+        ));
+        let _guard = DirGuard(root.clone());
+        std::fs::create_dir_all(&root).unwrap();
+        let profile = root.join("debug");
+        let deps = profile.join("deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::write(deps.join("libwidget-aaaaaaaaaaaaaaaa.rlib"), b"b").unwrap();
+        std::fs::write(deps.join("libwidget-bbbbbbbbbbbbbbbb.rmeta"), b"c").unwrap();
+        std::fs::write(deps.join("extra-cccccccccccccccc.rlib"), b"e").unwrap();
+        let ok_dir = root.join("ok-unit");
+        let big_dir = root.join("big-unit");
+        std::fs::create_dir_all(&ok_dir).unwrap();
+        std::fs::create_dir_all(&big_dir).unwrap();
+        let exact = 4 * 1024 * 1024;
+        std::fs::write(ok_dir.join("output-lib-widget"), sized_summary(exact)).unwrap();
+        std::fs::write(ok_dir.join("invoked.timestamp"), b"stamp").unwrap();
+        std::fs::write(big_dir.join("output-lib-widget"), sized_summary(exact + 1)).unwrap();
+        let units = vec![
+            unit(
+                "widget",
+                "lib-widget",
+                "aaaaaaaaaaaaaaaa",
+                "[]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+            unit(
+                "widget",
+                "lib-widget",
+                "bbbbbbbbbbbbbbbb",
+                "[]",
+                Coverage::None,
+                (2, 1, 1),
+            ),
+        ];
+        let target = crate::cargo_target::TargetDir {
+            path: root.clone(),
+            owner: crate::cargo_target::Owner::Owned {
+                checkout: root.clone(),
+            },
+            profiles: vec![crate::fingerprint::ProfileReport {
+                path: profile.clone(),
+                format: crate::fingerprint::Format::Supported,
+                units: 2,
+                not_current: 2,
+                not_current_units: vec![
+                    NotCurrentUnit {
+                        dir: ok_dir.clone(),
+                        stem: Some("lib-widget".to_string()),
+                        features: Some(Arc::from("[]")),
+                        outputs: vec!["output-lib-widget".to_string()],
+                    },
+                    NotCurrentUnit {
+                        dir: big_dir.clone(),
+                        stem: Some("lib-widget".to_string()),
+                        features: Some(Arc::from("[]")),
+                        outputs: vec!["output-lib-widget".to_string()],
+                    },
+                ],
+                edges: None,
+                graph: Some(crate::fingerprint::UnitGraph {
+                    units,
+                    edges: Vec::new(),
+                }),
+            }],
+            size: None,
+            unreadable: None,
+        };
+        let exp = super::run_with(
+            &FakeFs,
+            2,
+            &[&target],
+            Limits { top: None },
+            FailedUnits::Report,
+            &|| false,
+        )
+        .unwrap();
+        let groups = groups_of(&exp.findings);
+        assert_eq!(groups.len(), 1);
+        assert!(!groups[0].measured.contains_key("mode_build"));
+        assert!(!groups[0].measured.contains_key("mode_check"));
+        assert!(!groups[0].measured.contains_key("mode_unknown"));
+        assert!(exp.unmeasured.iter().any(|(field, reason)| {
+            field == &profile.display().to_string()
+                && reason == "deps listing failed or was over its cap"
+        }));
+        let failed = failed_of(&exp.findings);
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].path.as_deref(), Some(ok_dir.as_path()));
+        assert!(exp.unmeasured.iter().any(|(field, reason)| {
+            field == &big_dir.display().to_string() && reason == "larger than 4 MiB"
+        }));
+        assert_eq!(
+            exp.human,
+            format!(
+                "widget  2 copies\nwidget  1 failed\n{}  1 groups\n",
+                root.display()
+            )
         );
     }
 }

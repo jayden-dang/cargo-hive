@@ -141,6 +141,23 @@ impl Hive {
         );
     }
 
+    /// `cargo check --offline` in `dir` with the same environment as `build_crate`.
+    pub fn check_crate(&self, dir: &Path) {
+        let mut cmd = Command::new("cargo");
+        cmd.args(["check", "--offline", "--quiet"])
+            .current_dir(dir)
+            .env("CARGO_HOME", &self.cargo_home.path)
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET_DIR")
+            .env_remove("CARGO_BUILD_BUILD_DIR");
+        let out = cmd.output().unwrap();
+        assert!(
+            out.status.success(),
+            "cargo check failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     /// Runs with `--json` and parses stdout as exactly one JSON value.
     pub fn json(&self, args: &[&str]) -> (Output, serde_json::Value) {
         let mut all = args.to_vec();
@@ -220,6 +237,15 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+pub fn register(hive: &Hive, repo: &Path) {
+    let out = hive.run(&["repo", "add", repo.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// A git repo at `dir` with a Cargo package at `crate_rel` (relative, "" for the root) and one commit.

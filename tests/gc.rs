@@ -1,6 +1,8 @@
 #![cfg(target_os = "macos")]
 mod common;
-use common::{crate_dirs, git, init_repo, plant_session, sessions_in, wait_within, Hive, Scratch};
+use common::{
+    crate_dirs, git, init_repo, plant_session, register, sessions_in, wait_within, Hive, Scratch,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -16,15 +18,6 @@ fn pid_alive(pid: u32) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-fn register(hive: &Hive, repo: &Path) {
-    let out = hive.run(&["repo", "add", repo.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 fn gc(hive: &Hive, args: &[&str]) -> (std::process::Output, serde_json::Value) {

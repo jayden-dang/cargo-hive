@@ -51,6 +51,16 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// Report copies of one crate, feature splits, and units whose last compile failed
+    Explain {
+        /// Registered repos to explain; none means every registered repo
+        repos: Vec<std::path::PathBuf>,
+        /// -n, --top. Default 10. 0 means show all.
+        #[arg(short = 'n', long = "top", default_value_t = 10)]
+        top: usize,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// Hold a lock until killed (used by doctor's lock check)
     #[command(name = "__hold-lock", hide = true)]
     HoldLock {
@@ -135,6 +145,7 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
             dry_run,
             out,
         } => gc_cmd(&state, &repos, dry_run, out),
+        Command::Explain { repos, top, out } => explain_cmd(&state, &repos, top, out),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
         Command::TryLock { .. } => unreachable!("handled before the state root is opened"),
     }
@@ -881,4 +892,147 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
         return emit(state, out, b.finish(), &human, 130);
     }
     emit(state, out, b.finish(), &human, code)
+}
+
+fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: OutputArgs) -> i32 {
+    use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
+    use crate::doctor::{self, Capabilities, Capability};
+    use crate::explain::{self, FailedUnits, Limits};
+    use crate::fingerprint::Format;
+    use crate::platform::Availability;
+    let loaded = (|| -> Result<_, StateError> {
+        Ok((
+            state.read::<Registry>(registry::FILE)?,
+            state.config()?,
+            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+            state.read::<Snapshot>(SNAPSHOT_FILE)?,
+        ))
+    })();
+    let (reg, cfg, caps, mut snapshot) = match loaded {
+        Ok(v) => v,
+        Err(e) => return emit_failure(state, out, "explain", &e.to_string(), 1),
+    };
+    let mut b = Receipt::new("explain", Scope::default());
+    let release = doctor::resolve_toolchain(state.root())
+        .ok()
+        .map(|t| t.release);
+    b.toolchain(release.clone());
+    if let Err(refusal) = doctor::require(&caps, Capability::FingerprintReading, release.as_deref())
+    {
+        b.finding("refusal", None, refusal.to_string());
+        return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
+    }
+    let selection = select(&reg, args, &mut b);
+    let code = i32::from(selection.refused);
+    if let Err(e) = doctor::install_signal_handlers() {
+        return emit_failure(
+            state,
+            out,
+            "explain",
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
+    }
+    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
+    let checkouts = live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
+    let scan = discover::targets(
+        &checkouts,
+        &cfg,
+        selection.all_repos,
+        &mut snapshot,
+        cancelled,
+    );
+    if cancelled() {
+        b.finding("error", None, "explain was cancelled");
+        return emit(state, out, b.finish(), "explain was cancelled\n", 130);
+    }
+    for fault in &scan.walk_faults {
+        b.finding(
+            "walk.unreadable",
+            Some(fault.path.clone()),
+            fault.detail.clone(),
+        );
+    }
+    let wrote = match state.locked_or_cancelled(cancelled, |tx| {
+        if cancelled() {
+            return Ok(false);
+        }
+        let disk = tx.read(SNAPSHOT_FILE)?;
+        tx.write(
+            SNAPSHOT_FILE,
+            &discover::merge_snapshot(snapshot, disk, &scan.cleared_profiles),
+        )?;
+        Ok(true)
+    }) {
+        Ok(wrote) => wrote,
+        Err(StateError::Cancelled) => false,
+        Err(e) => {
+            eprintln!("cargo-hive: {e}");
+            b.finding("error", None, e.to_string());
+            return emit(state, out, b.finish(), &format!("{e}\n"), 1);
+        }
+    };
+    if !wrote {
+        b.finding("error", None, "explain was cancelled");
+        return emit(state, out, b.finish(), "explain was cancelled\n", 130);
+    }
+    let scope = discover::Scope::from_paths(
+        args.is_empty(),
+        checkouts
+            .iter()
+            .filter(|checkout| !checkout.missing)
+            .map(|checkout| checkout.path.clone()),
+    );
+    let kept: Vec<_> = scan
+        .targets
+        .iter()
+        .filter(|target| scope.contains(target))
+        .collect();
+    for target in &kept {
+        if let Some(why) = &target.unreadable {
+            b.finding("target.unreadable", Some(target.path.clone()), why.clone());
+            continue;
+        }
+        for profile in &target.profiles {
+            if let Format::Unsupported(why) = &profile.format {
+                b.finding(
+                    "profile.unsupported",
+                    Some(profile.path.clone()),
+                    why.clone(),
+                );
+            }
+        }
+    }
+    let failed = match doctor::failed_unit_reporting(&caps) {
+        Availability::Available => FailedUnits::Report,
+        Availability::Unavailable(reason) => FailedUnits::Off(reason),
+    };
+    let limits = if top == 0 {
+        Limits { top: None }
+    } else {
+        Limits { top: Some(top) }
+    };
+    let explanation = match explain::run(&kept, limits, failed, &cancelled) {
+        Ok(explanation) => explanation,
+        Err(explain::Cancelled) => {
+            b.finding("error", None, "explain was cancelled");
+            return emit(state, out, b.finish(), "explain was cancelled\n", 130);
+        }
+    };
+    for finding in explanation.findings {
+        b.finding_measured(
+            &finding.kind,
+            finding.path,
+            finding.detail,
+            finding.measured,
+        );
+    }
+    for (name, n) in explanation.counts {
+        b.count(name, n);
+    }
+    for (field, reason) in explanation.unmeasured {
+        b.unmeasured(&field, reason);
+    }
+    emit(state, out, b.finish(), &explanation.human, code)
 }
