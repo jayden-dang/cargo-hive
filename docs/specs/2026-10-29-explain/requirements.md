@@ -62,22 +62,27 @@ signature, Receipt. Further terms used below:
 
 - **EXPLAIN-1.1** WHEN the user runs `cargo hive explain` THE SYSTEM SHALL form the copy groups of every supported profile dir of every target in scope (EXPLAIN-5.1).
 - **EXPLAIN-1.2** WHEN explain reports a multi-copy group THE SYSTEM SHALL report it as one finding whose path is the profile dir and whose measured keys are exactly: `crate`, `target_kind`, `copies`, `feature_sets` (distinct `features` strings), `profile_hashes` (distinct `profile` values), `mode_build`, `mode_check`, `mode_unknown` (copies in each mode), and `copies_sharing_features_and_profile` (copies minus the number of distinct (`features`, `profile`) pairs).
-- **EXPLAIN-1.3** WHEN explain reports a multi-copy group THE SYSTEM SHALL also report one feature-set finding per distinct pair of mode and `features` string among its units, with measured keys exactly `crate`, `target_kind`, `mode`, `features` (Cargo's string, verbatim), `coverage`, and `units` (the group's units with that mode and string). `coverage` is `none` when the string is `[]`, `all_declared` when it names every feature in the unit's `declared_features`, and `partial` otherwise.
+- ~~**EXPLAIN-1.3**~~ superseded by EXPLAIN-1.9 (design measurement 2026-10-29: an empty `features` string, which Cargo writes for run-build-script units, needs its own coverage value) — was: ~~WHEN explain reports a multi-copy group THE SYSTEM SHALL also report one feature-set finding per distinct pair of mode and `features` string among its units, with measured keys exactly `crate`, `target_kind`, `mode`, `features` (Cargo's string, verbatim), `coverage`, and `units` (the group's units with that mode and string). `coverage` is `none` when the string is `[]`, `all_declared` when it names every feature in the unit's `declared_features`, and `partial` otherwise.~~
 - **EXPLAIN-1.4** THE SYSTEM SHALL report, across the whole run, the multi-copy groups with the most copies, at most the default count (Open Questions), ordered by copies descending, then by profile dir path, then by crate name, then by hash-file name.
 - **EXPLAIN-1.5** WHERE the user passes the show-all flag THE SYSTEM SHALL report every multi-copy group, in the order of EXPLAIN-1.4.
-- **EXPLAIN-1.6** WHEN explain runs THE SYSTEM SHALL report, for every target dir in scope whether or not any of its groups was listed, one totals finding with measured keys exactly `groups` (multi-copy groups), `extra_units` (the sum of copies minus 1 over those groups), `groups_shown`, `failed_units` and `compiling_or_unknown_units` (EXPLAIN-3.4).
-- **EXPLAIN-1.7** WHEN explain runs THE SYSTEM SHALL put the run-wide totals of `groups`, `extra_units` and `groups_shown` in the receipt's counts.
+- ~~**EXPLAIN-1.6**~~ superseded by EXPLAIN-1.10 (design measurement 2026-10-29: the totals finding also counts feature-divergence findings) — was: ~~WHEN explain runs THE SYSTEM SHALL report, for every target dir in scope whether or not any of its groups was listed, one totals finding with measured keys exactly `groups` (multi-copy groups), `extra_units` (the sum of copies minus 1 over those groups), `groups_shown`, `failed_units` and `compiling_or_unknown_units` (EXPLAIN-3.4).~~
+- ~~**EXPLAIN-1.7**~~ superseded by EXPLAIN-1.11 (design measurement 2026-10-29: the run-wide counts also count feature-divergence findings) — was: ~~WHEN explain runs THE SYSTEM SHALL put the run-wide totals of `groups`, `extra_units` and `groups_shown` in the receipt's counts.~~
 - **EXPLAIN-1.8** THE SYSTEM SHALL carry crate names, target kinds, modes and feature strings only as measured values, never inside a measured key or a count name.
 
+- **EXPLAIN-1.9** WHEN explain reports a multi-copy group THE SYSTEM SHALL also report one feature-set finding per distinct pair of mode and `features` string among its units, with measured keys exactly `crate`, `target_kind`, `mode`, `features` (Cargo's string, verbatim), `coverage`, and `units` (the group's units with that mode and string). `coverage` is `not_recorded` when the string is empty (Cargo records no features for a run-build-script unit), `none` when it is `[]`, `all_declared` when it names every feature in the unit's `declared_features`, and `partial` otherwise.
+- **EXPLAIN-1.10** WHEN explain runs THE SYSTEM SHALL report, for every target dir in scope whether or not any of its groups was listed, one totals finding with measured keys exactly `groups` (multi-copy groups), `extra_units` (the sum of copies minus 1 over those groups), `groups_shown`, `divergences` (feature-divergence findings, EXPLAIN-2.5), `divergences_shown`, `failed_units` and `compiling_or_unknown_units` (EXPLAIN-3.4).
+- **EXPLAIN-1.11** WHEN explain runs THE SYSTEM SHALL put the run-wide totals of `groups`, `extra_units`, `groups_shown`, `divergences` and `divergences_shown` in the receipt's counts.
 ## 2. See where one crate builds with different feature sets
 
 **Story:** As a developer, I want explain to show me each crate that is built with different feature sets in the same mode and target kind, so that I can find the feature split that multiplies its copies.
 
-- **EXPLAIN-2.1** WHEN a copy group holds, among its units of one mode, two or more distinct `features` strings THE SYSTEM SHALL report a feature-divergence finding whose path is the profile dir, with measured keys exactly `crate`, `target_kind`, `mode` and `feature_sets`, together with the EXPLAIN-1.3 feature-set findings of that group and mode.
-- **EXPLAIN-2.2** THE SYSTEM SHALL report every feature-divergence finding, and the feature-set findings that go with it, whatever the default count and whether or not its copy group is listed by EXPLAIN-1.4, and SHALL report each feature-set finding at most once.
+- ~~**EXPLAIN-2.1**~~ superseded by EXPLAIN-2.5 (design measurement 2026-10-29: it cited the struck EXPLAIN-1.3) — was: ~~WHEN a copy group holds, among its units of one mode, two or more distinct `features` strings THE SYSTEM SHALL report a feature-divergence finding whose path is the profile dir, with measured keys exactly `crate`, `target_kind`, `mode` and `feature_sets`, together with the EXPLAIN-1.3 feature-set findings of that group and mode.~~
+- ~~**EXPLAIN-2.2**~~ superseded by EXPLAIN-2.6 (design measurement 2026-10-29: 139 uncut feature-divergence findings made the default klynt receipt about 142 KB) — was: ~~THE SYSTEM SHALL report every feature-divergence finding, and the feature-set findings that go with it, whatever the default count and whether or not its copy group is listed by EXPLAIN-1.4, and SHALL report each feature-set finding at most once.~~
 - **EXPLAIN-2.3** THE SYSTEM SHALL give every feature-divergence finding the same detail text, which names both possible sources (different feature flags between invocations, and dev-dependency feature unification between build and test) and names no tool.
 - **EXPLAIN-2.4** THE SYSTEM SHALL decide feature divergence only from the fingerprints' `features` and `declared_features` values, and read no editor or tool configuration file to do so.
 
+- **EXPLAIN-2.5** WHEN a copy group holds, among its units of one mode, two or more distinct `features` strings THE SYSTEM SHALL count one feature divergence for that group and mode, reported as a finding whose path is the profile dir, with measured keys exactly `crate`, `target_kind`, `mode` and `feature_sets`, together with the EXPLAIN-1.9 feature-set findings of that group and mode.
+- **EXPLAIN-2.6** THE SYSTEM SHALL report, across the whole run, the feature divergences whose copy groups have the most copies, at most the divergence default count (Open Questions), ordered by copies descending, then by profile dir path, crate name, hash-file name and mode. WHERE the user passes the show-all flag it SHALL report every one. It SHALL report each feature-set finding at most once.
 ## 3. See which crates failed their last compile
 
 **Story:** As a developer, I want explain to tell me which units failed their last compile and with which rustc error codes or lint names, so that I can fix the crate whose last compile failed.
@@ -153,8 +158,14 @@ Files and surfaces this change touches:
 
 ## Open Questions
 
-Owned unknowns from `.skills/EXPLAIN/close-package.md` §3. The design must measure or put each one to the owner rather than pick it.
+None. The owned unknowns from `.skills/EXPLAIN/close-package.md` §3 were measured in design and
+decided by the owner on 2026-10-29 (`design.md`, Decisions):
 
-- The default count of EXPLAIN-1.4 (20 is a guess), set after measuring the receipt size on klynt — project owner — 2026-10-29 — forbid-guess (cấm đoán).
-- The spelling of the show-all flag (`-n N` with 0 for all, or `--top N` and `--all`) — project owner — 2026-10-29 — forbid-guess (cấm đoán).
-- The finding kind names (working names: `variants.crate`, `features.set`, `features.divergent`, `unit.failed`, `target.totals`) — project owner — 2026-10-29 — forbid-guess (cấm đoán).
+- The default count of EXPLAIN-1.4 and the divergence default count of EXPLAIN-2.6 are one shared
+  default of 10 (about 16 KB on klynt).
+- The show-all flag of EXPLAIN-1.5, 2.6 and 5.5 is `-n, --top <N>` with `N = 0`.
+- Finding kind names: `copies.group`, `copies.features`, `copies.divergence`, `unit.failed`,
+  `copies.totals`.
+- The coverage value for an empty `features` string is `not_recorded`.
+- "Measured keys exactly" names the full key set; a value explain cannot measure is omitted and
+  named in `unmeasured` (CORE-5.5, kept by EXPLAIN-7.4).
