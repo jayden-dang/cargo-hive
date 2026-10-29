@@ -1,7 +1,7 @@
 # Requirements: Explain (why a crate has N copies, feature divergence, failed units)
 
 Feature code: EXPLAIN
-Status: Approved
+Status: In-progress
 Date: 2026-10-29
 
 <!--
