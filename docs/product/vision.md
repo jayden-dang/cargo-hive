@@ -63,7 +63,7 @@ Receipts are also the data Cargo lacks for a default target-dir GC policy (cargo
 
 **Hard constraints.**
 - macOS only. The declared floor is macOS 27; older versions are supported where `cargo hive doctor` passes.
-- Install path: `cargo install cargo-hive`, then `cargo hive doctor`, then `cargo hive repo add <main>`. For agents, `cargo hive skill install` installs the hive skill, which ships inside the binary (ROAD-12); there is no MCP server. `cargo-hive <sub>` is the direct form of `cargo hive <sub>`. Until the crate is published, `cargo install --path .` (README) stands in for the first step.
+- Install path: `cargo install cargo-hive`, then `cargo hive doctor`, then `cargo hive repo add <main>`. For agents, install the hive skill as a plugin from this repo's marketplace (`/plugin marketplace add jayden-dang/cargo-hive`, then `/plugin install cargo-hive@cargo-hive`; Codex has the same pair) (ROAD-12); there is no MCP server. `cargo-hive <sub>` is the direct form of `cargo hive <sub>`. Until the crate is published, `cargo install --path .` (README) stands in for the first step.
 - Building needs a Rust toolchain and the Xcode Command Line Tools; nothing else at runtime. Applesauce is embedded, LocalAuthentication is reached through objc bindings, and afsctool is never used.
 - Zero configuration works. Defaults: secondary roots `/private/tmp` and `$TMPDIR`, cache root `~/.cache/cargo-target`, GC window 7 days, store budget 40 GB, store max age 30 days.
 - `cargo hive doctor` runs the mechanism checks on each machine and disables every capability that fails.
