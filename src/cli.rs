@@ -388,6 +388,70 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
     emit(state, out, b.finish(), &human, i32::from(fail > 0))
 }
 
+struct Selection {
+    repos: Vec<registry::Repo>,
+    all_repos: bool,
+    refused: bool,
+}
+
+fn select(reg: &Registry, args: &[std::path::PathBuf], b: &mut ReceiptBuilder) -> Selection {
+    let mut refused = false;
+    let mut repos = Vec::new();
+    if args.is_empty() {
+        repos = reg.repos.clone();
+    }
+    for arg in args {
+        let real = arg.canonicalize().unwrap_or(arg.clone());
+        match reg.repos.iter().find(|r| r.main == real) {
+            Some(r) => {
+                if !repos.iter().any(|s| s.main == r.main) {
+                    repos.push(r.clone());
+                }
+            }
+            None => {
+                b.finding(
+                    "refusal",
+                    Some(arg.clone()),
+                    "not a registered repository; run `cargo hive repo add` first",
+                );
+                refused = true;
+            }
+        }
+    }
+    let all_repos = repos.len() == reg.repos.len()
+        && repos
+            .iter()
+            .all(|s| reg.repos.iter().any(|r| r.main == s.main));
+    Selection {
+        repos,
+        all_repos,
+        refused,
+    }
+}
+
+fn live_checkouts(
+    repos: &[registry::Repo],
+    cfg: &crate::state::Config,
+    b: &mut ReceiptBuilder,
+) -> Vec<crate::discover::Checkout> {
+    let mains: Vec<_> = repos.iter().map(|r| r.main.clone()).collect();
+    let mut checkouts = Vec::new();
+    for repo in repos {
+        b.scope_mut().repos.push(repo.main.clone());
+        let (rows, faults) = crate::discover::checkouts(repo, &mains, cfg);
+        for fault in faults {
+            b.finding("walk.unreadable", Some(fault.path), fault.detail);
+        }
+        for c in rows {
+            if !c.missing {
+                b.scope_mut().checkouts.push(c.path.clone());
+            }
+            checkouts.push(c);
+        }
+    }
+    checkouts
+}
+
 fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: OutputArgs) -> i32 {
     use crate::classify::Class;
     use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
@@ -422,29 +486,10 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
         b.finding("refusal", None, refusal.to_string());
         return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
     }
-    let mut code = 0;
-    let mut selected = Vec::new();
-    if args.is_empty() {
-        selected = reg.repos.clone();
-    }
-    for arg in args {
-        let real = arg.canonicalize().unwrap_or(arg.clone());
-        match reg.repos.iter().find(|r| r.main == real) {
-            Some(r) => {
-                if !selected.iter().any(|s| s.main == r.main) {
-                    selected.push(r.clone());
-                }
-            }
-            None => {
-                b.finding(
-                    "refusal",
-                    Some(arg.clone()),
-                    "not a registered repository; run `cargo hive repo add` first",
-                );
-                code = 1;
-            }
-        }
-    }
+    let selection = select(&reg, args, &mut b);
+    let code = i32::from(selection.refused);
+    let selected = selection.repos;
+    let all_repos = selection.all_repos;
     let mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
     let (mut total, mut protected, mut secondary, mut missing) = (0u64, 0u64, 0u64, 0u64);
     let mut human = String::new();
@@ -495,10 +540,6 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
             1,
         );
     }
-    let all_repos = selected.len() == reg.repos.len()
-        && selected
-            .iter()
-            .all(|s| reg.repos.iter().any(|r| r.main == s.main));
     let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
     let mut scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot, cancelled);
     if cancelled() {
@@ -714,51 +755,10 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
         }
     }
-    let mut code = 0;
-    let mut selected = Vec::new();
-    if args.is_empty() {
-        selected = reg.repos.clone();
-    }
-    for arg in args {
-        let real = arg.canonicalize().unwrap_or(arg.clone());
-        match reg.repos.iter().find(|r| r.main == real) {
-            Some(r) => {
-                if !selected
-                    .iter()
-                    .any(|s: &crate::registry::Repo| s.main == r.main)
-                {
-                    selected.push(r.clone());
-                }
-            }
-            None => {
-                b.finding(
-                    "refusal",
-                    Some(arg.clone()),
-                    "not a registered repository; run `cargo hive repo add` first",
-                );
-                code = 1;
-            }
-        }
-    }
-    let mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
-    let mut checkouts = Vec::new();
-    for repo in &selected {
-        b.scope_mut().repos.push(repo.main.clone());
-        let (rows, faults) = discover::checkouts(repo, &mains, &cfg);
-        for fault in faults {
-            b.finding("walk.unreadable", Some(fault.path), fault.detail);
-        }
-        for c in rows {
-            if !c.missing {
-                b.scope_mut().checkouts.push(c.path.clone());
-            }
-            checkouts.push(c);
-        }
-    }
-    let all_repos = selected.len() == reg.repos.len()
-        && selected
-            .iter()
-            .all(|s| reg.repos.iter().any(|r| r.main == s.main));
+    let selection = select(&reg, args, &mut b);
+    let code = i32::from(selection.refused);
+    let checkouts = live_checkouts(&selection.repos, &cfg, &mut b);
+    let all_repos = selection.all_repos;
     let scan = discover::targets(&checkouts, &cfg, all_repos, &mut snapshot, cancelled);
     if cancelled() {
         b.finding("error", None, "gc was cancelled");
