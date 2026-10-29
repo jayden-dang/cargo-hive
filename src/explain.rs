@@ -1,12 +1,14 @@
-//! Groups fingerprint units that are copies of one crate, and totals every target.
+//! Groups fingerprint units that are copies of one crate, totals every target,
+//! and reports units whose last compile failed.
 //!
-//! `analyse` only reads units and dependency names already in memory. `Explanation::human`
+//! `analyse` only reads values already in memory. `Explanation::human`
 //! stays empty for the caller to fill.
 
 #![cfg_attr(not(test), allow(dead_code))]
 
-use crate::fingerprint::{kind_of, NotCurrentUnit, Unit};
+use crate::fingerprint::{error_code, is_summary_line, kind_of, NotCurrentUnit, Unit};
 use crate::receipt::{Finding, Measured};
+use crate::state::utc_timestamp;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -22,13 +24,9 @@ struct ProfileInput {
 }
 
 struct NotCurrentInput {
-    #[allow(dead_code)]
     unit: NotCurrentUnit,
-    #[allow(dead_code)]
     kind_from_output: Option<String>,
-    #[allow(dead_code)]
     outputs: Result<Vec<String>, String>,
-    #[allow(dead_code)]
     attempted_at: Option<SystemTime>,
 }
 
@@ -101,6 +99,8 @@ struct TargetTotals {
     groups_shown: u64,
     divergences: u64,
     divergences_shown: u64,
+    failed_units: u64,
+    compiling_or_unknown_units: u64,
 }
 
 fn analyse(inputs: &[ProfileInput], limits: Limits, failed: &FailedUnits) -> Explanation {
@@ -166,6 +166,14 @@ fn analyse(inputs: &[ProfileInput], limits: Limits, failed: &FailedUnits) -> Exp
             }
         }
     }
+
+    apply_failed_units(
+        inputs,
+        failed,
+        &mut by_target,
+        &mut findings,
+        &mut unmeasured,
+    );
 
     for (path, totals) in &by_target {
         findings.push(totals_finding(path, totals, failed));
@@ -457,10 +465,156 @@ fn totals_finding(path: &Path, totals: &TargetTotals, failed: &FailedUnits) -> F
     insert_int(&mut measured, "divergences", totals.divergences);
     insert_int(&mut measured, "divergences_shown", totals.divergences_shown);
     if matches!(failed, FailedUnits::Report) {
-        insert_int(&mut measured, "failed_units", 0);
+        insert_int(&mut measured, "failed_units", totals.failed_units);
     }
-    insert_int(&mut measured, "compiling_or_unknown_units", 0);
+    insert_int(
+        &mut measured,
+        "compiling_or_unknown_units",
+        totals.compiling_or_unknown_units,
+    );
     finding("copies.totals", path, measured)
+}
+
+fn apply_failed_units(
+    inputs: &[ProfileInput],
+    failed: &FailedUnits,
+    by_target: &mut BTreeMap<PathBuf, TargetTotals>,
+    findings: &mut Vec<Finding>,
+    unmeasured: &mut Vec<(String, String)>,
+) {
+    match failed {
+        FailedUnits::Off(reason) => {
+            for input in inputs {
+                let totals = by_target.entry(input.target_dir.clone()).or_default();
+                totals.compiling_or_unknown_units += as_u64(input.not_current.len());
+            }
+            unmeasured.push(("failed_units".to_string(), reason.clone()));
+        }
+        FailedUnits::Report => {
+            for input in inputs {
+                for item in &input.not_current {
+                    record_not_current(item, &input.target_dir, by_target, findings, unmeasured);
+                }
+            }
+        }
+    }
+}
+
+fn record_not_current(
+    item: &NotCurrentInput,
+    target_dir: &Path,
+    by_target: &mut BTreeMap<PathBuf, TargetTotals>,
+    findings: &mut Vec<Finding>,
+    unmeasured: &mut Vec<(String, String)>,
+) {
+    let totals = by_target.entry(target_dir.to_path_buf()).or_default();
+    let texts = match &item.outputs {
+        Err(reason) => {
+            totals.compiling_or_unknown_units += 1;
+            note_unit(unmeasured, &item.unit.dir, reason.clone());
+            return;
+        }
+        Ok(texts) => texts,
+    };
+    let read = read_output_texts(texts);
+    if read.unparsable {
+        note_unit(unmeasured, &item.unit.dir, "a line did not parse");
+    }
+    if !read.failed {
+        totals.compiling_or_unknown_units += 1;
+        return;
+    }
+    totals.failed_units += 1;
+    let mut measured = BTreeMap::new();
+    insert_text(&mut measured, "crate", &failed_crate(item));
+    insert_text(&mut measured, "target_kind", &failed_kind(item));
+    match &item.unit.features {
+        Some(features) => insert_text(&mut measured, "features", features),
+        None => note_unit(unmeasured, &item.unit.dir, "the unit has no fingerprint"),
+    }
+    match item.attempted_at {
+        Some(time) => insert_text(&mut measured, "attempted_at", &utc_timestamp(time)),
+        None => note_unit(unmeasured, &item.unit.dir, "the timestamp is missing"),
+    }
+    insert_text(&mut measured, "error_codes", &read.codes);
+    let mut found = finding("unit.failed", &item.unit.dir, measured);
+    found.detail = "Its last compile failed.".to_string();
+    findings.push(found);
+}
+
+fn note_unit(unmeasured: &mut Vec<(String, String)>, dir: &Path, reason: impl Into<String>) {
+    unmeasured.push((dir.display().to_string(), reason.into()));
+}
+
+fn read_output_texts(texts: &[String]) -> OutputTexts {
+    let mut failed = false;
+    let mut codes = Vec::new();
+    let mut unparsable = false;
+    for text in texts {
+        for line in text.lines() {
+            match is_summary_line(line) {
+                None => {
+                    unparsable = true;
+                    continue;
+                }
+                Some(is_summary) => failed |= is_summary,
+            }
+            if let Some(code) = error_code(line) {
+                if !codes.contains(&code) {
+                    codes.push(code);
+                }
+            }
+        }
+    }
+    OutputTexts {
+        failed,
+        codes: codes.join(","),
+        unparsable,
+    }
+}
+
+struct OutputTexts {
+    failed: bool,
+    codes: String,
+    unparsable: bool,
+}
+
+fn failed_crate(item: &NotCurrentInput) -> String {
+    if let Some(stem) = &item.unit.stem {
+        return crate_and_kind(stem).0;
+    }
+    let name = item
+        .unit
+        .dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match name.rsplit_once('-') {
+        Some((head, tail)) if is_lower_hex_16(tail) => head.to_string(),
+        _ => name,
+    }
+}
+
+fn is_lower_hex_16(text: &str) -> bool {
+    text.len() == 16
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn failed_kind(item: &NotCurrentInput) -> String {
+    if let Some(stem) = &item.unit.stem {
+        return kind_of(stem);
+    }
+    if let Some(kind) = &item.kind_from_output {
+        return kind.clone();
+    }
+    item.unit
+        .outputs
+        .iter()
+        .find_map(|name| name.strip_prefix("output-"))
+        .map(kind_of)
+        .unwrap_or_else(|| "other".to_string())
 }
 
 fn divergence_finding(group: &Group<'_>, mode: Mode, feature_sets: usize) -> Finding {
@@ -504,6 +658,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn unit(
         dir_crate: &str,
@@ -2085,5 +2240,563 @@ mod tests {
         assert!(divergences
             .iter()
             .all(|finding| finding.detail == DIVERGENCE_DETAIL));
+    }
+
+    fn attempted_stamp() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+    }
+
+    fn error_line(code: &str) -> String {
+        format!(r#"{{"level":"error","code":{{"code":"{code}"}},"message":"mismatched types"}}"#)
+    }
+
+    fn summary_line() -> String {
+        r#"{"level":"error","code":null,"message":"aborting due to 1 previous error"}"#.to_string()
+    }
+
+    fn note_line() -> String {
+        r#"{"level":"failure-note","code":null,"message":"For more information about this error, try `rustc --explain E0308`."}"#
+            .to_string()
+    }
+
+    fn warning_line() -> String {
+        r#"{"level":"warning","code":null,"message":"unused variable"}"#.to_string()
+    }
+
+    fn not_current(
+        dir: &str,
+        stem: Option<&str>,
+        features: Option<&str>,
+        kind_from_output: Option<&str>,
+        output_names: &[&str],
+        outputs: Result<Vec<String>, &str>,
+        attempted_at: Option<SystemTime>,
+    ) -> NotCurrentInput {
+        NotCurrentInput {
+            unit: NotCurrentUnit {
+                dir: PathBuf::from(dir),
+                stem: stem.map(str::to_string),
+                features: features.map(Arc::from),
+                outputs: output_names
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect(),
+            },
+            kind_from_output: kind_from_output.map(str::to_string),
+            outputs: outputs.map_err(str::to_string),
+            attempted_at,
+        }
+    }
+
+    fn failed_of(findings: &[Finding]) -> Vec<&Finding> {
+        findings
+            .iter()
+            .filter(|finding| finding.kind == "unit.failed")
+            .collect()
+    }
+
+    fn profile_with(
+        target: &str,
+        profile_dir: &str,
+        not_current_units: Vec<NotCurrentInput>,
+    ) -> ProfileInput {
+        let mut input = profile(target, profile_dir, Vec::new(), Some(Vec::new()));
+        input.not_current = not_current_units;
+        input
+    }
+
+    fn profile_with_a_failed_compile() -> ProfileInput {
+        let copies = vec![
+            unit(
+                "shown",
+                "lib-shown",
+                "1111111111111111",
+                "[]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+            unit(
+                "shown",
+                "lib-shown",
+                "2222222222222222",
+                "[]",
+                Coverage::None,
+                (1, 1, 1),
+            ),
+        ];
+        let mut input = profile("/targets/app", "/profiles/debug", copies, Some(Vec::new()));
+        input.not_current.push(not_current(
+            "/profiles/debug/.fingerprint/not-the-crate-aaaaaaaaaaaaaaaa",
+            Some("lib-widget"),
+            Some("[\"testkit\"]"),
+            None,
+            &["output-lib-widget"],
+            Ok(vec![format!(
+                "{}\n{}\n{}\n",
+                error_line("E0308"),
+                summary_line(),
+                note_line()
+            )]),
+            Some(attempted_stamp()),
+        ));
+        input
+    }
+
+    #[test]
+    fn a_summary_line_anywhere_makes_a_unit_failed() {
+        let failed = FailedUnits::Report;
+        let listed = analyse(
+            &[profile_with_a_failed_compile()],
+            Limits { top: Some(10) },
+            &failed,
+        );
+        let found = failed_of(&listed.findings);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].path.as_deref(),
+            Some(Path::new(
+                "/profiles/debug/.fingerprint/not-the-crate-aaaaaaaaaaaaaaaa"
+            ))
+        );
+        assert_eq!(found[0].detail, "Its last compile failed.");
+        let mut expected = BTreeMap::new();
+        expected.insert("crate".to_string(), text("widget"));
+        expected.insert("target_kind".to_string(), text("lib"));
+        expected.insert("features".to_string(), text("[\"testkit\"]"));
+        expected.insert("attempted_at".to_string(), text("2023-11-14T22:13:20Z"));
+        expected.insert("error_codes".to_string(), text("E0308"));
+        assert_eq!(found[0].measured, expected);
+        assert_eq!(
+            listed
+                .findings
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "copies.group",
+                "copies.features",
+                "unit.failed",
+                "copies.totals"
+            ]
+        );
+        assert_eq!(
+            listed
+                .findings
+                .iter()
+                .find(|finding| finding.kind == "copies.totals")
+                .unwrap()
+                .measured,
+            totals_map(1, 1, 1, Some(1))
+        );
+        assert!(listed.unmeasured.is_empty());
+        assert_eq!(
+            listed.counts,
+            vec![
+                ("groups", 1),
+                ("extra_units", 1),
+                ("groups_shown", 1),
+                ("divergences", 0),
+                ("divergences_shown", 0),
+            ]
+        );
+        let cut = analyse(
+            &[profile_with_a_failed_compile()],
+            Limits { top: Some(0) },
+            &failed,
+        );
+        assert!(cut
+            .findings
+            .iter()
+            .all(|finding| finding.kind != "copies.group" && finding.kind != "copies.features"));
+        assert_eq!(failed_of(&cut.findings).len(), 1);
+        assert_eq!(
+            cut.findings
+                .iter()
+                .find(|finding| finding.kind == "copies.totals")
+                .unwrap()
+                .measured,
+            totals_map(1, 1, 0, Some(1))
+        );
+    }
+
+    #[test]
+    fn error_codes_are_distinct_non_null_and_in_first_seen_order() {
+        let input = profile_with(
+            "/targets/app",
+            "/profiles/debug",
+            vec![
+                not_current(
+                    "/units/ordered",
+                    Some("lib-ordered"),
+                    Some("[\"a\"]"),
+                    None,
+                    &["output-lib-ordered"],
+                    Ok(vec![
+                        error_line("dead_code"),
+                        error_line("E0308"),
+                        error_line("dead_code"),
+                        summary_line(),
+                    ]),
+                    Some(attempted_stamp()),
+                ),
+                not_current(
+                    "/units/summary-only",
+                    Some("lib-summary"),
+                    Some(""),
+                    None,
+                    &["output-lib-summary"],
+                    Ok(vec![summary_line()]),
+                    Some(attempted_stamp()),
+                ),
+            ],
+        );
+        let exp = analyse(&[input], Limits { top: None }, &FailedUnits::Report);
+        let found = failed_of(&exp.findings);
+        assert_eq!(found.len(), 2);
+        assert_eq!(measured_text(found[0], "error_codes"), "dead_code,E0308");
+        assert_eq!(measured_text(found[1], "error_codes"), "");
+        assert_eq!(measured_text(found[1], "features"), "");
+        assert_eq!(
+            found
+                .iter()
+                .map(|finding| finding.path.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(Path::new("/units/ordered")),
+                Some(Path::new("/units/summary-only"))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_never_compiled_unit_names_its_kind_from_the_output_file_and_omits_features() {
+        let input = profile_with(
+            "/targets/app",
+            "/profiles/debug",
+            vec![
+                not_current(
+                    "/fp/widget-0123456789abcdef",
+                    None,
+                    None,
+                    None,
+                    &["dep-lib-x", "output-lib-x"],
+                    Ok(vec![summary_line()]),
+                    Some(attempted_stamp()),
+                ),
+                not_current(
+                    "/fp/helper",
+                    None,
+                    Some("[]"),
+                    Some("bin"),
+                    &["output-lib-x"],
+                    Ok(vec![summary_line()]),
+                    Some(attempted_stamp()),
+                ),
+                not_current(
+                    "/fp/custom-tool",
+                    None,
+                    Some("[]"),
+                    None,
+                    &[],
+                    Ok(vec![summary_line()]),
+                    Some(attempted_stamp()),
+                ),
+            ],
+        );
+        let exp = analyse(&[input], Limits { top: None }, &FailedUnits::Report);
+        let found = failed_of(&exp.findings);
+        assert_eq!(found.len(), 3);
+        assert_eq!(measured_text(found[0], "crate"), "widget");
+        assert_eq!(measured_text(found[0], "target_kind"), "lib");
+        assert!(!found[0].measured.contains_key("features"));
+        assert_eq!(
+            measured_text(found[0], "attempted_at"),
+            "2023-11-14T22:13:20Z"
+        );
+        assert_eq!(measured_text(found[0], "error_codes"), "");
+        assert_eq!(
+            found[0].path.as_deref(),
+            Some(Path::new("/fp/widget-0123456789abcdef"))
+        );
+        assert_eq!(measured_text(found[1], "crate"), "helper");
+        assert_eq!(measured_text(found[1], "target_kind"), "bin");
+        assert_eq!(measured_text(found[1], "features"), "[]");
+        assert_eq!(measured_text(found[2], "crate"), "custom-tool");
+        assert_eq!(measured_text(found[2], "target_kind"), "other");
+        assert_eq!(
+            exp.unmeasured,
+            vec![(
+                "/fp/widget-0123456789abcdef".to_string(),
+                "the unit has no fingerprint".to_string()
+            )]
+        );
+        assert_eq!(
+            measured_int(
+                exp.findings
+                    .iter()
+                    .find(|finding| finding.kind == "copies.totals")
+                    .unwrap(),
+                "failed_units"
+            ),
+            3
+        );
+    }
+
+    #[test]
+    fn a_unit_without_a_summary_line_is_only_counted() {
+        let warnings = profile_with(
+            "/t/warn",
+            "/p/warn",
+            vec![not_current(
+                "/units/warning",
+                Some("lib-warning"),
+                Some("[]"),
+                None,
+                &["output-lib-warning"],
+                Ok(vec![warning_line()]),
+                Some(attempted_stamp()),
+            )],
+        );
+        let empty = profile_with(
+            "/t/empty",
+            "/p/empty",
+            vec![not_current(
+                "/units/empty",
+                Some("lib-empty"),
+                Some("[]"),
+                None,
+                &[],
+                Ok(vec![]),
+                Some(attempted_stamp()),
+            )],
+        );
+        let exp = analyse(
+            &[warnings, empty],
+            Limits { top: None },
+            &FailedUnits::Report,
+        );
+        assert!(failed_of(&exp.findings).is_empty());
+        assert!(exp.unmeasured.is_empty());
+        for target in ["/t/empty", "/t/warn"] {
+            let totals = exp
+                .findings
+                .iter()
+                .find(|finding| {
+                    finding.kind == "copies.totals"
+                        && finding.path.as_deref() == Some(Path::new(target))
+                })
+                .unwrap();
+            assert_eq!(measured_int(totals, "failed_units"), 0);
+            assert_eq!(measured_int(totals, "compiling_or_unknown_units"), 1);
+        }
+    }
+
+    #[test]
+    fn an_unparsable_line_is_skipped_and_reported() {
+        let dir = "/units/broken";
+        let input = profile_with(
+            "/targets/app",
+            "/profiles/debug",
+            vec![not_current(
+                dir,
+                Some("lib-broken"),
+                Some("[]"),
+                None,
+                &["output-lib-broken"],
+                Ok(vec!["not json".to_string(), summary_line()]),
+                Some(attempted_stamp()),
+            )],
+        );
+        let exp = analyse(&[input], Limits { top: None }, &FailedUnits::Report);
+        let found = failed_of(&exp.findings);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path.as_deref(), Some(Path::new(dir)));
+        assert_eq!(measured_text(found[0], "error_codes"), "");
+        assert_eq!(
+            measured_int(
+                exp.findings
+                    .iter()
+                    .find(|finding| finding.kind == "copies.totals")
+                    .unwrap(),
+                "compiling_or_unknown_units"
+            ),
+            0
+        );
+        assert_eq!(
+            exp.unmeasured,
+            vec![(dir.to_string(), "a line did not parse".to_string())]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_output_or_missing_stamp_is_handled() {
+        let input = profile_with(
+            "/targets/app",
+            "/profiles/debug",
+            vec![
+                not_current(
+                    "/units/reading",
+                    Some("lib-reading"),
+                    None,
+                    None,
+                    &["output-lib-reading"],
+                    Err("cannot read output-lib-reading"),
+                    None,
+                ),
+                not_current(
+                    "/units/stamped",
+                    Some("lib-stamped"),
+                    Some("[]"),
+                    None,
+                    &["output-lib-stamped"],
+                    Ok(vec![error_line("E0308"), summary_line()]),
+                    None,
+                ),
+            ],
+        );
+        let exp = analyse(&[input], Limits { top: None }, &FailedUnits::Report);
+        let found = failed_of(&exp.findings);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path.as_deref(), Some(Path::new("/units/stamped")));
+        assert!(!found[0].measured.contains_key("attempted_at"));
+        assert_eq!(measured_text(found[0], "crate"), "stamped");
+        assert_eq!(measured_text(found[0], "features"), "[]");
+        assert_eq!(measured_text(found[0], "error_codes"), "E0308");
+        let totals = exp
+            .findings
+            .iter()
+            .find(|finding| finding.kind == "copies.totals")
+            .unwrap();
+        assert_eq!(measured_int(totals, "failed_units"), 1);
+        assert_eq!(measured_int(totals, "compiling_or_unknown_units"), 1);
+        assert_eq!(
+            exp.unmeasured,
+            vec![
+                (
+                    "/units/reading".to_string(),
+                    "cannot read output-lib-reading".to_string()
+                ),
+                (
+                    "/units/stamped".to_string(),
+                    "the timestamp is missing".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_units_are_not_named_while_reporting_is_off() {
+        let reason = "doctor check (g) has not run; the active toolchain has no result";
+        let named = profile_with(
+            "/targets/app",
+            "/profiles/a",
+            vec![not_current(
+                "/units/would-fail",
+                Some("lib-widget"),
+                Some("[]"),
+                None,
+                &["output-lib-widget"],
+                Ok(vec!["not json".to_string(), summary_line()]),
+                Some(attempted_stamp()),
+            )],
+        );
+        let unread = profile_with(
+            "/targets/app",
+            "/profiles/b",
+            vec![not_current(
+                "/units/unread",
+                Some("lib-other"),
+                None,
+                None,
+                &["output-lib-other"],
+                Err("cannot read output-lib-other"),
+                None,
+            )],
+        );
+        let exp = analyse(
+            &[named, unread],
+            Limits { top: Some(0) },
+            &FailedUnits::Off(reason.to_string()),
+        );
+        assert!(failed_of(&exp.findings).is_empty());
+        let totals: Vec<_> = exp
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == "copies.totals")
+            .collect();
+        assert_eq!(totals.len(), 1);
+        assert_eq!(totals[0].path.as_deref(), Some(Path::new("/targets/app")));
+        assert!(!totals[0].measured.contains_key("failed_units"));
+        assert_eq!(measured_int(totals[0], "compiling_or_unknown_units"), 2);
+        assert_eq!(
+            exp.unmeasured,
+            vec![("failed_units".to_string(), reason.to_string())]
+        );
+        assert!(exp
+            .counts
+            .iter()
+            .all(|(name, _)| *name != "failed_units" && *name != "compiling_or_unknown_units"));
+    }
+
+    #[test]
+    fn a_failed_unit_is_described_only_by_its_last_compile() {
+        let first = profile_with(
+            "/targets/app",
+            "/profiles/a",
+            vec![not_current(
+                "/units/first",
+                Some("lib-first"),
+                Some("[]"),
+                None,
+                &["output-lib-first"],
+                Ok(vec![error_line("E0308"), summary_line()]),
+                Some(attempted_stamp()),
+            )],
+        );
+        let second = profile_with(
+            "/targets/app",
+            "/profiles/b",
+            vec![not_current(
+                "/units/second",
+                Some("bin-second"),
+                Some(""),
+                None,
+                &["output-bin-second"],
+                Ok(vec![summary_line()]),
+                Some(attempted_stamp()),
+            )],
+        );
+        let exp = analyse(
+            &[first, second],
+            Limits { top: Some(0) },
+            &FailedUnits::Report,
+        );
+        let found = failed_of(&exp.findings);
+        assert_eq!(found.len(), 2);
+        assert!(found
+            .iter()
+            .all(|finding| finding.detail == "Its last compile failed."));
+        assert_eq!(
+            found
+                .iter()
+                .map(|finding| finding.path.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(Path::new("/units/first")),
+                Some(Path::new("/units/second"))
+            ]
+        );
+        assert_eq!(
+            exp.findings
+                .iter()
+                .map(|finding| finding.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["unit.failed", "unit.failed", "copies.totals"]
+        );
+        assert_eq!(measured_int(&exp.findings[2], "failed_units"), 2);
+        assert_eq!(
+            measured_int(&exp.findings[2], "compiling_or_unknown_units"),
+            0
+        );
     }
 }
