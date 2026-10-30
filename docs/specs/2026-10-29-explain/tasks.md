@@ -101,10 +101,10 @@ Prefactor (design "cli repository selection"). `status` and `gc_cmd` carry the s
 
 **Depends-on:** none
 
-- [ ] **Step 1: Pin today's behavior.** Run `cargo test --test status_targets --test gc --test status_checkouts` and record the pass count. Then save `status --json` and `gc --dry-run --json` receipts of a two-repo fixture with one unregistered argument (`/private/tmp/hive-it-select/before-*.json`); they are the byte-level guard for this refactor, beside the tests.
-- [ ] **Step 2: Extract `select` and `live_checkouts`.** Keep the refusal finding text, its kind and the order of checks byte-for-byte. `status` and `gc_cmd` call `select` and read `refused` to choose exit code 1; `gc_cmd` calls `live_checkouts`.
-- [ ] **Step 3: Verify.** Rerun the Step 1 tests; expect the same pass count. Rerun the two receipts and diff them with the saved ones, ignoring only `ts`; expect no difference. Run the merge gate.
-- [ ] **Step 4: Commit** `refactor(cli): share repository selection between status and gc`.
+- [x] **Step 1: Pin today's behavior.** Run `cargo test --test status_targets --test gc --test status_checkouts` and record the pass count. Then save `status --json` and `gc --dry-run --json` receipts of a two-repo fixture with one unregistered argument (`/private/tmp/hive-it-select/before-*.json`); they are the byte-level guard for this refactor, beside the tests.
+- [x] **Step 2: Extract `select` and `live_checkouts`.** Keep the refusal finding text, its kind and the order of checks byte-for-byte. `status` and `gc_cmd` call `select` and read `refused` to choose exit code 1; `gc_cmd` calls `live_checkouts`.
+- [x] **Step 3: Verify.** Rerun the Step 1 tests; expect the same pass count. Rerun the two receipts and diff them with the saved ones, ignoring only `ts`; expect no difference. Run the merge gate.
+- [x] **Step 4: Commit** `refactor(cli): share repository selection between status and gc`.
 
 _Requirements: EXPLAIN-5.2, EXPLAIN-7.1, EXPLAIN-7.3_
 
@@ -126,10 +126,10 @@ Prefactor (design "scope"). `explain` must use exactly gc's target scope without
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests** in `src/discover.rs`: `a_scope_without_arguments_contains_every_target`; `a_checkout_scope_contains_targets_owned_by_or_inside_its_checkouts` (owned by a listed checkout → true; path inside a listed checkout but owned elsewhere → true; orphan under a cache root → false). Run `cargo test --lib discover::`; expect a compile error: `Scope` is not in `discover`.
-- [ ] **Step 2: Move the code.** `Scope` and the body of `in_scope` become `discover::Scope` and `Scope::contains`; `gc_cmd`'s construction becomes `Scope::from_paths(args.is_empty(), checkouts.iter().filter(|c| !c.missing).map(|c| c.path.clone()))`. `gc` imports `discover::Scope`. No behavior change.
-- [ ] **Step 3: Verify.** `cargo test --lib discover::` passes; `cargo test --test gc` passes unchanged. Run the merge gate.
-- [ ] **Step 4: Commit** `refactor(gc): move target scope into discover so other commands can share it`.
+- [x] **Step 1: Write the failing tests** in `src/discover.rs`: `a_scope_without_arguments_contains_every_target`; `a_checkout_scope_contains_targets_owned_by_or_inside_its_checkouts` (owned by a listed checkout → true; path inside a listed checkout but owned elsewhere → true; orphan under a cache root → false). Run `cargo test --lib discover::`; expect a compile error: `Scope` is not in `discover`.
+- [x] **Step 2: Move the code.** `Scope` and the body of `in_scope` become `discover::Scope` and `Scope::contains`; `gc_cmd`'s construction becomes `Scope::from_paths(args.is_empty(), checkouts.iter().filter(|c| !c.missing).map(|c| c.path.clone()))`. `gc` imports `discover::Scope`. No behavior change.
+- [x] **Step 3: Verify.** `cargo test --lib discover::` passes; `cargo test --test gc` passes unchanged. Run the merge gate.
+- [x] **Step 4: Commit** `refactor(gc): move target scope into discover so other commands can share it`.
 
 _Requirements: EXPLAIN-5.1, EXPLAIN-7.3_
 
@@ -157,17 +157,17 @@ Design "fingerprint" and Decisions 1, 2, 4.
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests** in `src/fingerprint.rs`:
+- [x] **Step 1: Write the failing tests** in `src/fingerprint.rs`:
   - `a_unit_keeps_its_stem_features_coverage_and_hashes`: a new helper `unit_json_with(deps, features, declared)` beside `unit_json` (whose 8 call sites stay unchanged); a unit with `"[\"testkit\"]"`/`"[\"testkit\"]"` reads `AllDeclared`, `"[]"` reads `None`, `"[\"a\"]"` of `"[\"a\",\"b\"]"` reads `Partial`, `""`/`""` reads `NotRecorded`, `"not json"` reads `Unreadable` and the profile stays supported; `stem == "lib-q"`, and `profile`, `target`, `path` equal the JSON values (2, 1, 3).
   - `units_with_the_same_features_share_one_string`: two units with `"[]"` have `Arc::ptr_eq` features.
   - `not_current_units_are_listed_with_what_explain_needs`: the never-compiled fixture lists `stem: None, features: None, outputs: ["output-lib-failed"]`; the emptied-hash fixture lists `stem: Some("lib-dep")` and `features: Some("[]")`; `not_current` equals the list length; an unsupported profile has an empty list.
   - `the_summary_line_is_recognized_anywhere_and_only_in_its_exact_form`: lines from `.skills/research/2026-10-29-cargo-output-message-cache.md` — `{"$message_type":"diagnostic","message":"aborting due to 1 previous error","code":null,"level":"error","spans":[]}` → `Some(true)`; same with `"code":{"code":"E0308"}` → `Some(false)`; a `failure-note` → `Some(false)`; `{"$message_type":"future_incompat"}` → `Some(false)`; `not json` → `None`. `error_code` returns `Some("E0308")`, `Some("dead_code")`, and `None` for the summary line.
 
   Run `cargo test --lib fingerprint::`; expect compile errors on the missing fields and functions.
-- [ ] **Step 2: Implement.** `read_unit` returns the stem, the interned `features` (a per-profile `HashMap<String, Arc<str>>`) and `coverage` computed from `features` and `declared_features` (a JSON string array each; `""` → `NotRecorded`), then drops `declared_features`. Both not-current sites push a `NotCurrentUnit` from the names already in hand. The line matchers parse into a struct whose `level`, `code` and `message` are all `Option` and ignore unknown fields.
-- [ ] **Step 3: Verify.** `cargo test --lib fingerprint::` passes; `cargo test --test status_targets` passes unchanged (status output identical). Run the merge gate.
-- [ ] **Step 4: Check status's time.** Run `cargo test --release --test guards -- --ignored status_on_klynt` and record cold and warm times beside the pre-change numbers in the task report (`.skills/EXPLAIN/`); a cold run over 2 s that `main` passes on the same load is a stop-and-report.
-- [ ] **Step 5: Commit** `feat(fingerprint): keep what explain needs from the one read, and list not-current units`.
+- [x] **Step 2: Implement.** `read_unit` returns the stem, the interned `features` (a per-profile `HashMap<String, Arc<str>>`) and `coverage` computed from `features` and `declared_features` (a JSON string array each; `""` → `NotRecorded`), then drops `declared_features`. Both not-current sites push a `NotCurrentUnit` from the names already in hand. The line matchers parse into a struct whose `level`, `code` and `message` are all `Option` and ignore unknown fields.
+- [x] **Step 3: Verify.** `cargo test --lib fingerprint::` passes; `cargo test --test status_targets` passes unchanged (status output identical). Run the merge gate.
+- [x] **Step 4: Check status's time.** Run `cargo test --release --test guards -- --ignored status_on_klynt` and record cold and warm times beside the pre-change numbers in the task report (`.skills/EXPLAIN/`); a cold run over 2 s that `main` passes on the same load is a stop-and-report.
+- [x] **Step 5: Commit** `feat(fingerprint): keep what explain needs from the one read, and list not-current units`.
 
 _Requirements: EXPLAIN-7.1_
 
@@ -196,11 +196,11 @@ Design "doctor" and Decisions 6, 7.
 
 **Depends-on:** Task 3
 
-- [ ] **Step 1: Write the failing unit tests** in `src/doctor.rs`: `judge_failed_marker` table (`(false, [summary])` → pass; `(false, ["warning only"])` → fail; `(true, [])` → unavailable; `(false, [])` → fail); `an_unavailable_check_g_disables_nothing_and_leaves_g_not_run` (`capabilities_for` with (g) unavailable → no capability disabled, `failed_marker_check == 0`; with (g) fail → only `FailedUnitReporting` disabled, marker 1; with pass → marker 1); `a_capabilities_record_without_check_g_loads_and_reads_as_not_run` (the `lock_check` load-test shape, `:1331`); `a_failed_check_g_disables_only_failed_unit_reporting` (`capabilities_for` with (g) fail leaves `FingerprintReading`, `Deletion`, `Seeding` enabled). Update the three `Capabilities { lock_check: 0 }` literals (`:1248, 1266, 1311`) and the check enumerations (`~1010, 1038, 1143, 1194-1199`). Run `cargo test --lib doctor::`; expect compile errors.
-- [ ] **Step 2: Implement** `CheckId::G`, the capability, the field, `failed_unit_reporting`, `judge_failed_marker`, and the check: write `PROBE_CRATE` into a fresh `g/` subdirectory, appending `pub fn hive_probe_failure() -> u32 { "x" }` to its `src/lib.rs`, of doctor's temp dir, build it with `probe_command` and `output_with_deadline`, read every `output-*` under its `target/debug/.fingerprint/` with `read_capped`, and judge.
-- [ ] **Step 3: Integration.** `tests/doctor.rs`: `EXPECTED_IDS` becomes 7 entries with `"g"`; add `check_g_passes_on_the_proof_machine` (doctor receipt has check `g` with verdict `pass`). Run `cargo test --test doctor`; expect pass.
-- [ ] **Step 4: Docs.** README doctor text lists (g) and what it disables. ADR-0001 gains the sentence of design Decision 12. Run the merge gate.
-- [ ] **Step 5: Commit** `feat(doctor): check (g) proves a failed compile leaves rustc's summary line`.
+- [x] **Step 1: Write the failing unit tests** in `src/doctor.rs`: `judge_failed_marker` table (`(false, [summary])` → pass; `(false, ["warning only"])` → fail; `(true, [])` → unavailable; `(false, [])` → fail); `an_unavailable_check_g_disables_nothing_and_leaves_g_not_run` (`capabilities_for` with (g) unavailable → no capability disabled, `failed_marker_check == 0`; with (g) fail → only `FailedUnitReporting` disabled, marker 1; with pass → marker 1); `a_capabilities_record_without_check_g_loads_and_reads_as_not_run` (the `lock_check` load-test shape, `:1331`); `a_failed_check_g_disables_only_failed_unit_reporting` (`capabilities_for` with (g) fail leaves `FingerprintReading`, `Deletion`, `Seeding` enabled). Update the three `Capabilities { lock_check: 0 }` literals (`:1248, 1266, 1311`) and the check enumerations (`~1010, 1038, 1143, 1194-1199`). Run `cargo test --lib doctor::`; expect compile errors.
+- [x] **Step 2: Implement** `CheckId::G`, the capability, the field, `failed_unit_reporting`, `judge_failed_marker`, and the check: write `PROBE_CRATE` into a fresh `g/` subdirectory, appending `pub fn hive_probe_failure() -> u32 { "x" }` to its `src/lib.rs`, of doctor's temp dir, build it with `probe_command` and `output_with_deadline`, read every `output-*` under its `target/debug/.fingerprint/` with `read_capped`, and judge.
+- [x] **Step 3: Integration.** `tests/doctor.rs`: `EXPECTED_IDS` becomes 7 entries with `"g"`; add `check_g_passes_on_the_proof_machine` (doctor receipt has check `g` with verdict `pass`). Run `cargo test --test doctor`; expect pass.
+- [x] **Step 4: Docs.** README doctor text lists (g) and what it disables. ADR-0001 gains the sentence of design Decision 12. Run the merge gate.
+- [x] **Step 5: Commit** `feat(doctor): check (g) proves a failed compile leaves rustc's summary line`.
 
 _Requirements: EXPLAIN-4.1, EXPLAIN-4.2, EXPLAIN-7.2_
 
@@ -229,7 +229,7 @@ _Requirements: EXPLAIN-4.1, EXPLAIN-4.2, EXPLAIN-7.2_
 
 **Depends-on:** Task 3, the receipt amendment
 
-- [ ] **Step 1: Write the failing tests** in `src/explain.rs` over hand-built `ProfileInput`s:
+- [x] **Step 1: Write the failing tests** in `src/explain.rs` over hand-built `ProfileInput`s:
   - `copies_are_grouped_by_crate_stem_target_and_path`: three `lib-persistence` units sharing target/path → one group of 3; a fourth with another `path` → not in it.
   - `a_group_reports_its_counts_under_fixed_keys`: features `["testkit"]`×2 with profile 2 and `[]`×1 with profile 5, deps names giving 2 build and 1 check → `copies.group` measured exactly `{crate:"persistence", target_kind:"lib", copies:3, feature_sets:2, profile_hashes:2, mode_build:2, mode_check:1, mode_unknown:0, copies_sharing_features_and_profile:1}`.
   - `feature_sets_are_reported_per_mode_with_coverage`: one `copies.features` per (mode, features) with `coverage` `all_declared`/`none`/`not_recorded` and `units`.
@@ -239,9 +239,9 @@ _Requirements: EXPLAIN-4.1, EXPLAIN-4.2, EXPLAIN-7.2_
   - `a_failed_deps_listing_omits_modes_and_says_why`: `deps: None` for a listed group's profile → no `mode_*` keys and one `unmeasured` entry naming the profile.
 
   Run `cargo test --lib explain::`; expect compile errors (module missing).
-- [ ] **Step 2: Implement** `analyse` for groups, feature sets, ranking, cutting and totals, and `pub mod explain;`.
-- [ ] **Step 3: Verify** `cargo test --lib explain::` passes. Run the merge gate.
-- [ ] **Step 4: Commit** `feat(explain): group copies of a crate and report what tells them apart`.
+- [x] **Step 2: Implement** `analyse` for groups, feature sets, ranking, cutting and totals, and `pub mod explain;`.
+- [x] **Step 3: Verify** `cargo test --lib explain::` passes. Run the merge gate.
+- [x] **Step 4: Commit** `feat(explain): group copies of a crate and report what tells them apart`.
 
 _Requirements: EXPLAIN-1.1, EXPLAIN-1.2, EXPLAIN-1.4, EXPLAIN-1.5, EXPLAIN-1.8, EXPLAIN-1.9, EXPLAIN-1.10, EXPLAIN-1.11_
 
@@ -263,16 +263,16 @@ _Requirements: EXPLAIN-1.1, EXPLAIN-1.2, EXPLAIN-1.4, EXPLAIN-1.5, EXPLAIN-1.8, 
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `a_crate_with_two_feature_sets_in_one_mode_diverges`: check-mode units with `["testkit"]` and `[]` → one `copies.divergence` (`mode:"check"`, `feature_sets:2`) plus their `copies.features`; build-mode units all `[]` → no divergence for build.
   - `divergences_are_ranked_and_cut_like_groups`: 12 divergences, `top: Some(10)` → 10 listed by copies desc then profile, crate, stem, mode; totals and counts carry `divergences: 12, divergences_shown: 10`; `top: None` → 12.
   - `a_feature_set_finding_is_reported_once`: a group both listed and divergent yields each (mode, features) finding once.
   - `the_divergence_detail_names_both_sources_and_no_tool`: every `copies.divergence` detail equals `DIVERGENCE_DETAIL`.
 
   Run `cargo test --lib explain::`; expect failures (no divergence findings).
-- [ ] **Step 2: Implement** divergence detection, ranking, cutting and the counters.
-- [ ] **Step 3: Verify** `cargo test --lib explain::` passes. Run the merge gate.
-- [ ] **Step 4: Commit** `feat(explain): report crates built with different feature sets in one mode`.
+- [x] **Step 2: Implement** divergence detection, ranking, cutting and the counters.
+- [x] **Step 3: Verify** `cargo test --lib explain::` passes. Run the merge gate.
+- [x] **Step 4: Commit** `feat(explain): report crates built with different feature sets in one mode`.
 
 _Requirements: EXPLAIN-2.3, EXPLAIN-2.4, EXPLAIN-2.5, EXPLAIN-2.6_
 
@@ -297,7 +297,7 @@ _Requirements: EXPLAIN-2.3, EXPLAIN-2.4, EXPLAIN-2.5, EXPLAIN-2.6_
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `a_summary_line_anywhere_makes_a_unit_failed`: outputs `[E0308 line, summary, failure-note]` → one `unit.failed` with `error_codes: "E0308"`, `attempted_at` from `utc_timestamp`, path = unit dir.
   - `error_codes_are_distinct_non_null_and_in_first_seen_order`: `[dead_code, E0308, dead_code, summary]` → `"dead_code,E0308"`; only the summary → `""`.
   - `a_never_compiled_unit_names_its_kind_from_the_output_file_and_omits_features`: `stem: None` → `crate` from dir name, `target_kind` from `output-lib-x`, no `features` key, an `unmeasured` entry.
@@ -308,9 +308,9 @@ _Requirements: EXPLAIN-2.3, EXPLAIN-2.4, EXPLAIN-2.5, EXPLAIN-2.6_
   - `a_failed_unit_is_described_only_by_its_last_compile`: the `unit.failed` detail is the fixed text "Its last compile failed." for every finding.
 
   Run `cargo test --lib explain::`; expect failures.
-- [ ] **Step 2: Implement** the failed-unit rules in `analyse`.
-- [ ] **Step 3: Verify** `cargo test --lib explain::` passes. Run the merge gate.
-- [ ] **Step 4: Commit** `feat(explain): report units whose last compile failed, with rustc's codes`.
+- [x] **Step 2: Implement** the failed-unit rules in `analyse`.
+- [x] **Step 3: Verify** `cargo test --lib explain::` passes. Run the merge gate.
+- [x] **Step 4: Commit** `feat(explain): report units whose last compile failed, with rustc's codes`.
 
 _Requirements: EXPLAIN-3.1, EXPLAIN-3.2, EXPLAIN-3.3, EXPLAIN-3.4, EXPLAIN-3.5, EXPLAIN-3.6, EXPLAIN-4.3_
 
@@ -338,7 +338,7 @@ _Requirements: EXPLAIN-3.1, EXPLAIN-3.2, EXPLAIN-3.3, EXPLAIN-3.4, EXPLAIN-3.5, 
 
 **Depends-on:** Task 1, Task 2, Task 4, Task 6, Task 7
 
-- [ ] **Step 1: Write the failing integration tests** in `tests/explain.rs` (fixture repos under `/private/tmp/hive-it-*`, `HIVE_HOME` per test, `write_ready_capabilities`):
+- [x] **Step 1: Write the failing integration tests** in `tests/explain.rs` (fixture repos under `/private/tmp/hive-it-*`, `HIVE_HOME` per test, `write_ready_capabilities`):
   - `explain_lists_copies_of_a_crate_built_two_ways`: `build_crate`, then `check_crate` → `copies.group` for its lib with `mode_build:1, mode_check:1`.
   - `explain_names_a_failed_unit_with_its_code`: `build_crate_failing` on a crate with a type error → one `unit.failed` with `error_codes:"E0308"`, `failed_units:1`.
   - `explain_without_check_g_counts_but_does_not_name`: capabilities without `failed_marker_check` → no `unit.failed`, `unmeasured` says (g) has not run, exit 0.
@@ -353,10 +353,10 @@ _Requirements: EXPLAIN-3.1, EXPLAIN-3.2, EXPLAIN-3.3, EXPLAIN-3.4, EXPLAIN-3.5, 
   - `top_zero_shows_every_group`: a synthetic target (a `CACHEDIR.TAG`, a `debug/.fingerprint/` with 12 crates × 2 units written by the reader test helpers' format, and an empty `deps/`) under the fixture repo → `-n 0` lists 12 groups, the default lists 10.
 
   Run `cargo test --test explain`; expect failure: `explain` is not a command.
-- [ ] **Step 2: Implement** `io`, `run`, the command in the order of the design (require `FingerprintReading`; state and signal handlers; `select`; `targets`; `cancelled()` → exit 130 before the snapshot merge; merge; `Scope::contains`; `run` with `FailedUnits` from `failed_unit_reporting`; `emit` with 130/1/0), and the human rendering: one line per listed group, divergence and failed unit, then the totals.
-- [ ] **Step 3: Verify** `cargo test --test explain` passes. Run the merge gate.
-- [ ] **Step 4: Docs.** README commands table gains `cargo hive explain [<repo>…] [-n N]`, plus a short section on what it reports and never claims.
-- [ ] **Step 5: Commit** `feat(cli): add cargo hive explain`.
+- [x] **Step 2: Implement** `io`, `run`, the command in the order of the design (require `FingerprintReading`; state and signal handlers; `select`; `targets`; `cancelled()` → exit 130 before the snapshot merge; merge; `Scope::contains`; `run` with `FailedUnits` from `failed_unit_reporting`; `emit` with 130/1/0), and the human rendering: one line per listed group, divergence and failed unit, then the totals.
+- [x] **Step 3: Verify** `cargo test --test explain` passes. Run the merge gate.
+- [x] **Step 4: Docs.** README commands table gains `cargo hive explain [<repo>…] [-n N]`, plus a short section on what it reports and never claims.
+- [x] **Step 5: Commit** `feat(cli): add cargo hive explain`.
 
 _Requirements: EXPLAIN-5.1, EXPLAIN-5.2, EXPLAIN-5.3, EXPLAIN-5.4, EXPLAIN-5.5, EXPLAIN-7.4_
 
@@ -378,14 +378,14 @@ _Requirements: EXPLAIN-5.1, EXPLAIN-5.2, EXPLAIN-5.3, EXPLAIN-5.4, EXPLAIN-5.5, 
 
 **Depends-on:** Task 8
 
-- [ ] **Step 1: Write the tests** in `tests/guards.rs`:
+- [x] **Step 1: Write the tests** in `tests/guards.rs`:
   - Add `explain` to the command lists of the CORE-6.3 snapshot tests (`repo_add_status_and_doctor_leave_…` at lines ~82-126 and the scratch `CARGO_HOME` test at ~128-158), with the fixture target also holding a failed unit built by `build_crate_failing` before the snapshot: the checkout and target dir are byte-for-byte unchanged, `~/.cargo` shows the same marks, the scratch `CARGO_HOME` is byte-for-byte unchanged.
   - `explain_installs_nothing_in_the_build_path`: after `explain`, the checkout holds no `.cargo/` directory it did not have, and `~/.cargo` shows the same `config`, `config.toml`, `env`, `env.fish` and `bin/` marks (`cargo_home_marks`, `tests/guards.rs:59-80`).
   - `#[ignore]` `explain_on_klynt_stays_within_two_seconds_of_status`: same structure as the CORE-6.1 test (`:284-329`): cold (delete `snapshot.json` before each of the two commands) and warm median of 5 for both `status <klynt> --no-sizes --json` and `explain <klynt> --json`; assert the explain minus status difference is at most 2 s in each case.
 
   Run `cargo test --test guards`. These guards describe behavior Task 8 already has, so they pass on first run; prove each can fail by temporarily making `explain` write a file into the fixture target (revert after), and expect the snapshot test to fail.
-- [ ] **Step 2: Run the timing test** `cargo test --release --test guards -- --ignored explain_on_klynt` on the proof machine and record cold and warm numbers in the task report.
-- [ ] **Step 3: Verify.** Run the merge gate.
-- [ ] **Step 4: Commit** `test(explain): guard that explain writes nothing outside hive's state, and time it on klynt`.
+- [x] **Step 2: Run the timing test** `cargo test --release --test guards -- --ignored explain_on_klynt` on the proof machine and record cold and warm numbers in the task report.
+- [x] **Step 3: Verify.** Run the merge gate.
+- [x] **Step 4: Commit** `test(explain): guard that explain writes nothing outside hive's state, and time it on klynt`.
 
 _Requirements: EXPLAIN-6.1, EXPLAIN-6.2, EXPLAIN-7.5_
