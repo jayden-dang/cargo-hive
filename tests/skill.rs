@@ -528,8 +528,26 @@ fn skill_documents_every_mile1_command() {
     }
 }
 
+fn has_local_link(line: &str) -> bool {
+    line.split("](").skip(1).any(|rest| {
+        let target = rest.split(')').next().unwrap_or(rest);
+        !(target.starts_with("http://") || target.starts_with("https://"))
+    })
+}
+
 #[test]
 fn skill_body_fits_the_budget() {
+    for local in [
+        "see [notes](#anchor)",
+        "see [notes](docs/notes)",
+        "mail [me](mailto:a@b.c)",
+        "[web](https://x.y) and [local](./z)",
+    ] {
+        assert!(has_local_link(local), "link not rejected: {local}");
+    }
+    for fine in ["[web](https://x.y)", "[web](http://x.y)", "no links here"] {
+        assert!(!has_local_link(fine), "link wrongly rejected: {fine}");
+    }
     let body = skill_body();
     let count = body.lines().count();
     assert!(
@@ -538,7 +556,7 @@ fn skill_body_fits_the_budget() {
     );
     for (i, line) in body.lines().enumerate() {
         assert!(
-            !line.contains("](") || line.contains("](http"),
+            !has_local_link(line),
             "skill body line {} links to a local path: {line}",
             i + 1
         );

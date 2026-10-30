@@ -14,13 +14,14 @@ Run hive as `cargo hive` followed by a subcommand. Where the harness cannot call
 Before the first write, learn the binary's version. Take `hive_version` from any receipt already printed. If none exists, ask the binary for its version: it prints the binary name followed by its version. Compare major and minor with this skill's `metadata.hive-version`.
 
 - Same major and minor: carry on.
-- Different: `doctor`, `repo list`, `status` and `explain` may still run. Tell the user both versions and how to update: `/plugin marketplace update cargo-hive` for the plugin, or reinstall the binary.
-- Different: do not run `gc` or `repo add`. Ask the user to update first.
+- If different:
+  - `doctor`, `repo list`, `status` and `explain` may still run. Tell the user both versions and how to update: `/plugin marketplace update cargo-hive` for the plugin, or reinstall the binary.
+  - Do not run `gc` or `repo add`. Ask the user to update first.
 
 ## The model
 
-- Checkouts are protected (the main checkout, and orphan target dirs with no checkout) or secondary (extra worktrees, such as an agent lane). Reclaiming from protected ones needs the owner's approval; secondary ones an agent may reclaim itself.
-- Actions come in two tiers. The auto tier is safe to run unasked; in this version it is all `gc` does: it deletes superseded incremental sessions and leftover rustc temp entries, each under its owner's lock. The plan tier (larger reclaims that need approval) is not available yet.
+- A checkout is protected (a registered main checkout, or anything hive cannot classify) or secondary (a linked worktree inside its own main, or a checkout under a secondary root, by default `/private/tmp` and `$TMPDIR`). Orphan target dirs are not checkouts: they are target dirs no checkout owns.
+- Actions come in two tiers. The auto tier is safe to run unasked on protected and secondary checkouts alike; in this version it is all `gc` does: it deletes superseded incremental sessions and leftover rustc temp entries, each under its owner's lock. The plan tier (closure deletion and whole orphan target dirs) needs the owner's approval on protected checkouts and orphan dirs, and is not available yet. Reclaim only through hive, never by other means.
 - A result marked `needs-human` is the owner's to resolve. Report it; do not work around it.
 - Never run the owner's approval command. It is named here in prose only; an agent does not issue it.
 - The repos a command acts on come from its arguments. Never infer them from the current directory.
@@ -34,6 +35,8 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 | How big is it, what is orphaned? | `status` |
 | How do I free space? | `gc` with `--dry-run` first, then `gc` |
 | Why are there so many copies of a crate? | `explain` |
+
+`status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo (for `gc`, every target hive knows). Pass explicit paths unless the user asked for everything.
 
 ## Command lines
 
@@ -51,7 +54,7 @@ cargo hive explain /path/to/repo --top 20 --json
 
 With `--json`, hive prints exactly one JSON object on stdout and its prose on stderr. Read the object and report its counters as measured. Never estimate bytes or time yourself, and say so when a field says a size was not measured.
 
-Exit codes: 0 success; 1 refusal or failure (the receipt says why); 2 unsupported operating system; 130 cancelled.
+Exit codes: 0 success; 1 refusal or failure (read the receipt, or stderr if no receipt was printed); 2 unsupported operating system; 130 cancelled.
 
 ## Do not
 
