@@ -6055,3 +6055,27 @@ Added after execution by `root-cause` (2026-10-29). A first compile that fails l
 - [x] **Step 3: Verify** — `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (184 passed) and `cargo check --target x86_64-unknown-linux-gnu` (only the existing `entry_kind` warning). `status` on klynt reports `target/debug` supported with 2,423 units and 17,258 resolved edges.
 
 _Requirements: CORE-4.16, CORE-4.17_
+
+---
+
+### Task F1: The cancelled-status snapshot test stops racing the lock holder
+
+Fix 2026-10-30 (root-cause, owner-accepted proposition: the test killed the lock holder right after SIGINT and asserted a logged receipt; when hive acted on SIGINT while the holder still held the lock, CORE-6.6 rightly skipped logging, so the outcome depended on scheduling).
+
+**Files:**
+- Modify: `tests/status_targets.rs` (`an_interrupted_status_waiting_on_the_state_lock_exits_130_without_writing_the_snapshot`)
+- Test: `tests/status_targets.rs`
+
+**Reuse:** rung 2 — the assertions `an_interrupted_status_waiting_for_the_state_lock_exits_130_without_waiting_for_the_holder` already makes (receipt on stdout, `status was cancelled`)
+
+**Interfaces:**
+- Consumes: `Hive::command`, `wait_within`, `__hold-lock` (`tests/common/mod.rs`, `src/cli.rs`)
+- Produces: none
+
+**Depends-on:** none
+
+- [x] **Step 1: Red.** With a 500 ms pause between SIGINT and killing the holder (throwaway instrumentation, removed), the old test fails 3/3 at "a cancelled status appends a receipt" while hive's stderr says the receipt was not logged.
+- [x] **Step 2: Fix.** Kill the holder only after `status` exits; assert exit 130, the receipt on stdout with `status was cancelled`, stderr saying the receipt was not logged, and `snapshot.json` unchanged. Passes 8/8 alone, the whole `tests/status_targets.rs` 3/3, and the full suite twice under added CPU load.
+- [x] **Step 3: Verify and commit** `test(status): hold the state lock until a cancelled status exits`.
+
+_Requirements: CORE-6.8, CORE-6.9_
