@@ -201,7 +201,7 @@ Design "Liveness", flow steps 1–3, 5 and 7, Decision 3.
 
 **Depends-on:** Task 3
 
-- [ ] **Step 1: Write the failing tests** in `src/liveness.rs`:
+- [x] **Step 1: Write the failing tests** in `src/liveness.rs`:
   - `an_unsupported_profile_makes_the_whole_target_undecided` (a profile dir with no `.fingerprint/`).
   - `a_not_current_unit_inside_the_window_makes_the_target_undecided`: table with a never-compiled dir (`invoked.timestamp` + `output-lib-x`), an emptied-hash dir, and a not-current run-build-script whose timestamp is under `build/`.
   - `a_not_current_unit_outside_the_window_or_without_a_timestamp_is_ignored`: Decided, and its dir is in no dead unit.
@@ -211,9 +211,9 @@ Design "Liveness", flow steps 1–3, 5 and 7, Decision 3.
   - `every_reason_is_reported_with_what_clears_it`: three conditions at once give three sorted reasons, each with a non-empty `clears_when`, and no dead units.
 
   Run `cargo test --lib liveness::`; expect these tests to fail on `Decided` results.
-- [ ] **Step 2: Implement** the checks, collecting into one list with no early return, and `clears_when` for each variant.
-- [ ] **Step 3: Verify** `cargo test --lib liveness::` passes. Run the merge gate.
-- [ ] **Step 4: Commit** `feat(liveness): refuse to decide, with every reason, when the graph cannot prove reachability`.
+- [x] **Step 2: Implement** the checks, collecting into one list with no early return, and `clears_when` for each variant.
+- [x] **Step 3: Verify** `cargo test --lib liveness::` passes. Run the merge gate.
+- [x] **Step 4: Commit** `feat(liveness): refuse to decide, with every reason, when the graph cannot prove reachability`.
 
 _Requirements: LIVE-2.1, LIVE-2.2, LIVE-2.3, LIVE-2.4, LIVE-2.5, LIVE-2.6, LIVE-2.7, LIVE-2.9, LIVE-2.10, LIVE-2.11_
 
