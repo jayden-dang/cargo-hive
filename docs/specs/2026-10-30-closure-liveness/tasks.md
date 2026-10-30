@@ -272,7 +272,7 @@ Design "Fixture coverage", real-cargo cases.
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1: Write the failing tests** in `tests/liveness.rs`, each in a `/private/tmp/hive-it-liveness-*` scratch workspace of path-only crates:
+- [x] **Step 1: Write the failing tests** in `tests/liveness.rs`, each in a `/private/tmp/hive-it-liveness-*` scratch workspace of path-only crates:
   - `a_proc_macro_in_the_host_profile_stays_live_for_a_target_triple_build`: `app` (bin, `build.rs`) → path proc-macro `pm`, which has a real `#[proc_macro] pub fn m(_: TokenStream) -> TokenStream` used by `app`. Build with `--target <host triple from rustc -vV>`, backdate all 30 d, then set the triple-dir bin's timestamp to now; window 6 h. The bin, its run-build-script, `pm` and the build-script compile unit are live, and nothing is dead.
   - `a_backdated_check_variant_is_dead_with_its_rmeta_and_dep_info`: `app` → lib `dep`. Run `cargo check`, backdate every timestamp 30 d, then run `cargo build --bins --examples`. The new build units are roots, and the shared build-script and proc-macro units stay old but are live through traversal. Window 6 h: the check units are dead, and their `files` are exactly their fingerprint dir plus `deps/lib*-<h>.rmeta` and `deps/*-<h>.d`.
   - `a_dead_example_lists_its_examples_entries` and `a_build_script_unit_is_never_dead_and_its_run_timestamp_in_build_is_a_root`.
@@ -281,9 +281,9 @@ Design "Fixture coverage", real-cargo cases.
   - `the_package_ships_no_test_file`: `cargo package --list --allow-dirty` lists no path under `tests/`.
 
   Run `cargo test --test liveness`; expect the two guard tests to pass and the four liveness cases to fail only where liveness disagrees with real Cargo output (if all four pass at once, record that in the task report).
-- [ ] **Step 2: Fix** anything the real output exposes in `src/liveness.rs`; a new sub-case gets a synthetic unit test there first.
-- [ ] **Step 3: Verify** `cargo test --test liveness` passes. Run the merge gate.
-- [ ] **Step 4: Commit** `test(liveness): check live and dead units against real cargo builds`.
+- [x] **Step 2: Fix** anything the real output exposes in `src/liveness.rs`; a new sub-case gets a synthetic unit test there first.
+- [x] **Step 3: Verify** `cargo test --test liveness` passes. Run the merge gate.
+- [x] **Step 4: Commit** `test(liveness): check live and dead units against real cargo builds`.
 
 _Requirements: LIVE-1.1, LIVE-1.3, LIVE-3.1, LIVE-5.5, LIVE-5.6, LIVE-5.7_
 
