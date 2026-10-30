@@ -7,6 +7,7 @@ pub mod explain;
 pub mod fingerprint;
 pub mod gc;
 pub mod git;
+pub mod liveness;
 pub mod platform;
 pub mod receipt;
 pub mod registry;

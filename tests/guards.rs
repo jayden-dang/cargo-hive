@@ -431,3 +431,11 @@ fn explain_on_klynt_stays_within_two_seconds_of_status() {
         status_warm[2]
     );
 }
+
+#[test]
+fn liveness_spawns_no_process() {
+    let source = include_str!("../src/liveness.rs");
+    let production = source.split("#[cfg(test)]").next().unwrap();
+    assert!(!production.contains("std::process"));
+    assert!(!production.contains("Command"));
+}
