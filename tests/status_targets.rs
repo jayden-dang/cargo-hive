@@ -601,18 +601,19 @@ fn an_interrupted_status_waiting_on_the_state_lock_exits_130_without_writing_the
         .status()
         .unwrap()
         .success());
+    let out = wait_within(child, Duration::from_secs(30));
     holder.kill().unwrap();
     let _ = holder.wait();
-    let out = wait_within(child, Duration::from_secs(30));
     assert_eq!(out.status.code(), Some(130), "{out:?}");
-    let logged = fs::read_dir(hive.home.path.join("receipts"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .any(|e| {
-            let text = fs::read_to_string(e.path()).unwrap_or_default();
-            text.contains("\"command\":\"status\"") && text.contains("status was cancelled")
-        });
-    assert!(logged, "a cancelled status appends a receipt");
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        receipt.to_string().contains("status was cancelled"),
+        "{receipt}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("the receipt was not logged"),
+        "a status cancelled while the lock is held says its receipt was not logged: {out:?}"
+    );
     assert_eq!(
         fs::read(&snapshot_path).unwrap(),
         before,
