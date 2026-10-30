@@ -92,14 +92,14 @@ Prefactor (design "Fingerprint helpers", Decisions 4 and 5). Gives liveness the 
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests** in `src/fingerprint.rs`:
+- [x] **Step 1: Write the failing tests** in `src/fingerprint.rs`:
   - `the_unit_hash_is_the_sixteen_hex_tail_of_the_dir_name`: table of `dep-4360aef667e9273e` → `Some("4360aef667e9273e")`, `build_script_build-9a4d89fe046fe1ba` → `Some(..)`, `dep-4360AEF667E9273E` → `None`, `dep-4360aef667e9273` (15) → `None`, `nodash` → `None`.
   - `a_dependency_name_is_read_back_from_the_unit_json`: the existing `unit_json` writes every name as `"dep"`, so add `unit_json_named(deps: &[(u64, &str)])` beside it, and write a unit with `[(7, "alpha"), (9, "beta")]`. Then `dep_name(dir, "lib-q", 9)` → `Some("beta")`, `dep_name(dir, "lib-q", 7)` → `Some("alpha")`, `dep_name(dir, "lib-q", 8)` → `None`, and a missing JSON → `None`.
 
   Run `cargo test --lib fingerprint::`; expect compile errors: `unit_hash` and `dep_name` are not found.
-- [ ] **Step 2: Implement** both functions; `directory_suffix` in `src/explain.rs` becomes `fingerprint::unit_hash(dir_name)`.
-- [ ] **Step 3: Verify.** `cargo test --lib fingerprint::` passes. `cargo test --test explain --test status_targets` passes unchanged. Run the merge gate.
-- [ ] **Step 4: Commit** `refactor(fingerprint): share the unit-hash rule and read a dependency's name on demand`.
+- [x] **Step 2: Implement** both functions; `directory_suffix` in `src/explain.rs` becomes `fingerprint::unit_hash(dir_name)`.
+- [x] **Step 3: Verify.** `cargo test --lib fingerprint::` passes. `cargo test --test explain --test status_targets` passes unchanged. Run the merge gate.
+- [x] **Step 4: Commit** `refactor(fingerprint): share the unit-hash rule and read a dependency's name on demand`.
 
 _Requirements: LIVE-2.3, LIVE-2.9, LIVE-5.1, LIVE-5.2, LIVE-5.3_
 
@@ -125,16 +125,16 @@ Prefactor (design "gc byte measurement", Decision 8).
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests** in `src/gc/run.rs`:
+- [x] **Step 1: Write the failing tests** in `src/gc/run.rs`:
   - `measure_counts_a_file_root_and_a_directory_root`: one file path and one directory path → freed equals the sum of their blocks.
   - `measure_counts_a_hardlinked_file_as_still_shared_unless_every_link_is_listed`: two links of one inode, listing one → `still_shared`; listing both → `freed`.
   - `measure_ignores_a_duplicate_and_a_nested_path`: the same file twice, and a directory plus a file inside it, give the same totals as listing each once.
   - `measure_counts_nothing_for_a_missing_path`.
 
   Run `cargo test --lib gc::`; expect compile errors: `measure` and `Footprint` are not found.
-- [ ] **Step 2: Implement.** Move `scan` out of `Runner` unchanged apart from the `account_bytes` parameter, and have `remove_measured` call it. Add `measure` and `Footprint`, and re-export both from `src/gc.rs`.
-- [ ] **Step 3: Verify.** `cargo test --lib gc::` passes, including the existing recorded-operation tests (e.g. the `lock, stat old, remove_tree old` sequence around lines 748-762), unchanged. `cargo test --test gc` passes unchanged. Run the merge gate.
-- [ ] **Step 4: Commit** `refactor(gc): let callers measure what deleting a set of paths would free`.
+- [x] **Step 2: Implement.** Move `scan` out of `Runner` unchanged apart from the `account_bytes` parameter, and have `remove_measured` call it. Add `measure` and `Footprint`, and re-export both from `src/gc.rs`.
+- [x] **Step 3: Verify.** `cargo test --lib gc::` passes, including the existing recorded-operation tests (e.g. the `lock, stat old, remove_tree old` sequence around lines 748-762), unchanged. `cargo test --test gc` passes unchanged. Run the merge gate.
+- [x] **Step 4: Commit** `refactor(gc): let callers measure what deleting a set of paths would free`.
 
 _Requirements: LIVE-4.9, LIVE-5.4_
 
