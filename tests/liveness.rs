@@ -1,9 +1,10 @@
 mod common;
-use cargo_hive::cargo_target::{self, Owner, TargetDir};
+use cargo_hive::cargo_target::{self, TargetDir};
 use cargo_hive::fingerprint;
 use cargo_hive::liveness::{liveness, Liveness, UnitRef};
 use cargo_hive::platform;
 use clap::CommandFactory;
+use common::prove::{self, WindowOutcome};
 use common::{init_repo, register, wait_within, Hive, Scratch};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -151,25 +152,7 @@ fn backdate_all(target: &Path, age: Duration) {
 }
 
 fn read_target(path: &Path) -> TargetDir {
-    let mut target = TargetDir {
-        path: path.to_path_buf(),
-        owner: Owner::Unresolved {
-            reason: "test".into(),
-        },
-        profiles: Vec::new(),
-        size: None,
-        unreadable: None,
-    };
-    match cargo_target::identify(path).expect("a cargo-tagged target dir") {
-        Err(why) => target.unreadable = Some(why),
-        Ok(profiles) => {
-            target.profiles = profiles
-                .iter()
-                .map(|(dir, _)| fingerprint::read_profile(dir))
-                .collect();
-        }
-    }
-    target
+    prove::read_target(path).expect("a cargo-tagged target dir")
 }
 
 fn decide(target: &Path) -> (BTreeSet<UnitRef>, Vec<cargo_hive::liveness::DeadUnit>) {
@@ -473,4 +456,534 @@ fn the_package_ships_no_test_file() {
         !listing.lines().any(|l| l.starts_with("tests/")),
         "{listing}"
     );
+}
+
+fn argv(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|p| p.to_string()).collect()
+}
+
+fn at(secs: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+}
+
+fn key(profile: &str, dir: &str) -> (PathBuf, String) {
+    (PathBuf::from(profile), dir.to_string())
+}
+
+#[test]
+fn commands_are_checked_and_json_is_inserted_after_the_subcommand() {
+    for (cmd, index) in [
+        (vec!["build"], 0),
+        (vec!["+stable", "build", "--offline"], 1),
+        (vec!["-q", "check"], 1),
+        (vec!["test", "--", "--target-dir"], 0),
+        (vec!["clippy", "--", "-D", "warnings"], 0),
+    ] {
+        assert_eq!(prove::check_command(&argv(&cmd)), Ok(index), "{cmd:?}");
+    }
+    for cmd in [
+        vec![],
+        vec!["--offline"],
+        vec!["build", "--message-format", "short"],
+        vec!["build", "--message-format=short"],
+        vec!["build", "--target-dir", "x"],
+        vec!["build", "--target-dir=x"],
+        vec!["build", "--artifact-dir=x"],
+        vec!["build", "--artifact-dir", "x"],
+        vec!["--target-dir=x", "build"],
+    ] {
+        assert!(prove::check_command(&argv(&cmd)).is_err(), "{cmd:?}");
+    }
+    assert_eq!(
+        prove::with_json(&argv(&["clippy", "--", "-D", "warnings"])),
+        argv(&["clippy", "--message-format=json", "--", "-D", "warnings"])
+    );
+    assert_eq!(
+        prove::with_json(&argv(&["+stable", "build", "--offline"])),
+        argv(&["+stable", "build", "--message-format=json", "--offline"])
+    );
+    assert_eq!(
+        prove::with_json(&argv(&["-q", "check"])),
+        argv(&["-q", "check", "--message-format=json"])
+    );
+}
+
+#[test]
+fn rebuilt_units_are_new_dirs_or_changed_timestamps() {
+    let before: prove::Stamps = BTreeMap::from([
+        (key("debug", "a-1"), Some(at(1))),
+        (key("debug", "b-2"), Some(at(1))),
+        (key("debug", "c-3"), None),
+    ]);
+    let after: prove::Stamps = BTreeMap::from([
+        (key("debug", "a-1"), Some(at(1))),
+        (key("debug", "b-2"), Some(at(2))),
+        (key("debug", "c-3"), None),
+        (key("debug", "d-4"), Some(at(2))),
+    ]);
+    assert_eq!(
+        prove::rebuilt(&before, &after),
+        vec![key("debug", "b-2"), key("debug", "d-4")]
+    );
+    assert_eq!(prove::rebuilt(&after, &after), vec![]);
+}
+
+#[test]
+fn a_rebuilt_live_unit_fails_the_window() {
+    let rebuilt = vec![key("debug", "b-2"), key("x86/debug", "d-4")];
+    let live = BTreeSet::from([key("debug", "b-2"), key("debug", "d-4")]);
+    let hit = prove::rebuilt_live(&rebuilt, &live);
+    assert_eq!(hit, vec!["debug/b-2".to_string()]);
+    assert_eq!(
+        prove::outcome(&hit, None),
+        WindowOutcome::RebuiltLive(hit.clone())
+    );
+    let none = prove::rebuilt_live(&rebuilt, &BTreeSet::new());
+    assert_eq!(none, Vec::<String>::new());
+    assert_eq!(prove::outcome(&none, None), WindowOutcome::Passed);
+    assert_eq!(
+        prove::outcome(&none, Some("why".into())),
+        WindowOutcome::Vacuous("why".into())
+    );
+}
+
+#[test]
+fn a_window_is_vacuous_when_undecided_empty_failed_or_silent() {
+    let unit = UnitRef {
+        profile: PathBuf::from("/t/debug"),
+        dir_name: "a-0123456789abcdef".into(),
+    };
+    let dead = |files: Vec<PathBuf>| cargo_hive::liveness::DeadUnit {
+        unit: unit.clone(),
+        files,
+    };
+    let undecided = Liveness::Undecided {
+        reasons: vec![cargo_hive::liveness::Uncertain::TargetUnreadable {
+            target: PathBuf::from("/t"),
+            why: "denied".into(),
+        }],
+    };
+    let empty = Liveness::Decided {
+        live: vec![],
+        dead: vec![],
+    };
+    let listed = Liveness::Decided {
+        live: vec![],
+        dead: vec![dead(vec![PathBuf::from("/t/debug/deps/x")])],
+    };
+    let unlisted = Liveness::Decided {
+        live: vec![],
+        dead: vec![dead(vec![])],
+    };
+    assert!(prove::vacuous_reason(&undecided, &[0], &[1])
+        .unwrap()
+        .contains("undecided"));
+    assert!(prove::vacuous_reason(&empty, &[0], &[1])
+        .unwrap()
+        .contains("no dead unit"));
+    assert!(prove::vacuous_reason(&unlisted, &[0], &[1])
+        .unwrap()
+        .contains("no dead unit"));
+    assert!(prove::vacuous_reason(&listed, &[0, 101], &[1, 1])
+        .unwrap()
+        .contains("101"));
+    assert!(prove::vacuous_reason(&listed, &[0, 0], &[1, 0])
+        .unwrap()
+        .contains("compiler-artifact"));
+    assert_eq!(prove::vacuous_reason(&listed, &[0, 0], &[3, 1]), None);
+    assert_eq!(prove::vacuous_reason(&listed, &[], &[]), None);
+}
+
+#[test]
+fn clone_timestamps_and_original_trees_are_compared_exactly() {
+    let original: prove::Stamps = BTreeMap::from([
+        (key("debug", "a-1"), Some(at(1))),
+        (key("debug", "b-2"), Some(at(1))),
+    ]);
+    let mut clone = original.clone();
+    assert_eq!(prove::mtime_mismatches(&original, &clone), vec![]);
+    clone.insert(key("debug", "b-2"), Some(at(2)));
+    assert_eq!(
+        prove::mtime_mismatches(&original, &clone),
+        vec![key("debug", "b-2")]
+    );
+    clone.remove(&key("debug", "a-1"));
+    assert_eq!(
+        prove::mtime_mismatches(&original, &clone),
+        vec![key("debug", "a-1"), key("debug", "b-2")]
+    );
+
+    let before: prove::Tree = BTreeMap::from([
+        (PathBuf::from("/t/a"), (at(1), 10)),
+        (PathBuf::from("/t/b"), (at(1), 10)),
+        (PathBuf::from("/t/c"), (at(1), 10)),
+        (PathBuf::from("/t/d"), (at(1), 10)),
+    ]);
+    let mut after = before.clone();
+    assert_eq!(prove::tree_changes(&before, &after), Vec::<PathBuf>::new());
+    after.insert(PathBuf::from("/t/a"), (at(2), 10));
+    after.insert(PathBuf::from("/t/b"), (at(1), 11));
+    after.remove(&PathBuf::from("/t/c"));
+    after.insert(PathBuf::from("/t/e"), (at(1), 0));
+    assert_eq!(
+        prove::tree_changes(&before, &after),
+        ["/t/a", "/t/b", "/t/c", "/t/e"].map(PathBuf::from).to_vec()
+    );
+}
+
+#[test]
+fn the_walk_records_metadata_and_stops_at_its_cap() {
+    let s = Scratch::new("prove-walk");
+    write(&s.path.join("a/b.txt"), "hello");
+    write(&s.path.join("c.txt"), "x");
+    let tree = prove::walk(&s.path, 100).unwrap();
+    assert_eq!(tree[&s.path.join("a/b.txt")].1, 5);
+    assert!(tree.contains_key(&s.path.join("a")));
+    assert!(prove::walk(&s.path, 2).is_err());
+}
+
+#[test]
+fn all_vacuous_and_render_name_each_window_command_and_exit() {
+    let window = |secs: u64, outcome: WindowOutcome, exit: i32| prove::WindowReport {
+        window: Duration::from_secs(secs),
+        outcome,
+        dead_units: 3,
+        dead_bytes: Default::default(),
+        unmapped: Default::default(),
+        rebuilt: 2,
+        rebuilt_live: 0,
+        reasons: vec!["a reason".into()],
+        commands: vec![(argv(&["build", "--message-format=json", "--offline"]), exit)],
+    };
+    let mut report = prove::ProveReport {
+        baseline_rebuilt: vec![],
+        windows: vec![
+            window(6 * 3600, WindowOutcome::Vacuous("none".into()), 0),
+            window(7 * 86_400, WindowOutcome::Vacuous("none".into()), 101),
+        ],
+    };
+    assert!(report.all_vacuous());
+    let text = report.render();
+    assert!(
+        text.contains("build --message-format=json --offline"),
+        "{text}"
+    );
+    assert!(text.contains("exit 101"), "{text}");
+    assert!(text.contains("exit 0"), "{text}");
+    assert!(text.contains("6h") && text.contains("7d"), "{text}");
+    assert!(text.contains("a reason"), "{text}");
+    report.windows[0].outcome = WindowOutcome::Passed;
+    assert!(!report.all_vacuous());
+    assert!(report.render().contains("only the replayed commands"));
+}
+
+#[test]
+fn a_command_printing_more_than_a_pipe_holds_is_counted_from_its_log() {
+    let s = Scratch::new("prove-log");
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(
+        "i=0; while [ $i -lt 3000 ]; do echo '{\"reason\":\"compiler-artifact\",\"pad\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}'; echo noise; i=$((i+1)); done; exit 7",
+    );
+    let ran = prove::run_logged(&s.path, "big", cmd, Duration::from_secs(60)).unwrap();
+    assert_eq!(ran.exit, 7);
+    assert_eq!(ran.artifact_lines, 3000);
+    assert!(fs::metadata(&ran.stdout).unwrap().len() > 64 * 1024);
+    assert!(prove::count_artifacts(&ran.stdout, 1024).is_err());
+}
+
+struct Volumes {
+    inner: Box<dyn platform::Fs>,
+    scratch: PathBuf,
+    fs_type: &'static str,
+    scratch_mount: String,
+    touch_when_measured: Option<PathBuf>,
+}
+
+impl platform::Fs for Volumes {
+    fn temp_dir(&self, p: &Path, prefix: &str) -> std::io::Result<platform::TempDir> {
+        self.inner.temp_dir(p, prefix)
+    }
+    fn write_file(&self, p: &Path, b: &[u8]) -> std::io::Result<()> {
+        self.inner.write_file(p, b)
+    }
+    fn read(&self, p: &Path) -> std::io::Result<Vec<u8>> {
+        self.inner.read(p)
+    }
+    fn hardlink(&self, s: &Path, d: &Path) -> std::io::Result<()> {
+        self.inner.hardlink(s, d)
+    }
+    fn set_mtime(&self, p: &Path, t: SystemTime) -> std::io::Result<()> {
+        self.inner.set_mtime(p, t)
+    }
+    fn mtime(&self, p: &Path) -> std::io::Result<SystemTime> {
+        self.inner.mtime(p)
+    }
+    fn inode(&self, p: &Path) -> std::io::Result<u64> {
+        self.inner.inode(p)
+    }
+    fn clone_file(&self, s: &Path, d: &Path) -> std::io::Result<()> {
+        self.inner.clone_file(s, d)
+    }
+    fn sharing(&self, p: &Path) -> std::io::Result<platform::Sharing> {
+        if let Some(path) = &self.touch_when_measured {
+            set_mtime(path, SystemTime::now() + Duration::from_secs(5));
+        }
+        self.inner.sharing(p)
+    }
+    fn compress(&self, p: &Path) -> platform::CompressOutcome {
+        self.inner.compress(p)
+    }
+    fn hold_lock(&self, k: platform::LockKind, p: &Path) -> std::io::Result<platform::LockHolder> {
+        self.inner.hold_lock(k, p)
+    }
+    fn try_lock_exclusive(&self, p: &Path) -> platform::TryLock {
+        self.inner.try_lock_exclusive(p)
+    }
+    fn try_lock_elsewhere(
+        &self,
+        k: platform::LockKind,
+        p: &Path,
+    ) -> std::io::Result<platform::LockState> {
+        self.inner.try_lock_elsewhere(k, p)
+    }
+    fn entry_stat(&self, p: &Path) -> std::io::Result<platform::EntryStat> {
+        self.inner.entry_stat(p)
+    }
+    fn read_dir_bounded(
+        &self,
+        d: &Path,
+        cap: usize,
+    ) -> std::io::Result<Vec<(String, platform::EntryKind)>> {
+        self.inner.read_dir_bounded(d, cap)
+    }
+    fn remove_tree(&self, p: &Path) -> std::io::Result<()> {
+        self.inner.remove_tree(p)
+    }
+    fn remove_file(&self, p: &Path) -> std::io::Result<()> {
+        self.inner.remove_file(p)
+    }
+    fn volume(&self, p: &Path) -> std::io::Result<platform::VolumeInfo> {
+        let mut info = self.inner.volume(p)?;
+        info.fs_type = self.fs_type.to_string();
+        if p.starts_with(&self.scratch) {
+            info.mount = PathBuf::from(&self.scratch_mount);
+        }
+        Ok(info)
+    }
+}
+
+fn proof_fixture(label: &str) -> Fixture {
+    let fx = fixture(label);
+    cargo(&fx, &["check"]);
+    backdate_all(&fx.target, THIRTY_DAYS);
+    cargo(&fx, &["build", "--bins", "--examples"]);
+    fx
+}
+
+fn input(fx: &Fixture, windows: &[Duration]) -> prove::ProveInput {
+    prove::ProveInput {
+        target: fx.target.clone(),
+        checkout: fx.app.clone(),
+        cmds: vec![argv(&["build", "--offline"])],
+        windows: windows.to_vec(),
+        now: SystemTime::now(),
+    }
+}
+
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn no_clone_left(scratch: &Path) {
+    let left: Vec<_> = entries(scratch)
+        .into_iter()
+        .filter(|n| n.starts_with("clone"))
+        .collect();
+    assert_eq!(left, Vec::<String>::new());
+}
+
+#[test]
+fn the_proof_passes_a_window_whose_dead_units_cargo_does_not_need_and_calls_an_empty_window_vacuous(
+) {
+    let fx = proof_fixture("prove-pass");
+    let scratch = Scratch::new("prove-scratch");
+    let before = prove::walk(&fx.target, 5_000_000).unwrap();
+    let lock_before = fs::metadata(fx.app.join("Cargo.lock"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let fs_ = platform::current().unwrap().fs;
+    let window = Duration::from_secs(6 * 3600);
+    let long = Duration::from_secs(3650 * 86_400);
+
+    let report =
+        prove::prove_with(fs_.as_ref(), &scratch.path, &input(&fx, &[window, long])).unwrap();
+
+    println!("{}", report.render());
+    assert_eq!(report.baseline_rebuilt, Vec::<String>::new());
+    let first = &report.windows[0];
+    assert_eq!(first.outcome, WindowOutcome::Passed, "{}", report.render());
+    assert!(first.dead_units > 0);
+    assert!(first.dead_bytes.bytes.freed > 0, "{first:?}");
+    assert!(first.unmapped.bytes.freed > 0, "{first:?}");
+    assert_eq!(first.rebuilt_live, 0);
+    assert_eq!(
+        first.commands,
+        vec![(argv(&["build", "--message-format=json", "--offline"]), 0)]
+    );
+    assert!(matches!(
+        report.windows[1].outcome,
+        WindowOutcome::Vacuous(_)
+    ));
+    assert!(!report.all_vacuous());
+    assert_eq!(
+        prove::tree_changes(&before, &prove::walk(&fx.target, 5_000_000).unwrap()),
+        Vec::<PathBuf>::new()
+    );
+    assert_eq!(
+        fs::metadata(fx.app.join("Cargo.lock"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        lock_before
+    );
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn a_held_build_lock_fails_the_proof_and_leaves_no_clone() {
+    let fx = proof_fixture("prove-lock");
+    let scratch = Scratch::new("prove-scratch");
+    let fs_ = platform::current().unwrap().fs;
+    let profile = fx.target.join("debug");
+    let lock = profile.join(".cargo-build-lock");
+    let held = match fs_.try_lock_exclusive(&lock) {
+        platform::TryLock::Acquired(guard) => guard,
+        other => panic!("expected the fixture lock to be free: {other:?}"),
+    };
+
+    let err = prove::prove_with(fs_.as_ref(), &scratch.path, &input(&fx, &[WINDOW])).unwrap_err();
+
+    assert!(err.contains(&profile.display().to_string()), "{err}");
+    assert_eq!(entries(&scratch.path), Vec::<String>::new());
+    drop(held);
+    assert!(prove::prove_with(fs_.as_ref(), &scratch.path, &input(&fx, &[WINDOW])).is_ok());
+}
+
+#[test]
+fn a_volume_that_cannot_clone_fails_before_copying() {
+    let fx = proof_fixture("prove-volume");
+    let scratch = Scratch::new("prove-scratch");
+    for (fs_type, scratch_mount, wanted) in [
+        ("hfs", "/Volumes/other", "apfs"),
+        ("apfs", "/Volumes/other", "same volume"),
+    ] {
+        let fs_ = Volumes {
+            inner: platform::current().unwrap().fs,
+            scratch: scratch.path.clone(),
+            fs_type,
+            scratch_mount: scratch_mount.to_string(),
+            touch_when_measured: None,
+        };
+        let err = prove::prove_with(&fs_, &scratch.path, &input(&fx, &[WINDOW])).unwrap_err();
+        assert!(err.contains(wanted), "{err}");
+        assert_eq!(entries(&scratch.path), Vec::<String>::new());
+    }
+}
+
+#[test]
+fn a_baseline_rebuild_makes_every_window_vacuous() {
+    let fx = proof_fixture("prove-baseline");
+    let scratch = Scratch::new("prove-scratch");
+    let source = fx.app.join("src/main.rs");
+    fs::write(
+        &source,
+        "pm::m!();\nfn main() { println!(\"{}\", dep::answer()); }\n",
+    )
+    .unwrap();
+    set_mtime(&source, SystemTime::now() + Duration::from_secs(120));
+    let fs_ = platform::current().unwrap().fs;
+
+    let report = prove::prove_with(
+        fs_.as_ref(),
+        &scratch.path,
+        &input(&fx, &[WINDOW, THIRTY_DAYS]),
+    )
+    .unwrap();
+
+    assert!(
+        report.baseline_rebuilt.iter().any(|u| u.contains("app-")),
+        "{report:?}"
+    );
+    assert!(report.all_vacuous());
+    for w in &report.windows {
+        match &w.outcome {
+            WindowOutcome::Vacuous(why) => {
+                assert!(why.contains("baseline") && why.contains("app-"), "{why}")
+            }
+            other => panic!("expected Vacuous, got {other:?}"),
+        }
+    }
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn a_failing_command_makes_every_window_vacuous_and_leaves_no_clone() {
+    let fx = proof_fixture("prove-failing");
+    let scratch = Scratch::new("prove-scratch");
+    let mut request = input(&fx, &[WINDOW]);
+    request.cmds = vec![argv(&["build", "--offline", "--bogus-flag"])];
+    let fs_ = platform::current().unwrap().fs;
+
+    let report = prove::prove_with(fs_.as_ref(), &scratch.path, &request).unwrap();
+
+    match &report.windows[0].outcome {
+        WindowOutcome::Vacuous(why) => assert!(why.contains("exit"), "{why}"),
+        other => panic!("expected Vacuous, got {other:?}"),
+    }
+    assert!(report.all_vacuous());
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn deleting_dead_check_units_makes_a_check_replay_rebuild_them_without_failing() {
+    let fx = proof_fixture("prove-check");
+    let scratch = Scratch::new("prove-scratch");
+    let mut request = input(&fx, &[WINDOW]);
+    request.cmds = vec![argv(&["check", "--offline"])];
+    let fs_ = platform::current().unwrap().fs;
+
+    let report = prove::prove_with(fs_.as_ref(), &scratch.path, &request).unwrap();
+
+    let w = &report.windows[0];
+    assert_eq!(w.outcome, WindowOutcome::Passed, "{}", report.render());
+    assert!(w.rebuilt > 0, "{}", report.render());
+    assert_eq!(w.rebuilt_live, 0);
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn a_change_to_the_original_during_the_proof_fails_it_naming_the_entry() {
+    let fx = proof_fixture("prove-changed");
+    let scratch = Scratch::new("prove-scratch");
+    let touched = fx.app.join("Cargo.lock");
+    let inner = platform::current().unwrap().fs;
+    let mount = inner.volume(&scratch.path).unwrap().mount;
+    let fs_ = Volumes {
+        inner,
+        scratch: scratch.path.clone(),
+        fs_type: "apfs",
+        scratch_mount: mount.to_string_lossy().into_owned(),
+        touch_when_measured: Some(touched),
+    };
+
+    let err = prove::prove_with(&fs_, &scratch.path, &input(&fx, &[WINDOW])).unwrap_err();
+
+    assert!(err.contains("Cargo.lock"), "{err}");
+    no_clone_left(&scratch.path);
 }
