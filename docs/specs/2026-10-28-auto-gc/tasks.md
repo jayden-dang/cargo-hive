@@ -3507,3 +3507,27 @@ _Requirements: AUTOGC-5.4, AUTOGC-6.4_
 Run `git add -A && git commit -m "docs: gc in the README; realign CORE's doctor lock check"`.
 
 _Requirements: AUTOGC-2.9, AUTOGC-7.2_
+
+---
+
+### Task F1: The scope test stops comparing machine-wide findings
+
+Fix 2026-10-30 (root-cause, owner-accepted proposition: the test compared every finding `status <b>` reported while the default secondary roots `/private/tmp` and `$TMPDIR` churned with concurrent test binaries; `gc <a>` never touched b).
+
+**Files:**
+- Modify: `tests/gc.rs` (`gc_changes_nothing_outside_its_scope_and_status_reports_the_same`)
+- Test: `tests/gc.rs`
+
+**Reuse:** rung 2 — the scoped-config pattern `gc_of_one_repo_keeps_a_shared_target_owned_by_the_other_registered_main` already uses (`Hive::config` with `secondary_roots`)
+
+**Interfaces:**
+- Consumes: `Hive::ready`, `Hive::config`, `Scratch::new`, `git` (`tests/common/mod.rs`)
+- Produces: none
+
+**Depends-on:** none
+
+- [x] **Step 1: Red.** Between the `before` snapshot and `gc <a>`, create an unrelated git repository in a fresh `Scratch` under `/private/tmp`. Run `cargo test --test gc gc_changes_nothing_outside`; it fails at the status comparison.
+- [x] **Step 2: Fix.** Point the test's `secondary_roots` at an empty directory inside its own scratch. The test passes 3/3 alone and the whole `tests/gc.rs` passes 3/3 at load average ~31.
+- [x] **Step 3: Verify and commit** `test(gc): keep the scope test's status comparison to its own scratch`.
+
+_Requirements: AUTOGC-6.6, AUTOGC-6.7_
