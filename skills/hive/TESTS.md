@@ -131,8 +131,65 @@ Both agents, with no tools, were given hive's name and description plus `rust-fm
 
 ## Install — Claude Code
 
-Filled by the install runs.
+Run on 2026-10-30 from a clean `git clone --branch skill` of this repo at `/private/tmp/hive-skill-install-20261030/clone`, with `CLAUDE_CONFIG_DIR=/private/tmp/hive-skill-install-20261030/claude` so the real `~/.claude` was never written. These are the CLI forms of `/plugin marketplace add` and `/plugin install`.
+
+```
+$ claude plugin marketplace add /private/tmp/hive-skill-install-20261030/clone
+$ claude plugin install cargo-hive@cargo-hive
+$ claude plugin details cargo-hive
+$ claude plugin list
+Adding marketplace…✔ Successfully added marketplace: cargo-hive (declared in user settings)
+Installing plugin "cargo-hive@cargo-hive"...✔ Successfully installed plugin: cargo-hive@cargo-hive (scope: user)
+cargo-hive 0.1.0
+  Description: Teaches coding agents to reclaim Rust build space with cargo-hive instead of cargo clean.
+  Source: cargo-hive@cargo-hive
+
+Component inventory
+  Skills (1)  hive
+  Agents (0)
+  Hooks (0)
+  MCP servers (0)
+  LSP servers (0)
+
+Projected token cost
+  Always-on:   ~73 tok   added to every session
+
+Per-component (rounded)
+  component  always-on  on-invoke
+  hive             ~70       ~850
+
+  On-invoke cost is paid each time a skill or agent fires.
+  Token counts are estimates and may differ from actual usage.
+Installed plugins:
+
+  ❯ cargo-hive@cargo-hive
+    Version: 0.1.0
+    Read from: /private/tmp/hive-skill-install-20261030/clone
+    Scope: user
+    Status: ✔ enabled
+```
+
+`Skills (1)  hive` is the skill behind `/cargo-hive:hive`. The interactive slash-command form is not run here; it waits for the published marketplace.
 
 ## Install — Codex
 
-Filled by the install runs.
+Run on 2026-10-30 from the same clean clone, with `CODEX_HOME=/private/tmp/hive-skill-install-20261030/codex` so the real `~/.codex` was never written.
+
+```
+$ codex plugin marketplace add /private/tmp/hive-skill-install-20261030/clone
+$ codex plugin add cargo-hive@cargo-hive
+$ codex plugin list
+Added marketplace `cargo-hive` from /private/tmp/hive-skill-install-20261030/clone.
+Installed marketplace root: /private/tmp/hive-skill-install-20261030/clone
+Added plugin `cargo-hive` from marketplace `cargo-hive`.
+Installed plugin root: /private/tmp/hive-skill-install-20261030/codex/plugins/cache/cargo-hive/cargo-hive/0.1.0
+Marketplace `cargo-hive`
+/private/tmp/hive-skill-install-20261030/clone/.claude-plugin/marketplace.json
+
+PLUGIN                 STATUS              VERSION  SOURCE
+cargo-hive@cargo-hive  installed, enabled  0.1.0    /private/tmp/hive-skill-install-20261030/clone
+$ ls /private/tmp/hive-skill-install-20261030/codex/plugins/cache/cargo-hive/cargo-hive/0.1.0/skills
+hive
+```
+
+`codex plugin` has no command that lists skills, so the `hive` skill is confirmed by its directory in the installed plugin root.
