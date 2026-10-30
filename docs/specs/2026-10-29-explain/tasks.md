@@ -321,7 +321,7 @@ _Requirements: EXPLAIN-3.1, EXPLAIN-3.2, EXPLAIN-3.3, EXPLAIN-3.4, EXPLAIN-3.5, 
 **Gate:** the receipt amendment is on `main`. Design "cli `explain`" and Decisions 3, 8, 10, 11.
 
 **Files:**
-- Modify: `src/cli.rs`, `src/explain.rs` (the `io` part and `run`), `tests/common/mod.rs`, `README.md`
+- Modify: `src/cli.rs`, `src/explain.rs` (the `io` part and `run`), `tests/common/mod.rs`, `tests/status_targets.rs`, `tests/gc.rs`, `tests/status_checkouts.rs` (they import the moved `register`), `README.md`
 - Create: `tests/explain.rs`
 - Test: `tests/explain.rs`
 
