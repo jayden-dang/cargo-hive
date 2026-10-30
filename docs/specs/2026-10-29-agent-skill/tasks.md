@@ -10,7 +10,7 @@
 Feature code: SKILL
 Status: Approved
 Date: 2026-10-29
-Execution-mode: unset
+Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
