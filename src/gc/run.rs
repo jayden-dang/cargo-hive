@@ -354,7 +354,7 @@ impl Runner<'_> {
     /// Measures `path` for the ledger, then removes it (a dry run only measures). True when
     /// the entry is, or in a dry run would be, gone. A vanished entry counts nothing.
     fn remove_measured(&mut self, target: &Path, path: &Path) -> bool {
-        let files = match self.scan(path) {
+        let files = match scan(self.fs, path, self.opts.account_bytes) {
             Ok(None) => return false,
             Ok(Some(files)) => files,
             Err(why) => {
@@ -374,53 +374,115 @@ impl Runner<'_> {
                 }
             }
         }
-        for (file, measured) in files {
-            match measured {
-                Ok((stat, sharing)) => self.ledger.file(target, &stat, sharing.as_ref()),
-                Err(e) => self.ledger.unmeasured(file, e.to_string()),
-            }
-        }
+        record(&mut self.ledger, target, files);
         true
     }
+}
 
-    /// The regular files under `root`, without following links and at most `MAX_DEPTH` deep.
-    /// `Ok(None)` means the root vanished between listing and measure.
-    fn scan(&self, root: &Path) -> Result<Option<Scanned>, String> {
-        let mut files = Vec::new();
-        let mut stack = vec![(root.to_path_buf(), 0usize)];
-        while let Some((dir, depth)) = stack.pop() {
-            let entries = match self.fs.read_dir_bounded(&dir, CRATE_DIR_CAP) {
-                Ok(v) => v,
-                Err(e) if e.kind() == io::ErrorKind::NotFound && dir == root => return Ok(None),
-                Err(e) => return Err(format!("could not list {}: {e}", dir.display())),
-            };
-            for (name, kind) in entries {
-                let path = dir.join(&name);
-                match kind {
-                    EntryKind::Dir if depth + 1 > MAX_DEPTH => {
-                        return Err(format!(
-                            "{} is deeper than {MAX_DEPTH} levels",
-                            path.display()
-                        ))
+/// What deleting a set of paths would free, counted per inode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Footprint {
+    pub bytes: Bytes,
+    pub unmeasured: u64,
+}
+
+/// Measures `paths` as one set for `target`, so a hard link listed only once stays shared.
+/// Duplicates and paths under another listed path are ignored. A missing path counts nothing.
+pub fn measure(fs: &dyn Fs, target: &Path, paths: &[PathBuf], account_bytes: bool) -> Footprint {
+    let mut roots: Vec<&PathBuf> = paths.iter().collect();
+    roots.sort();
+    roots.dedup();
+    let outermost: Vec<&PathBuf> = roots
+        .iter()
+        .copied()
+        .filter(|p| !roots.iter().any(|q| *q != *p && p.starts_with(q)))
+        .collect();
+    let mut ledger = Ledger::new();
+    for path in outermost {
+        let stat = match fs.entry_stat(path) {
+            Ok(stat) => stat,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                ledger.unmeasured(path.clone(), e.to_string());
+                continue;
+            }
+        };
+        match stat.kind {
+            EntryKind::File => {
+                let sharing = if account_bytes {
+                    match fs.sharing(path) {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            ledger.unmeasured(path.clone(), e.to_string());
+                            continue;
+                        }
                     }
-                    EntryKind::Dir => stack.push((path, depth + 1)),
-                    EntryKind::File => {
-                        let measured = self.fs.entry_stat(&path).and_then(|stat| {
-                            let sharing = if self.opts.account_bytes {
-                                Some(self.fs.sharing(&path)?)
-                            } else {
-                                None
-                            };
-                            Ok((stat, sharing))
-                        });
-                        files.push((path, measured));
-                    }
-                    EntryKind::Symlink | EntryKind::Other => {}
+                } else {
+                    None
+                };
+                ledger.file(target, &stat, sharing.as_ref());
+            }
+            EntryKind::Dir => match scan(fs, path, account_bytes) {
+                Ok(None) => {}
+                Ok(Some(files)) => record(&mut ledger, target, files),
+                Err(why) => ledger.unmeasured(path.clone(), why),
+            },
+            EntryKind::Symlink | EntryKind::Other => {}
+        }
+    }
+    let tally = ledger.finish();
+    Footprint {
+        bytes: tally.total,
+        unmeasured: tally.unmeasured.len() as u64 + tally.unmeasured_more,
+    }
+}
+
+fn record(ledger: &mut Ledger, target: &Path, files: Scanned) {
+    for (file, measured) in files {
+        match measured {
+            Ok((stat, sharing)) => ledger.file(target, &stat, sharing.as_ref()),
+            Err(e) => ledger.unmeasured(file, e.to_string()),
+        }
+    }
+}
+
+/// The regular files under `root`, without following links and at most `MAX_DEPTH` deep.
+/// `Ok(None)` means the root vanished between listing and measure.
+fn scan(fs: &dyn Fs, root: &Path, account_bytes: bool) -> Result<Option<Scanned>, String> {
+    let mut files = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let entries = match fs.read_dir_bounded(&dir, CRATE_DIR_CAP) {
+            Ok(v) => v,
+            Err(e) if e.kind() == io::ErrorKind::NotFound && dir == root => return Ok(None),
+            Err(e) => return Err(format!("could not list {}: {e}", dir.display())),
+        };
+        for (name, kind) in entries {
+            let path = dir.join(&name);
+            match kind {
+                EntryKind::Dir if depth + 1 > MAX_DEPTH => {
+                    return Err(format!(
+                        "{} is deeper than {MAX_DEPTH} levels",
+                        path.display()
+                    ))
                 }
+                EntryKind::Dir => stack.push((path, depth + 1)),
+                EntryKind::File => {
+                    let measured = fs.entry_stat(&path).and_then(|stat| {
+                        let sharing = if account_bytes {
+                            Some(fs.sharing(&path)?)
+                        } else {
+                            None
+                        };
+                        Ok((stat, sharing))
+                    });
+                    files.push((path, measured));
+                }
+                EntryKind::Symlink | EntryKind::Other => {}
             }
         }
-        Ok(Some(files))
     }
+    Ok(Some(files))
 }
 
 #[cfg(test)]
@@ -1361,5 +1423,84 @@ mod tests {
         };
         assert!(removed.iter().all(|p| allowed(p)), "{removed:?}");
         assert!(after.is_subset(&before));
+    }
+
+    fn blocks_bytes(path: &Path) -> u64 {
+        std::fs::symlink_metadata(path).unwrap().blocks() * 512
+    }
+
+    fn write_file(path: &Path, len: usize) -> PathBuf {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![7u8; len]).unwrap();
+        path.to_path_buf()
+    }
+
+    #[test]
+    fn measure_counts_a_file_root_and_a_directory_root() {
+        let f = fixture("measure-mixed");
+        let file = write_file(&f.root.join("loose.rlib"), 20_000);
+        let dir = f.root.join("tree");
+        let a = write_file(&dir.join("a.o"), 9_000);
+        let b = write_file(&dir.join("sub/b.o"), 5_000);
+        let footprint = measure(
+            &Rec::new(),
+            &f.root.join("target"),
+            &[file.clone(), dir],
+            true,
+        );
+        assert_eq!(
+            footprint.bytes.freed,
+            blocks_bytes(&file) + blocks_bytes(&a) + blocks_bytes(&b)
+        );
+        assert_eq!(footprint.bytes.still_shared, 0);
+        assert_eq!(footprint.unmeasured, 0);
+    }
+
+    #[test]
+    fn measure_counts_a_hardlinked_file_as_still_shared_unless_every_link_is_listed() {
+        let f = fixture("measure-links");
+        let one = write_file(&f.root.join("one.rlib"), 12_000);
+        let two = f.root.join("two.rlib");
+        std::fs::hard_link(&one, &two).unwrap();
+        let bytes = blocks_bytes(&one);
+        let target = f.root.join("target");
+
+        let partial = measure(&Rec::new(), &target, std::slice::from_ref(&one), true);
+        assert_eq!(partial.bytes.freed, 0);
+        assert_eq!(partial.bytes.still_shared, bytes);
+
+        let whole = measure(&Rec::new(), &target, &[one, two], true);
+        assert_eq!(whole.bytes.freed, bytes);
+        assert_eq!(whole.bytes.still_shared, 0);
+    }
+
+    #[test]
+    fn measure_ignores_a_duplicate_and_a_nested_path() {
+        let f = fixture("measure-dups");
+        let dir = f.root.join("tree");
+        let inner = write_file(&dir.join("inner.o"), 9_000);
+        let file = write_file(&f.root.join("loose.rlib"), 20_000);
+        let target = f.root.join("target");
+        let once = measure(&Rec::new(), &target, &[dir.clone(), file.clone()], true);
+        let noisy = measure(
+            &Rec::new(),
+            &target,
+            &[file.clone(), dir.clone(), inner, file, dir],
+            true,
+        );
+        assert_eq!(noisy, once);
+        assert!(once.bytes.freed > 0);
+    }
+
+    #[test]
+    fn measure_counts_nothing_for_a_missing_path() {
+        let f = fixture("measure-missing");
+        let footprint = measure(
+            &Rec::new(),
+            &f.root.join("target"),
+            &[f.root.join("never-existed")],
+            true,
+        );
+        assert_eq!(footprint, Footprint::default());
     }
 }
