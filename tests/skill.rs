@@ -263,6 +263,34 @@ fn manifest_versions_match_the_crate() {
         ".codex-plugin/plugin.json field skills"
     );
 
+    let descriptions: Vec<String> = [
+        ".claude-plugin/plugin.json",
+        ".codex-plugin/plugin.json",
+        ".claude-plugin/marketplace.json",
+    ]
+    .iter()
+    .map(|rel| {
+        let m = manifest(rel);
+        let d = if *rel == ".claude-plugin/marketplace.json" {
+            &m["plugins"][0]["description"]
+        } else {
+            &m["description"]
+        };
+        d.as_str()
+            .unwrap_or_else(|| panic!("{rel} has no description string"))
+            .to_string()
+    })
+    .collect();
+    assert!(
+        descriptions.windows(2).all(|w| w[0] == w[1]),
+        "the three manifest descriptions differ: {descriptions:?}"
+    );
+    let skill_dirs: Vec<String> = fs::read_dir(format!("{}/skills", env!("CARGO_MANIFEST_DIR")))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(skill_dirs, ["hive"], "skills/ must hold exactly one entry");
+
     let market = manifest(".claude-plugin/marketplace.json");
     assert_eq!(
         market["name"], "cargo-hive",
@@ -363,7 +391,7 @@ fn stray_mentions(body: &str) -> Vec<(usize, String)> {
 
 #[derive(Debug, PartialEq)]
 enum Parsed {
-    Help,
+    Info,
     Doctor,
     RepoAdd,
     RepoList,
@@ -381,7 +409,7 @@ fn parse(words: &[String]) -> Result<Parsed, String> {
     let cli = match Cli::try_parse_from(argv) {
         Ok(cli) => cli,
         Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
-            return Ok(Parsed::Help)
+            return Ok(Parsed::Info)
         }
         Err(e) => return Err(e.to_string()),
     };
@@ -402,6 +430,21 @@ fn parse(words: &[String]) -> Result<Parsed, String> {
 
 fn skill_body() -> String {
     split_skill(&repo_file("skills/hive/SKILL.md")).unwrap().1
+}
+
+fn skill_commands() -> Vec<(CommandLine, Parsed)> {
+    command_lines(&skill_body())
+        .into_iter()
+        .map(|line| {
+            let parsed = parse(&line.words).unwrap_or_else(|e| {
+                panic!(
+                    "skill body line {} does not parse: {}\n{e}",
+                    line.line_no, line.text
+                )
+            });
+            (line, parsed)
+        })
+        .collect()
 }
 
 fn words(line: &str) -> Vec<String> {
@@ -444,20 +487,16 @@ fn skill_command_lines_parse_with_the_cli() {
     }
 
     let hold = command_lines("`cargo hive __hold-lock a b`");
-    assert!(parse(&hold[0].words).is_err());
-    assert_eq!(parse(&words("--help")), Ok(Parsed::Help));
-    assert_eq!(parse(&words("--version")), Ok(Parsed::Help));
+    assert_eq!(
+        parse(&hold[0].words),
+        Err("the internal lock subcommands are not part of the skill".to_string())
+    );
+    assert_eq!(parse(&words("--help")), Ok(Parsed::Info));
+    assert_eq!(parse(&words("--version")), Ok(Parsed::Info));
     assert!(parse(&words("status --no-such-flag")).is_err());
 
+    skill_commands();
     let body = skill_body();
-    for line in command_lines(&body) {
-        if let Err(e) = parse(&line.words) {
-            panic!(
-                "skill body line {} does not parse: {}\n{e}",
-                line.line_no, line.text
-            );
-        }
-    }
     let strays = stray_mentions(&body);
     assert!(
         strays.is_empty(),
@@ -466,17 +505,10 @@ fn skill_command_lines_parse_with_the_cli() {
 }
 
 #[test]
-fn skill_documents_every_mile1_command() {
-    let body = skill_body();
+fn skill_documents_every_shipped_command() {
     let mut seen: Vec<Parsed> = Vec::new();
-    for line in command_lines(&body) {
-        let parsed = parse(&line.words).unwrap_or_else(|e| {
-            panic!(
-                "skill body line {} does not parse: {}\n{e}",
-                line.line_no, line.text
-            )
-        });
-        if parsed == Parsed::Help {
+    for (line, parsed) in skill_commands() {
+        if parsed == Parsed::Info {
             continue;
         }
         assert!(
@@ -512,6 +544,12 @@ fn skill_documents_every_mile1_command() {
         }
         seen.push(parsed);
     }
+    assert!(
+        skill_commands()
+            .iter()
+            .any(|(line, parsed)| *parsed == Parsed::Info && line.words == words("--version")),
+        "the skill gives no `--version` command line"
+    );
     for want in [
         Parsed::Doctor,
         Parsed::RepoAdd,
@@ -526,6 +564,18 @@ fn skill_documents_every_mile1_command() {
             "the skill documents no command line for {want:?}"
         );
     }
+}
+
+const QUOTE_LEAD: &str = "The skill says: \"";
+
+fn skill_quotes(assertion: &str) -> Vec<&str> {
+    assertion
+        .match_indices(QUOTE_LEAD)
+        .filter_map(|(i, lead)| {
+            let rest = &assertion[i + lead.len()..];
+            rest.find('"').map(|end| &rest[..end])
+        })
+        .collect()
 }
 
 fn has_local_link(line: &str) -> bool {
@@ -584,9 +634,12 @@ fn skill_body_fits_the_budget() {
 
 #[test]
 fn eval_entries_carry_their_evidence() {
+    assert_eq!(skill_quotes("The skill says: \"a b.\" and \"x\""), ["a b."]);
+    assert!(skill_quotes("no quote here").is_empty());
     let evals = manifest("skills/hive/eval.json");
     let entries = evals.as_array().expect("eval.json is an array");
     assert!(!entries.is_empty(), "eval.json has no entries");
+    let body = skill_body();
     let tests_md = repo_file("skills/hive/TESTS.md");
     let headings: Vec<&str> = tests_md.lines().filter(|l| l.starts_with("## ")).collect();
     let mut ids = std::collections::HashSet::new();
@@ -636,6 +689,19 @@ fn eval_entries_carry_their_evidence() {
                 !s.trim().is_empty(),
                 "{at}: an assertion is not a non-empty string"
             );
+            if kind == "contract" {
+                let quotes = skill_quotes(s);
+                assert!(
+                    !quotes.is_empty(),
+                    "{at}: a contract assertion quotes no skill text: {s}"
+                );
+                for q in quotes {
+                    assert!(
+                        body.contains(q),
+                        "{at}: quoted skill text is not in the skill body: {q:?}"
+                    );
+                }
+            }
         }
     }
     for needed in ["behavior", "trigger"] {

@@ -131,7 +131,7 @@ Both agents, with no tools, were given hive's name and description plus `rust-fm
 
 ## Install — Claude Code
 
-Run on 2026-10-30 from a clean `git clone --branch skill` of this repo at `/private/tmp/hive-skill-install-20261030/clone`, with `CLAUDE_CONFIG_DIR=/private/tmp/hive-skill-install-20261030/claude` so the real `~/.claude` was never written. These are the CLI forms of `/plugin marketplace add` and `/plugin install`.
+Run on 2026-10-30 from a clean `git clone --branch skill` of this repo at `/private/tmp/hive-skill-install-20261030/clone`, with `CLAUDE_CONFIG_DIR=/private/tmp/hive-skill-install-20261030/claude` so the real `~/.claude` was never written. These are the CLI forms of `/plugin marketplace add` and `/plugin install`. The outputs below are concatenated in command order.
 
 ```
 $ claude plugin marketplace add /private/tmp/hive-skill-install-20261030/clone
@@ -169,11 +169,11 @@ Installed plugins:
     Status: ✔ enabled
 ```
 
-`Skills (1)  hive` is the skill behind `/cargo-hive:hive`. The interactive slash-command form is not run here; it waits for the published marketplace.
+`Skills (1)  hive` is the skill behind `/cargo-hive:hive`. The interactive slash-command form is not run here; it waits for the published marketplace. The GitHub-form install and the interactive `/plugin` + `/cargo-hive:hive` check remain the owner's post-merge step.
 
 ## Install — Codex
 
-Run on 2026-10-30 from the same clean clone, with `CODEX_HOME=/private/tmp/hive-skill-install-20261030/codex` so the real `~/.codex` was never written.
+Run on 2026-10-30 from the same clean clone, with `CODEX_HOME=/private/tmp/hive-skill-install-20261030/codex` so the real `~/.codex` was never written. The outputs below are concatenated in command order.
 
 ```
 $ codex plugin marketplace add /private/tmp/hive-skill-install-20261030/clone
@@ -192,4 +192,4 @@ $ ls /private/tmp/hive-skill-install-20261030/codex/plugins/cache/cargo-hive/car
 hive
 ```
 
-`codex plugin` has no command that lists skills, so the `hive` skill is confirmed by its directory in the installed plugin root.
+`codex plugin` has no command that lists skills, so the `hive` skill is confirmed by its directory in the installed plugin root. The GitHub-form install and the interactive `/plugin` + `/cargo-hive:hive` check remain the owner's post-merge step.

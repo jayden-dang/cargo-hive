@@ -11,7 +11,7 @@ Run hive as `cargo hive` followed by a subcommand. Where the harness cannot call
 
 ## Version first
 
-Before the first write, learn the binary's version. Take `hive_version` from any receipt already printed. If none exists, ask the binary for its version: it prints the binary name followed by its version. Compare major and minor with this skill's `metadata.hive-version`.
+Before the first write, learn the binary's version. Take `hive_version` from any receipt already printed. If none exists, run `cargo hive --version`; it prints the binary name followed by its version. If the binary is missing or the command fails, stop and tell the user to install hive. Compare major and minor with this skill's `metadata.hive-version`.
 
 - Same major and minor: carry on.
 - If different:
@@ -20,10 +20,10 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 
 ## The model
 
-- A checkout is protected (a registered main checkout, or anything hive cannot classify) or secondary (a linked worktree inside its own main, or a checkout under a secondary root, by default `/private/tmp` and `$TMPDIR`). Orphan target dirs are not checkouts: they are target dirs no checkout owns.
-- Actions come in two tiers. The auto tier is safe to run unasked on protected and secondary checkouts alike; in this version it is all `gc` does: it deletes superseded incremental sessions and leftover rustc temp entries, each under its owner's lock. The plan tier (closure deletion and whole orphan target dirs) needs the owner's approval on protected checkouts and orphan dirs, and is not available yet. Reclaim only through hive, never by other means.
+- A checkout is protected (a registered main checkout, or anything hive cannot classify) or secondary (a linked worktree inside its own main, or a checkout under a secondary root, by default `/private/tmp` and `$TMPDIR`). A Cargo target dir that no known checkout owns is not a checkout: `status` reports it as an orphan candidate.
+- Actions come in two tiers. The auto tier is safe to run unasked on protected and secondary checkouts alike; in this version it is all `gc` does: it deletes superseded incremental sessions (with their lock files) and leftover rustc temp entries, taking each owner's lock without waiting where one exists and skipping anything held. The plan tier (closure deletion and whole orphan targets) needs the owner's approval on protected checkouts and orphan candidates, and is not available yet. When hive covers the request, reclaim only through hive, never by other means.
 - A result marked `needs-human` is the owner's to resolve. Report it; do not work around it.
-- Never run the owner's approval command. It is named here in prose only; an agent does not issue it.
+- Never run the owner's approval command, the `approve` subcommand. An agent does not issue it.
 - The repos a command acts on come from its arguments. Never infer them from the current directory.
 
 ## Which command
@@ -36,7 +36,9 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 | How do I free space? | `gc` with `--dry-run` first, then `gc` |
 | Why are there so many copies of a crate? | `explain` |
 
-`status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo (for `gc`, every target hive knows). Pass explicit paths unless the user asked for everything.
+`status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root. Pass explicit paths unless the user asked for everything.
+
+`explain` shows 10 groups by default; `--top 0` shows all of them, as in `cargo hive explain /path/to/repo --top 0 --json`.
 
 ## Command lines
 

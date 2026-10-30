@@ -23,12 +23,16 @@ cargo hive status          # every registered repo; add --json for one machine-r
 Optional: install the agent skill, so Claude Code and Codex learn to use `cargo hive` instead of
 `cargo clean`.
 
-```sh
-# Claude Code (inside a session)
+In Claude Code, inside a session:
+
+```
 /plugin marketplace add jayden-dang/cargo-hive
 /plugin install cargo-hive@cargo-hive
+```
 
-# Codex
+In Codex, from a shell:
+
+```sh
 codex plugin marketplace add jayden-dang/cargo-hive
 codex plugin add cargo-hive@cargo-hive
 ```

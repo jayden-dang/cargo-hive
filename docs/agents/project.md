@@ -128,7 +128,7 @@ None — not deployed. hive is a local CLI with no hosted component.
 ## release steps
 
 1. Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo check --target x86_64-unknown-linux-gnu`.
-2. Version: set `version` in `Cargo.toml` to `X.Y.Z`, then `cargo check` so `Cargo.lock` follows.
+2. Version: set `version` in `Cargo.toml` to `X.Y.Z`, also set the same version in `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json` and `skills/hive/SKILL.md` `metadata.hive-version` (tests/skill.rs fails if they differ), then `cargo check` so `Cargo.lock` follows.
 3. Package check: `cargo package --list` shows only `src/`, `Cargo.toml`, `Cargo.lock`, `README.md` and license files; then `cargo publish --dry-run`.
 4. Commit and tag: `git commit -am "release: vX.Y.Z"`, `git tag vX.Y.Z`, `git push origin main vX.Y.Z`.
 5. Publish: `cargo publish` (needs `cargo login`; a published version cannot be undone, only yanked).
