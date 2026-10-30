@@ -392,7 +392,7 @@ Amendment 2026-10-30 (tier 1, owner-approved). Harness plugin caches receive onl
 
 - [x] **Step 1: Write the failing tests.** The skill and manifests are read from `plugin/`; the marketplace `source` is `./plugin`; `plugin/`, `plugin/.claude-plugin`, `plugin/.codex-plugin`, `plugin/skills`, `plugin/skills/hive` and `.claude-plugin` hold exactly their expected entries; an unclosed `The skill says: "` quote is an error naming the eval entry. Run `cargo test --test skill`; expect every test to fail because the files are not under `plugin/` yet.
 - [x] **Step 2: Move the files** with `git mv`, set `source` to `./plugin`, update the release step in `docs/agents/project.md`. Run `cargo test --test skill`; expect pass. Add a stray file under `plugin/skills/hive/`, expect a failure naming that dir, remove it.
-- [ ] **Step 3: Install check.** From a clean clone with `CLAUDE_CONFIG_DIR` / `CODEX_HOME` in a scratch dir: `claude plugin marketplace add`, `claude plugin install cargo-hive@cargo-hive`, `claude plugin details cargo-hive` (`Skills (1)  hive`); the plugin cache holds only `.claude-plugin`, `.codex-plugin`, `skills`; the same for Codex. Record under both Install headings in `skills/hive/TESTS.md`.
-- [ ] **Step 4: Verify and commit** `refactor(skill): ship the plugin from its own plugin/ root` after the merge gate.
+- [x] **Step 3: Install check.** From a clean clone with `CLAUDE_CONFIG_DIR` / `CODEX_HOME` in a scratch dir: `claude plugin marketplace add`, `claude plugin install cargo-hive@cargo-hive`, `claude plugin details cargo-hive` (`Skills (1)  hive`); the plugin cache holds only `.claude-plugin`, `.codex-plugin`, `skills`; the same for Codex. Record under both Install headings in `skills/hive/TESTS.md`.
+- [x] **Step 4: Verify and commit** `refactor(skill): ship the plugin from its own plugin/ root` after the merge gate.
 
 _Requirements: SKILL-1.6, SKILL-1.7, SKILL-1.8, SKILL-4.5, SKILL-5.4_
