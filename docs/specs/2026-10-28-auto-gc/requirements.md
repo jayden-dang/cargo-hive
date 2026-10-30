@@ -139,6 +139,8 @@ Consult outcome: no `docs/product/metrics.md`, `docs/ops/reliability.md`, `docs/
   - a file hard-linked into `deps/`;
   - a file hard-linked into both `deps/` and the kept session.
 - **Reliability:** **AUTOGC-6.5** IF `gc` is killed at any point THEN THE SYSTEM SHALL leave every target in a state where the next `cargo build` with no source change compiles 0 units. At worst an interrupted deletion leaves a partly removed old session, or an orphan lock file, which the next gc removes; the order of AUTOGC-2.2 guarantees this. This is verified by a kill-during-gc test.
+- **Reliability:** **AUTOGC-6.6** WHEN `gc <a>` runs THE SYSTEM SHALL leave `status <b>` reporting the same count names and the same findings for a sibling registered repository b, verified by a test whose secondary roots are its own scratch directory, so that directories other processes create or remove under `/private/tmp` or `$TMPDIR` during the test stay outside the comparison (fix 2026-10-30: the test compared machine-wide findings and failed whenever concurrent test binaries churned the default secondary roots).
+- **Reliability:** **AUTOGC-6.7** (guard) WHEN `status` runs with no `secondary_roots` configured THE SYSTEM SHALL CONTINUE TO walk `/private/tmp` and `$TMPDIR` as secondary roots and report what it finds there (CORE-3.5); the fix changes only the test's configuration.
 - **Accessibility:** None, because this is a headless CLI with JSON output.
 
 ## 7. Existing behavior this feature must not change

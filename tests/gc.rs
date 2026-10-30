@@ -632,6 +632,12 @@ fn a_target_two_repositories_share_is_cleaned_by_either() {
 fn gc_changes_nothing_outside_its_scope_and_status_reports_the_same() {
     let hive = Hive::ready();
     let s = Scratch::new("gc-outside");
+    let secondary = s.path.join("secondary");
+    fs::create_dir_all(&secondary).unwrap();
+    hive.config(&format!(
+        "{{\"secondary_roots\":[\"{}\"]}}",
+        secondary.display()
+    ));
     let a = init_repo(&s.path.join("a"), "");
     let b = init_repo(&s.path.join("b"), "");
     hive.build_with_sessions(&a, None);
@@ -652,6 +658,8 @@ fn gc_changes_nothing_outside_its_scope_and_status_reports_the_same() {
         (keys, findings)
     };
     let before = status_b(&hive);
+    let elsewhere = Scratch::new("gc-outside-elsewhere");
+    git(&elsewhere.path, &["init", "-q", "unrelated"]);
     gc(&hive, &[a.to_str().unwrap()]);
     assert_eq!(tree(&b), b_tree, "gc <a> changed repository b");
     assert_eq!(
