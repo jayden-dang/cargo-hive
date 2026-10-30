@@ -581,3 +581,64 @@ fn skill_body_fits_the_budget() {
         "the skill body headings must be the seven the skill is built around, in order"
     );
 }
+
+#[test]
+fn eval_entries_carry_their_evidence() {
+    let evals = manifest("skills/hive/eval.json");
+    let entries = evals.as_array().expect("eval.json is an array");
+    assert!(!entries.is_empty(), "eval.json has no entries");
+    let tests_md = repo_file("skills/hive/TESTS.md");
+    let headings: Vec<&str> = tests_md.lines().filter(|l| l.starts_with("## ")).collect();
+    let mut ids = std::collections::HashSet::new();
+    let mut kinds = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let at = format!("eval.json entry {i}");
+        let id = entry["eval_id"]
+            .as_u64()
+            .filter(|n| *n > 0)
+            .unwrap_or_else(|| panic!("{at}: eval_id is not a positive integer"));
+        assert!(ids.insert(id), "{at}: eval_id {id} is repeated");
+        let name = entry["eval_name"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{at}: eval_name is not a string"));
+        let kebab = !name.is_empty()
+            && !name.starts_with('-')
+            && !name.ends_with('-')
+            && !name.contains("--")
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        assert!(kebab, "{at}: eval_name {name:?} is not kebab-case");
+        let kind = entry["kind"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{at}: kind is not a string"));
+        assert!(
+            ["behavior", "trigger", "contract"].contains(&kind),
+            "{at}: kind {kind:?} is not behavior, trigger or contract"
+        );
+        kinds.push(kind);
+        let from = entry["derived_from"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{at}: derived_from is not a string"));
+        assert!(
+            from.starts_with("## ") && headings.contains(&from),
+            "{at}: derived_from {from:?} is not a heading in TESTS.md"
+        );
+        let prompt = entry["prompt"].as_str().unwrap_or("");
+        assert!(!prompt.trim().is_empty(), "{at}: prompt is empty");
+        let assertions = entry["assertions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{at}: assertions is not an array"));
+        assert!(!assertions.is_empty(), "{at}: assertions is empty");
+        for a in assertions {
+            let s = a.as_str().unwrap_or("");
+            assert!(
+                !s.trim().is_empty(),
+                "{at}: an assertion is not a non-empty string"
+            );
+        }
+    }
+    for needed in ["behavior", "trigger"] {
+        assert!(kinds.contains(&needed), "eval.json has no {needed} entry");
+    }
+}
