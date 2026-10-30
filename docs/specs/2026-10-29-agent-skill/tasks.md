@@ -153,7 +153,9 @@ Claude Code and Codex can load the plugin, and a version skew between any manife
 - [x] **Step 4: Verify.** Run the merge gate. `git diff main -- src/` is empty.
 - [x] **Step 5: Commit** `feat(skill): publish the hive skill as plugin cargo-hive from this repo's marketplace`.
 
-_Requirements: SKILL-1.6, SKILL-1.7, SKILL-4.5_ (repointed 2026-10-30: this task's SKILL-1.1, 1.2 and 4.1 were superseded when Task 7 moved the plugin into `plugin/`)
+Footer repointed 2026-10-30: the IDs this task first cited were superseded when Task 7 moved the plugin into `plugin/`.
+
+_Requirements: SKILL-1.6, SKILL-1.7, SKILL-4.5_
 
 ---
 
