@@ -22,9 +22,20 @@ const FORBIDDEN_FLAGS: [&str; 5] = [
     "--config",
 ];
 /// The only subcommands a replay may run: they compile or run inside the checkout and write nothing but the target dir; all of them accept `--locked`.
-const ALLOWED: [&str; 14] = [
+/// Only long built-in names that cargo 1.97.1 does not let an `[alias]` shadow; short names, `clippy`, `rustc` and `rustdoc` are refused.
+const ALLOWED: [&str; 6] = ["build", "check", "test", "doc", "bench", "run"];
+/// Names whose alias definition in a cargo config is refused: the allowed ones, plus the short names and external subcommands an alias could shadow (defense in depth).
+const ALIAS_GUARDED: [&str; 14] = [
     "build", "b", "check", "c", "test", "t", "clippy", "doc", "d", "bench", "rustc", "rustdoc",
     "run", "r",
+];
+/// Short names cargo accepts, and the long name the refusal message points to.
+const SHORT_NAMES: [(&str, &str); 5] = [
+    ("b", "build"),
+    ("c", "check"),
+    ("d", "doc"),
+    ("r", "run"),
+    ("t", "test"),
 ];
 /// Global flags that take no value and may precede the subcommand.
 const GLOBAL_SWITCHES: [&str; 8] = [
@@ -40,18 +51,9 @@ const GLOBAL_SWITCHES: [&str; 8] = [
 /// Config files are scanned for these keys, which redirect build output outside the clone.
 const REDIRECT_KEYS: [&str; 2] = ["artifact-dir", "out-dir"];
 const CONFIG_CAP: u64 = 1 << 20;
-/// Cargo's short aliases and the long built-in each stands for. A user `[alias]` can shadow the short names (not the long ones), so the replay always runs the long name.
-pub const SHORT_ALIASES: [(&str, &str); 5] = [
-    ("b", "build"),
-    ("c", "check"),
-    ("d", "doc"),
-    ("r", "run"),
-    ("t", "test"),
-];
-/// Subcommands whose args after `--` go to rustc/rustdoc, where these flags write outside the clone.
-const TOOL_REDIRECTS: [&str; 3] = ["-o", "--out-dir", "--emit"];
-
 /// The owner's commands run for real in the checkout (that is the owner's choice): only the target dir is protected, not build.rs or test side effects. RUSTFLAGS and the owner's cargo config are left as the shell has them, since they are part of what the commands do; RUSTC_WRAPPER and RUSTC_WORKSPACE_WRAPPER are removed because they change fingerprints.
+///
+/// Arguments after `--` are checked for `build`, `check` and `doc` (none allowed). For `test`, `bench` and `run` they go to the test harness or the program, which runs real project code anyway, so they are the owner's responsibility.
 pub struct ProveInput {
     pub target: PathBuf,
     pub checkout: PathBuf,
@@ -190,24 +192,18 @@ pub fn check_command(cmd: &[String]) -> Result<usize, String> {
                 "has {arg} before the subcommand; only +toolchain, -q, -v, --color, --locked, --frozen and --offline may precede it"
             ));
         } else if ALLOWED.contains(&arg) {
-            let name = long_name(arg);
-            if name == "rustc" || name == "rustdoc" {
-                if let Some(bad) = cmd.get(before_dashes + 1..).and_then(|rest| {
-                    rest.iter().find(|a| {
-                        TOOL_REDIRECTS.iter().any(|f| {
-                            a.starts_with(f)
-                                && (*f == "-o"
-                                    || a.len() == f.len()
-                                    || a.as_bytes()[f.len()] == b'=')
-                        })
-                    })
-                }) {
+            if matches!(arg, "build" | "check" | "doc") {
+                if let Some(bad) = cmd.get(before_dashes + 1..).and_then(|rest| rest.first()) {
                     return Err(format!(
-                        "passes {bad} after `--`, which writes output outside the clone"
+                        "passes {bad} after `--`; `cargo {arg}` takes no arguments there"
                     ));
                 }
             }
             return Ok(i);
+        } else if let Some((_, long)) = SHORT_NAMES.iter().find(|(short, _)| *short == arg) {
+            return Err(format!(
+                "runs `cargo {arg}`, a short name an alias can shadow; use `{long}`"
+            ));
         } else {
             return Err(format!(
                 "runs `cargo {arg}`, which is not replayable; allowed: {}",
@@ -216,13 +212,6 @@ pub fn check_command(cmd: &[String]) -> Result<usize, String> {
         }
     }
     Err("has no cargo subcommand".to_string())
-}
-
-fn long_name(name: &str) -> &str {
-    SHORT_ALIASES
-        .iter()
-        .find(|(short, _)| *short == name)
-        .map_or(name, |(_, long)| long)
 }
 
 /// The vector cargo runs: `--locked` and `--message-format=json` go right after the subcommand. `--locked` is added and only when the vector has neither `--locked` nor `--frozen` before `--`, so a replay cannot rewrite the checkout's Cargo.lock.
@@ -238,7 +227,6 @@ pub fn replay_args(cmd: &[String]) -> Vec<String> {
     if !has_lock {
         out.insert(sub + 1, "--locked".to_string());
     }
-    out[sub] = long_name(&cmd[sub]).to_string();
     out
 }
 
@@ -581,7 +569,7 @@ pub fn check_config_in(
                 l == "[alias]" || l.starts_with("alias.")
             });
             if has_alias {
-                if let Some(name) = keys.iter().find(|k| ALLOWED.contains(&k.as_str())) {
+                if let Some(name) = keys.iter().find(|k| ALIAS_GUARDED.contains(&k.as_str())) {
                     return Err(format!(
                         "{} defines the alias `{name}`, which can turn an allowed subcommand into another command",
                         path.display()

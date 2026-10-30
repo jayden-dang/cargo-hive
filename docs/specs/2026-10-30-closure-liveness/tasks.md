@@ -324,7 +324,7 @@ Design "Proof procedure" and Decisions 9 and 10.
 **Depends-on:** Task 2, Task 6
 
 - [ ] **Step 1: Write the failing helper tests** in `tests/liveness.rs`:
-  - `commands_are_checked_and_json_is_inserted_after_the_subcommand`: a table where `["build"]` → 0; `["+stable","build","--offline"]` → 1; `["-q","check"]` → 1. `["clippy","--","-D","warnings"]` becomes `["clippy","--message-format=json","--","-D","warnings"]`. These are refused: `[]`; `["--offline"]`; and any vector carrying `--message-format`, `--message-format=short`, `--target-dir x`, `--target-dir=x` or `--artifact-dir=x` before `--`. `["test","--","--target-dir"]` is accepted.
+  - `commands_are_checked_and_json_is_inserted_after_the_subcommand`: a table where `["build"]` → 0; `["+stable","build","--offline"]` → 1; `["-q","check"]` → 1. `["test","--","--nocapture"]` becomes `["test","--message-format=json","--","--nocapture"]`. These are refused: `[]`; `["--offline"]`; and any vector carrying `--message-format`, `--message-format=short`, `--target-dir x`, `--target-dir=x` or `--artifact-dir=x` before `--`. `["test","--","--target-dir"]` is accepted.
   - `rebuilt_units_are_new_dirs_or_changed_timestamps`, and `a_rebuilt_live_unit_fails_the_window`: hand-made maps where a changed key in the live set gives `RebuiltLive`, and one outside it gives `Passed`.
   - `a_window_is_vacuous_when_undecided_empty_failed_or_silent`: a table over `vacuous_reason` with Undecided, Decided with no dead unit, an exit of 101, and a command with 0 artifact lines, each giving a reason. A Decided result with dead units, all exits 0 and lines > 0 gives `None`.
   - `clone_timestamps_and_original_trees_are_compared_exactly`: `mtime_mismatches` and `tree_changes` find one changed mtime, one size change, one added path and one removed path.
@@ -381,7 +381,7 @@ Design "Proof procedure", step 1, and the success signals in `.skills/LIVE/close
   HIVE_PROVE_CMDS='[["build","--offline"],["check","--all-targets","--offline"],["test","--no-run","--offline"]]' \
   cargo test --release --test liveness_prove -- --ignored --nocapture
   ```
-  Add `["clippy","--all-targets","--offline"]` only if it exits 0 on klynt first. Expect the 6 h and 24 h windows `Passed` with `rebuilt_live == 0`, and the 7 d window `Vacuous` until the target is older than 7 days. Record the date, the commands, each window's report and the elapsed time in `proof-runs.md`. A `RebuiltLive` result is a stop-and-report, never something to edit away.
+  The replay accepts only `build`, `check`, `test`, `doc`, `bench` and `run`, by their long names (owner decision 2026-10-30); `clippy`, `rustc` and `rustdoc` are refused. Expect the 6 h and 24 h windows `Passed` with `rebuilt_live == 0`, and the 7 d window `Vacuous` until the target is older than 7 days. Record the date, the commands, each window's report and the elapsed time in `proof-runs.md`. A `RebuiltLive` result is a stop-and-report, never something to edit away.
 - [ ] **Step 5: Commit** `test(liveness): run the deletion proof on a real target and record the klynt results`.
 
 _Requirements: LIVE-4.1, LIVE-4.2, LIVE-4.8, LIVE-4.11_

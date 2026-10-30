@@ -477,7 +477,8 @@ fn commands_are_checked_and_json_is_inserted_after_the_subcommand() {
         (vec!["+stable", "build", "--offline"], 1),
         (vec!["-q", "check"], 1),
         (vec!["test", "--", "--target-dir"], 0),
-        (vec!["clippy", "--", "-D", "warnings"], 0),
+        (vec!["check", "--all-targets"], 0),
+        (vec!["test", "--", "--nocapture"], 0),
     ] {
         assert_eq!(prove::check_command(&argv(&cmd)), Ok(index), "{cmd:?}");
     }
@@ -495,8 +496,12 @@ fn commands_are_checked_and_json_is_inserted_after_the_subcommand() {
         assert!(prove::check_command(&argv(&cmd)).is_err(), "{cmd:?}");
     }
     assert_eq!(
-        prove::with_json(&argv(&["clippy", "--", "-D", "warnings"])),
-        argv(&["clippy", "--message-format=json", "--", "-D", "warnings"])
+        prove::with_json(&argv(&["test", "--", "--nocapture"])),
+        argv(&["test", "--message-format=json", "--", "--nocapture"])
+    );
+    assert_eq!(
+        prove::with_json(&argv(&["check", "--all-targets"])),
+        argv(&["check", "--message-format=json", "--all-targets"])
     );
     assert_eq!(
         prove::with_json(&argv(&["+stable", "build", "--offline"])),
@@ -510,10 +515,7 @@ fn commands_are_checked_and_json_is_inserted_after_the_subcommand() {
 
 #[test]
 fn only_subcommands_that_compile_inside_the_checkout_are_allowed() {
-    for sub in [
-        "build", "b", "check", "c", "test", "t", "clippy", "doc", "d", "bench", "rustc", "rustdoc",
-        "run", "r",
-    ] {
+    for sub in ["build", "check", "test", "doc", "bench", "run"] {
         assert_eq!(prove::check_command(&argv(&[sub])), Ok(0), "{sub}");
         assert_eq!(
             prove::check_command(&argv(&["+nightly", sub])),
@@ -524,6 +526,7 @@ fn only_subcommands_that_compile_inside_the_checkout_are_allowed() {
     for sub in [
         "fix",
         "fmt",
+        "rm",
         "update",
         "add",
         "remove",
@@ -665,35 +668,6 @@ fn a_config_that_redirects_artifacts_is_refused() {
 }
 
 #[test]
-fn short_subcommand_names_are_rewritten_to_the_long_builtins() {
-    let table: Vec<(&str, &str)> = prove::SHORT_ALIASES.to_vec();
-    assert_eq!(
-        table,
-        vec![
-            ("b", "build"),
-            ("c", "check"),
-            ("d", "doc"),
-            ("r", "run"),
-            ("t", "test")
-        ]
-    );
-    for (short, long) in table {
-        assert_eq!(
-            prove::replay_args(&argv(&["+stable", short, "-p", "x"])),
-            argv(&[
-                "+stable",
-                long,
-                "--locked",
-                "--message-format=json",
-                "-p",
-                "x"
-            ]),
-            "{short}"
-        );
-    }
-}
-
-#[test]
 fn a_cargo_alias_env_var_is_scrubbed_from_the_replay() {
     let names: Vec<std::ffi::OsString> = ["CARGO_ALIAS_T", "CARGO_ALIAS_clippy", "PATH"]
         .iter()
@@ -742,7 +716,7 @@ fn a_config_alias_cannot_turn_an_allowed_name_into_cargo_fix() {
     let inp = prove::ProveInput {
         target: s.path.join("target"),
         checkout: app.clone(),
-        cmds: vec![argv(&["t"])],
+        cmds: vec![argv(&["test"])],
         windows: vec![WINDOW],
         now: SystemTime::now(),
     };
@@ -750,8 +724,8 @@ fn a_config_alias_cannot_turn_an_allowed_name_into_cargo_fix() {
     let refused = prove::prove_with(fs_.as_ref(), &s.path, &inp).unwrap_err();
     assert!(refused.contains(".cargo/config.toml"), "{refused}");
 
-    // Path 2: even past the config scan, the rewritten long name runs the real `test`.
-    let args = prove::replay_args(&argv(&["t"]));
+    // Path 2: even past the config scan, the long name runs the real `test`.
+    let args = prove::replay_args(&argv(&["test"]));
     assert_eq!(args[0], "test");
     let mut process = prove::replay_command(&args, &app, &s.path.join("clone"));
     process.arg("--offline");
@@ -843,38 +817,48 @@ fn config_scan_covers_home_relative_checkout_and_relative_cargo_home() {
 }
 
 #[test]
-fn rustc_and_rustdoc_args_after_the_dashes_cannot_redirect_output() {
-    for sub in ["rustc", "rustdoc"] {
-        for bad in [
-            "-o",
-            "-o/x",
-            "--out-dir",
-            "--out-dir=/x",
-            "--emit",
-            "--emit=link=/x",
-        ] {
-            let err = prove::check_command(&argv(&[sub, "--", "-Cfoo", bad, "/x"])).unwrap_err();
-            assert!(err.contains(bad), "{sub} {bad}: {err}");
-        }
-        for fine in [
-            "-Copt-level=3",
-            "--cfg",
-            "-Dwarnings",
-            "--crate-type=lib",
-            "-O",
-        ] {
-            assert_eq!(
-                prove::check_command(&argv(&[sub, "--", fine])),
-                Ok(0),
-                "{sub} {fine}"
+fn short_names_and_alias_shadowable_subcommands_are_refused() {
+    for (sub, hint) in [
+        ("b", "build"),
+        ("c", "check"),
+        ("d", "doc"),
+        ("r", "run"),
+        ("t", "test"),
+    ] {
+        let err = prove::check_command(&argv(&["+stable", sub])).unwrap_err();
+        assert!(
+            err.contains(&format!("`cargo {sub}`")) && err.contains(&format!("use `{hint}`")),
+            "{sub}: {err}"
+        );
+    }
+    for sub in [
+        "clippy", "rustc", "rustdoc", "fix", "fmt", "rm", "install", "v",
+    ] {
+        let err = prove::check_command(&argv(&[sub, "--", "-D", "warnings"])).unwrap_err();
+        assert!(err.contains(&format!("`cargo {sub}`")), "{sub}: {err}");
+    }
+}
+
+#[test]
+fn args_after_the_dashes_are_refused_for_build_check_and_doc_only() {
+    for sub in ["build", "check", "doc"] {
+        for bad in ["-o", "--print=link-args=/x", "-Cincremental=/x", "anything"] {
+            let err = prove::check_command(&argv(&[sub, "--", bad])).unwrap_err();
+            assert!(
+                err.contains(bad) && err.contains("after `--`"),
+                "{sub} {bad}: {err}"
             );
         }
+        assert_eq!(prove::check_command(&argv(&[sub, "--locked"])), Ok(0));
     }
-    // Other subcommands pass their args after `--` to a test binary, not rustc.
-    assert_eq!(
-        prove::check_command(&argv(&["test", "--", "-o", "x"])),
-        Ok(0)
-    );
+    // test, bench and run hand their args to real project code, which runs anyway.
+    for sub in ["test", "bench", "run"] {
+        assert_eq!(
+            prove::check_command(&argv(&[sub, "--", "-o", "x"])),
+            Ok(0),
+            "{sub}"
+        );
+    }
 }
 
 #[test]
@@ -1514,15 +1498,14 @@ fn replayed_cargo_is_locked_and_cannot_be_redirected() {
             vec!["build", "--locked", "--message-format=json", "--offline"],
         ),
         (
-            vec!["+stable", "clippy", "--", "-D", "warnings"],
+            vec!["+stable", "test", "--", "--nocapture"],
             vec![
                 "+stable",
-                "clippy",
+                "test",
                 "--locked",
                 "--message-format=json",
                 "--",
-                "-D",
-                "warnings",
+                "--nocapture",
             ],
         ),
         (
