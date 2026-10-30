@@ -235,7 +235,7 @@ Design "Liveness", flow steps 6 to 8, Decisions 5 and 7.
 
 **Depends-on:** Task 4
 
-- [ ] **Step 1: Write the failing tests** in `src/liveness.rs`. Each plants entries in `deps/` and `examples/` next to synthetic units:
+- [x] **Step 1: Write the failing tests** in `src/liveness.rs`. Each plants entries in `deps/` and `examples/` next to synthetic units:
   - `a_dead_unit_lists_its_fingerprint_dir_and_every_entry_carrying_its_hash`: table of entries `libdep-<h>.rlib`, `libdep-<h>.rmeta`, `dep-<h>.d`, `dep-<h>`, `dep-<h>.abc.rcgu.o`, `dep-<h>.dep.<16hex>-cgu.02.rcgu.o`, `examples/ex-<h>`, `examples/ex-<h>.d` → listed. `dep-<h>x`, `<h>` (no dash), `ex` and `ex.d` (uplifted, examples root) → not listed.
   - `nothing_outside_the_units_own_deps_and_examples_is_listed`: entries with the hash under `build/`, `incremental/`, the profile root, and another profile dir stay unlisted.
   - `an_entry_carrying_the_hash_of_a_unit_that_is_not_dead_is_not_listed`: a table where the other hash belongs to a live unit, a never-collected unit (`build-script`), or a not-current unit dir. Each such entry stays unlisted, and the fingerprint dirs of those three units are never listed.
@@ -244,9 +244,9 @@ Design "Liveness", flow steps 6 to 8, Decisions 5 and 7.
   - `file_lists_do_not_depend_on_listing_order`: a fake `Fs` returning shuffled `read_dir_bounded` results gives equal results.
 
   Run `cargo test --lib liveness::`; expect failures: `files` is empty.
-- [ ] **Step 2: Implement** the listings (only for profiles holding a dead unit, with NotFound treated as empty), `carries`, the non-dead-hash exclusion, the empty-files rule, `BTreeMap` grouping and sorting, and `ListingFailed`, added to the same reason list before the Decided/Undecided choice.
-- [ ] **Step 3: Verify** `cargo test --lib liveness::` passes. Run the merge gate.
-- [ ] **Step 4: Commit** `feat(liveness): list exactly the hash-keyed files of each dead unit`.
+- [x] **Step 2: Implement** the listings (only for profiles holding a dead unit, with NotFound treated as empty), `carries`, the non-dead-hash exclusion, the empty-files rule, `BTreeMap` grouping and sorting, and `ListingFailed`, added to the same reason list before the Decided/Undecided choice.
+- [x] **Step 3: Verify** `cargo test --lib liveness::` passes. Run the merge gate.
+- [x] **Step 4: Commit** `feat(liveness): list exactly the hash-keyed files of each dead unit`.
 
 _Requirements: LIVE-2.7, LIVE-2.8, LIVE-3.1, LIVE-3.2, LIVE-3.3, LIVE-3.5, LIVE-3.6_
 
