@@ -199,6 +199,31 @@ skills
 
 The plugin cache now holds only the plugin directory, not the repository.
 
+### From the published marketplace (2026-10-30)
+
+After `main` was pushed (b0706d1), with `CLAUDE_CONFIG_DIR=/private/tmp/hive-skill-gh-20261030/claude`. Each command is followed by its output.
+
+```
+$ claude plugin marketplace add jayden-dang/cargo-hive
+✔ Successfully added marketplace: cargo-hive (declared in user settings)
+$ claude plugin install cargo-hive@cargo-hive
+Installing plugin "cargo-hive@cargo-hive"...✔ Successfully installed plugin: cargo-hive@cargo-hive (scope: user)
+$ claude plugin details cargo-hive
+cargo-hive 0.1.0
+  Description: Teaches coding agents to reclaim Rust build space with cargo-hive instead of cargo clean.
+  Source: cargo-hive@cargo-hive
+
+Component inventory
+  Skills (1)  hive
+$ ls -a <plugin cache>/cargo-hive/cargo-hive/0.1.0
+.claude-plugin
+.codex-plugin
+.in_use
+skills
+```
+
+`.in_use` is Claude Code's own marker. The interactive `/plugin` form in the owner's session is recorded below when run.
+
 ## Install — Codex
 
 Run on 2026-10-30 from the same clean clone, with `CODEX_HOME=/private/tmp/hive-skill-install-20261030/codex` so the real `~/.codex` was never written. The outputs below are concatenated in command order.
@@ -243,3 +268,23 @@ hive
 ```
 
 The installed plugin root holds only the plugin directory; before the move it held the whole clone, `.git` included.
+
+### From the published marketplace (2026-10-30)
+
+Same push, with `CODEX_HOME=/private/tmp/hive-skill-gh-20261030/codex`. Each command is followed by its output.
+
+```
+$ codex plugin marketplace add jayden-dang/cargo-hive
+Added marketplace `cargo-hive` from https://github.com/jayden-dang/cargo-hive.git.
+Installed marketplace root: /private/tmp/hive-skill-gh-20261030/codex/.tmp/marketplaces/cargo-hive
+$ codex plugin add cargo-hive@cargo-hive
+Added plugin `cargo-hive` from marketplace `cargo-hive`.
+Installed plugin root: /private/tmp/hive-skill-gh-20261030/codex/plugins/cache/cargo-hive/cargo-hive/0.1.0
+$ codex plugin list
+cargo-hive@cargo-hive  installed, enabled  0.1.0    /private/tmp/hive-skill-gh-20261030/codex/.tmp/marketplaces/cargo-hive/plugin
+$ ls -a <plugin root>; ls <plugin root>/skills
+.claude-plugin
+.codex-plugin
+skills
+hive
+```
