@@ -665,6 +665,219 @@ fn a_config_that_redirects_artifacts_is_refused() {
 }
 
 #[test]
+fn short_subcommand_names_are_rewritten_to_the_long_builtins() {
+    let table: Vec<(&str, &str)> = prove::SHORT_ALIASES.to_vec();
+    assert_eq!(
+        table,
+        vec![
+            ("b", "build"),
+            ("c", "check"),
+            ("d", "doc"),
+            ("r", "run"),
+            ("t", "test")
+        ]
+    );
+    for (short, long) in table {
+        assert_eq!(
+            prove::replay_args(&argv(&["+stable", short, "-p", "x"])),
+            argv(&[
+                "+stable",
+                long,
+                "--locked",
+                "--message-format=json",
+                "-p",
+                "x"
+            ]),
+            "{short}"
+        );
+    }
+}
+
+#[test]
+fn a_cargo_alias_env_var_is_scrubbed_from_the_replay() {
+    let names: Vec<std::ffi::OsString> = ["CARGO_ALIAS_T", "CARGO_ALIAS_clippy", "PATH"]
+        .iter()
+        .map(Into::into)
+        .collect();
+    let process = prove::replay_command_with_env(
+        &argv(&["build"]),
+        Path::new("/co"),
+        Path::new("/cl"),
+        &names,
+    );
+    let envs: BTreeMap<_, _> = process
+        .get_envs()
+        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_owned())))
+        .collect();
+    for gone in ["CARGO_ALIAS_T", "CARGO_ALIAS_clippy"] {
+        assert_eq!(envs.get(gone), Some(&None), "{gone}");
+    }
+    assert!(!envs.contains_key("PATH"));
+}
+
+#[test]
+fn a_config_alias_cannot_turn_an_allowed_name_into_cargo_fix() {
+    let s = Scratch::new("prove-alias");
+    let app = s.path.join("app");
+    let main = "fn main() { let x = 1; }\n";
+    write(&app.join("Cargo.toml"), &manifest("app", ""));
+    write(&app.join("src/main.rs"), main);
+    write(
+        &app.join(".cargo/config.toml"),
+        "[alias]\nt = \"fix --allow-no-vcs --allow-dirty\"\n",
+    );
+    let status = Command::new("cargo")
+        .args(["generate-lockfile", "--offline"])
+        .current_dir(&app)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // Path 1: check_config refuses the checkout, naming the file.
+    let err = prove::check_config(&app).unwrap_err();
+    assert!(
+        err.contains(".cargo/config.toml") && err.contains("`t`"),
+        "{err}"
+    );
+    let inp = prove::ProveInput {
+        target: s.path.join("target"),
+        checkout: app.clone(),
+        cmds: vec![argv(&["t"])],
+        windows: vec![WINDOW],
+        now: SystemTime::now(),
+    };
+    let fs_ = platform::current().unwrap().fs;
+    let refused = prove::prove_with(fs_.as_ref(), &s.path, &inp).unwrap_err();
+    assert!(refused.contains(".cargo/config.toml"), "{refused}");
+
+    // Path 2: even past the config scan, the rewritten long name runs the real `test`.
+    let args = prove::replay_args(&argv(&["t"]));
+    assert_eq!(args[0], "test");
+    let mut process = prove::replay_command(&args, &app, &s.path.join("clone"));
+    process.arg("--offline");
+    let out = process.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_to_string(app.join("src/main.rs")).unwrap(), main);
+}
+
+#[test]
+fn only_aliases_that_shadow_an_allowed_name_or_include_files_are_refused() {
+    let s = Scratch::new("prove-alias-scan");
+    let work = s.path.join("a/checkout");
+    fs::create_dir_all(work.join(".cargo")).unwrap();
+    let cfg = work.join(".cargo/config.toml");
+    for ok in [
+        "[alias]\nxtask = \"run -p xtask --\"\n",
+        "[build]\nbuild = 1\n",
+        "[alias]\n# t = \"fix\"\nlint = \"clippy\"\n",
+    ] {
+        fs::write(&cfg, ok).unwrap();
+        assert!(prove::check_config(&work).is_ok(), "{ok}");
+    }
+    for name in [
+        "clippy", "build", "check", "test", "doc", "bench", "run", "rustc", "rustdoc", "b", "c",
+        "d", "r", "t",
+    ] {
+        for body in [
+            format!("[alias]\n{name} = \"fix\"\n"),
+            format!("[alias]\n  \"{name}\"=[\"fix\"]\n"),
+            format!("alias.{name} = \"fix\"\n"),
+        ] {
+            fs::write(&cfg, &body).unwrap();
+            let err = prove::check_config(&work).unwrap_err();
+            assert!(
+                err.contains("config.toml") && err.contains(&format!("`{name}`")),
+                "{body}: {err}"
+            );
+        }
+    }
+    fs::write(&cfg, "include = [\"more.toml\"]\n").unwrap();
+    let err = prove::check_config(&work).unwrap_err();
+    assert!(
+        err.contains("config.toml") && err.contains("include"),
+        "{err}"
+    );
+}
+
+#[test]
+fn config_scan_covers_home_relative_checkout_and_relative_cargo_home() {
+    let s = Scratch::new("prove-scan-where");
+    let root = s.path.clone();
+    let bad = "[build]\nartifact-dir = \"/x\"\n";
+    let work = root.join("w/checkout");
+    fs::create_dir_all(&work).unwrap();
+    let scan = |checkout: &Path, cwd: &Path, ch: Option<&str>, home: Option<&Path>| {
+        prove::check_config_in(
+            checkout,
+            cwd,
+            ch.map(Into::into),
+            home.map(|h| h.as_os_str().to_owned()),
+        )
+    };
+    // $HOME/.cargo is scanned when CARGO_HOME is unset, and not when it is set.
+    let home = root.join("home");
+    fs::create_dir_all(home.join(".cargo")).unwrap();
+    fs::write(home.join(".cargo/config.toml"), bad).unwrap();
+    assert!(scan(&work, &root, None, Some(&home))
+        .unwrap_err()
+        .contains("home/.cargo/config.toml"));
+    assert!(scan(&work, &root, Some("ch"), Some(&home)).is_ok());
+    assert!(scan(&work, &root, None, None).is_ok());
+    // A relative checkout is resolved against the cwd, so its real ancestors are scanned.
+    fs::create_dir_all(root.join("w/.cargo")).unwrap();
+    fs::write(root.join("w/.cargo/config.toml"), bad).unwrap();
+    assert!(scan(Path::new("checkout"), &root.join("w"), None, None)
+        .unwrap_err()
+        .contains("w/.cargo/config.toml"));
+    fs::remove_file(root.join("w/.cargo/config.toml")).unwrap();
+    // A relative CARGO_HOME is resolved against the checkout.
+    fs::create_dir_all(work.join("ch")).unwrap();
+    fs::write(work.join("ch/config.toml"), bad).unwrap();
+    assert!(scan(&work, &root, Some("ch"), None)
+        .unwrap_err()
+        .contains("checkout/ch/config.toml"));
+}
+
+#[test]
+fn rustc_and_rustdoc_args_after_the_dashes_cannot_redirect_output() {
+    for sub in ["rustc", "rustdoc"] {
+        for bad in [
+            "-o",
+            "-o/x",
+            "--out-dir",
+            "--out-dir=/x",
+            "--emit",
+            "--emit=link=/x",
+        ] {
+            let err = prove::check_command(&argv(&[sub, "--", "-Cfoo", bad, "/x"])).unwrap_err();
+            assert!(err.contains(bad), "{sub} {bad}: {err}");
+        }
+        for fine in [
+            "-Copt-level=3",
+            "--cfg",
+            "-Dwarnings",
+            "--crate-type=lib",
+            "-O",
+        ] {
+            assert_eq!(
+                prove::check_command(&argv(&[sub, "--", fine])),
+                Ok(0),
+                "{sub} {fine}"
+            );
+        }
+    }
+    // Other subcommands pass their args after `--` to a test binary, not rustc.
+    assert_eq!(
+        prove::check_command(&argv(&["test", "--", "-o", "x"])),
+        Ok(0)
+    );
+}
+
+#[test]
 fn prove_refuses_a_checkout_whose_config_redirects_artifacts() {
     let fx = proof_fixture("prove-artifactdir");
     fs::create_dir_all(fx.app.join(".cargo")).unwrap();
@@ -686,14 +899,17 @@ fn prove_refuses_a_checkout_whose_config_redirects_artifacts() {
 fn a_clone_that_aliases_the_original_is_refused_and_nothing_is_deleted() {
     let fx = proof_fixture("prove-aliasclone");
     let scratch = Scratch::new("prove-scratch");
+    // Empty checkout on purpose: if check_clone_root were dropped, the replay would fail at once (no Cargo.toml) instead of hanging on the build lock this process holds.
+    let empty_checkout = Scratch::new("prove-empty-checkout");
     let before = tree_of(&fx.target);
     let fs_ = platform::current().unwrap().fs;
     let alias = |_: &Path, _: &str, target: &Path, dest: &Path| -> Result<(), String> {
         std::os::unix::fs::symlink(target, dest).map_err(|e| e.to_string())
     };
 
-    let err = prove::prove_with_cloner(fs_.as_ref(), &scratch.path, &input(&fx, &[WINDOW]), &alias)
-        .unwrap_err();
+    let mut inp = input(&fx, &[WINDOW]);
+    inp.checkout = empty_checkout.path.clone();
+    let err = prove::prove_with_cloner(fs_.as_ref(), &scratch.path, &inp, &alias).unwrap_err();
 
     assert!(err.contains("not a real directory"), "{err}");
     assert_eq!(tree_of(&fx.target), before);

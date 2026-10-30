@@ -40,6 +40,16 @@ const GLOBAL_SWITCHES: [&str; 8] = [
 /// Config files are scanned for these keys, which redirect build output outside the clone.
 const REDIRECT_KEYS: [&str; 2] = ["artifact-dir", "out-dir"];
 const CONFIG_CAP: u64 = 1 << 20;
+/// Cargo's short aliases and the long built-in each stands for. A user `[alias]` can shadow the short names (not the long ones), so the replay always runs the long name.
+pub const SHORT_ALIASES: [(&str, &str); 5] = [
+    ("b", "build"),
+    ("c", "check"),
+    ("d", "doc"),
+    ("r", "run"),
+    ("t", "test"),
+];
+/// Subcommands whose args after `--` go to rustc/rustdoc, where these flags write outside the clone.
+const TOOL_REDIRECTS: [&str; 3] = ["-o", "--out-dir", "--emit"];
 
 /// The owner's commands run for real in the checkout (that is the owner's choice): only the target dir is protected, not build.rs or test side effects. RUSTFLAGS and the owner's cargo config are left as the shell has them, since they are part of what the commands do; RUSTC_WRAPPER and RUSTC_WORKSPACE_WRAPPER are removed because they change fingerprints.
 pub struct ProveInput {
@@ -180,6 +190,23 @@ pub fn check_command(cmd: &[String]) -> Result<usize, String> {
                 "has {arg} before the subcommand; only +toolchain, -q, -v, --color, --locked, --frozen and --offline may precede it"
             ));
         } else if ALLOWED.contains(&arg) {
+            let name = long_name(arg);
+            if name == "rustc" || name == "rustdoc" {
+                if let Some(bad) = cmd.get(before_dashes + 1..).and_then(|rest| {
+                    rest.iter().find(|a| {
+                        TOOL_REDIRECTS.iter().any(|f| {
+                            a.starts_with(f)
+                                && (*f == "-o"
+                                    || a.len() == f.len()
+                                    || a.as_bytes()[f.len()] == b'=')
+                        })
+                    })
+                }) {
+                    return Err(format!(
+                        "passes {bad} after `--`, which writes output outside the clone"
+                    ));
+                }
+            }
             return Ok(i);
         } else {
             return Err(format!(
@@ -189,6 +216,13 @@ pub fn check_command(cmd: &[String]) -> Result<usize, String> {
         }
     }
     Err("has no cargo subcommand".to_string())
+}
+
+fn long_name(name: &str) -> &str {
+    SHORT_ALIASES
+        .iter()
+        .find(|(short, _)| *short == name)
+        .map_or(name, |(_, long)| long)
 }
 
 /// The vector cargo runs: `--locked` and `--message-format=json` go right after the subcommand. `--locked` is added and only when the vector has neither `--locked` nor `--frozen` before `--`, so a replay cannot rewrite the checkout's Cargo.lock.
@@ -204,6 +238,7 @@ pub fn replay_args(cmd: &[String]) -> Vec<String> {
     if !has_lock {
         out.insert(sub + 1, "--locked".to_string());
     }
+    out[sub] = long_name(&cmd[sub]).to_string();
     out
 }
 
@@ -489,11 +524,28 @@ fn cp_clone(scratch: &Path, label: &str, target: &Path, dest: &Path) -> Result<(
     Ok(())
 }
 
-/// Refuses a checkout whose `.cargo/config(.toml)` (here, in any ancestor, or in CARGO_HOME) names `artifact-dir` or `out-dir`: stable cargo rejects those options, nightly would write outside the clone, and an env override would break stable. A text scan of at most 1 MiB per file; a larger file is refused.
+/// Refuses a checkout whose cargo config (`.cargo/config(.toml)` here, in any ancestor, in CARGO_HOME, or in `$HOME/.cargo` when CARGO_HOME is unset) names `artifact-dir` or `out-dir` (stable cargo rejects those, nightly would write outside the clone), has an `include` key (the included file is not followed), or has an `[alias]` table that defines a name the allow-list accepts (notably `clippy`, an external subcommand an alias can shadow). A relative checkout is resolved against the process cwd and a relative CARGO_HOME against the checkout. A text scan of at most 1 MiB per file; a larger file is refused.
 pub fn check_config(checkout: &Path) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+    check_config_in(
+        checkout,
+        &cwd,
+        std::env::var_os("CARGO_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+pub fn check_config_in(
+    checkout: &Path,
+    cwd: &Path,
+    cargo_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<(), String> {
+    let checkout = cwd.join(checkout);
     let mut dirs: Vec<PathBuf> = checkout.ancestors().map(|a| a.join(".cargo")).collect();
-    if let Some(home) = std::env::var_os("CARGO_HOME") {
-        dirs.push(PathBuf::from(home));
+    match cargo_home {
+        Some(h) => dirs.push(checkout.join(h)),
+        None => dirs.extend(home.map(|h| PathBuf::from(h).join(".cargo"))),
     }
     for dir in dirs {
         for name in ["config.toml", "config"] {
@@ -506,7 +558,7 @@ pub fn check_config(checkout: &Path) -> Result<(), String> {
                 .map_err(|e| format!("{}: {e}", path.display()))?;
             if text.len() as u64 > CONFIG_CAP {
                 return Err(format!(
-                    "{} is over 1 MiB; the proof cannot check it for artifact-dir or out-dir",
+                    "{} is over 1 MiB; the proof cannot check it",
                     path.display()
                 ));
             }
@@ -517,9 +569,37 @@ pub fn check_config(checkout: &Path) -> Result<(), String> {
                     path.display()
                 ));
             }
+            let keys: Vec<String> = text.lines().filter_map(config_key).collect();
+            if keys.iter().any(|k| k == "include") {
+                return Err(format!(
+                    "{} has an include key; the proof does not follow included configs",
+                    path.display()
+                ));
+            }
+            let has_alias = text.lines().any(|l| {
+                let l = l.trim();
+                l == "[alias]" || l.starts_with("alias.")
+            });
+            if has_alias {
+                if let Some(name) = keys.iter().find(|k| ALLOWED.contains(&k.as_str())) {
+                    return Err(format!(
+                        "{} defines the alias `{name}`, which can turn an allowed subcommand into another command",
+                        path.display()
+                    ));
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// The key of a `key = value` line, without an `alias.` prefix or quotes; None for other lines.
+fn config_key(line: &str) -> Option<String> {
+    let line = line.trim_start();
+    let line = line.strip_prefix("alias.").unwrap_or(line);
+    let (key, _) = line.split_once('=')?;
+    let key = key.trim().trim_matches(|c| c == '"' || c == '\'');
+    (!key.is_empty() && !key.contains(char::is_whitespace)).then(|| key.to_string())
 }
 
 fn clone_target<'a>(
@@ -590,7 +670,7 @@ pub fn replay_command(args: &[String], checkout: &Path, clone: &Path) -> Command
     replay_command_with_env(args, checkout, clone, &names)
 }
 
-/// `env_names` are the variables present in the environment; every `CARGO_UNSTABLE_*` among them is removed so a nightly opt-in cannot enable artifact redirection.
+/// `env_names` are the variables present in the environment; every `CARGO_UNSTABLE_*` among them is removed so a nightly opt-in cannot enable artifact redirection, and every `CARGO_ALIAS_*` so an env alias cannot turn an allowed name into another subcommand.
 pub fn replay_command_with_env(
     args: &[String],
     checkout: &Path,
@@ -608,7 +688,8 @@ pub fn replay_command_with_env(
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTC_WORKSPACE_WRAPPER");
     for name in env_names {
-        if name.to_string_lossy().starts_with("CARGO_UNSTABLE_") {
+        let name_lossy = name.to_string_lossy();
+        if name_lossy.starts_with("CARGO_UNSTABLE_") || name_lossy.starts_with("CARGO_ALIAS_") {
             process.env_remove(name);
         }
     }
