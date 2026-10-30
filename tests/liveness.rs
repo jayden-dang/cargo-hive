@@ -509,6 +509,198 @@ fn commands_are_checked_and_json_is_inserted_after_the_subcommand() {
 }
 
 #[test]
+fn only_subcommands_that_compile_inside_the_checkout_are_allowed() {
+    for sub in [
+        "build", "b", "check", "c", "test", "t", "clippy", "doc", "d", "bench", "rustc", "rustdoc",
+        "run", "r",
+    ] {
+        assert_eq!(prove::check_command(&argv(&[sub])), Ok(0), "{sub}");
+        assert_eq!(
+            prove::check_command(&argv(&["+nightly", sub])),
+            Ok(1),
+            "{sub}"
+        );
+    }
+    for sub in [
+        "fix",
+        "fmt",
+        "update",
+        "add",
+        "remove",
+        "install",
+        "uninstall",
+        "publish",
+        "generate-lockfile",
+        "clean",
+        "new",
+        "init",
+        "login",
+        "vendor",
+        "my-alias",
+    ] {
+        for cmd in [
+            vec![sub],
+            vec!["+nightly", sub],
+            vec!["-q", sub, "--allow-dirty"],
+        ] {
+            let err = prove::check_command(&argv(&cmd)).unwrap_err();
+            assert!(err.contains(sub), "{cmd:?}: {err}");
+        }
+    }
+    assert!(prove::check_command(&argv(&["+nightly", "fix", "--allow-dirty"])).is_err());
+    assert_eq!(
+        prove::replay_args(&argv(&["fix"])),
+        argv(&["fix", "--message-format=json"]),
+        "fix is no longer lockable"
+    );
+}
+
+#[test]
+fn a_flag_with_a_value_before_the_subcommand_is_parsed_or_refused() {
+    assert_eq!(
+        prove::check_command(&argv(&["--color", "always", "build"])),
+        Ok(2)
+    );
+    assert_eq!(
+        prove::check_command(&argv(&["--color=always", "build"])),
+        Ok(1)
+    );
+    assert_eq!(
+        prove::check_command(&argv(&["+stable", "--color", "never", "-q", "test"])),
+        Ok(4)
+    );
+    assert_eq!(
+        prove::replay_args(&argv(&["--color", "always", "build"])),
+        argv(&[
+            "--color",
+            "always",
+            "build",
+            "--locked",
+            "--message-format=json"
+        ])
+    );
+    assert!(prove::check_command(&argv(&["--color", "always", "fmt"])).is_err());
+    for cmd in [
+        vec!["--color", "build"],
+        vec!["--color"],
+        vec!["-C", "dir", "build"],
+        vec!["--manifest-path", "x/Cargo.toml", "build"],
+        vec!["--features", "a", "build"],
+        vec!["-p", "a", "build"],
+        vec!["--frobnicate", "build"],
+    ] {
+        let err = prove::check_command(&argv(&cmd)).unwrap_err();
+        assert!(
+            err.contains("before the subcommand")
+                || err.contains("without a value")
+                || err.contains("no cargo subcommand"),
+            "{cmd:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn unstable_env_is_scrubbed_from_the_replay() {
+    let names: Vec<std::ffi::OsString> = [
+        "CARGO_UNSTABLE_UNSTABLE_OPTIONS",
+        "CARGO_UNSTABLE_X",
+        "CARGO_HOME",
+        "PATH",
+    ]
+    .iter()
+    .map(Into::into)
+    .collect();
+    let process = prove::replay_command_with_env(
+        &argv(&["build"]),
+        Path::new("/co"),
+        Path::new("/cl"),
+        &names,
+    );
+    let envs: BTreeMap<_, _> = process
+        .get_envs()
+        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_owned())))
+        .collect();
+    for gone in ["CARGO_UNSTABLE_UNSTABLE_OPTIONS", "CARGO_UNSTABLE_X"] {
+        assert_eq!(envs.get(gone), Some(&None), "{gone}");
+    }
+    assert!(!envs.contains_key("CARGO_HOME"));
+    assert!(!envs.contains_key("PATH"));
+}
+
+#[test]
+fn a_config_that_redirects_artifacts_is_refused() {
+    let s = Scratch::new("prove-config");
+    let work = s.path.join("a/b/checkout");
+    fs::create_dir_all(work.join(".cargo")).unwrap();
+    assert!(prove::check_config(&work).is_ok());
+    for (file, body) in [
+        (".cargo/config.toml", "[build]\nartifact-dir = \"/x\"\n"),
+        (".cargo/config", "[build]\nout-dir = \"/x\"\n"),
+    ] {
+        fs::write(work.join(file), body).unwrap();
+        let err = prove::check_config(&work).unwrap_err();
+        assert!(
+            err.contains(file) && (err.contains("artifact-dir") || err.contains("out-dir")),
+            "{err}"
+        );
+        fs::remove_file(work.join(file)).unwrap();
+    }
+    fs::create_dir_all(s.path.join("a/.cargo")).unwrap();
+    fs::write(
+        s.path.join("a/.cargo/config.toml"),
+        "[build]\nartifact-dir=\"/x\"\n",
+    )
+    .unwrap();
+    assert!(prove::check_config(&work)
+        .unwrap_err()
+        .contains("artifact-dir"));
+    fs::write(s.path.join("a/.cargo/config.toml"), "[build]\njobs = 2\n").unwrap();
+    assert!(prove::check_config(&work).is_ok());
+    fs::write(
+        s.path.join("a/.cargo/config.toml"),
+        vec![b'#'; (1 << 20) + 1],
+    )
+    .unwrap();
+    assert!(prove::check_config(&work).unwrap_err().contains("1 MiB"));
+}
+
+#[test]
+fn prove_refuses_a_checkout_whose_config_redirects_artifacts() {
+    let fx = proof_fixture("prove-artifactdir");
+    fs::create_dir_all(fx.app.join(".cargo")).unwrap();
+    fs::write(
+        fx.app.join(".cargo/config.toml"),
+        "[build]\nartifact-dir = \"/tmp/nope\"\n",
+    )
+    .unwrap();
+    let scratch = Scratch::new("prove-scratch");
+    let fs_ = platform::current().unwrap().fs;
+
+    let err = prove::prove_with(fs_.as_ref(), &scratch.path, &input(&fx, &[WINDOW])).unwrap_err();
+
+    assert!(err.contains("artifact-dir"), "{err}");
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn a_clone_that_aliases_the_original_is_refused_and_nothing_is_deleted() {
+    let fx = proof_fixture("prove-aliasclone");
+    let scratch = Scratch::new("prove-scratch");
+    let before = tree_of(&fx.target);
+    let fs_ = platform::current().unwrap().fs;
+    let alias = |_: &Path, _: &str, target: &Path, dest: &Path| -> Result<(), String> {
+        std::os::unix::fs::symlink(target, dest).map_err(|e| e.to_string())
+    };
+
+    let err = prove::prove_with_cloner(fs_.as_ref(), &scratch.path, &input(&fx, &[WINDOW]), &alias)
+        .unwrap_err();
+
+    assert!(err.contains("not a real directory"), "{err}");
+    assert_eq!(tree_of(&fx.target), before);
+    no_clone_left(&scratch.path);
+}
+
+#[test]
 fn rebuilt_units_are_new_dirs_or_changed_timestamps() {
     let before: prove::Stamps = BTreeMap::from([
         (key("debug", "a-1"), Some(at(1))),
@@ -1134,10 +1326,6 @@ fn replayed_cargo_is_locked_and_cannot_be_redirected() {
         (
             vec!["check", "--locked"],
             vec!["check", "--message-format=json", "--locked"],
-        ),
-        (
-            vec!["fmt", "--check"],
-            vec!["fmt", "--message-format=json", "--check"],
         ),
     ] {
         assert_eq!(prove::replay_args(&argv(&cmd)), argv(&want), "{cmd:?}");

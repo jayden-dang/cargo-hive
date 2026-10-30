@@ -21,13 +21,27 @@ const FORBIDDEN_FLAGS: [&str; 5] = [
     "--out-dir",
     "--config",
 ];
-/// Subcommands that accept `--locked`; a vector for any other subcommand is replayed as given and the checkout's Cargo.lock is only checked after the fact.
-const LOCKABLE: [&str; 15] = [
-    "build", "b", "check", "c", "test", "t", "clippy", "doc", "d", "run", "r", "bench", "rustc",
-    "rustdoc", "fix",
+/// The only subcommands a replay may run: they compile or run inside the checkout and write nothing but the target dir; all of them accept `--locked`.
+const ALLOWED: [&str; 14] = [
+    "build", "b", "check", "c", "test", "t", "clippy", "doc", "d", "bench", "rustc", "rustdoc",
+    "run", "r",
 ];
+/// Global flags that take no value and may precede the subcommand.
+const GLOBAL_SWITCHES: [&str; 8] = [
+    "-q",
+    "--quiet",
+    "-v",
+    "-vv",
+    "--verbose",
+    "--locked",
+    "--frozen",
+    "--offline",
+];
+/// Config files are scanned for these keys, which redirect build output outside the clone.
+const REDIRECT_KEYS: [&str; 2] = ["artifact-dir", "out-dir"];
+const CONFIG_CAP: u64 = 1 << 20;
 
-/// RUSTFLAGS and the owner's cargo config are left as the shell has them, since they are part of what the commands do; RUSTC_WRAPPER and RUSTC_WORKSPACE_WRAPPER are removed because they change fingerprints.
+/// The owner's commands run for real in the checkout (that is the owner's choice): only the target dir is protected, not build.rs or test side effects. RUSTFLAGS and the owner's cargo config are left as the shell has them, since they are part of what the commands do; RUSTC_WRAPPER and RUSTC_WORKSPACE_WRAPPER are removed because they change fingerprints.
 pub struct ProveInput {
     pub target: PathBuf,
     pub checkout: PathBuf,
@@ -151,13 +165,33 @@ pub fn check_command(cmd: &[String]) -> Result<usize, String> {
             return Err("carries -Z, which can redirect cargo's output".to_string());
         }
     }
-    cmd[..before_dashes]
-        .iter()
-        .position(|a| !a.starts_with('+') && !a.starts_with('-'))
-        .ok_or_else(|| "has no cargo subcommand".to_string())
+    let mut i = 0;
+    while i < before_dashes {
+        let arg = cmd[i].as_str();
+        if arg.starts_with('+') || GLOBAL_SWITCHES.contains(&arg) || arg.starts_with("--color=") {
+            i += 1;
+        } else if arg == "--color" {
+            match cmd.get(i + 1).filter(|_| i + 1 < before_dashes) {
+                Some(value) if !value.starts_with('-') => i += 2,
+                _ => return Err("has --color without a value".to_string()),
+            }
+        } else if arg.starts_with('-') {
+            return Err(format!(
+                "has {arg} before the subcommand; only +toolchain, -q, -v, --color, --locked, --frozen and --offline may precede it"
+            ));
+        } else if ALLOWED.contains(&arg) {
+            return Ok(i);
+        } else {
+            return Err(format!(
+                "runs `cargo {arg}`, which is not replayable; allowed: {}",
+                ALLOWED.join(", ")
+            ));
+        }
+    }
+    Err("has no cargo subcommand".to_string())
 }
 
-/// The vector cargo runs: `--locked` and `--message-format=json` go right after the subcommand. `--locked` is added only for the subcommands in `LOCKABLE` and only when the vector has neither `--locked` nor `--frozen` before `--`, so a replay cannot rewrite the checkout's Cargo.lock.
+/// The vector cargo runs: `--locked` and `--message-format=json` go right after the subcommand. `--locked` is added and only when the vector has neither `--locked` nor `--frozen` before `--`, so a replay cannot rewrite the checkout's Cargo.lock.
 pub fn replay_args(cmd: &[String]) -> Vec<String> {
     let mut out = with_json(cmd);
     let Ok(sub) = check_command(cmd) else {
@@ -167,7 +201,7 @@ pub fn replay_args(cmd: &[String]) -> Vec<String> {
     let has_lock = cmd[..before_dashes]
         .iter()
         .any(|a| a == "--locked" || a == "--frozen");
-    if LOCKABLE.contains(&cmd[sub].as_str()) && !has_lock {
+    if !has_lock {
         out.insert(sub + 1, "--locked".to_string());
     }
     out
@@ -413,12 +447,12 @@ pub fn run_logged(
     })
 }
 
-struct Clone<'a> {
+struct CloneDir<'a> {
     fs: &'a dyn Fs,
     path: PathBuf,
 }
 
-impl Clone<'_> {
+impl CloneDir<'_> {
     fn remove(self) -> Result<(), String> {
         self.fs
             .remove_tree(&self.path)
@@ -426,25 +460,18 @@ impl Clone<'_> {
     }
 }
 
-impl Drop for Clone<'_> {
+impl Drop for CloneDir<'_> {
     fn drop(&mut self) {
         let _ = self.fs.remove_tree(&self.path);
     }
 }
 
-fn clone_target<'a>(
-    fs: &'a dyn Fs,
-    scratch: &Path,
-    label: &str,
-    target: &Path,
-) -> Result<Clone<'a>, String> {
-    let path = scratch.join(format!("clone-{label}"));
-    let guard = Clone {
-        fs,
-        path: path.clone(),
-    };
+pub type Cloner = dyn Fn(&Path, &str, &Path, &Path) -> Result<(), String>;
+
+/// The default clone: an APFS copy-on-write `cp`. Tests inject others to prove the root check holds.
+fn cp_clone(scratch: &Path, label: &str, target: &Path, dest: &Path) -> Result<(), String> {
     let mut cmd = Command::new("cp");
-    cmd.args(["-c", "-R", "-p"]).arg(target).arg(&path);
+    cmd.args(["-c", "-R", "-p"]).arg(target).arg(dest);
     let ran = run_logged(
         scratch,
         &format!("cp-{label}"),
@@ -459,6 +486,55 @@ fn clone_target<'a>(
             ran.exit
         ));
     }
+    Ok(())
+}
+
+/// Refuses a checkout whose `.cargo/config(.toml)` (here, in any ancestor, or in CARGO_HOME) names `artifact-dir` or `out-dir`: stable cargo rejects those options, nightly would write outside the clone, and an env override would break stable. A text scan of at most 1 MiB per file; a larger file is refused.
+pub fn check_config(checkout: &Path) -> Result<(), String> {
+    let mut dirs: Vec<PathBuf> = checkout.ancestors().map(|a| a.join(".cargo")).collect();
+    if let Some(home) = std::env::var_os("CARGO_HOME") {
+        dirs.push(PathBuf::from(home));
+    }
+    for dir in dirs {
+        for name in ["config.toml", "config"] {
+            let path = dir.join(name);
+            let Ok(file) = fs::File::open(&path) else {
+                continue;
+            };
+            let mut text = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::Read::take(file, CONFIG_CAP + 1), &mut text)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            if text.len() as u64 > CONFIG_CAP {
+                return Err(format!(
+                    "{} is over 1 MiB; the proof cannot check it for artifact-dir or out-dir",
+                    path.display()
+                ));
+            }
+            let text = String::from_utf8_lossy(&text);
+            if let Some(key) = REDIRECT_KEYS.iter().find(|k| text.contains(**k)) {
+                return Err(format!(
+                    "{} names {key}, which writes build output outside the clone",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn clone_target<'a>(
+    fs: &'a dyn Fs,
+    scratch: &Path,
+    label: &str,
+    target: &Path,
+    cloner: &Cloner,
+) -> Result<CloneDir<'a>, String> {
+    let path = scratch.join(format!("clone-{label}"));
+    let guard = CloneDir {
+        fs,
+        path: path.clone(),
+    };
+    cloner(scratch, label, target, &path)?;
     check_clone_root(&path, scratch, target)?;
     Ok(guard)
 }
@@ -510,6 +586,17 @@ pub fn check_clone_root(clone: &Path, scratch: &Path, target: &Path) -> Result<(
 }
 
 pub fn replay_command(args: &[String], checkout: &Path, clone: &Path) -> Command {
+    let names: Vec<std::ffi::OsString> = std::env::vars_os().map(|(k, _)| k).collect();
+    replay_command_with_env(args, checkout, clone, &names)
+}
+
+/// `env_names` are the variables present in the environment; every `CARGO_UNSTABLE_*` among them is removed so a nightly opt-in cannot enable artifact redirection.
+pub fn replay_command_with_env(
+    args: &[String],
+    checkout: &Path,
+    clone: &Path,
+    env_names: &[std::ffi::OsString],
+) -> Command {
     let mut process = Command::new("cargo");
     process
         .args(args)
@@ -519,7 +606,13 @@ pub fn replay_command(args: &[String], checkout: &Path, clone: &Path) -> Command
         .env_remove("CARGO_BUILD_BUILD_DIR")
         .env_remove("CARGO_BUILD_ARTIFACT_DIR")
         .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER");
+    for name in env_names {
+        if name.to_string_lossy().starts_with("CARGO_UNSTABLE_") {
+            process.env_remove(name);
+        }
+    }
+    process
         .env("CARGO_TARGET_DIR", clone)
         .env("CARGO_BUILD_BUILD_DIR", clone);
     process
@@ -651,12 +744,22 @@ pub fn prove(input: &ProveInput) -> Result<ProveReport, String> {
 }
 
 pub fn prove_with(fs: &dyn Fs, scratch: &Path, input: &ProveInput) -> Result<ProveReport, String> {
+    prove_with_cloner(fs, scratch, input, &cp_clone)
+}
+
+pub fn prove_with_cloner(
+    fs: &dyn Fs,
+    scratch: &Path,
+    input: &ProveInput,
+    cloner: &Cloner,
+) -> Result<ProveReport, String> {
     for cmd in &input.cmds {
         check_command(cmd).map_err(|why| format!("command {cmd:?} {why}"))?;
     }
     if input.cmds.is_empty() {
         return Err("no commands to replay".to_string());
     }
+    check_config(&input.checkout)?;
     let root = fs::symlink_metadata(&input.target)
         .map_err(|e| format!("{}: {e}", input.target.display()))?;
     if root.file_type().is_symlink() {
@@ -741,7 +844,7 @@ pub fn prove_with(fs: &dyn Fs, scratch: &Path, input: &ProveInput) -> Result<Pro
     let mut baseline_rebuilt = Vec::new();
     let mut baseline_problem = None;
     if decisions.iter().any(|d| d.pre_vacuous.is_none()) {
-        let clone = clone_target(fs, scratch, "baseline", &input.target)?;
+        let clone = clone_target(fs, scratch, "baseline", &input.target, cloner)?;
         let clone_target_dir = read_target(&clone.path)?;
         let before = stamps(fs, &clone_target_dir);
         let ran = replay(scratch, "baseline", input, &clone.path)?;
@@ -784,7 +887,7 @@ pub fn prove_with(fs: &dyn Fs, scratch: &Path, input: &ProveInput) -> Result<Pro
             continue;
         }
 
-        let clone = clone_target(fs, scratch, &format!("w{i}"), &input.target)?;
+        let clone = clone_target(fs, scratch, &format!("w{i}"), &input.target, cloner)?;
         let clone_target_dir = read_target(&clone.path)?;
         let mismatches = mtime_mismatches(&original_stamps, &stamps(fs, &clone_target_dir));
         if !mismatches.is_empty() {
