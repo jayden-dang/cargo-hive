@@ -1,0 +1,16 @@
+{
+  "name": "cargo-hive",
+  "version": "0.1.0",
+  "description": "Teaches coding agents to reclaim Rust build space with cargo-hive instead of cargo clean.",
+  "author": { "name": "Jayden Dang", "url": "https://github.com/jayden-dang" },
+  "homepage": "https://github.com/jayden-dang/cargo-hive",
+  "repository": "https://github.com/jayden-dang/cargo-hive",
+  "license": "MIT OR Apache-2.0",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "cargo-hive",
+    "shortDescription": "Reclaim Rust build space safely instead of cargo clean.",
+    "developerName": "Jayden Dang",
+    "category": "Developer Tools"
+  }
+}

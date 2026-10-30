@@ -20,6 +20,23 @@ cargo hive repo add ~/code/my-repo
 cargo hive status          # every registered repo; add --json for one machine-readable receipt
 ```
 
+Optional: install the agent skill, so Claude Code and Codex learn to use `cargo hive` instead of
+`cargo clean`.
+
+In Claude Code, inside a session:
+
+```
+/plugin marketplace add jayden-dang/cargo-hive
+/plugin install cargo-hive@cargo-hive
+```
+
+In Codex, from a shell:
+
+```sh
+codex plugin marketplace add jayden-dang/cargo-hive
+codex plugin add cargo-hive@cargo-hive
+```
+
 ## Commands
 
 | Command | What it does |
@@ -74,3 +91,6 @@ None is required. `~/.hive/config.json` may set `secondary_roots`, which default
 ```sh
 cargo uninstall cargo-hive && rm -rf ~/.hive
 ```
+
+To remove the agent skill, run `/plugin uninstall cargo-hive` in Claude Code, or
+`codex plugin remove cargo-hive` in Codex.
