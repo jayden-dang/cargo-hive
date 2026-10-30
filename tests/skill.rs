@@ -18,6 +18,7 @@ fn split_skill(text: &str) -> Result<(Frontmatter, String), String> {
     let mut keys = Vec::new();
     let mut metadata = Vec::new();
     let mut in_metadata = false;
+    let mut seen_metadata = false;
     let mut closed = false;
     for (i, line) in lines.by_ref().enumerate() {
         let n = i + 2;
@@ -26,8 +27,7 @@ fn split_skill(text: &str) -> Result<(Frontmatter, String), String> {
             break;
         }
         if let Some(rest) = line.strip_prefix("  ") {
-            let pair = rest.split_once(": ");
-            match pair {
+            match rest.split_once(": ") {
                 Some((k, v))
                     if in_metadata
                         && !k.is_empty()
@@ -42,12 +42,19 @@ fn split_skill(text: &str) -> Result<(Frontmatter, String), String> {
             }
             continue;
         }
-        if line == "metadata:" && !in_metadata {
+        if line == "metadata:" {
+            if seen_metadata {
+                return Err(format!("unsupported line {n}: second metadata block"));
+            }
+            seen_metadata = true;
             in_metadata = true;
             continue;
         }
         match line.split_once(": ") {
             Some((k, v)) if !k.is_empty() && !k.contains(' ') && !v.is_empty() => {
+                if keys.iter().any(|(existing, _)| existing == k) {
+                    return Err(format!("unsupported line {n}: repeated key {k:?}"));
+                }
                 in_metadata = false;
                 keys.push((k.to_string(), v.to_string()));
             }
@@ -75,26 +82,26 @@ fn check_against_spec(dir: &str, text: &str) -> Result<(), String> {
             return Err(format!("frontmatter key {k:?} is not in the allowed keys"));
         }
     }
-    if !fm.metadata.is_empty() && get(&fm.keys, "metadata").is_some() {
-        return Err("metadata given twice".to_string());
-    }
     let name = get(&fm.keys, "name").ok_or("name is missing")?;
     if name != dir {
         return Err(format!(
             "name {name:?} must equal the directory name {dir:?}"
         ));
     }
-    let well_formed = name.len() <= 64
-        && !name.starts_with('-')
-        && !name.ends_with('-')
-        && !name.contains("--")
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if !well_formed {
-        return Err(format!(
-            "name {name:?} must be at most 64 characters of [a-z0-9] with single hyphens"
-        ));
+    if name.len() > 64 {
+        return Err(format!("name {name:?} must be at most 64 characters"));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(format!("name {name:?} must use only [a-z0-9] and hyphens"));
+    }
+    if name.starts_with('-') || name.ends_with('-') {
+        return Err(format!("name {name:?} must not start or end with a hyphen"));
+    }
+    if name.contains("--") {
+        return Err(format!("name {name:?} must use single hyphens"));
     }
     let description = get(&fm.keys, "description").ok_or("description is missing")?;
     if description.chars().count() > 1024 {
@@ -123,6 +130,7 @@ fn skill_frontmatter_follows_the_spec() {
 
     let ok_desc = "description: Reclaim a large target dir instead of cargo clean";
     let long = "x".repeat(1025);
+    let long_name = "a".repeat(65);
     let long_compat = "y".repeat(501);
     let cases: Vec<(&str, String, &str)> = vec![
         (
@@ -133,7 +141,37 @@ fn skill_frontmatter_follows_the_spec() {
         (
             "hive-",
             format!("---\nname: hive-\n{ok_desc}\n---\nbody"),
-            "single hyphens",
+            "start or end with a hyphen",
+        ),
+        (
+            "-hive",
+            format!("---\nname: -hive\n{ok_desc}\n---\nbody"),
+            "start or end with a hyphen",
+        ),
+        (
+            "hi_ve",
+            format!("---\nname: hi_ve\n{ok_desc}\n---\nbody"),
+            "[a-z0-9]",
+        ),
+        (
+            "Hive",
+            format!("---\nname: Hive\n{ok_desc}\n---\nbody"),
+            "[a-z0-9]",
+        ),
+        (
+            long_name.as_str(),
+            format!("---\nname: {long_name}\n{ok_desc}\n---\nbody"),
+            "at most 64 characters",
+        ),
+        (
+            "hive",
+            format!("---\nmetadata:\n  a: \"1\"\nname: hive\nmetadata:\n  b: \"2\"\n{ok_desc}\n---\nbody"),
+            "second metadata",
+        ),
+        (
+            "hive",
+            format!("---\nname: hive\nname: hive\n{ok_desc}\n---\nbody"),
+            "repeated key",
         ),
         (
             "hi--ve",
