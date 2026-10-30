@@ -6,3 +6,15 @@ metadata:
 ---
 
 Placeholder body for the hive skill.
+
+## Command lines
+
+```
+cargo hive doctor --json
+cargo hive repo add /path/to/repo --json
+cargo hive repo list --json
+cargo hive status /path/to/repo --json
+cargo hive gc /path/to/repo --dry-run --json
+cargo hive gc /path/to/repo --json
+cargo hive explain /path/to/repo --top 20 --json
+```

@@ -294,3 +294,236 @@ fn manifest_versions_match_the_crate() {
         ".claude-plugin/marketplace.json field plugins[0].skills must be absent"
     );
 }
+
+struct CommandLine {
+    line_no: usize,
+    text: String,
+    words: Vec<String>,
+}
+
+const PREFIXES: [&str; 2] = ["cargo hive ", "cargo-hive "];
+
+fn mentions(text: &str) -> usize {
+    PREFIXES.iter().map(|p| text.matches(p).count()).sum()
+}
+
+fn command_words(text: &str) -> Option<Vec<String>> {
+    if text.trim_end().ends_with('\\') {
+        return None;
+    }
+    let rest = PREFIXES.iter().find_map(|p| text.strip_prefix(p))?;
+    Some(
+        rest.split_whitespace()
+            .take_while(|w| !(w.starts_with('|') || w.starts_with("&&") || w.starts_with('#')))
+            .take_while(|w| !w.contains('>'))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+fn scan(body: &str) -> (Vec<CommandLine>, Vec<(usize, String)>) {
+    let mut commands = Vec::new();
+    let mut strays = Vec::new();
+    let mut fenced = false;
+    for (i, line) in body.lines().enumerate() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        let texts: Vec<&str> = if fenced {
+            vec![line]
+        } else {
+            line.split('`').skip(1).step_by(2).collect()
+        };
+        let mut found = 0;
+        for text in texts {
+            if let Some(words) = command_words(text) {
+                found += 1;
+                commands.push(CommandLine {
+                    line_no: i + 1,
+                    text: text.to_string(),
+                    words,
+                });
+            }
+        }
+        if mentions(line) > found {
+            strays.push((i + 1, line.to_string()));
+        }
+    }
+    (commands, strays)
+}
+
+fn command_lines(body: &str) -> Vec<CommandLine> {
+    scan(body).0
+}
+
+fn stray_mentions(body: &str) -> Vec<(usize, String)> {
+    scan(body).1
+}
+
+#[derive(Debug, PartialEq)]
+enum Parsed {
+    Help,
+    Doctor,
+    RepoAdd,
+    RepoList,
+    Status,
+    Gc { dry_run: bool },
+    Explain,
+}
+
+fn parse(words: &[String]) -> Result<Parsed, String> {
+    use cargo_hive::cli::{Cli, Command, RepoCommand};
+    use clap::error::ErrorKind;
+    use clap::Parser;
+
+    let argv = std::iter::once("cargo-hive".to_string()).chain(words.iter().cloned());
+    let cli = match Cli::try_parse_from(argv) {
+        Ok(cli) => cli,
+        Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
+            return Ok(Parsed::Help)
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    match cli.command {
+        Command::Doctor { .. } => Ok(Parsed::Doctor),
+        Command::Repo { command } => match command {
+            RepoCommand::Add { .. } => Ok(Parsed::RepoAdd),
+            RepoCommand::List(_) => Ok(Parsed::RepoList),
+        },
+        Command::Status { .. } => Ok(Parsed::Status),
+        Command::Gc { dry_run, .. } => Ok(Parsed::Gc { dry_run }),
+        Command::Explain { .. } => Ok(Parsed::Explain),
+        Command::HoldLock { .. } | Command::TryLock { .. } => {
+            Err("the internal lock subcommands are not part of the skill".to_string())
+        }
+    }
+}
+
+fn skill_body() -> String {
+    split_skill(&repo_file("skills/hive/SKILL.md")).unwrap().1
+}
+
+fn words(line: &str) -> Vec<String> {
+    line.split_whitespace().map(str::to_string).collect()
+}
+
+#[test]
+fn skill_command_lines_parse_with_the_cli() {
+    let fenced = command_lines("```\ncargo hive status /p --json\n```");
+    assert_eq!(fenced.len(), 1);
+    assert_eq!(fenced[0].line_no, 2);
+    assert_eq!(fenced[0].words, words("status /p --json"));
+
+    let inline = command_lines("Run `cargo-hive doctor --json` first.");
+    assert_eq!(inline.len(), 1);
+    assert_eq!(inline[0].text, "cargo-hive doctor --json");
+    assert_eq!(inline[0].words, words("doctor --json"));
+
+    let bare = "Use `cargo hive` here.";
+    assert!(command_lines(bare).is_empty());
+    assert!(stray_mentions(bare).is_empty());
+
+    let cut = command_lines("```\ncargo hive gc /p --json 2>&1 | jq\n```");
+    assert_eq!(cut[0].words, words("gc /p --json"));
+    assert!(stray_mentions("```\ncargo hive gc /p --json 2>&1 | jq\n```").is_empty());
+
+    for escaped in [
+        "```\n$ cargo hive status\n```",
+        "```\nHIVE_HOME=/x cargo hive status\n```",
+        "```\n  cargo hive status\n```",
+        "```\ncargo hive status \\\n  --json\n```",
+        "Plain prose: cargo hive status.",
+    ] {
+        assert_eq!(
+            stray_mentions(escaped).len(),
+            1,
+            "mention escaped the extractor: {escaped:?}"
+        );
+        assert!(command_lines(escaped).is_empty(), "{escaped:?}");
+    }
+
+    let hold = command_lines("`cargo hive __hold-lock a b`");
+    assert!(parse(&hold[0].words).is_err());
+    assert_eq!(parse(&words("--help")), Ok(Parsed::Help));
+    assert_eq!(parse(&words("--version")), Ok(Parsed::Help));
+    assert!(parse(&words("status --no-such-flag")).is_err());
+
+    let body = skill_body();
+    for line in command_lines(&body) {
+        if let Err(e) = parse(&line.words) {
+            panic!(
+                "skill body line {} does not parse: {}\n{e}",
+                line.line_no, line.text
+            );
+        }
+    }
+    let strays = stray_mentions(&body);
+    assert!(
+        strays.is_empty(),
+        "skill body mentions the CLI outside a command line: {strays:?}"
+    );
+}
+
+#[test]
+fn skill_documents_every_mile1_command() {
+    let body = skill_body();
+    let mut seen: Vec<Parsed> = Vec::new();
+    for line in command_lines(&body) {
+        let parsed = parse(&line.words).unwrap_or_else(|e| {
+            panic!(
+                "skill body line {} does not parse: {}\n{e}",
+                line.line_no, line.text
+            )
+        });
+        if parsed == Parsed::Help {
+            continue;
+        }
+        assert!(
+            line.words.iter().any(|w| w == "--json"),
+            "skill body line {} lacks --json: {}",
+            line.line_no,
+            line.text
+        );
+        let skip = if parsed == Parsed::RepoAdd || parsed == Parsed::RepoList {
+            2
+        } else {
+            1
+        };
+        let mut path_words = 0;
+        let mut rest = line.words.iter().skip(skip);
+        while let Some(w) = rest.next() {
+            if w == "--top" || w == "-n" {
+                rest.next();
+            } else if !w.starts_with('-') {
+                path_words += 1;
+            }
+        }
+        if matches!(
+            parsed,
+            Parsed::RepoAdd | Parsed::Status | Parsed::Gc { .. } | Parsed::Explain
+        ) {
+            assert!(
+                path_words >= 1,
+                "skill body line {} carries no path: {}",
+                line.line_no,
+                line.text
+            );
+        }
+        seen.push(parsed);
+    }
+    for want in [
+        Parsed::Doctor,
+        Parsed::RepoAdd,
+        Parsed::RepoList,
+        Parsed::Status,
+        Parsed::Gc { dry_run: true },
+        Parsed::Gc { dry_run: false },
+        Parsed::Explain,
+    ] {
+        assert!(
+            seen.contains(&want),
+            "the skill documents no command line for {want:?}"
+        );
+    }
+}
