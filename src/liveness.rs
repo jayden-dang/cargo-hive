@@ -562,4 +562,235 @@ mod tests {
             other => panic!("expected Undecided, got {other:?}"),
         }
     }
+
+    fn undecided(l: Liveness) -> Vec<Uncertain> {
+        match l {
+            Liveness::Undecided { reasons } => reasons,
+            other => panic!("expected Undecided, got {other:?}"),
+        }
+    }
+
+    fn never_compiled(profile: &Path, name: &str, age: Duration) {
+        let dir = profile.join(".fingerprint").join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("output-lib-x"), "").unwrap();
+        touch(&dir.join("invoked.timestamp"), age);
+    }
+
+    fn emptied_hash(profile: &Path, name: &str, stem: &str, age: Option<Duration>) {
+        write_unit(profile, name, stem, 1, &[], age);
+        fs::write(profile.join(".fingerprint").join(name).join(stem), "").unwrap();
+    }
+
+    #[test]
+    fn an_unsupported_profile_makes_the_whole_target_undecided() {
+        let s = Scratch::new("unsupported");
+        let good = s.0.join("debug");
+        let bare = s.0.join("release");
+        fs::create_dir_all(&bare).unwrap();
+        write_unit(&good, A, "lib-a", 101, &[], Some(HOUR));
+        let reasons = undecided(decide(&target_of(&s.0, &[&good, &bare]), 6 * HOUR));
+        assert!(matches!(
+            &reasons[..],
+            [Uncertain::ProfileUnsupported { profile, .. }] if *profile == bare
+        ));
+    }
+
+    #[test]
+    fn a_not_current_unit_inside_the_window_makes_the_target_undecided() {
+        type Make = fn(&Path, &str);
+        let cases: [(&str, Make); 3] = [
+            ("never compiled", |p, n| never_compiled(p, n, HOUR)),
+            ("emptied hash", |p, n| {
+                emptied_hash(p, n, "lib-x", Some(HOUR))
+            }),
+            ("run build script", |p, n| {
+                emptied_hash(p, n, "run-build-script-build-script-build", Some(HOUR))
+            }),
+        ];
+        for (label, make) in cases {
+            let s = Scratch::new("nc-in");
+            let p = s.0.join("debug");
+            write_unit(&p, B, "lib-b", 102, &[], Some(30 * DAY));
+            make(&p, A);
+            let reasons = undecided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+            let dir = p.join(".fingerprint").join(A);
+            assert!(
+                matches!(&reasons[..], [Uncertain::NotCurrentInWindow { dir: d }] if *d == dir),
+                "{label}: {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_not_current_unit_outside_the_window_or_without_a_timestamp_is_ignored() {
+        let s = Scratch::new("nc-out");
+        let p = s.0.join("debug");
+        write_unit(&p, D, "lib-d", 104, &[], Some(30 * DAY));
+        never_compiled(&p, A, 30 * DAY);
+        emptied_hash(&p, B, "lib-b", None);
+        emptied_hash(&p, C, "run-build-script-build-script-build", Some(30 * DAY));
+        let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert!(live.is_empty());
+        let dead: Vec<&str> = dead.iter().map(|d| d.unit.dir_name.as_str()).collect();
+        assert_eq!(dead, [D]);
+    }
+
+    #[test]
+    fn an_unresolved_edge_from_a_live_unit_names_the_unit_and_the_dependency() {
+        let s = Scratch::new("unres");
+        let p = s.0.join("debug");
+        write_unit(&p, A, "lib-a", 101, &[("ghost", 999)], Some(HOUR));
+        let unit = UnitRef {
+            profile: p.clone(),
+            dir_name: A.to_string(),
+        };
+        let target = target_of(&s.0, &[&p]);
+        let reasons = undecided(decide(&target, 6 * HOUR));
+        assert_eq!(
+            reasons,
+            [Uncertain::Unresolved {
+                unit: unit.clone(),
+                dependency: "ghost".into()
+            }]
+        );
+
+        fs::remove_file(p.join(".fingerprint").join(A).join("lib-a.json")).unwrap();
+        let reasons = undecided(decide(&target, 6 * HOUR));
+        assert_eq!(
+            reasons,
+            [Uncertain::Unresolved {
+                unit,
+                dependency: le_hex(999)
+            }]
+        );
+    }
+
+    #[test]
+    fn an_unresolved_edge_from_a_dead_unit_leaves_the_target_decided() {
+        let s = Scratch::new("unres-dead");
+        let p = s.0.join("debug");
+        write_unit(&p, A, "lib-a", 101, &[("ghost", 999)], Some(30 * DAY));
+        write_unit(&p, B, "lib-b", 102, &[], Some(HOUR));
+        let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert_eq!(names(&live), [B]);
+        assert_eq!(dead[0].unit.dir_name, A);
+    }
+
+    #[test]
+    fn a_dir_without_a_unit_hash_makes_the_target_undecided() {
+        let s = Scratch::new("nohash");
+        let p = s.0.join("debug");
+        write_unit(&p, "plain", "lib-a", 101, &[], Some(30 * DAY));
+        let reasons = undecided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert_eq!(
+            reasons,
+            [Uncertain::NoUnitHash {
+                dir: p.join(".fingerprint").join("plain")
+            }]
+        );
+    }
+
+    #[test]
+    fn two_units_sharing_one_unit_hash_make_the_target_undecided() {
+        let s = Scratch::new("dup");
+        let p = s.0.join("debug");
+        let other = "z-1111111111111111";
+        write_unit(&p, A, "lib-a", 101, &[], Some(30 * DAY));
+        write_unit(&p, other, "lib-z", 102, &[], Some(30 * DAY));
+        let reasons = undecided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert_eq!(
+            reasons,
+            [Uncertain::DuplicateUnitHash {
+                a: p.join(".fingerprint").join(A),
+                b: p.join(".fingerprint").join(other),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_same_unit_hash_in_two_profile_dirs_is_not_a_duplicate() {
+        let s = Scratch::new("dup-cross");
+        let host = s.0.join("debug");
+        let cross = s.0.join("aarch64-apple-darwin").join("debug");
+        write_unit(&host, A, "lib-a", 101, &[], Some(HOUR));
+        write_unit(&cross, A, "lib-a", 101, &[], Some(HOUR));
+        let (live, _) = decided(decide(&target_of(&s.0, &[&host, &cross]), 6 * HOUR));
+        assert_eq!(live.len(), 2);
+    }
+
+    #[test]
+    fn an_unreadable_target_is_undecided() {
+        let s = Scratch::new("unreadable");
+        let mut target = target_of(&s.0, &[]);
+        target.unreadable = Some("permission denied".into());
+        let reasons = undecided(decide(&target, 6 * HOUR));
+        assert_eq!(
+            reasons,
+            [Uncertain::TargetUnreadable {
+                target: s.0.clone(),
+                why: "permission denied".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn every_reason_is_reported_with_what_clears_it() {
+        let s = Scratch::new("all");
+        let bare = s.0.join("release");
+        fs::create_dir_all(&bare).unwrap();
+        let p = s.0.join("debug");
+        write_unit(&p, A, "lib-a", 101, &[("ghost", 999)], Some(HOUR));
+        never_compiled(&p, B, HOUR);
+        let reasons = undecided(decide(&target_of(&s.0, &[&p, &bare]), 6 * HOUR));
+        assert!(matches!(
+            &reasons[..],
+            [
+                Uncertain::ProfileUnsupported { .. },
+                Uncertain::NotCurrentInWindow { .. },
+                Uncertain::Unresolved { .. }
+            ]
+        ));
+        for reason in &reasons {
+            assert!(!reason.clears_when().is_empty());
+            assert!(!reason.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn every_kind_of_reason_says_what_clears_it() {
+        let path = PathBuf::from("/t/debug");
+        let unit = UnitRef {
+            profile: path.clone(),
+            dir_name: A.into(),
+        };
+        let all = [
+            Uncertain::ProfileUnsupported {
+                profile: path.clone(),
+                why: "w".into(),
+            },
+            Uncertain::NotCurrentInWindow { dir: path.clone() },
+            Uncertain::Unresolved {
+                unit,
+                dependency: "d".into(),
+            },
+            Uncertain::ListingFailed {
+                dir: path.clone(),
+                why: "w".into(),
+            },
+            Uncertain::NoUnitHash { dir: path.clone() },
+            Uncertain::DuplicateUnitHash {
+                a: path.clone(),
+                b: path.clone(),
+            },
+            Uncertain::TargetUnreadable {
+                target: path,
+                why: "w".into(),
+            },
+        ];
+        for reason in all {
+            assert!(!reason.clears_when().is_empty(), "{reason:?}");
+            assert!(reason.to_string().contains("/t/debug"), "{reason:?}");
+        }
+    }
 }
