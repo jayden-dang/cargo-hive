@@ -684,7 +684,7 @@ fn a_command_printing_more_than_a_pipe_holds_is_counted_from_its_log() {
     cmd.arg("-c").arg(
         "i=0; while [ $i -lt 3000 ]; do echo '{\"reason\":\"compiler-artifact\",\"pad\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}'; echo noise; i=$((i+1)); done; exit 7",
     );
-    let ran = prove::run_logged(&s.path, "big", cmd, Duration::from_secs(60)).unwrap();
+    let ran = prove::run_logged(&s.path, "big", cmd, Duration::from_secs(60), 1 << 30).unwrap();
     assert_eq!(ran.exit, 7);
     assert_eq!(ran.artifact_lines, 3000);
     assert!(fs::metadata(&ran.stdout).unwrap().len() > 64 * 1024);
@@ -697,6 +697,7 @@ struct Volumes {
     fs_type: &'static str,
     scratch_mount: String,
     touch_when_measured: Option<PathBuf>,
+    fail_remove_file: bool,
 }
 
 impl platform::Fs for Volumes {
@@ -760,6 +761,9 @@ impl platform::Fs for Volumes {
         self.inner.remove_tree(p)
     }
     fn remove_file(&self, p: &Path) -> std::io::Result<()> {
+        if self.fail_remove_file {
+            return Err(std::io::Error::other("injected remove_file failure"));
+        }
         self.inner.remove_file(p)
     }
     fn volume(&self, p: &Path) -> std::io::Result<platform::VolumeInfo> {
@@ -834,7 +838,10 @@ fn the_proof_passes_a_window_whose_dead_units_cargo_does_not_need_and_calls_an_e
     assert_eq!(first.rebuilt_live, 0);
     assert_eq!(
         first.commands,
-        vec![(argv(&["build", "--message-format=json", "--offline"]), 0)]
+        vec![(
+            argv(&["build", "--locked", "--message-format=json", "--offline"]),
+            0
+        )]
     );
     assert!(matches!(
         report.windows[1].outcome,
@@ -889,6 +896,7 @@ fn a_volume_that_cannot_clone_fails_before_copying() {
             fs_type,
             scratch_mount: scratch_mount.to_string(),
             touch_when_measured: None,
+            fail_remove_file: false,
         };
         let err = prove::prove_with(&fs_, &scratch.path, &input(&fx, &[WINDOW])).unwrap_err();
         assert!(err.contains(wanted), "{err}");
@@ -980,10 +988,271 @@ fn a_change_to_the_original_during_the_proof_fails_it_naming_the_entry() {
         fs_type: "apfs",
         scratch_mount: mount.to_string_lossy().into_owned(),
         touch_when_measured: Some(touched),
+        fail_remove_file: false,
     };
 
     let err = prove::prove_with(&fs_, &scratch.path, &input(&fx, &[WINDOW])).unwrap_err();
 
     assert!(err.contains("Cargo.lock"), "{err}");
     no_clone_left(&scratch.path);
+}
+
+fn tree_of(dir: &Path) -> Vec<(PathBuf, bool)> {
+    let mut out = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(p) = pending.pop() {
+        let meta = fs::symlink_metadata(&p).unwrap();
+        out.push((p.clone(), meta.is_dir()));
+        if meta.is_dir() {
+            for e in fs::read_dir(&p).unwrap() {
+                pending.push(e.unwrap().path());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn a_symlinked_target_root_is_refused_and_nothing_is_touched() {
+    let fx = proof_fixture("prove-linkroot");
+    let scratch = Scratch::new("prove-scratch");
+    let link = fx._scratch.path.join("target-link");
+    std::os::unix::fs::symlink(&fx.target, &link).unwrap();
+    let before = tree_of(&fx.target);
+    let walked = prove::walk(&fx.target, 5_000_000).unwrap();
+    let fs_ = platform::current().unwrap().fs;
+    let mut request = input(&fx, &[WINDOW]);
+    request.target = link.clone();
+
+    let err = prove::prove_with(fs_.as_ref(), &scratch.path, &request).unwrap_err();
+
+    assert!(err.contains(&link.display().to_string()), "{err}");
+    assert!(err.contains("symbolic link"), "{err}");
+    assert_eq!(tree_of(&fx.target), before);
+    assert_eq!(
+        prove::tree_changes(&walked, &prove::walk(&fx.target, 5_000_000).unwrap()),
+        Vec::<PathBuf>::new()
+    );
+    assert_eq!(entries(&scratch.path), Vec::<String>::new());
+    assert!(prove::walk(&link, 5_000_000).is_err());
+}
+
+#[test]
+fn a_symlinked_directory_inside_the_target_is_refused_and_the_outside_survives() {
+    let fx = proof_fixture("prove-linkdir");
+    let scratch = Scratch::new("prove-scratch");
+    let outside = fx._scratch.path.join("outside-deps");
+    let deps = fx.target.join("debug/deps");
+    fs::rename(&deps, &outside).unwrap();
+    std::os::unix::fs::symlink(&outside, &deps).unwrap();
+    let before = tree_of(&outside);
+    let fs_ = platform::current().unwrap().fs;
+
+    let err = prove::prove_with(fs_.as_ref(), &scratch.path, &input(&fx, &[WINDOW])).unwrap_err();
+
+    assert!(err.contains(&deps.display().to_string()), "{err}");
+    assert_eq!(tree_of(&outside), before);
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn a_delete_cannot_be_redirected_through_a_symlink_inside_the_clone() {
+    let s = Scratch::new("prove-redirect");
+    let target = s.path.join("target");
+    let clone = s.path.join("clone");
+    let outside = s.path.join("outside");
+    write(&outside.join("keep.rlib"), "outside");
+    write(&target.join("debug/deps/keep.rlib"), "original");
+    fs::create_dir_all(clone.join("debug")).unwrap();
+    std::os::unix::fs::symlink(&outside, clone.join("debug/deps")).unwrap();
+    let fs_ = platform::current().unwrap().fs;
+
+    let err = prove::delete_in_clone(
+        fs_.as_ref(),
+        &[target.join("debug/deps/keep.rlib")],
+        &target,
+        &clone,
+    )
+    .unwrap_err();
+
+    assert!(err.contains("debug/deps"), "{err}");
+    assert!(outside.join("keep.rlib").exists());
+}
+
+#[test]
+fn a_clone_root_must_be_a_real_directory_inside_the_scratch() {
+    let s = Scratch::new("prove-cloneroot");
+    let elsewhere = Scratch::new("prove-elsewhere");
+    let scratch = s.path.join("scratch");
+    fs::create_dir_all(scratch.join("good")).unwrap();
+    fs::create_dir_all(elsewhere.path.join("real")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path.join("real"), scratch.join("link")).unwrap();
+    let target = s.path.join("target");
+    fs::create_dir_all(&target).unwrap();
+
+    assert!(prove::check_clone_root(&scratch.join("good"), &scratch, &target).is_ok());
+    let linked = prove::check_clone_root(&scratch.join("link"), &scratch, &target).unwrap_err();
+    assert!(linked.contains("link"), "{linked}");
+    assert!(prove::check_clone_root(&elsewhere.path.join("real"), &scratch, &target).is_err());
+    assert!(prove::check_clone_root(&scratch.join("missing"), &scratch, &target).is_err());
+}
+
+#[test]
+fn replayed_cargo_is_locked_and_cannot_be_redirected() {
+    for (cmd, want) in [
+        (
+            vec!["build", "--offline"],
+            vec!["build", "--locked", "--message-format=json", "--offline"],
+        ),
+        (
+            vec!["+stable", "clippy", "--", "-D", "warnings"],
+            vec![
+                "+stable",
+                "clippy",
+                "--locked",
+                "--message-format=json",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        ),
+        (
+            vec!["test", "--", "--locked"],
+            vec![
+                "test",
+                "--locked",
+                "--message-format=json",
+                "--",
+                "--locked",
+            ],
+        ),
+        (
+            vec!["check", "--frozen"],
+            vec!["check", "--message-format=json", "--frozen"],
+        ),
+        (
+            vec!["check", "--locked"],
+            vec!["check", "--message-format=json", "--locked"],
+        ),
+        (
+            vec!["fmt", "--check"],
+            vec!["fmt", "--message-format=json", "--check"],
+        ),
+    ] {
+        assert_eq!(prove::replay_args(&argv(&cmd)), argv(&want), "{cmd:?}");
+    }
+
+    let process = prove::replay_command(&argv(&["build"]), Path::new("/co"), Path::new("/cl"));
+    let envs: BTreeMap<_, _> = process
+        .get_envs()
+        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_owned())))
+        .collect();
+    for gone in [
+        "CARGO_BUILD_ARTIFACT_DIR",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+    ] {
+        assert_eq!(envs.get(gone), Some(&None), "{gone}");
+    }
+    for set in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
+        assert_eq!(
+            envs.get(set).unwrap().as_deref(),
+            Some(std::ffi::OsStr::new("/cl")),
+            "{set}"
+        );
+    }
+    assert_eq!(
+        envs.get("CARGO_BUILD_TARGET_DIR"),
+        Some(&None),
+        "CARGO_BUILD_TARGET_DIR"
+    );
+}
+
+#[test]
+fn config_out_dir_and_unstable_flags_are_refused() {
+    for cmd in [
+        vec!["build", "--config", "build.target-dir=\"/x\""],
+        vec!["build", "--config=build.target-dir=\"/x\""],
+        vec!["build", "--config", "build.build-dir=\"/x\""],
+        vec!["--config", "x=y", "build"],
+        vec!["build", "--out-dir", "x"],
+        vec!["build", "--out-dir=x"],
+        vec!["build", "-Z", "unstable-options"],
+        vec!["build", "-Zunstable-options"],
+        vec!["-Zunstable-options", "build"],
+    ] {
+        assert!(prove::check_command(&argv(&cmd)).is_err(), "{cmd:?}");
+    }
+    assert_eq!(
+        prove::check_command(&argv(&["test", "--", "--config", "-Z"])),
+        Ok(0)
+    );
+}
+
+#[test]
+fn an_error_after_a_clone_exists_removes_the_clone_before_the_scratch_does() {
+    let fx = proof_fixture("prove-errclone");
+    let scratch = Scratch::new("prove-scratch");
+    let inner = platform::current().unwrap().fs;
+    let mount = inner.volume(&scratch.path).unwrap().mount;
+    let fs_ = Volumes {
+        inner,
+        scratch: scratch.path.clone(),
+        fs_type: "apfs",
+        scratch_mount: mount.to_string_lossy().into_owned(),
+        touch_when_measured: None,
+        fail_remove_file: true,
+    };
+
+    let err = prove::prove_with(&fs_, &scratch.path, &input(&fx, &[WINDOW])).unwrap_err();
+
+    assert!(err.contains("cannot delete"), "{err}");
+    assert!(scratch.path.exists());
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn a_held_second_profile_lock_releases_the_first_profiles_lock() {
+    let fx = proof_fixture("prove-locks");
+    cargo(&fx, &["build", "--release"]);
+    let scratch = Scratch::new("prove-scratch");
+    let fs_ = platform::current().unwrap().fs;
+    let profiles = profile_dirs(&fx.target);
+    assert!(profiles.len() >= 2, "{profiles:?}");
+    let last = profiles.last().unwrap();
+    let held = match fs_.try_lock_exclusive(&last.join(".cargo-build-lock")) {
+        platform::TryLock::Acquired(guard) => guard,
+        other => panic!("expected the fixture lock to be free: {other:?}"),
+    };
+
+    let err = prove::prove_with(fs_.as_ref(), &scratch.path, &input(&fx, &[WINDOW])).unwrap_err();
+
+    assert!(err.contains(&last.display().to_string()), "{err}");
+    for profile in &profiles[..profiles.len() - 1] {
+        match fs_.try_lock_exclusive(&profile.join(".cargo-build-lock")) {
+            platform::TryLock::Acquired(_) => {}
+            other => panic!("{} stayed locked: {other:?}", profile.display()),
+        }
+    }
+    drop(held);
+}
+
+#[test]
+fn a_command_writing_past_the_cap_is_killed_and_refused() {
+    let s = Scratch::new("prove-cap");
+    let started = std::time::Instant::now();
+
+    let err = prove::run_logged(
+        &s.path,
+        "flood",
+        Command::new("yes"),
+        Duration::from_secs(20),
+        1 << 20,
+    )
+    .err()
+    .expect("a flood over the cap is an error");
+
+    assert!(err.contains("cap"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(15));
 }

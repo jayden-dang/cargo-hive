@@ -1,4 +1,3 @@
-use super::wait_within;
 use cargo_hive::cargo_target::{self, Owner, TargetDir};
 use cargo_hive::fingerprint;
 use cargo_hive::gc::{measure, Footprint};
@@ -10,12 +9,23 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 const COMMAND_DEADLINE: Duration = Duration::from_secs(30 * 60);
 const OUTPUT_CAP: u64 = 256 * 1024 * 1024;
 const WALK_CAP: usize = 5_000_000;
-const FORBIDDEN_FLAGS: [&str; 3] = ["--message-format", "--target-dir", "--artifact-dir"];
+const FORBIDDEN_FLAGS: [&str; 5] = [
+    "--message-format",
+    "--target-dir",
+    "--artifact-dir",
+    "--out-dir",
+    "--config",
+];
+/// Subcommands that accept `--locked`; a vector for any other subcommand is replayed as given and the checkout's Cargo.lock is only checked after the fact.
+const LOCKABLE: [&str; 15] = [
+    "build", "b", "check", "c", "test", "t", "clippy", "doc", "d", "run", "r", "bench", "rustc",
+    "rustdoc", "fix",
+];
 
 /// RUSTFLAGS and the owner's cargo config are left as the shell has them, since they are part of what the commands do; RUSTC_WRAPPER and RUSTC_WORKSPACE_WRAPPER are removed because they change fingerprints.
 pub struct ProveInput {
@@ -137,11 +147,30 @@ pub fn check_command(cmd: &[String]) -> Result<usize, String> {
         {
             return Err(format!("carries {flag}, which the proof sets itself"));
         }
+        if arg.starts_with("-Z") {
+            return Err("carries -Z, which can redirect cargo's output".to_string());
+        }
     }
     cmd[..before_dashes]
         .iter()
         .position(|a| !a.starts_with('+') && !a.starts_with('-'))
         .ok_or_else(|| "has no cargo subcommand".to_string())
+}
+
+/// The vector cargo runs: `--locked` and `--message-format=json` go right after the subcommand. `--locked` is added only for the subcommands in `LOCKABLE` and only when the vector has neither `--locked` nor `--frozen` before `--`, so a replay cannot rewrite the checkout's Cargo.lock.
+pub fn replay_args(cmd: &[String]) -> Vec<String> {
+    let mut out = with_json(cmd);
+    let Ok(sub) = check_command(cmd) else {
+        return out;
+    };
+    let before_dashes = cmd.iter().position(|a| a == "--").unwrap_or(cmd.len());
+    let has_lock = cmd[..before_dashes]
+        .iter()
+        .any(|a| a == "--locked" || a == "--frozen");
+    if LOCKABLE.contains(&cmd[sub].as_str()) && !has_lock {
+        out.insert(sub + 1, "--locked".to_string());
+    }
+    out
 }
 
 pub fn with_json(cmd: &[String]) -> Vec<String> {
@@ -220,6 +249,16 @@ pub fn mtime_mismatches(original: &Stamps, clone: &Stamps) -> Vec<(PathBuf, Stri
 }
 
 pub fn walk(root: &Path, cap: usize) -> Result<Tree, String> {
+    walk_links(root, cap).map(|(tree, _)| tree)
+}
+
+/// Like `walk`, never following a link, and also returning every symbolic link that points at a directory. A symlinked root is an error.
+pub fn walk_links(root: &Path, cap: usize) -> Result<(Tree, Vec<PathBuf>), String> {
+    let root_meta = fs::symlink_metadata(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    if root_meta.file_type().is_symlink() {
+        return Err(format!("{} is a symbolic link", root.display()));
+    }
+    let mut linked_dirs = Vec::new();
     let mut tree = Tree::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(path) = pending.pop() {
@@ -228,6 +267,9 @@ pub fn walk(root: &Path, cap: usize) -> Result<Tree, String> {
             .modified()
             .map_err(|e| format!("{}: {e}", path.display()))?;
         tree.insert(path.clone(), (mtime, meta.len()));
+        if meta.file_type().is_symlink() && fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
+            linked_dirs.push(path.clone());
+        }
         if tree.len() > cap {
             return Err(format!(
                 "{}: more than {cap} entries, refusing to walk further",
@@ -244,7 +286,7 @@ pub fn walk(root: &Path, cap: usize) -> Result<Tree, String> {
             }
         }
     }
-    Ok(tree)
+    Ok((tree, linked_dirs))
 }
 
 pub fn tree_changes(before: &Tree, after: &Tree) -> Vec<PathBuf> {
@@ -327,19 +369,46 @@ pub fn run_logged(
     label: &str,
     mut cmd: Command,
     deadline: Duration,
+    cap: u64,
 ) -> Result<Ran, String> {
     let stdout = scratch.join(format!("{label}.out"));
     let stderr = scratch.join(format!("{label}.err"));
-    let child = cmd
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(fs::File::create(&stdout).map_err(|e| e.to_string())?)
         .stderr(fs::File::create(&stderr).map_err(|e| e.to_string())?)
         .spawn()
         .map_err(|e| format!("cannot start {cmd:?}: {e}"))?;
-    let status = wait_within(child, deadline).status;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        let over = [&stdout, &stderr]
+            .into_iter()
+            .find(|log| fs::metadata(log).is_ok_and(|m| m.len() > cap));
+        let problem = if let Some(log) = over {
+            Some(format!(
+                "{}: output passed the {cap} byte cap; killed {cmd:?}",
+                log.display()
+            ))
+        } else if started.elapsed() > deadline {
+            Some(format!(
+                "{cmd:?} did not finish within {deadline:?}; killed"
+            ))
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(problem);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     Ok(Ran {
         exit: status.code().unwrap_or(-1),
-        artifact_lines: count_artifacts(&stdout, OUTPUT_CAP)?,
+        artifact_lines: count_artifacts(&stdout, cap)?,
         stdout,
     })
 }
@@ -376,7 +445,13 @@ fn clone_target<'a>(
     };
     let mut cmd = Command::new("cp");
     cmd.args(["-c", "-R", "-p"]).arg(target).arg(&path);
-    let ran = run_logged(scratch, &format!("cp-{label}"), cmd, COMMAND_DEADLINE)?;
+    let ran = run_logged(
+        scratch,
+        &format!("cp-{label}"),
+        cmd,
+        COMMAND_DEADLINE,
+        OUTPUT_CAP,
+    )?;
     if ran.exit != 0 {
         return Err(format!(
             "cp -c -R -p {} exited with {}",
@@ -384,6 +459,7 @@ fn clone_target<'a>(
             ran.exit
         ));
     }
+    check_clone_root(&path, scratch, target)?;
     Ok(guard)
 }
 
@@ -407,6 +483,48 @@ pub fn read_target(path: &Path) -> Result<TargetDir, String> {
     })
 }
 
+/// The clone must be a real directory (not a link) whose canonical path is inside the canonical scratch dir and is not the target itself.
+pub fn check_clone_root(clone: &Path, scratch: &Path, target: &Path) -> Result<(), String> {
+    let meta = fs::symlink_metadata(clone).map_err(|e| format!("{}: {e}", clone.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(format!(
+            "{} is not a real directory; the clone would alias another path",
+            clone.display()
+        ));
+    }
+    let real = clone
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", clone.display()))?;
+    let scratch_real = scratch
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", scratch.display()))?;
+    if !real.starts_with(&scratch_real) || target.canonicalize().is_ok_and(|t| t == real) {
+        return Err(format!(
+            "{} resolves to {}, outside the scratch dir {}",
+            clone.display(),
+            real.display(),
+            scratch_real.display()
+        ));
+    }
+    Ok(())
+}
+
+pub fn replay_command(args: &[String], checkout: &Path, clone: &Path) -> Command {
+    let mut process = Command::new("cargo");
+    process
+        .args(args)
+        .current_dir(checkout)
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .env_remove("CARGO_BUILD_BUILD_DIR")
+        .env_remove("CARGO_BUILD_ARTIFACT_DIR")
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env("CARGO_TARGET_DIR", clone)
+        .env("CARGO_BUILD_BUILD_DIR", clone);
+    process
+}
+
 struct Replay {
     commands: Vec<(Vec<String>, i32)>,
     exits: Vec<i32>,
@@ -420,19 +538,15 @@ fn replay(scratch: &Path, label: &str, input: &ProveInput, clone: &Path) -> Resu
         artifact_lines: Vec::new(),
     };
     for (i, cmd) in input.cmds.iter().enumerate() {
-        let args = with_json(cmd);
-        let mut process = Command::new("cargo");
-        process
-            .args(&args)
-            .current_dir(&input.checkout)
-            .env_remove("CARGO_TARGET_DIR")
-            .env_remove("CARGO_BUILD_TARGET_DIR")
-            .env_remove("CARGO_BUILD_BUILD_DIR")
-            .env_remove("RUSTC_WRAPPER")
-            .env_remove("RUSTC_WORKSPACE_WRAPPER")
-            .env("CARGO_TARGET_DIR", clone)
-            .env("CARGO_BUILD_BUILD_DIR", clone);
-        let ran = run_logged(scratch, &format!("{label}-{i}"), process, COMMAND_DEADLINE)?;
+        let args = replay_args(cmd);
+        let process = replay_command(&args, &input.checkout, clone);
+        let ran = run_logged(
+            scratch,
+            &format!("{label}-{i}"),
+            process,
+            COMMAND_DEADLINE,
+            OUTPUT_CAP,
+        )?;
         out.commands.push((args, ran.exit));
         out.exits.push(ran.exit);
         out.artifact_lines.push(ran.artifact_lines);
@@ -441,7 +555,13 @@ fn replay(scratch: &Path, label: &str, input: &ProveInput, clone: &Path) -> Resu
 }
 
 fn snapshot(input: &ProveInput) -> Result<Tree, String> {
-    let mut tree = walk(&input.target, WALK_CAP)?;
+    let (mut tree, linked) = walk_links(&input.target, WALK_CAP)?;
+    if let Some(link) = linked.first() {
+        return Err(format!(
+            "{} is a symbolic link to a directory inside the target; a clone would alias its destination",
+            link.display()
+        ));
+    }
     let lock = input.checkout.join("Cargo.lock");
     if let Ok(meta) = fs::symlink_metadata(&lock) {
         let mtime = meta.modified().map_err(|e| e.to_string())?;
@@ -460,14 +580,31 @@ fn rebase(path: &Path, target: &Path, clone: &Path) -> Result<PathBuf, String> {
     Ok(clone.join(rel))
 }
 
-fn delete_in_clone(
+pub fn delete_in_clone(
     fs: &dyn Fs,
     files: &[PathBuf],
     target: &Path,
     clone: &Path,
 ) -> Result<(), String> {
+    let clone_real = clone
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", clone.display()))?;
     for file in files {
         let path = rebase(file, target, clone)?;
+        if let Some(parent) = path.parent() {
+            match parent.canonicalize() {
+                Ok(real) if real.starts_with(&clone_real) => {}
+                Ok(real) => {
+                    return Err(format!(
+                        "{} reaches {} through a link, outside the clone",
+                        path.display(),
+                        real.display()
+                    ))
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("cannot resolve {}: {e}", parent.display())),
+            }
+        }
         let removed = match fs.entry_stat(&path) {
             Ok(stat) if stat.kind == EntryKind::Dir => fs.remove_tree(&path),
             Ok(_) => fs.remove_file(&path),
@@ -519,6 +656,14 @@ pub fn prove_with(fs: &dyn Fs, scratch: &Path, input: &ProveInput) -> Result<Pro
     }
     if input.cmds.is_empty() {
         return Err("no commands to replay".to_string());
+    }
+    let root = fs::symlink_metadata(&input.target)
+        .map_err(|e| format!("{}: {e}", input.target.display()))?;
+    if root.file_type().is_symlink() {
+        return Err(format!(
+            "{} is a symbolic link; pass the real target directory",
+            input.target.display()
+        ));
     }
     let target = read_target(&input.target)?;
 
