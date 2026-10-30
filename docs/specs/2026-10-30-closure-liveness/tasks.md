@@ -371,9 +371,9 @@ Design "Proof procedure", step 1, and the success signals in `.skills/LIVE/close
 
 **Depends-on:** Task 7
 
-- [ ] **Step 1: Write the failing test** `missing_proof_variables_are_named` (not ignored): a table over `missing_vars` with none, one, or all three set. Run `cargo test --test liveness_prove`; expect a compile error.
-- [ ] **Step 2: Implement** the ignored test. It fails with the missing names, parses `HIVE_PROVE_CMDS` and fails naming any command `check_command` refuses, runs `prove`, prints the report, and fails when `prove` returns `Err`, any window is `RebuiltLive`, or `all_vacuous()`.
-- [ ] **Step 3: Verify.** `cargo test --test liveness_prove` passes, with the ignored test skipped. Then run `env -u HIVE_PROVE_TARGET -u HIVE_PROVE_CHECKOUT -u HIVE_PROVE_CMDS cargo test --test liveness_prove -- --ignored`, and expect a failure naming all three, which shows the ignored test really runs. Run the merge gate.
+- [x] **Step 1: Write the failing test** `missing_proof_variables_are_named` (not ignored): a table over `missing_vars` with none, one, or all three set. Run `cargo test --test liveness_prove`; expect a compile error.
+- [x] **Step 2: Implement** the ignored test. It fails with the missing names, parses `HIVE_PROVE_CMDS` and fails naming any command `check_command` refuses, runs `prove`, prints the report, and fails when `prove` returns `Err`, any window is `RebuiltLive`, or `all_vacuous()`.
+- [x] **Step 3: Verify.** `cargo test --test liveness_prove` passes, with the ignored test skipped. Then run `env -u HIVE_PROVE_TARGET -u HIVE_PROVE_CHECKOUT -u HIVE_PROVE_CMDS cargo test --test liveness_prove -- --ignored`, and expect a failure naming all three, which shows the ignored test really runs. Run the merge gate.
 - [ ] **Step 4: Acceptance on klynt (manual, owner present).** With nothing building in klynt, run:
   ```
   HIVE_PROVE_TARGET=~/Developer/klynt/klynt/target \

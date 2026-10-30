@@ -11,7 +11,7 @@ HIVE_PROVE_CMDS='[["build","--offline"],["check","--all-targets","--offline"],["
 cargo test --release --test liveness_prove -- --ignored --nocapture
 ```
 
-Add `["clippy","--all-targets","--offline"]` only if it exits 0 on klynt first.
+The replay accepts only `build`, `check`, `test`, `doc`, `bench` and `run` by their long names; any other command is refused.
 
 ## Results
 
