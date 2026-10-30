@@ -369,7 +369,7 @@ The plugin is installed through Claude Code's and Codex's own plugin commands, a
 - [x] **Step 3: README.** Add the two install pairs after the `cargo install` step, and add the plugin uninstall next to `rm -rf ~/.hive`.
 - [x] **Step 4: Verify the CLI is unchanged.** `git diff main -- src/` is empty. `cargo test --test guards --test gc` passes. Run the merge gate.
 - [x] **Step 5: Commit** `docs(skill): record plugin installs in Claude Code and Codex, and document them in the README`.
-- [ ] **Step 6 (after the branch lands on `main`; the owner runs it in a real session):** repeat Steps 1 and 2 with the GitHub form `jayden-dang/cargo-hive`, including the interactive `/plugin marketplace add` and `/plugin install` in Claude Code, and confirm `/cargo-hive:hive` is offered. Append the result to each install heading in a follow-up commit `docs(skill): record installs from the published marketplace`.
+- [x] **Step 6 (after the branch lands on `main`; the owner runs it in a real session):** repeat Steps 1 and 2 with the GitHub form `jayden-dang/cargo-hive`, including the interactive `/plugin marketplace add` and `/plugin install` in Claude Code, and confirm `/cargo-hive:hive` is offered. Append the result to each install heading in a follow-up commit `docs(skill): record installs from the published marketplace`.
 
 _Requirements: SKILL-1.3, SKILL-1.4, SKILL-1.5_
 

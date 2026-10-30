@@ -222,7 +222,20 @@ $ ls -a <plugin cache>/cargo-hive/cargo-hive/0.1.0
 skills
 ```
 
-`.in_use` is Claude Code's own marker. The interactive `/plugin` form in the owner's session is recorded below when run.
+`.in_use` is Claude Code's own marker.
+
+Interactive form, in the owner's own Claude Code session (2026-10-30):
+
+```
+/plugin marketplace add jayden-dang/cargo-hive
+Successfully added marketplace: cargo-hive
+/plugin install cargo-hive@cargo-hive
+✓ Installed cargo-hive. Plugin is now active.
+/reload-plugins
+Reloaded: 9 plugins · 12 skills · 15 agents · 11 hooks · 2 plugin MCP servers · 1 plugin LSP server
+```
+
+After the reload the session's skill list carried `cargo-hive:hive` with the skill's description, so the skill is invocable as `/cargo-hive:hive`.
 
 ## Install — Codex
 

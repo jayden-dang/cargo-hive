@@ -1,7 +1,7 @@
 # Requirements: Agent skill (the hive skill, shipped as a plugin)
 
 Feature code: SKILL
-Status: In-progress
+Status: Implemented
 Date: 2026-10-29
 
 <!--
