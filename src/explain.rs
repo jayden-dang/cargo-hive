@@ -15,7 +15,7 @@ use crate::platform::{
 };
 use crate::receipt::{Finding, Measured};
 use crate::state::utc_timestamp;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -84,7 +84,7 @@ struct Group<'a> {
     dir_crate: String,
     stem: String,
     units: Vec<&'a Unit>,
-    deps: Option<&'a [String]>,
+    deps: Option<&'a ModeIndex>,
 }
 
 struct FeatureRow<'a> {
@@ -111,9 +111,13 @@ struct TargetTotals {
 }
 
 fn analyse(inputs: &[ProfileInput], limits: Limits, failed: &FailedUnits) -> Explanation {
+    let indexes: Vec<Option<ModeIndex>> = inputs
+        .iter()
+        .map(|input| input.deps.as_deref().map(mode_index))
+        .collect();
     let mut groups = Vec::new();
-    for input in inputs {
-        groups.extend(groups_in(input));
+    for (input, index) in inputs.iter().zip(&indexes) {
+        groups.extend(groups_in(input, index.as_ref()));
     }
     groups.sort_by(rank_groups);
 
@@ -218,7 +222,7 @@ fn analyse(inputs: &[ProfileInput], limits: Limits, failed: &FailedUnits) -> Exp
     }
 }
 
-fn groups_in(input: &ProfileInput) -> Vec<Group<'_>> {
+fn groups_in<'a>(input: &'a ProfileInput, index: Option<&'a ModeIndex>) -> Vec<Group<'a>> {
     let mut buckets: BTreeMap<(&str, &str, u64, u64), Vec<&Unit>> = BTreeMap::new();
     for unit in &input.units {
         let dir_crate = directory_crate(&unit.dir_name, &unit.hash_hex);
@@ -236,7 +240,7 @@ fn groups_in(input: &ProfileInput) -> Vec<Group<'_>> {
             dir_crate: dir_crate.to_string(),
             stem: stem.to_string(),
             units,
-            deps: input.deps.as_deref(),
+            deps: index,
         })
         .collect()
 }
@@ -324,38 +328,33 @@ fn crate_and_kind(stem: &str) -> (String, String) {
     (crate_name, kind)
 }
 
-fn unit_mode(dir_name: &str, hash_hex: &str, deps: &[String]) -> Mode {
+fn unit_mode(dir_name: &str, hash_hex: &str, deps: &ModeIndex) -> Mode {
     let hash = directory_suffix(dir_name).unwrap_or(hash_hex);
-    let mut saw_rmeta = false;
-    for name in deps {
-        let Some(ext) = matched_extension(name, hash) else {
-            continue;
-        };
-        if ext.is_empty() || ext == "rlib" || ext == "dylib" {
-            return Mode::Build;
-        }
-        if ext == "rmeta" {
-            saw_rmeta = true;
-        }
-    }
-    if saw_rmeta {
-        Mode::Check
-    } else {
-        Mode::Unknown
+    match deps.get(hash) {
+        Some(&(true, _)) => Mode::Build,
+        Some(&(false, true)) => Mode::Check,
+        _ => Mode::Unknown,
     }
 }
 
-fn matched_extension<'a>(name: &'a str, hash_hex: &str) -> Option<&'a str> {
-    let segment = match name.rsplit_once('-') {
-        Some((_, tail)) => tail,
-        None => name,
-    };
-    let rest = segment.strip_prefix(hash_hex)?;
-    if rest.is_empty() {
-        Some("")
-    } else {
-        rest.strip_prefix('.')
+/// What `deps/` holds for each unit hash: `(has a build artifact, has an rmeta)`.
+type ModeIndex = HashMap<String, (bool, bool)>;
+
+fn mode_index(deps: &[String]) -> ModeIndex {
+    let mut index = ModeIndex::new();
+    for name in deps {
+        let segment = name
+            .rsplit_once('-')
+            .map_or(name.as_str(), |(_, tail)| tail);
+        let (hash, ext) = segment.split_once('.').unwrap_or((segment, ""));
+        let entry = index.entry(hash.to_string()).or_default();
+        if ext.is_empty() || ext == "rlib" || ext == "dylib" {
+            entry.0 = true;
+        } else if ext == "rmeta" {
+            entry.1 = true;
+        }
     }
+    index
 }
 
 fn group_finding(
@@ -833,7 +832,7 @@ fn profile_inputs(
                 deps: None,
                 not_current: Vec::new(),
             };
-            if !groups_in(&input).is_empty() {
+            if !groups_in(&input, None).is_empty() {
                 if cancelled() {
                     return Err(Cancelled);
                 }
