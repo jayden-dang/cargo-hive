@@ -166,7 +166,7 @@ Design "Liveness", flow steps 2 to 5 and 9, Decisions 1, 2 and 6. This task ship
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing tests** in `src/liveness.rs`. Write a new helper, not a copy of `tests/explain.rs::write_unit`: that one uses one value for both the dir suffix and the hash content, which would hide the unit hash versus fingerprint split. The helper takes a dir name with its own 16-hex unit hash, a *different* fingerprint u64 (written with `le_hex` into the hash file), a kind stem, `deps` as `[pkg, name, false, u64]`, and a timestamp age set with `File::options().write(true).open(..)?.set_modified(..)`. Each test runs `read_profile` per profile, builds a `TargetDir` by hand, and calls `liveness` with the real `Fs`:
+- [x] **Step 1: Write the failing tests** in `src/liveness.rs`. Write a new helper, not a copy of `tests/explain.rs::write_unit`: that one uses one value for both the dir suffix and the hash content, which would hide the unit hash versus fingerprint split. The helper takes a dir name with its own 16-hex unit hash, a *different* fingerprint u64 (written with `le_hex` into the hash file), a kind stem, `deps` as `[pkg, name, false, u64]`, and a timestamp age set with `File::options().write(true).open(..)?.set_modified(..)`. Each test runs `read_profile` per profile, builds a `TargetDir` by hand, and calls `liveness` with the real `Fs`:
   - `a_unit_inside_the_window_and_everything_it_reaches_are_live`: A (age 1 h) → B → C (age 30 d), plus D (30 d) unreached; window 6 h → live A, B, C; dead D.
   - `a_dependency_in_another_profile_dir_of_the_same_target_is_reached`: a bin under `aarch64-apple-darwin/debug` depending on a proc-macro under `debug`.
   - `an_edge_matching_two_units_reaches_both`.
@@ -177,9 +177,9 @@ Design "Liveness", flow steps 2 to 5 and 9, Decisions 1, 2 and 6. This task ship
   - `two_calls_on_an_unchanged_target_are_equal`, and the target tree is byte-identical before and after (no write).
 
   Then add a new test, `liveness_spawns_no_process`, to `tests/guards.rs`: the text of `src/liveness.rs` (via `include_str!("../src/liveness.rs")`) before its first `#[cfg(test)]` contains neither `std::process` nor `Command`. Run `cargo test --lib liveness::` and `cargo test --test guards liveness_spawns_no_process`; expect compile errors: module `liveness` not found.
-- [ ] **Step 2: Implement** the module per design flow steps 2–5 and 9: the target-wide `hash_hex` index across supported profiles, root selection with `unit_timestamp`/`in_window`, breadth-first traversal over `le_hex` lookups, and dead units as not-live, unit-hashed, collectible-kind current units with `files` empty for now. Open with a `//!` comment stating the read-only contract.
-- [ ] **Step 3: Verify.** The new tests pass. Run the merge gate.
-- [ ] **Step 4: Commit** `feat(liveness): decide which units of a target dir are live from the window and the fingerprint graph`.
+- [x] **Step 2: Implement** the module per design flow steps 2–5 and 9: the target-wide `hash_hex` index across supported profiles, root selection with `unit_timestamp`/`in_window`, breadth-first traversal over `le_hex` lookups, and dead units as not-live, unit-hashed, collectible-kind current units with `files` empty for now. Open with a `//!` comment stating the read-only contract.
+- [x] **Step 3: Verify.** The new tests pass. Run the merge gate.
+- [x] **Step 4: Commit** `feat(liveness): decide which units of a target dir are live from the window and the fingerprint graph`.
 
 _Requirements: LIVE-1.1, LIVE-1.2, LIVE-1.3, LIVE-1.4, LIVE-1.5, LIVE-1.6, LIVE-1.7, LIVE-1.8, LIVE-1.9, LIVE-1.10_
 
