@@ -95,6 +95,12 @@ fn repo_add_status_and_doctor_leave_checkouts_targets_and_cargo_home_unchanged()
         ],
     );
     let never_built = init_repo(&s.path.join("never-built"), "");
+    fs::write(
+        built.join("src/lib.rs"),
+        "pub fn answer() -> u32 { \"no\" }\n",
+    )
+    .unwrap();
+    hive.build_crate_failing(&built);
     let real_cargo_home = cargo_home();
     let (before, marks) = (tree(&s.path), cargo_home_marks());
     let runs: Vec<Vec<&str>> = vec![
@@ -103,6 +109,7 @@ fn repo_add_status_and_doctor_leave_checkouts_targets_and_cargo_home_unchanged()
         vec!["status"],
         vec!["status", "--no-sizes"],
         vec!["doctor"],
+        vec!["explain"],
     ];
     for args in runs {
         let out = hive
@@ -137,6 +144,7 @@ fn repo_add_status_and_doctor_leave_a_scratch_cargo_home_unchanged() {
         vec!["repo", "add", repo.to_str().unwrap()],
         vec!["status", "--no-sizes"],
         vec!["doctor"],
+        vec!["explain"],
     ];
     for args in runs {
         let out = hive
@@ -156,6 +164,41 @@ fn repo_add_status_and_doctor_leave_a_scratch_cargo_home_unchanged() {
         Vec::<String>::new(),
         "hive changed the scratch CARGO_HOME"
     );
+}
+
+#[test]
+fn explain_installs_nothing_in_the_build_path() {
+    let hive = Hive::ready();
+    let s = Scratch::new("explain-path");
+    let repo = init_repo(&s.path.join("app"), "");
+    hive.build_crate(&repo, None);
+    assert!(hive
+        .run(&["repo", "add", repo.to_str().unwrap()])
+        .status
+        .success());
+    let dot_cargo = repo.join(".cargo");
+    assert!(
+        !dot_cargo.exists(),
+        "the fixture checkout already had .cargo"
+    );
+    let real_cargo_home = cargo_home();
+    let marks = cargo_home_marks();
+    let out = hive
+        .command(&["explain"])
+        .env("CARGO_HOME", &real_cargo_home)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !dot_cargo.exists(),
+        "explain created .cargo in the checkout"
+    );
+    assert_eq!(cargo_home_marks(), marks, "explain changed ~/.cargo");
 }
 
 #[test]
@@ -325,5 +368,66 @@ fn status_on_klynt_finishes_within_two_seconds_cold_and_warm() {
         warm[2] < Duration::from_secs(2),
         "warm median took {:?}",
         warm[2]
+    );
+}
+
+#[test]
+#[ignore = "manual performance check on the proof machine; needs ~/Developer/klynt/klynt"]
+fn explain_on_klynt_stays_within_two_seconds_of_status() {
+    let klynt = PathBuf::from(std::env::var_os("HOME").unwrap()).join("Developer/klynt/klynt");
+    assert!(
+        klynt.join("Cargo.toml").is_file(),
+        "{} is not a checkout",
+        klynt.display()
+    );
+    let klynt = klynt.to_str().unwrap();
+    let hive = Hive::ready();
+    fs::remove_file(hive.home.path.join("config.json")).unwrap(); // the real defaults, as a user has them
+    let real = cargo_home();
+    assert!(hive
+        .command(&["repo", "add", klynt])
+        .env("CARGO_HOME", &real)
+        .status()
+        .unwrap()
+        .success());
+    let run = |args: &[&str]| {
+        let started = Instant::now();
+        let out = hive
+            .command(args)
+            .env("CARGO_HOME", &real)
+            .output()
+            .unwrap();
+        let took = started.elapsed();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        took
+    };
+    let snapshot = hive.home.path.join("snapshot.json");
+    let _ = fs::remove_file(&snapshot);
+    let status_cold = run(&["status", klynt, "--no-sizes", "--json"]);
+    let _ = fs::remove_file(&snapshot);
+    let explain_cold = run(&["explain", klynt, "--json"]);
+    let mut status_warm: Vec<Duration> = (0..5)
+        .map(|_| run(&["status", klynt, "--no-sizes", "--json"]))
+        .collect();
+    status_warm.sort();
+    let mut explain_warm: Vec<Duration> =
+        (0..5).map(|_| run(&["explain", klynt, "--json"])).collect();
+    explain_warm.sort();
+    eprintln!(
+        "cold status {status_cold:?} explain {explain_cold:?}; warm status {status_warm:?} explain {explain_warm:?}"
+    );
+    assert!(
+        explain_cold.saturating_sub(status_cold) <= Duration::from_secs(2),
+        "cold explain {explain_cold:?} minus status {status_cold:?}"
+    );
+    assert!(
+        explain_warm[2].saturating_sub(status_warm[2]) <= Duration::from_secs(2),
+        "warm median explain {:?} minus status {:?}",
+        explain_warm[2],
+        status_warm[2]
     );
 }
