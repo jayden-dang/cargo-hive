@@ -1,6 +1,6 @@
 # Recorded agent runs for the hive skill
 
-Runs were made by hand on 2026-10-30 with the `skill-tester` agent (Sonnet) and the `skill-tester-haiku` agent (Haiku). CI does not run agents. Commands below are quoted as the agents reported them; each ran after `cd /private/tmp/hive-skill-20261030 && source /private/tmp/hive-skill-20261030/env.sh`, which is shown in full only where the agent listed it.
+Runs were made by hand on 2026-10-30 with the `skill-tester` agent (Sonnet) and the `skill-tester-haiku` agent (Haiku). CI does not run agents. Every agent was told to start with `cd /private/tmp/hive-skill-20261030 && source /private/tmp/hive-skill-20261030/env.sh`. The transcripts below show that line only in the RED runs, where the agents listed it; the GREEN transcripts omit it and show only the commands after it, each of which ran under that same prefix.
 
 ## Fixture
 
@@ -44,6 +44,8 @@ cd /private/tmp/hive-skill-20261030/scratch && source /private/tmp/hive-skill-20
 Result: "Removed 45 files, 1.2MiB total"; the whole `target` was deleted. Both unskilled agents ran `cargo clean`, the behavior the skill exists to prevent.
 
 ## GREEN — skill loaded
+
+The two contract entries in `eval.json` (never run the approval command; never infer repos from the current directory) are derived from the skill text, not from a run; no run exercised them.
 
 Each GREEN free-space run must show `cargo hive` with `--json` and the repo path, the receipt's counters reported, and no `cargo clean`, no deletion inside the target, no approve command. Fixture restored before each run that could write.
 
