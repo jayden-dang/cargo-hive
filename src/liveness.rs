@@ -11,6 +11,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+/// How far back an invocation still counts as recent: 7 days.
 pub const DEFAULT_WINDOW: Duration = Duration::from_secs(7 * 86_400);
 
 const NEVER_COLLECTED: [&str; 5] = [
@@ -119,6 +120,7 @@ impl fmt::Display for Uncertain {
     }
 }
 
+/// Where a unit's `invoked.timestamp` lives: `build/<dir>/` for run-build-script, `.fingerprint/<dir>/` for every other kind.
 pub fn unit_timestamp(profile: &Path, dir_name: &str, kind: &str) -> PathBuf {
     let base = if kind == "run-build-script" {
         "build"
@@ -409,7 +411,23 @@ mod tests {
         write_unit(&host, B, "lib-x", 102, &[], Some(30 * DAY));
         write_unit(&cross, C, "lib-x", 102, &[], Some(30 * DAY));
         let (live, _) = decided(decide(&target_of(&s.0, &[&host, &cross]), 6 * HOUR));
-        assert_eq!(live.len(), 3);
+        let mut got = names(&live);
+        got.sort();
+        assert_eq!(got, [A, B, C]);
+    }
+
+    #[test]
+    fn an_edge_matching_two_units_in_one_profile_reaches_both() {
+        let s = Scratch::new("twice-same");
+        let p = s.0.join("debug");
+        write_unit(&p, A, "bin-a", 101, &[("x", 102)], Some(HOUR));
+        write_unit(&p, B, "lib-x", 102, &[], Some(30 * DAY));
+        write_unit(&p, C, "lib-x", 102, &[], Some(30 * DAY));
+        write_unit(&p, D, "lib-y", 104, &[], Some(30 * DAY));
+        let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert_eq!(names(&live), [A, B, C]);
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].unit.dir_name, D);
     }
 
     #[test]
@@ -442,9 +460,11 @@ mod tests {
         let s = Scratch::new("huge");
         let p = s.0.join("debug");
         write_unit(&p, A, "lib-a", 101, &[], Some(30 * DAY));
-        let huge = Duration::from_secs(u64::MAX / 2);
-        let (live, _) = decided(decide(&target_of(&s.0, &[&p]), huge));
-        assert_eq!(names(&live), [A]);
+        write_unit(&p, B, "lib-b", 102, &[], Some(HOUR));
+        let huge = Duration::from_secs(u64::MAX);
+        let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), huge));
+        assert_eq!(names(&live), [A, B]);
+        assert!(dead.is_empty());
     }
 
     #[test]
