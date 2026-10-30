@@ -70,11 +70,23 @@ Copying new registry units from a live checkout into the store, under a try-lock
 _Avoid_: harvest
 
 **Roots**:
-Units whose `invoked.timestamp` falls inside the GC window.
+Units whose `invoked.timestamp` mtime falls inside the GC window, or lies later than now.
 
 **Closure liveness**:
-A unit is live if it is reachable from the roots over the fingerprint graph.
+A unit is live if it is reachable from the roots over the fingerprint graph of its whole target dir, edges resolving across every profile dir in it.
 _Avoid_: reachability GC, mark phase
+
+**Dead unit**:
+A unit in a Decided target dir that is not live, and whose hash-keyed `deps/` and `examples/` files plus fingerprint dir may be collected. Build-script, run-build-script and doc units are never dead units.
+_Avoid_: garbage unit, stale unit, orphan unit
+
+**Undecided**:
+The liveness verdict for a target dir whose graph cannot prove reachability (a not-current unit inside the window, an unresolved edge from a live unit, or an unsupported profile); it has no dead units, and each reason names what clears it.
+_Avoid_: unknown, partial
+
+**Vacuous**:
+The outcome of a liveness proof run that could not have caught a fault (empty dead set, or a verify command that failed or built nothing); never counted as a pass.
+_Avoid_: skipped, trivially passing
 
 **Auto tier**:
 GC that runs without a plan: `rustc*`/`rmeta*` temp entries and superseded incremental sessions, always after taking the owner's lock.
