@@ -323,7 +323,7 @@ Design "Proof procedure" and Decisions 9 and 10.
 
 **Depends-on:** Task 2, Task 6
 
-- [ ] **Step 1: Write the failing helper tests** in `tests/liveness.rs`:
+- [x] **Step 1: Write the failing helper tests** in `tests/liveness.rs`:
   - `commands_are_checked_and_json_is_inserted_after_the_subcommand`: a table where `["build"]` → 0; `["+stable","build","--offline"]` → 1; `["-q","check"]` → 1. `["test","--","--nocapture"]` becomes `["test","--message-format=json","--","--nocapture"]`. These are refused: `[]`; `["--offline"]`; and any vector carrying `--message-format`, `--message-format=short`, `--target-dir x`, `--target-dir=x` or `--artifact-dir=x` before `--`. `["test","--","--target-dir"]` is accepted.
   - `rebuilt_units_are_new_dirs_or_changed_timestamps`, and `a_rebuilt_live_unit_fails_the_window`: hand-made maps where a changed key in the live set gives `RebuiltLive`, and one outside it gives `Passed`.
   - `a_window_is_vacuous_when_undecided_empty_failed_or_silent`: a table over `vacuous_reason` with Undecided, Decided with no dead unit, an exit of 101, and a command with 0 artifact lines, each giving a reason. A Decided result with dead units, all exits 0 and lines > 0 gives `None`.
@@ -331,12 +331,12 @@ Design "Proof procedure" and Decisions 9 and 10.
   - `all_vacuous_and_render_name_each_window_command_and_exit`: `render` contains every command's argv and exit status, and `all_vacuous` is true only when every outcome is Vacuous.
 
   Run `cargo test --test liveness`; expect compile errors: module `prove` not found.
-- [ ] **Step 2: Write the failing procedure tests** in `tests/liveness.rs`. Each uses a fixture in which `check` and then `build --bins --examples` ran and the check variant was backdated, with commands `[["build","--offline"]]`:
+- [x] **Step 2: Write the failing procedure tests** in `tests/liveness.rs`. Each uses a fixture in which `check` and then `build --bins --examples` ran and the check variant was backdated, with commands `[["build","--offline"]]`:
   - `the_proof_passes_a_window_whose_dead_units_cargo_does_not_need_and_calls_an_empty_window_vacuous`: the 6 h window is `Passed` with `dead_units > 0`, `dead_bytes.bytes.freed > 0`, `unmapped.bytes.freed > 0` and `rebuilt_live == 0`. The 3650 d window is `Vacuous`. The original tree is unchanged, and the scratch dir holds no clone afterwards.
   - `a_held_build_lock_fails_the_proof_and_leaves_no_clone`: hold `.cargo-build-lock` with `Fs::try_lock_exclusive` from the test. Expect `Err` naming the profile dir, and an empty scratch dir.
   - `a_volume_that_cannot_clone_fails_before_copying`: `prove_with` with a wrapper `Fs` whose `volume` reports `fs_type: "hfs"`, and then a different `mount` for the scratch dir. Each gives `Err`, and nothing is copied.
   - `a_baseline_rebuild_makes_every_window_vacuous`: touch a source file of the fixture after the build, so the baseline replay rebuilds. Expect every window `Vacuous`, naming the unit.
-- [ ] **Step 3: Implement** `prove_with` in the design's order:
+- [x] **Step 3: Implement** `prove_with` in the design's order:
   1. Validate the commands.
   2. Lock every profile's `.cargo-build-lock`; `Gone` needs no lock.
   3. Preflight: `volume(target).fs_type == "apfs"`, and the `mount` of the target and of the scratch dir are equal.
@@ -347,8 +347,8 @@ Design "Proof procedure" and Decisions 9 and 10.
   8. Re-walk the original, compare with `tree_changes`, then release the locks.
 
   Clones go in `scratch`. `cp -c -R -p` and each cargo run go through `wait_within` (30 min each), with stdout and stderr redirected to files in `scratch` and read back capped at 256 MiB. `compiler-artifact` lines are counted from that file. Walks are capped at 5,000,000 entries.
-- [ ] **Step 4: Verify** `cargo test --test liveness` passes. Run the merge gate.
-- [ ] **Step 5: Commit** `test(liveness): prove on an APFS clone that deleting dead units rebuilds no live unit`.
+- [x] **Step 4: Verify** `cargo test --test liveness` passes. Run the merge gate.
+- [x] **Step 5: Commit** `test(liveness): prove on an APFS clone that deleting dead units rebuilds no live unit`.
 
 _Requirements: LIVE-4.2, LIVE-4.3, LIVE-4.4, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.12, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16, LIVE-4.17_
 
