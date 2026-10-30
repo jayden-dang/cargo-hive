@@ -124,8 +124,7 @@ fn check_against_spec(dir: &str, text: &str) -> Result<(), String> {
 fn skill_frontmatter_follows_the_spec() {
     let text = repo_file("skills/hive/SKILL.md");
     check_against_spec("hive", &text).unwrap();
-    let (fm, body) = split_skill(&text).unwrap();
-    assert_eq!(get(&fm.metadata, "hive-version"), Some("0.1.0"));
+    let (_, body) = split_skill(&text).unwrap();
     assert!(!body.trim().is_empty(), "the skill body is empty");
 
     let ok_desc = "description: Reclaim a large target dir instead of cargo clean";
@@ -229,4 +228,69 @@ fn skill_frontmatter_follows_the_spec() {
             .expect_err(&format!("accepted a frontmatter that breaks {rule}"));
         assert!(err.contains(rule), "error {err:?} does not name {rule:?}");
     }
+}
+
+fn manifest(rel: &str) -> serde_json::Value {
+    serde_json::from_str(&repo_file(rel)).unwrap_or_else(|e| panic!("{rel} is not JSON: {e}"))
+}
+
+#[test]
+fn manifest_versions_match_the_crate() {
+    let crate_version = env!("CARGO_PKG_VERSION");
+    let (fm, _) = split_skill(&repo_file("skills/hive/SKILL.md")).unwrap();
+    assert_eq!(
+        get(&fm.metadata, "hive-version"),
+        Some(crate_version),
+        "skills/hive/SKILL.md metadata.hive-version must equal the crate version"
+    );
+
+    for rel in [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"] {
+        let plugin = manifest(rel);
+        assert_eq!(plugin["name"], "cargo-hive", "{rel} field name");
+        assert_eq!(
+            plugin["version"], crate_version,
+            "{rel} field version must equal the crate version"
+        );
+    }
+    assert_eq!(
+        manifest(".claude-plugin/plugin.json")["skills"],
+        serde_json::json!(["./skills/hive"]),
+        ".claude-plugin/plugin.json field skills"
+    );
+    assert_eq!(
+        manifest(".codex-plugin/plugin.json")["skills"],
+        "./skills/",
+        ".codex-plugin/plugin.json field skills"
+    );
+
+    let market = manifest(".claude-plugin/marketplace.json");
+    assert_eq!(
+        market["name"], "cargo-hive",
+        ".claude-plugin/marketplace.json field name"
+    );
+    let plugins = market["plugins"]
+        .as_array()
+        .unwrap_or_else(|| panic!(".claude-plugin/marketplace.json field plugins is not a list"));
+    assert_eq!(
+        plugins.len(),
+        1,
+        ".claude-plugin/marketplace.json field plugins must hold exactly one plugin"
+    );
+    let entry = &plugins[0];
+    assert_eq!(
+        entry["name"], "cargo-hive",
+        ".claude-plugin/marketplace.json field plugins[0].name"
+    );
+    assert_eq!(
+        entry["source"], "./",
+        ".claude-plugin/marketplace.json field plugins[0].source"
+    );
+    assert!(
+        entry.get("version").is_none(),
+        ".claude-plugin/marketplace.json field plugins[0].version must be absent"
+    );
+    assert!(
+        entry.get("skills").is_none(),
+        ".claude-plugin/marketplace.json field plugins[0].skills must be absent"
+    );
 }

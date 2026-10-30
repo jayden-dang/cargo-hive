@@ -1,0 +1,12 @@
+{
+  "name": "cargo-hive",
+  "owner": { "name": "Jayden Dang" },
+  "description": "Marketplace for the cargo-hive agent skill.",
+  "plugins": [
+    {
+      "name": "cargo-hive",
+      "source": "./",
+      "description": "Teaches coding agents to reclaim Rust build space with cargo-hive instead of cargo clean."
+    }
+  ]
+}
