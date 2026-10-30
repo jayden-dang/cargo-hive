@@ -25,6 +25,7 @@ This feature relies on ARCH-2, ARCH-8, ARCH-10 and ARCH-12, and changes none of 
 6. **No YAML dependency.** The frontmatter is a file this repo owns, so `tests/skill.rs` reads only a strict subset: top-level `key: value` lines, plus one `metadata:` block of two-space-indented `key: "value"` lines. Anything else fails the test as an unsupported line. Adding `serde_yaml` or a similar crate would be a new dependency, which is the owner's call, and nothing here needs it.
 7. **Command lines use literal example values, and names stay bare.** A placeholder in a subcommand or typed-flag position fails to parse (`cargo hive <sub>` gives `InvalidSubcommand`). So every command line spells its subcommand and uses literal values for typed flags, such as `/path/to/repo` and whatever numeric flag EXPLAIN ships with a number. When the skill names the command itself, it writes the bare span `cargo hive` or `cargo-hive`, with nothing after it. The extractor only takes spans that continue past `cargo hive ` (SKILL-4.2), so a bare name is never read as a command line.
 8. **Agent runs are made by hand**, with the `skill-tester` (Sonnet) and `skill-tester-haiku` agents, and recorded in `skills/hive/TESTS.md`. `eval.json` follows the owner's `lint-skill-evals.py` fields. CI does not run agents (requirements Out of Scope).
+9. **Plugin root is `plugin/` (amendment 2026-10-30).** The marketplace entry's `source` is `./plugin`, and `plugin/` holds only the two manifests and `skills/hive/SKILL.md`. A spike with both harnesses showed their plugin caches then receive only that directory, where `source: "./"` copied the whole repository (Codex included `.git`). Installing from GitHub still clones the repository once as the marketplace; the cache the harness loads from holds only the plugin. The run records `skills/hive/TESTS.md` and `skills/hive/eval.json` stay outside `plugin/`, so they do not ship.
 
 ## Architecture
 
@@ -34,7 +35,7 @@ deep modules — an interface much simpler than what it hides.
 
 ### Plugin manifests
 
-Satisfies: SKILL-1.1, SKILL-1.2
+Satisfies: SKILL-1.6, SKILL-1.7
 Reuse: rung 4 — the Claude Code and Codex plugin systems, laid out as in the owner's `jayden-dang/skills` (`.claude-plugin/marketplace.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`)
 Interface: marketplace `cargo-hive` → plugin `cargo-hive` (source `./`) → skill `hive`
 Depth: n/a — extends the harnesses' plugin systems; the files are configuration they read
@@ -42,16 +43,16 @@ Locality: three new JSON files at the repo root; no existing module touched (lea
 
 ```
 .claude-plugin/marketplace.json  {"name": "cargo-hive", "owner": {...},
-                                  "plugins": [{"name": "cargo-hive", "source": "./", "description": "..."}]}
-.claude-plugin/plugin.json       {"name": "cargo-hive", "version": "0.1.0", "description": "...",
+                                  "plugins": [{"name": "cargo-hive", "source": "./plugin", "description": "..."}]}
+plugin/.claude-plugin/plugin.json {"name": "cargo-hive", "version": "0.1.0", "description": "...",
                                   "skills": ["./skills/hive"]}
-.codex-plugin/plugin.json        {"name": "cargo-hive", "version": "0.1.0", "description": "...",
+plugin/.codex-plugin/plugin.json  {"name": "cargo-hive", "version": "0.1.0", "description": "...",
                                   "skills": "./skills/", "interface": {"displayName": "cargo-hive", ...}}
 ```
 
 The marketplace entry has no `version` and no `skills` (Decision 2). The Codex manifest copies the `interface` block the skills repo uses, with only the fields that repo fills.
 
-### The skill (`skills/hive/SKILL.md`)
+### The skill (`plugin/skills/hive/SKILL.md`)
 
 Satisfies: SKILL-2.1, SKILL-2.2, SKILL-2.3, SKILL-2.4, SKILL-2.5, SKILL-2.6, SKILL-3.1, SKILL-3.2, SKILL-3.3, SKILL-6.1, SKILL-6.2
 Reuse: rung 4 — the Agent Skills format (frontmatter plus a markdown body), read natively by both harnesses
@@ -83,7 +84,7 @@ There is no `allowed-tools` key (SKILL-6.2). The body is at most 150 lines (SKIL
 
 ### Drift test (`tests/skill.rs`)
 
-Satisfies: SKILL-4.1, SKILL-4.2, SKILL-4.3, SKILL-4.4, SKILL-5.3
+Satisfies: SKILL-4.2, SKILL-4.3, SKILL-4.4, SKILL-4.5, SKILL-5.3, SKILL-5.4
 Reuse: rung 2 — `cargo_hive::cli::{Cli, Command, RepoCommand}` (`src/cli.rs:17,23,69`, all `pub`) for parsing. Rung 4 — `env!("CARGO_PKG_VERSION")`, which Cargo sets for integration tests. Rung 5 — `serde_json` (already a dependency) for the manifests and `eval.json`. Rung 7 — two small readers, the frontmatter subset (Decision 6) and command-line extraction, because nothing installed does either.
 Respects: ARCH-8 (the skill's command lines carry path arguments; the test parses them as the binary would)
 Interface: `cargo test --test skill`. Each failure message names the file, the rule and the offending line or value.
@@ -103,7 +104,7 @@ Until EXPLAIN merges, `Command` has no `Explain` variant. The skill's `explain` 
 
 ### Agent runs (`skills/hive/TESTS.md`, `skills/hive/eval.json`)
 
-Satisfies: SKILL-1.3, SKILL-1.4, SKILL-5.1, SKILL-5.2
+Satisfies: SKILL-1.3, SKILL-1.4, SKILL-1.8, SKILL-5.1, SKILL-5.2
 Reuse: rung 2 — the owner's skill-testing practice: a `TESTS.md` RED/GREEN record plus `eval.json`, run by the `skill-tester` and `skill-tester-haiku` agents
 Interface: two files a reader opens; `eval.json` is also read by `tests/skill.rs`
 Depth: n/a — evidence records, not code

@@ -171,6 +171,34 @@ Installed plugins:
 
 `Skills (1)  hive` is the skill behind `/cargo-hive:hive`. The interactive slash-command form is not run here; it waits for the published marketplace. The GitHub-form install and the interactive `/plugin` + `/cargo-hive:hive` check remain the owner's post-merge step.
 
+### After the plugin moved to `plugin/` (2026-10-30)
+
+Clean `git clone --branch skill-amend` into `/private/tmp/hive-skill-install2-20261030/clone`, with `CLAUDE_CONFIG_DIR=/private/tmp/hive-skill-install2-20261030/claude`. Each command is followed by its output.
+
+```
+$ claude plugin marketplace add /private/tmp/hive-skill-install2-20261030/clone
+Adding marketplace…✔ Successfully added marketplace: cargo-hive (declared in user settings)
+$ claude plugin install cargo-hive@cargo-hive
+Installing plugin "cargo-hive@cargo-hive"...✔ Successfully installed plugin: cargo-hive@cargo-hive (scope: user)
+$ claude plugin details cargo-hive
+cargo-hive 0.1.0
+  Description: Teaches coding agents to reclaim Rust build space with cargo-hive instead of cargo clean.
+  Source: cargo-hive@cargo-hive
+
+Component inventory
+  Skills (1)  hive
+  Agents (0)
+  Hooks (0)
+  MCP servers (0)
+  LSP servers (0)
+$ ls -a <plugin cache>/cargo-hive/cargo-hive/0.1.0
+.claude-plugin
+.codex-plugin
+skills
+```
+
+The plugin cache now holds only the plugin directory, not the repository.
+
 ## Install — Codex
 
 Run on 2026-10-30 from the same clean clone, with `CODEX_HOME=/private/tmp/hive-skill-install-20261030/codex` so the real `~/.codex` was never written. The outputs below are concatenated in command order.
@@ -193,3 +221,25 @@ hive
 ```
 
 `codex plugin` has no command that lists skills, so the `hive` skill is confirmed by its directory in the installed plugin root. The GitHub-form install and the interactive `/plugin` + `/cargo-hive:hive` check remain the owner's post-merge step.
+
+### After the plugin moved to `plugin/` (2026-10-30)
+
+Same clean clone, with `CODEX_HOME=/private/tmp/hive-skill-install2-20261030/codex`. Each command is followed by its output.
+
+```
+$ codex plugin marketplace add /private/tmp/hive-skill-install2-20261030/clone
+Added marketplace `cargo-hive` from /private/tmp/hive-skill-install2-20261030/clone.
+Installed marketplace root: /private/tmp/hive-skill-install2-20261030/clone
+$ codex plugin add cargo-hive@cargo-hive
+Added plugin `cargo-hive` from marketplace `cargo-hive`.
+Installed plugin root: /private/tmp/hive-skill-install2-20261030/codex/plugins/cache/cargo-hive/cargo-hive/0.1.0
+$ codex plugin list
+cargo-hive@cargo-hive  installed, enabled  0.1.0    /private/tmp/hive-skill-install2-20261030/clone/plugin
+$ ls -a <plugin root>; ls <plugin root>/skills
+.claude-plugin
+.codex-plugin
+skills
+hive
+```
+
+The installed plugin root holds only the plugin directory; before the move it held the whole clone, `.git` included.

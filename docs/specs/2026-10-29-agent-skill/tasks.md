@@ -66,10 +66,10 @@ House rules for this plan:
 
 | Path | Change | Responsibility |
 |---|---|---|
-| `skills/hive/SKILL.md` | create | the skill: frontmatter (`name`, `description`, `metadata.hive-version`) and a body of at most 150 lines |
-| `.claude-plugin/marketplace.json` | create | marketplace `cargo-hive`, one plugin entry with `source: "./"`, no `version`, no `skills` |
-| `.claude-plugin/plugin.json` | create | plugin `cargo-hive`, `version`, `"skills": ["./skills/hive"]` |
-| `.codex-plugin/plugin.json` | create | plugin `cargo-hive`, `version`, `"skills": "./skills/"`, `interface` block |
+| `plugin/skills/hive/SKILL.md` (was `skills/hive/SKILL.md` until Task 7) | create | the skill: frontmatter (`name`, `description`, `metadata.hive-version`) and a body of at most 150 lines |
+| `.claude-plugin/marketplace.json` | create | marketplace `cargo-hive`, one plugin entry with `source: "./plugin"` (`"./"` until Task 7), no `version`, no `skills` |
+| `plugin/.claude-plugin/plugin.json` (was `.claude-plugin/plugin.json` until Task 7) | create | plugin `cargo-hive`, `version`, `"skills": ["./skills/hive"]` |
+| `plugin/.codex-plugin/plugin.json` (was `.codex-plugin/plugin.json` until Task 7) | create | plugin `cargo-hive`, `version`, `"skills": "./skills/"`, `interface` block |
 | `tests/skill.rs` | create | the drift tests: versions, manifest shapes, frontmatter, command lines, MILE-1 coverage, body budget, `eval.json` fields |
 | `skills/hive/TESTS.md` | create | fixture recipe; RED and GREEN agent runs; Claude Code and Codex install runs |
 | `skills/hive/eval.json` | create | `behavior`, `trigger` and `contract` entries, each `derived_from` a `TESTS.md` heading |
@@ -153,7 +153,7 @@ Claude Code and Codex can load the plugin, and a version skew between any manife
 - [x] **Step 4: Verify.** Run the merge gate. `git diff main -- src/` is empty.
 - [x] **Step 5: Commit** `feat(skill): publish the hive skill as plugin cargo-hive from this repo's marketplace`.
 
-_Requirements: SKILL-1.1, SKILL-1.2, SKILL-4.1_
+_Requirements: SKILL-1.6, SKILL-1.7, SKILL-4.5_ (repointed 2026-10-30: this task's SKILL-1.1, 1.2 and 4.1 were superseded when Task 7 moved the plugin into `plugin/`)
 
 ---
 
@@ -370,3 +370,29 @@ The plugin is installed through Claude Code's and Codex's own plugin commands, a
 - [ ] **Step 6 (after the branch lands on `main`; the owner runs it in a real session):** repeat Steps 1 and 2 with the GitHub form `jayden-dang/cargo-hive`, including the interactive `/plugin marketplace add` and `/plugin install` in Claude Code, and confirm `/cargo-hive:hive` is offered. Append the result to each install heading in a follow-up commit `docs(skill): record installs from the published marketplace`.
 
 _Requirements: SKILL-1.3, SKILL-1.4, SKILL-1.5_
+
+---
+
+### Task 7: The plugin moves to its own root
+
+Amendment 2026-10-30 (tier 1, owner-approved). Harness plugin caches receive only `plugin/`, not the repository, and a contract eval with an unclosed skill quote fails the test instead of being skipped.
+
+**Files:**
+- Move: `.claude-plugin/plugin.json` → `plugin/.claude-plugin/plugin.json`, `.codex-plugin/plugin.json` → `plugin/.codex-plugin/plugin.json`, `skills/hive/SKILL.md` → `plugin/skills/hive/SKILL.md`
+- Modify: `.claude-plugin/marketplace.json`, `tests/skill.rs`, `docs/agents/project.md`
+- Test: `tests/skill.rs`
+
+**Reuse:** rung 4 — the Claude Code and Codex plugin systems (marketplace `source` relative path)
+
+**Interfaces:**
+- Consumes: `repo_file`, `manifest`, `skill_quotes` (Tasks 1-5)
+- Produces: `const SKILL`, `const CLAUDE_PLUGIN`, `const CODEX_PLUGIN`; `fn entries_of(rel: &str) -> Vec<String>`; `skill_quotes(&str) -> Result<Vec<&str>, String>`
+
+**Depends-on:** Task 6
+
+- [x] **Step 1: Write the failing tests.** The skill and manifests are read from `plugin/`; the marketplace `source` is `./plugin`; `plugin/`, `plugin/.claude-plugin`, `plugin/.codex-plugin`, `plugin/skills`, `plugin/skills/hive` and `.claude-plugin` hold exactly their expected entries; an unclosed `The skill says: "` quote is an error naming the eval entry. Run `cargo test --test skill`; expect every test to fail because the files are not under `plugin/` yet.
+- [x] **Step 2: Move the files** with `git mv`, set `source` to `./plugin`, update the release step in `docs/agents/project.md`. Run `cargo test --test skill`; expect pass. Add a stray file under `plugin/skills/hive/`, expect a failure naming that dir, remove it.
+- [x] **Step 3: Install check.** From a clean clone with `CLAUDE_CONFIG_DIR` / `CODEX_HOME` in a scratch dir: `claude plugin marketplace add`, `claude plugin install cargo-hive@cargo-hive`, `claude plugin details cargo-hive` (`Skills (1)  hive`); the plugin cache holds only `.claude-plugin`, `.codex-plugin`, `skills`; the same for Codex. Record under both Install headings in `skills/hive/TESTS.md`.
+- [x] **Step 4: Verify and commit** `refactor(skill): ship the plugin from its own plugin/ root` after the merge gate.
+
+_Requirements: SKILL-1.6, SKILL-1.7, SKILL-1.8, SKILL-4.5, SKILL-5.4_

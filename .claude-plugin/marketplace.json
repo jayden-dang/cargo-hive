@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "cargo-hive",
-      "source": "./",
+      "source": "./plugin",
       "description": "Teaches coding agents to reclaim Rust build space with cargo-hive instead of cargo clean."
     }
   ]

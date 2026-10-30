@@ -1,5 +1,19 @@
 use std::fs;
 
+const SKILL: &str = "plugin/skills/hive/SKILL.md";
+const CLAUDE_PLUGIN: &str = "plugin/.claude-plugin/plugin.json";
+const CODEX_PLUGIN: &str = "plugin/.codex-plugin/plugin.json";
+
+fn entries_of(rel: &str) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(format!("{}/{rel}", env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{rel}: {e}"))
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != ".DS_Store")
+        .collect();
+    names.sort();
+    names
+}
+
 fn repo_file(rel: &str) -> String {
     let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), rel);
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
@@ -122,7 +136,7 @@ fn check_against_spec(dir: &str, text: &str) -> Result<(), String> {
 
 #[test]
 fn skill_frontmatter_follows_the_spec() {
-    let text = repo_file("skills/hive/SKILL.md");
+    let text = repo_file(SKILL);
     check_against_spec("hive", &text).unwrap();
     let (_, body) = split_skill(&text).unwrap();
     assert!(!body.trim().is_empty(), "the skill body is empty");
@@ -237,14 +251,14 @@ fn manifest(rel: &str) -> serde_json::Value {
 #[test]
 fn manifest_versions_match_the_crate() {
     let crate_version = env!("CARGO_PKG_VERSION");
-    let (fm, _) = split_skill(&repo_file("skills/hive/SKILL.md")).unwrap();
+    let (fm, _) = split_skill(&repo_file(SKILL)).unwrap();
     assert_eq!(
         get(&fm.metadata, "hive-version"),
         Some(crate_version),
-        "skills/hive/SKILL.md metadata.hive-version must equal the crate version"
+        "{SKILL} metadata.hive-version must equal the crate version"
     );
 
-    for rel in [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"] {
+    for rel in [CLAUDE_PLUGIN, CODEX_PLUGIN] {
         let plugin = manifest(rel);
         assert_eq!(plugin["name"], "cargo-hive", "{rel} field name");
         assert_eq!(
@@ -253,19 +267,19 @@ fn manifest_versions_match_the_crate() {
         );
     }
     assert_eq!(
-        manifest(".claude-plugin/plugin.json")["skills"],
+        manifest(CLAUDE_PLUGIN)["skills"],
         serde_json::json!(["./skills/hive"]),
-        ".claude-plugin/plugin.json field skills"
+        "{CLAUDE_PLUGIN} field skills"
     );
     assert_eq!(
-        manifest(".codex-plugin/plugin.json")["skills"],
+        manifest(CODEX_PLUGIN)["skills"],
         "./skills/",
-        ".codex-plugin/plugin.json field skills"
+        "{CODEX_PLUGIN} field skills"
     );
 
     let descriptions: Vec<String> = [
-        ".claude-plugin/plugin.json",
-        ".codex-plugin/plugin.json",
+        CLAUDE_PLUGIN,
+        CODEX_PLUGIN,
         ".claude-plugin/marketplace.json",
     ]
     .iter()
@@ -285,11 +299,16 @@ fn manifest_versions_match_the_crate() {
         descriptions.windows(2).all(|w| w[0] == w[1]),
         "the three manifest descriptions differ: {descriptions:?}"
     );
-    let skill_dirs: Vec<String> = fs::read_dir(format!("{}/skills", env!("CARGO_MANIFEST_DIR")))
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(skill_dirs, ["hive"], "skills/ must hold exactly one entry");
+    for (dir, want) in [
+        ("plugin", &[".claude-plugin", ".codex-plugin", "skills"][..]),
+        ("plugin/.claude-plugin", &["plugin.json"][..]),
+        ("plugin/.codex-plugin", &["plugin.json"][..]),
+        ("plugin/skills", &["hive"][..]),
+        ("plugin/skills/hive", &["SKILL.md"][..]),
+        (".claude-plugin", &["marketplace.json"][..]),
+    ] {
+        assert_eq!(entries_of(dir), want, "{dir}/ must hold exactly {want:?}");
+    }
 
     let market = manifest(".claude-plugin/marketplace.json");
     assert_eq!(
@@ -310,7 +329,7 @@ fn manifest_versions_match_the_crate() {
         ".claude-plugin/marketplace.json field plugins[0].name"
     );
     assert_eq!(
-        entry["source"], "./",
+        entry["source"], "./plugin",
         ".claude-plugin/marketplace.json field plugins[0].source"
     );
     assert!(
@@ -429,7 +448,7 @@ fn parse(words: &[String]) -> Result<Parsed, String> {
 }
 
 fn skill_body() -> String {
-    split_skill(&repo_file("skills/hive/SKILL.md")).unwrap().1
+    split_skill(&repo_file(SKILL)).unwrap().1
 }
 
 fn skill_commands() -> Vec<(CommandLine, Parsed)> {
@@ -568,12 +587,14 @@ fn skill_documents_every_shipped_command() {
 
 const QUOTE_LEAD: &str = "The skill says: \"";
 
-fn skill_quotes(assertion: &str) -> Vec<&str> {
+fn skill_quotes(assertion: &str) -> Result<Vec<&str>, String> {
     assertion
         .match_indices(QUOTE_LEAD)
-        .filter_map(|(i, lead)| {
+        .map(|(i, lead)| {
             let rest = &assertion[i + lead.len()..];
-            rest.find('"').map(|end| &rest[..end])
+            rest.find('"')
+                .map(|end| &rest[..end])
+                .ok_or_else(|| format!("a skill quote is never closed: {assertion}"))
         })
         .collect()
 }
@@ -634,8 +655,14 @@ fn skill_body_fits_the_budget() {
 
 #[test]
 fn eval_entries_carry_their_evidence() {
-    assert_eq!(skill_quotes("The skill says: \"a b.\" and \"x\""), ["a b."]);
-    assert!(skill_quotes("no quote here").is_empty());
+    assert_eq!(
+        skill_quotes("The skill says: \"a b.\" and \"x\"").unwrap(),
+        ["a b."]
+    );
+    assert!(skill_quotes("no quote here").unwrap().is_empty());
+    assert!(skill_quotes("The skill says: \"never closed")
+        .unwrap_err()
+        .contains("never closed"));
     let evals = manifest("skills/hive/eval.json");
     let entries = evals.as_array().expect("eval.json is an array");
     assert!(!entries.is_empty(), "eval.json has no entries");
@@ -690,7 +717,7 @@ fn eval_entries_carry_their_evidence() {
                 "{at}: an assertion is not a non-empty string"
             );
             if kind == "contract" {
-                let quotes = skill_quotes(s);
+                let quotes = skill_quotes(s).unwrap_or_else(|e| panic!("{at}: {e}"));
                 assert!(
                     !quotes.is_empty(),
                     "{at}: a contract assertion quotes no skill text: {s}"
