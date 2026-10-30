@@ -5,7 +5,8 @@
 use super::is_temp_entry;
 use super::ledger::{Bytes, Ledger};
 use super::plan::{self, Action};
-use crate::cargo_target::{Owner, TargetDir};
+use crate::cargo_target::TargetDir;
+use crate::discover::Scope;
 use crate::fingerprint::Format;
 use crate::platform::{EntryKind, EntryStat, Fs, HeldLock, Sharing, TryLock};
 use crate::size::MAX_DEPTH;
@@ -17,14 +18,6 @@ use std::time::SystemTime;
 pub const CRATE_DIR_CAP: usize = 100_000;
 /// Most entries listed from one `deps/` directory.
 pub const DEPS_CAP: usize = 1_000_000;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Scope {
-    /// Every target the scan found.
-    All,
-    /// Targets owned by, or lying inside, these checkouts (realpaths).
-    Checkouts(Vec<PathBuf>),
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct RunOpts {
@@ -72,16 +65,6 @@ struct Runner<'a> {
     cancelled: bool,
 }
 
-fn in_scope(t: &TargetDir, scope: &Scope) -> bool {
-    match scope {
-        Scope::All => true,
-        Scope::Checkouts(checkouts) => {
-            matches!(&t.owner, Owner::Owned { checkout } if checkouts.contains(checkout))
-                || checkouts.iter().any(|c| t.path.starts_with(c))
-        }
-    }
-}
-
 pub fn run(
     fs: &dyn Fs,
     targets: &[TargetDir],
@@ -98,7 +81,7 @@ pub fn run(
         cancelled: false,
     };
     let mut per_target = Vec::new();
-    for t in targets.iter().filter(|t| in_scope(t, scope)) {
+    for t in targets.iter().filter(|t| scope.contains(t)) {
         if r.stop() {
             break;
         }
@@ -443,6 +426,7 @@ impl Runner<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cargo_target::Owner;
     use crate::fingerprint::ProfileReport;
     use crate::platform::{
         CompressOutcome, HeldLock, LockHolder, LockKind, LockState, TempDir, VolumeInfo,
@@ -730,6 +714,7 @@ mod tests {
                 format: Format::Supported,
                 units: 0,
                 not_current: 0,
+                not_current_units: Vec::new(),
                 edges: None,
                 graph: None,
             }],

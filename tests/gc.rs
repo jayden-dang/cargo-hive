@@ -1,6 +1,8 @@
 #![cfg(target_os = "macos")]
 mod common;
-use common::{crate_dirs, init_repo, plant_session, sessions_in, wait_within, Hive, Scratch};
+use common::{
+    crate_dirs, git, init_repo, plant_session, register, sessions_in, wait_within, Hive, Scratch,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -16,15 +18,6 @@ fn pid_alive(pid: u32) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-fn register(hive: &Hive, repo: &Path) {
-    let out = hive.run(&["repo", "add", repo.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 fn gc(hive: &Hive, args: &[&str]) -> (std::process::Output, serde_json::Value) {
@@ -667,4 +660,84 @@ fn gc_changes_nothing_outside_its_scope_and_status_reports_the_same() {
         "gc changed CARGO_HOME"
     );
     assert_eq!(status_b(&hive), before);
+}
+
+fn cargo_offline(hive: &Hive, dir: &Path, args: &[&str]) {
+    let out = Command::new("cargo")
+        .args(args)
+        .current_dir(dir)
+        .env("CARGO_HOME", &hive.cargo_home.path)
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .env_remove("CARGO_BUILD_BUILD_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "cargo {args:?} in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn gc_of_one_repo_keeps_a_shared_target_owned_by_the_other_registered_main() {
+    let hive = Hive::ready();
+    let s = Scratch::new("gc-protected-owner");
+    let sec = s.path.join("sec");
+    fs::create_dir_all(&sec).unwrap();
+    hive.config(&format!(
+        "{{\"secondary_roots\":[\"{}\"],\"cache_roots\":[\"{}\"]}}",
+        sec.display(),
+        s.path.join("no-cache").display()
+    ));
+    let sel = init_repo(&s.path.join("sel"), "");
+    cargo_offline(&hive, &sel, &["generate-lockfile", "--offline"]);
+    git(&sel, &["add", "-A"]);
+    git(&sel, &["commit", "-q", "-m", "lock"]);
+    fs::create_dir_all(sec.join("a-nest")).unwrap();
+    git(
+        &sec,
+        &["clone", "-q", sel.to_str().unwrap(), "a-nest/m-outside"],
+    );
+    git(&sec, &["clone", "-q", sel.to_str().unwrap(), "m-protected"]);
+
+    let external = s.path.join("external");
+    fs::create_dir_all(external.join("debug/.fingerprint")).unwrap();
+    fs::write(
+        external.join("CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n",
+    )
+    .unwrap();
+    let target_cfg = format!("[build]\ntarget-dir = \"{}\"\n", external.display());
+    // The member's workspace root is the parent, which no live checkout contains,
+    // so an unprotected owner falls outside gc's checkout list.
+    fs::write(
+        sec.join("a-nest/Cargo.toml"),
+        "[workspace]\nmembers = [\"m-outside\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(sec.join("a-nest/.cargo")).unwrap();
+    fs::write(sec.join("a-nest/.cargo/config.toml"), &target_cfg).unwrap();
+    fs::create_dir_all(sec.join("m-protected/.cargo")).unwrap();
+    fs::write(sec.join("m-protected/.cargo/config.toml"), &target_cfg).unwrap();
+    cargo_offline(
+        &hive,
+        &sec.join("a-nest"),
+        &["generate-lockfile", "--offline"],
+    );
+
+    let protected = sec.join("m-protected");
+    register(&hive, &sel);
+    register(&hive, &protected);
+    let (out, r) = hive.json(&["gc", "--dry-run", sel.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{r}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        r.to_string().contains(external.to_str().unwrap()),
+        "gc of the selected repo dropped the shared target: {r}"
+    );
 }

@@ -1,5 +1,5 @@
 mod common;
-use common::{git, init_repo, Hive, Scratch};
+use common::{git, init_repo, register, Hive, Scratch};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -20,15 +20,6 @@ fn class_of(receipt: &serde_json::Value, path: &Path) -> String {
                 .to_string()
         })
         .unwrap_or_else(|| "absent".into())
-}
-
-fn register(hive: &Hive, repo: &Path) {
-    let out = hive.run(&["repo", "add", repo.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 
 #[test]

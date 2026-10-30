@@ -51,6 +51,16 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// Report copies of one crate, feature splits, and units whose last compile failed
+    Explain {
+        /// Registered repos to explain; none means every registered repo
+        repos: Vec<std::path::PathBuf>,
+        /// -n, --top. Default 10. 0 means show all.
+        #[arg(short = 'n', long = "top", default_value_t = 10)]
+        top: usize,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// Hold a lock until killed (used by doctor's lock check)
     #[command(name = "__hold-lock", hide = true)]
     HoldLock {
@@ -135,6 +145,7 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
             dry_run,
             out,
         } => gc_cmd(&state, &repos, dry_run, out),
+        Command::Explain { repos, top, out } => explain_cmd(&state, &repos, top, out),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
         Command::TryLock { .. } => unreachable!("handled before the state root is opened"),
     }
@@ -388,6 +399,70 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
     emit(state, out, b.finish(), &human, i32::from(fail > 0))
 }
 
+struct Selection {
+    repos: Vec<registry::Repo>,
+    all_repos: bool,
+    refused: bool,
+}
+
+fn select(reg: &Registry, args: &[std::path::PathBuf], b: &mut ReceiptBuilder) -> Selection {
+    let mut refused = false;
+    let mut repos = Vec::new();
+    if args.is_empty() {
+        repos = reg.repos.clone();
+    }
+    for arg in args {
+        let real = arg.canonicalize().unwrap_or(arg.clone());
+        match reg.repos.iter().find(|r| r.main == real) {
+            Some(r) => {
+                if !repos.iter().any(|s| s.main == r.main) {
+                    repos.push(r.clone());
+                }
+            }
+            None => {
+                b.finding(
+                    "refusal",
+                    Some(arg.clone()),
+                    "not a registered repository; run `cargo hive repo add` first",
+                );
+                refused = true;
+            }
+        }
+    }
+    let all_repos = repos.len() == reg.repos.len()
+        && repos
+            .iter()
+            .all(|s| reg.repos.iter().any(|r| r.main == s.main));
+    Selection {
+        repos,
+        all_repos,
+        refused,
+    }
+}
+
+fn live_checkouts(
+    repos: &[registry::Repo],
+    registered_mains: &[std::path::PathBuf],
+    cfg: &crate::state::Config,
+    b: &mut ReceiptBuilder,
+) -> Vec<crate::discover::Checkout> {
+    let mut checkouts = Vec::new();
+    for repo in repos {
+        b.scope_mut().repos.push(repo.main.clone());
+        let (rows, faults) = crate::discover::checkouts(repo, registered_mains, cfg);
+        for fault in faults {
+            b.finding("walk.unreadable", Some(fault.path), fault.detail);
+        }
+        for c in rows {
+            if !c.missing {
+                b.scope_mut().checkouts.push(c.path.clone());
+            }
+            checkouts.push(c);
+        }
+    }
+    checkouts
+}
+
 fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: OutputArgs) -> i32 {
     use crate::classify::Class;
     use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
@@ -422,29 +497,10 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
         b.finding("refusal", None, refusal.to_string());
         return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
     }
-    let mut code = 0;
-    let mut selected = Vec::new();
-    if args.is_empty() {
-        selected = reg.repos.clone();
-    }
-    for arg in args {
-        let real = arg.canonicalize().unwrap_or(arg.clone());
-        match reg.repos.iter().find(|r| r.main == real) {
-            Some(r) => {
-                if !selected.iter().any(|s| s.main == r.main) {
-                    selected.push(r.clone());
-                }
-            }
-            None => {
-                b.finding(
-                    "refusal",
-                    Some(arg.clone()),
-                    "not a registered repository; run `cargo hive repo add` first",
-                );
-                code = 1;
-            }
-        }
-    }
+    let selection = select(&reg, args, &mut b);
+    let code = i32::from(selection.refused);
+    let selected = selection.repos;
+    let all_repos = selection.all_repos;
     let mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
     let (mut total, mut protected, mut secondary, mut missing) = (0u64, 0u64, 0u64, 0u64);
     let mut human = String::new();
@@ -495,10 +551,6 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
             1,
         );
     }
-    let all_repos = selected.len() == reg.repos.len()
-        && selected
-            .iter()
-            .all(|s| reg.repos.iter().any(|r| r.main == s.main));
     let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
     let mut scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot, cancelled);
     if cancelled() {
@@ -714,51 +766,11 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
         }
     }
-    let mut code = 0;
-    let mut selected = Vec::new();
-    if args.is_empty() {
-        selected = reg.repos.clone();
-    }
-    for arg in args {
-        let real = arg.canonicalize().unwrap_or(arg.clone());
-        match reg.repos.iter().find(|r| r.main == real) {
-            Some(r) => {
-                if !selected
-                    .iter()
-                    .any(|s: &crate::registry::Repo| s.main == r.main)
-                {
-                    selected.push(r.clone());
-                }
-            }
-            None => {
-                b.finding(
-                    "refusal",
-                    Some(arg.clone()),
-                    "not a registered repository; run `cargo hive repo add` first",
-                );
-                code = 1;
-            }
-        }
-    }
-    let mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
-    let mut checkouts = Vec::new();
-    for repo in &selected {
-        b.scope_mut().repos.push(repo.main.clone());
-        let (rows, faults) = discover::checkouts(repo, &mains, &cfg);
-        for fault in faults {
-            b.finding("walk.unreadable", Some(fault.path), fault.detail);
-        }
-        for c in rows {
-            if !c.missing {
-                b.scope_mut().checkouts.push(c.path.clone());
-            }
-            checkouts.push(c);
-        }
-    }
-    let all_repos = selected.len() == reg.repos.len()
-        && selected
-            .iter()
-            .all(|s| reg.repos.iter().any(|r| r.main == s.main));
+    let selection = select(&reg, args, &mut b);
+    let code = i32::from(selection.refused);
+    let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
+    let checkouts = live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
+    let all_repos = selection.all_repos;
     let scan = discover::targets(&checkouts, &cfg, all_repos, &mut snapshot, cancelled);
     if cancelled() {
         b.finding("error", None, "gc was cancelled");
@@ -771,17 +783,13 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             fault.detail.clone(),
         );
     }
-    let scope = if args.is_empty() {
-        gc::Scope::All
-    } else {
-        gc::Scope::Checkouts(
-            checkouts
-                .iter()
-                .filter(|c| !c.missing)
-                .map(|c| c.path.clone())
-                .collect(),
-        )
-    };
+    let scope = gc::Scope::from_paths(
+        args.is_empty(),
+        checkouts
+            .iter()
+            .filter(|c| !c.missing)
+            .map(|c| c.path.clone()),
+    );
     let account_bytes = !caps.disabled.contains_key(&Capability::EvictionAccounting);
     let volumes = |fs: &dyn platform::Fs| -> BTreeMap<String, (std::path::PathBuf, u64)> {
         scan.targets
@@ -884,4 +892,147 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
         return emit(state, out, b.finish(), &human, 130);
     }
     emit(state, out, b.finish(), &human, code)
+}
+
+fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: OutputArgs) -> i32 {
+    use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
+    use crate::doctor::{self, Capabilities, Capability};
+    use crate::explain::{self, FailedUnits, Limits};
+    use crate::fingerprint::Format;
+    use crate::platform::Availability;
+    let loaded = (|| -> Result<_, StateError> {
+        Ok((
+            state.read::<Registry>(registry::FILE)?,
+            state.config()?,
+            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+            state.read::<Snapshot>(SNAPSHOT_FILE)?,
+        ))
+    })();
+    let (reg, cfg, caps, mut snapshot) = match loaded {
+        Ok(v) => v,
+        Err(e) => return emit_failure(state, out, "explain", &e.to_string(), 1),
+    };
+    let mut b = Receipt::new("explain", Scope::default());
+    let release = doctor::resolve_toolchain(state.root())
+        .ok()
+        .map(|t| t.release);
+    b.toolchain(release.clone());
+    if let Err(refusal) = doctor::require(&caps, Capability::FingerprintReading, release.as_deref())
+    {
+        b.finding("refusal", None, refusal.to_string());
+        return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
+    }
+    let selection = select(&reg, args, &mut b);
+    let code = i32::from(selection.refused);
+    if let Err(e) = doctor::install_signal_handlers() {
+        return emit_failure(
+            state,
+            out,
+            "explain",
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
+    }
+    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
+    let checkouts = live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
+    let scan = discover::targets(
+        &checkouts,
+        &cfg,
+        selection.all_repos,
+        &mut snapshot,
+        cancelled,
+    );
+    if cancelled() {
+        b.finding("error", None, "explain was cancelled");
+        return emit(state, out, b.finish(), "explain was cancelled\n", 130);
+    }
+    for fault in &scan.walk_faults {
+        b.finding(
+            "walk.unreadable",
+            Some(fault.path.clone()),
+            fault.detail.clone(),
+        );
+    }
+    let wrote = match state.locked_or_cancelled(cancelled, |tx| {
+        if cancelled() {
+            return Ok(false);
+        }
+        let disk = tx.read(SNAPSHOT_FILE)?;
+        tx.write(
+            SNAPSHOT_FILE,
+            &discover::merge_snapshot(snapshot, disk, &scan.cleared_profiles),
+        )?;
+        Ok(true)
+    }) {
+        Ok(wrote) => wrote,
+        Err(StateError::Cancelled) => false,
+        Err(e) => {
+            eprintln!("cargo-hive: {e}");
+            b.finding("error", None, e.to_string());
+            return emit(state, out, b.finish(), &format!("{e}\n"), 1);
+        }
+    };
+    if !wrote {
+        b.finding("error", None, "explain was cancelled");
+        return emit(state, out, b.finish(), "explain was cancelled\n", 130);
+    }
+    let scope = discover::Scope::from_paths(
+        args.is_empty(),
+        checkouts
+            .iter()
+            .filter(|checkout| !checkout.missing)
+            .map(|checkout| checkout.path.clone()),
+    );
+    let kept: Vec<_> = scan
+        .targets
+        .iter()
+        .filter(|target| scope.contains(target))
+        .collect();
+    for target in &kept {
+        if let Some(why) = &target.unreadable {
+            b.finding("target.unreadable", Some(target.path.clone()), why.clone());
+            continue;
+        }
+        for profile in &target.profiles {
+            if let Format::Unsupported(why) = &profile.format {
+                b.finding(
+                    "profile.unsupported",
+                    Some(profile.path.clone()),
+                    why.clone(),
+                );
+            }
+        }
+    }
+    let failed = match doctor::failed_unit_reporting(&caps) {
+        Availability::Available => FailedUnits::Report,
+        Availability::Unavailable(reason) => FailedUnits::Off(reason),
+    };
+    let limits = if top == 0 {
+        Limits { top: None }
+    } else {
+        Limits { top: Some(top) }
+    };
+    let explanation = match explain::run(&kept, limits, failed, &cancelled) {
+        Ok(explanation) => explanation,
+        Err(explain::Cancelled) => {
+            b.finding("error", None, "explain was cancelled");
+            return emit(state, out, b.finish(), "explain was cancelled\n", 130);
+        }
+    };
+    for finding in explanation.findings {
+        b.finding_measured(
+            &finding.kind,
+            finding.path,
+            finding.detail,
+            finding.measured,
+        );
+    }
+    for (name, n) in explanation.counts {
+        b.count(name, n);
+    }
+    for (field, reason) in explanation.unmeasured {
+        b.unmeasured(&field, reason);
+    }
+    emit(state, out, b.finish(), &explanation.human, code)
 }

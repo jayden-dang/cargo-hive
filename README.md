@@ -24,11 +24,18 @@ cargo hive status          # every registered repo; add --json for one machine-r
 
 | Command | What it does |
 |---|---|
-| `cargo hive doctor` | Runs checks (a)–(f) in a temporary directory and records which capabilities are enabled for the active toolchain |
+| `cargo hive doctor` | Runs checks (a)–(g) in a temporary directory and records which capabilities are enabled for the active toolchain |
 | `cargo hive repo add <path>` | Registers the main checkout containing `<path>` |
 | `cargo hive repo list` | Lists registered repositories and their root commits |
 | `cargo hive status [<repo>…] [--no-sizes]` | Lists checkouts (protected, secondary, missing) and Cargo target dirs (owner or orphan candidate, size, units and edges) |
 | `cargo hive gc [<repo>…] [--dry-run]` | Deletes superseded incremental sessions and `deps/rustc*`/`rmeta*` temp dirs. Freed bytes are counted per inode and reported as totals. `--dry-run` deletes nothing |
+| `cargo hive explain [<repo>…] [-n N]` | Reports copies of one crate, feature splits, and units whose last compile failed. `-n` defaults to 10; `-n 0` shows every group |
+
+A failure of check (g) disables failed-unit reporting only.
+
+## explain
+
+`cargo hive explain` reports copies of one crate, feature splits, and units whose last compile failed. It never claims bytes, durations, or a tool name, and it never says that a unit always fails or that a copy is an older build. `-n` (`--top`) defaults to 10 groups; `-n 0` shows every group. Naming a failed unit needs doctor check (g); without it the count stays unmeasured and no unit is named.
 
 Every command accepts `--json`. It then prints exactly one receipt on stdout, and every
 receipt is also appended to `~/.hive/receipts/<date>.jsonl`. Receipts carry counts and

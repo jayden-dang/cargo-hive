@@ -3,7 +3,7 @@
 
 use crate::platform::major_version;
 use crate::platform::{
-    Approve, Availability, CompressOutcome, Fs, LockHolder, LockKind, LockState, TryLock,
+    Approve, Availability, CompressOutcome, EntryKind, Fs, LockHolder, LockKind, LockState, TryLock,
 };
 use crate::receipt::Measured;
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,8 @@ pub const CAPABILITIES_FILE: &str = "capabilities.json";
 pub const MACOS_FLOOR: u32 = 27;
 pub const PROBE_DEADLINE: Duration = Duration::from_secs(120);
 pub const LOCK_CHECK_VERSION: u32 = 1;
+pub const FAILED_MARKER_CHECK_VERSION: u32 = 1;
+const PROBE_LISTING_CAP: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -29,6 +31,7 @@ pub enum CheckId {
     D,
     E,
     F,
+    G,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -40,6 +43,7 @@ pub enum Capability {
     Deletion,
     Approval,
     FingerprintReading,
+    FailedUnitReporting,
 }
 
 impl CheckId {
@@ -51,10 +55,11 @@ impl CheckId {
             CheckId::D => "d",
             CheckId::E => "e",
             CheckId::F => "f",
+            CheckId::G => "g",
         }
     }
 
-    /// The capabilities this check vouches for: a check that does not pass disables them.
+    /// The capabilities this check vouches for. A fail disables them.
     pub fn disables(self) -> &'static [Capability] {
         match self {
             CheckId::A => &[Capability::Seeding],
@@ -67,6 +72,7 @@ impl CheckId {
                 Capability::Deletion,
                 Capability::Seeding,
             ],
+            CheckId::G => &[Capability::FailedUnitReporting],
         }
     }
 }
@@ -80,6 +86,7 @@ impl Capability {
             Capability::Deletion => "deletion",
             Capability::Approval => "approval",
             Capability::FingerprintReading => "fingerprint graph reading",
+            Capability::FailedUnitReporting => "failed-unit reporting",
         }
     }
 }
@@ -121,6 +128,10 @@ pub struct Capabilities {
     /// recorded before the exclusive-lock matrix existed.
     #[serde(default)]
     pub lock_check: u32,
+    /// Version of check (g)'s failed-compile proof these results come from. 0 means check (g)
+    /// has not run.
+    #[serde(default)]
+    pub failed_marker_check: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -292,16 +303,46 @@ pub fn require(
 
 pub fn capabilities_for(report: &DoctorReport) -> Capabilities {
     let mut disabled: BTreeMap<Capability, BTreeSet<CheckId>> = BTreeMap::new();
-    for check in report.checks.iter().filter(|c| c.verdict != Verdict::Pass) {
-        for cap in check.id.disables() {
-            disabled.entry(*cap).or_default().insert(check.id);
+    let mut failed_marker_check = 0;
+    for check in &report.checks {
+        if check.id == CheckId::G {
+            match check.verdict {
+                Verdict::Unavailable => {}
+                Verdict::Pass => failed_marker_check = FAILED_MARKER_CHECK_VERSION,
+                Verdict::Fail => {
+                    failed_marker_check = FAILED_MARKER_CHECK_VERSION;
+                    for cap in check.id.disables() {
+                        disabled.entry(*cap).or_default().insert(check.id);
+                    }
+                }
+            }
+            continue;
+        }
+        if check.verdict != Verdict::Pass {
+            for cap in check.id.disables() {
+                disabled.entry(*cap).or_default().insert(check.id);
+            }
         }
     }
     Capabilities {
         toolchain_release: report.toolchain_release.clone(),
         disabled,
         lock_check: LOCK_CHECK_VERSION,
+        failed_marker_check,
     }
+}
+
+/// Whether these results allow naming failed units.
+pub fn failed_unit_reporting(caps: &Capabilities) -> Availability {
+    if caps.failed_marker_check == 0 {
+        return Availability::Unavailable(
+            "doctor check (g) has not run; run cargo hive doctor".into(),
+        );
+    }
+    if caps.disabled.contains_key(&Capability::FailedUnitReporting) {
+        return Availability::Unavailable("doctor check (g) failed".into());
+    }
+    Availability::Available
 }
 
 /// The report line for a macOS below the declared floor; doctor reports it and still runs every check.
@@ -717,6 +758,134 @@ fn check_format(
     }
 }
 
+fn unavailable_g(reason: impl fmt::Display) -> Check {
+    Check {
+        id: CheckId::G,
+        verdict: Verdict::Unavailable,
+        measured: Measures::from([("reason".to_string(), Measured::Text(reason.to_string()))]),
+    }
+}
+
+fn summary_line_count(outputs: &[String]) -> u64 {
+    outputs
+        .iter()
+        .flat_map(|text| text.lines())
+        .filter(|line| crate::fingerprint::is_summary_line(line) == Some(true))
+        .count() as u64
+}
+
+fn judge_failed_marker(exit_ok: bool, outputs: &[String]) -> Verdict {
+    if exit_ok {
+        Verdict::Unavailable
+    } else if summary_line_count(outputs) > 0 {
+        Verdict::Pass
+    } else {
+        Verdict::Fail
+    }
+}
+
+fn probe_output_texts(fs: &dyn Fs, fingerprint: &Path) -> Result<Vec<String>, String> {
+    if !fingerprint.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut paths = Vec::new();
+    let root = fs
+        .read_dir_bounded(fingerprint, PROBE_LISTING_CAP)
+        .map_err(|e| e.to_string())?;
+    for (name, kind) in root {
+        match kind {
+            EntryKind::File if name.starts_with("output-") => paths.push(fingerprint.join(name)),
+            EntryKind::Dir => {
+                let dir = fingerprint.join(&name);
+                let children = fs
+                    .read_dir_bounded(&dir, PROBE_LISTING_CAP)
+                    .map_err(|e| e.to_string())?;
+                for (child, child_kind) in children {
+                    if child_kind == EntryKind::File && child.starts_with("output-") {
+                        paths.push(dir.join(child));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    paths.sort();
+    let mut texts = Vec::with_capacity(paths.len());
+    for path in paths {
+        let mut file =
+            std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let bytes = crate::fingerprint::read_capped(&mut file)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        texts.push(String::from_utf8(bytes).map_err(|e| format!("{}: {e}", path.display()))?);
+    }
+    Ok(texts)
+}
+
+fn write_failing_probe(fs: &dyn Fs, krate: &Path, cargo_home: &Path) -> io::Result<()> {
+    for (rel, body) in PROBE_CRATE {
+        let path = krate.join(rel);
+        std::fs::create_dir_all(path.parent().expect("probe files live in the crate"))?;
+        let mut bytes = body.as_bytes().to_vec();
+        if rel == "src/lib.rs" {
+            bytes.extend_from_slice(b"pub fn hive_probe_failure() -> u32 { \"x\" }\n");
+        }
+        fs.write_file(&path, &bytes)?;
+    }
+    std::fs::create_dir_all(cargo_home)
+}
+
+/// (g) A failed compile leaves rustc's summary line in an `output-*` file.
+fn check_failed_marker(
+    fs: &dyn Fs,
+    dir: &Path,
+    toolchain: &Result<Toolchain, String>,
+) -> Result<Check, DoctorError> {
+    let tc = match toolchain {
+        Ok(t) => t,
+        Err(reason) => return Ok(unavailable_g(reason)),
+    };
+    let (krate, target, cargo_home) = (
+        dir.join("g"),
+        dir.join("g-target"),
+        dir.join("g-cargo-home"),
+    );
+    if let Err(e) = write_failing_probe(fs, &krate, &cargo_home) {
+        return Ok(unavailable_g(e));
+    }
+    let mut cmd = probe_command(tc, &krate, &target, &cargo_home);
+    let output = match crate::cargo_target::output_with_deadline(&mut cmd, PROBE_DEADLINE, || {
+        CANCEL.load(Ordering::SeqCst)
+    }) {
+        Err(crate::cargo_target::ChildOutputError::Cancelled) => {
+            return Err(DoctorError::Cancelled);
+        }
+        Err(crate::cargo_target::ChildOutputError::TimedOut) => {
+            return Ok(unavailable_g("the probe build exceeded its deadline"));
+        }
+        Err(crate::cargo_target::ChildOutputError::Failed(message)) => {
+            return Ok(unavailable_g(message));
+        }
+        Ok(output) => output,
+    };
+    let texts = match probe_output_texts(fs, &target.join("debug/.fingerprint")) {
+        Ok(texts) => texts,
+        Err(reason) => return Ok(unavailable_g(reason)),
+    };
+    let exit_ok = output.status.success();
+    Ok(Check {
+        id: CheckId::G,
+        verdict: judge_failed_marker(exit_ok, &texts),
+        measured: Measures::from([
+            ("exit_ok".to_string(), Measured::Bool(exit_ok)),
+            ("outputs".to_string(), Measured::Int(texts.len() as u64)),
+            (
+                "summary_lines".to_string(),
+                Measured::Int(summary_line_count(&texts)),
+            ),
+        ]),
+    })
+}
+
 /// (e) Owner authentication: availability only, never a dialog.
 fn check_owner_auth(approve: &dyn Approve) -> Check {
     match approve.owner_auth_available() {
@@ -760,6 +929,8 @@ pub fn run(
     }
     checkpoint()?;
     checks.push(check_format(fs, dir, &env.toolchain)?);
+    checkpoint()?;
+    checks.push(check_failed_marker(fs, dir, &env.toolchain)?);
     Ok(DoctorReport {
         macos: env.macos.clone(),
         below_floor: env
@@ -1006,10 +1177,11 @@ mod tests {
         }
     }
 
-    /// Capabilities from checks a–e only: check f needs a real toolchain (Task 11).
+    /// Capabilities from checks a–e only: checks f and g need a real toolchain.
     fn caps_a_to_e(report: &DoctorReport) -> Capabilities {
         let mut only = report.clone();
-        only.checks.retain(|c| c.id != CheckId::F);
+        only.checks
+            .retain(|c| c.id != CheckId::F && c.id != CheckId::G);
         capabilities_for(&only)
     }
 
@@ -1035,7 +1207,11 @@ mod tests {
             &env(&parent, "27.0.1"),
         )
         .unwrap();
-        for c in report.checks.iter().filter(|c| c.id != CheckId::F) {
+        for c in report
+            .checks
+            .iter()
+            .filter(|c| c.id != CheckId::F && c.id != CheckId::G)
+        {
             assert_eq!(c.verdict, Verdict::Pass, "{:?}: {:?}", c.id, c.measured);
             assert!(!c.measured.is_empty(), "{:?} has no measured value", c.id);
         }
@@ -1140,7 +1316,11 @@ mod tests {
                 &env(&parent, "27.0.1"),
             )
             .unwrap();
-            for c in report.checks.iter().filter(|c| c.id != CheckId::F) {
+            for c in report
+                .checks
+                .iter()
+                .filter(|c| c.id != CheckId::F && c.id != CheckId::G)
+            {
                 let expected = if c.id == failing {
                     Verdict::Fail
                 } else {
@@ -1246,6 +1426,7 @@ mod tests {
             toolchain_release: Some("1.96.1".into()),
             disabled: BTreeMap::new(),
             lock_check: 0,
+            failed_marker_check: 0,
         };
         let e = require(&other, Capability::FingerprintReading, Some("1.97.1"))
             .unwrap_err()
@@ -1264,6 +1445,7 @@ mod tests {
             toolchain_release: Some("1.97.1".into()),
             disabled,
             lock_check: 0,
+            failed_marker_check: 0,
         };
         let e = require(&off, Capability::FingerprintReading, Some("1.97.1"))
             .unwrap_err()
@@ -1309,6 +1491,7 @@ mod tests {
             toolchain_release: Some("1.97.1".into()),
             disabled: BTreeMap::new(),
             lock_check: 0,
+            failed_marker_check: 0,
         };
         let e = require(&old, Capability::Deletion, Some("1.97.1")).unwrap_err();
         assert!(matches!(e, CapabilityRefusal::RunDoctor(_)), "{e}");
@@ -1333,6 +1516,100 @@ mod tests {
             serde_json::from_str(r#"{"toolchain_release":"1.97.1","disabled":{}}"#).unwrap();
         assert_eq!(caps.lock_check, 0);
         assert_eq!(LOCK_CHECK_VERSION, 1);
+    }
+
+    fn report_with(checks: Vec<Check>) -> DoctorReport {
+        DoctorReport {
+            macos: None,
+            below_floor: false,
+            toolchain_release: Some("1.97.1".into()),
+            checks,
+            stale_removed: 0,
+        }
+    }
+
+    fn marker_check(verdict: Verdict) -> Check {
+        Check {
+            id: CheckId::G,
+            verdict,
+            measured: Measures::new(),
+        }
+    }
+
+    #[test]
+    fn judge_failed_marker_passes_only_when_the_build_failed_and_left_a_summary_line() {
+        let summary = concat!(
+            "warning only\n",
+            r#"{"$message_type":"diagnostic","message":"aborting due to 1 previous error","code":null,"level":"error","spans":[]}"#,
+            "\n",
+        );
+        let cases = [
+            (false, vec![summary.to_string()], Verdict::Pass),
+            (false, vec!["warning only".to_string()], Verdict::Fail),
+            (true, Vec::<String>::new(), Verdict::Unavailable),
+            (false, Vec::<String>::new(), Verdict::Fail),
+        ];
+        for (exit_ok, outputs, want) in cases {
+            assert_eq!(
+                judge_failed_marker(exit_ok, &outputs),
+                want,
+                "exit_ok={exit_ok} outputs={outputs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unavailable_check_g_disables_nothing_and_leaves_g_not_run() {
+        let unavailable = capabilities_for(&report_with(vec![marker_check(Verdict::Unavailable)]));
+        assert!(unavailable.disabled.is_empty());
+        assert_eq!(unavailable.failed_marker_check, 0);
+        assert_eq!(unavailable.lock_check, LOCK_CHECK_VERSION);
+        assert_eq!(
+            failed_unit_reporting(&unavailable),
+            Availability::Unavailable("doctor check (g) has not run; run cargo hive doctor".into())
+        );
+
+        let failed = capabilities_for(&report_with(vec![marker_check(Verdict::Fail)]));
+        assert_eq!(
+            failed.disabled.keys().copied().collect::<Vec<_>>(),
+            vec![Capability::FailedUnitReporting]
+        );
+        assert_eq!(failed.failed_marker_check, FAILED_MARKER_CHECK_VERSION);
+        assert_eq!(
+            failed_unit_reporting(&failed),
+            Availability::Unavailable("doctor check (g) failed".into())
+        );
+
+        let passed = capabilities_for(&report_with(vec![marker_check(Verdict::Pass)]));
+        assert!(passed.disabled.is_empty());
+        assert_eq!(passed.failed_marker_check, FAILED_MARKER_CHECK_VERSION);
+        assert_eq!(failed_unit_reporting(&passed), Availability::Available);
+    }
+
+    #[test]
+    fn a_capabilities_record_without_check_g_loads_and_reads_as_not_run() {
+        let caps: Capabilities =
+            serde_json::from_str(r#"{"toolchain_release":"1.97.1","disabled":{}}"#).unwrap();
+        assert_eq!(caps.failed_marker_check, 0);
+        assert_eq!(FAILED_MARKER_CHECK_VERSION, 1);
+        assert_eq!(
+            failed_unit_reporting(&caps),
+            Availability::Unavailable("doctor check (g) has not run; run cargo hive doctor".into())
+        );
+    }
+
+    #[test]
+    fn a_failed_check_g_disables_only_failed_unit_reporting() {
+        let caps = capabilities_for(&report_with(vec![marker_check(Verdict::Fail)]));
+        assert_eq!(
+            caps.disabled.get(&Capability::FailedUnitReporting),
+            Some(&BTreeSet::from([CheckId::G]))
+        );
+        assert!(!caps.disabled.contains_key(&Capability::FingerprintReading));
+        assert!(!caps.disabled.contains_key(&Capability::Deletion));
+        assert!(!caps.disabled.contains_key(&Capability::Seeding));
+        assert_eq!(caps.disabled.len(), 1);
+        assert_eq!(caps.failed_marker_check, FAILED_MARKER_CHECK_VERSION);
     }
 
     #[test]

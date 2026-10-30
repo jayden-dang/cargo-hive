@@ -2,12 +2,13 @@
 //! and a sibling `<H>` with 16 lowercase hex chars. Its JSON must have exactly the 11
 //! known keys with known types. Any deviation makes the whole profile dir unsupported.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -43,12 +44,53 @@ pub enum Format {
     Unsupported(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    NotRecorded,
+    None,
+    AllDeclared,
+    Partial,
+    Unreadable,
+}
+
+impl Coverage {
+    pub fn as_str(&self) -> Option<&'static str> {
+        match self {
+            Coverage::NotRecorded => Some("not_recorded"),
+            Coverage::None => Some("none"),
+            Coverage::AllDeclared => Some("all_declared"),
+            Coverage::Partial => Some("partial"),
+            Coverage::Unreadable => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Unit {
     pub dir_name: String,
     pub kind: String,
     pub hash_hex: String,
     pub deps: Vec<u64>,
+    #[serde(skip)]
+    pub stem: String,
+    #[serde(skip)]
+    pub features: Arc<str>,
+    #[serde(skip)]
+    pub coverage: Coverage,
+    #[serde(skip)]
+    pub profile: u64,
+    #[serde(skip)]
+    pub target: u64,
+    #[serde(skip)]
+    pub path: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotCurrentUnit {
+    pub dir: PathBuf,
+    pub stem: Option<String>,
+    pub features: Option<Arc<str>>,
+    pub outputs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -71,6 +113,8 @@ pub struct ProfileReport {
     pub units: usize,
     /// Unit dirs Cargo left mid-rebuild or after a failed compile: counted, never read as units.
     pub not_current: usize,
+    #[serde(skip)]
+    pub not_current_units: Vec<NotCurrentUnit>,
     pub edges: Option<EdgeCounts>,
     #[serde(skip)]
     pub graph: Option<UnitGraph>,
@@ -85,7 +129,7 @@ pub fn le_hex(value: u64) -> String {
         .collect()
 }
 
-fn kind_of(stem: &str) -> String {
+pub(crate) fn kind_of(stem: &str) -> String {
     KINDS
         .iter()
         .find(|k| stem == **k || stem.starts_with(&format!("{k}-")))
@@ -135,7 +179,7 @@ fn check_types(obj: &Map<String, Value>) -> Result<Vec<u64>, String> {
         .collect()
 }
 
-fn read_capped(reader: &mut impl Read) -> Result<Vec<u8>, String> {
+pub(crate) fn read_capped(reader: &mut impl Read) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     reader
         .by_ref()
@@ -148,9 +192,18 @@ fn read_capped(reader: &mut impl Read) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// `Ok(None)` is a unit Cargo is rebuilding or failed to rebuild: it empties the hash file before
-/// compiling and rewrites it only on success, so the JSON beside it is stale.
-fn read_unit(dir: &Path, json_name: &str) -> Result<Option<Unit>, String> {
+enum ParsedUnit {
+    Current(Unit),
+    NotCurrent { stem: String, features: Arc<str> },
+}
+
+/// An emptied hash is a unit Cargo is rebuilding. The JSON beside it is stale, so the unit is
+/// not current; its stem and features are still the ones the last successful build wrote.
+fn read_unit(
+    dir: &Path,
+    json_name: &str,
+    shared_features: &mut HashMap<String, Arc<str>>,
+) -> Result<ParsedUnit, String> {
     let stem = json_name.trim_end_matches(".json");
     let hash = fs::read(dir.join(stem)).map_err(|e| format!("hash file `{stem}`: {e}"))?;
     if !hash.is_empty() && !is_hash(&hash) {
@@ -172,18 +225,116 @@ fn read_unit(dir: &Path, json_name: &str) -> Result<Option<Unit>, String> {
         .as_object()
         .ok_or_else(|| format!("{json_name} is not a JSON object"))?;
     let deps = check_types(obj)?;
+    let features_raw = obj["features"]
+        .as_str()
+        .ok_or("`features` is not a string")?;
+    let declared_raw = obj["declared_features"]
+        .as_str()
+        .ok_or("`declared_features` is not a string")?;
+    let features = intern(shared_features, features_raw);
+    let stem = stem.to_string();
     if hash.is_empty() {
-        return Ok(None);
+        return Ok(ParsedUnit::NotCurrent { stem, features });
     }
-    Ok(Some(Unit {
+    Ok(ParsedUnit::Current(Unit {
         dir_name: dir
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default(),
-        kind: kind_of(stem),
+        kind: kind_of(&stem),
         hash_hex: String::from_utf8(hash).expect("checked ASCII hex"),
         deps,
+        stem,
+        features,
+        coverage: coverage_of(features_raw, declared_raw),
+        profile: obj["profile"]
+            .as_u64()
+            .ok_or("`profile` is not an unsigned integer")?,
+        target: obj["target"]
+            .as_u64()
+            .ok_or("`target` is not an unsigned integer")?,
+        path: obj["path"]
+            .as_u64()
+            .ok_or("`path` is not an unsigned integer")?,
     }))
+}
+
+fn intern(shared: &mut HashMap<String, Arc<str>>, text: &str) -> Arc<str> {
+    if let Some(hit) = shared.get(text) {
+        return Arc::clone(hit);
+    }
+    let hit: Arc<str> = Arc::from(text);
+    shared.insert(text.to_string(), Arc::clone(&hit));
+    hit
+}
+
+fn coverage_of(features: &str, declared: &str) -> Coverage {
+    if features.is_empty() {
+        return Coverage::NotRecorded;
+    }
+    let Some(enabled) = json_string_array(features) else {
+        return Coverage::Unreadable;
+    };
+    if enabled.is_empty() {
+        return Coverage::None;
+    }
+    let Some(declared) = json_string_array(declared) else {
+        return Coverage::Unreadable;
+    };
+    if declared
+        .iter()
+        .all(|name| enabled.iter().any(|on| on == name))
+    {
+        Coverage::AllDeclared
+    } else {
+        Coverage::Partial
+    }
+}
+
+fn json_string_array(raw: &str) -> Option<Vec<String>> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    let items = value.as_array()?;
+    let mut names = Vec::with_capacity(items.len());
+    for item in items {
+        names.push(item.as_str()?.to_string());
+    }
+    Some(names)
+}
+
+#[derive(Deserialize)]
+struct OutputLine {
+    level: Option<String>,
+    code: Option<OutputCode>,
+    message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OutputCode {
+    code: Option<String>,
+}
+
+fn output_line(line: &str) -> Option<OutputLine> {
+    serde_json::from_str(line).ok()
+}
+
+pub fn is_summary_line(line: &str) -> Option<bool> {
+    let parsed = output_line(line)?;
+    Some(
+        parsed.level.as_deref() == Some("error")
+            && parsed.code.is_none()
+            && parsed
+                .message
+                .as_deref()
+                .is_some_and(|message| message.starts_with("aborting due to")),
+    )
+}
+
+pub fn error_code(line: &str) -> Option<String> {
+    let parsed = output_line(line)?;
+    if parsed.level.as_deref() != Some("error") {
+        return None;
+    }
+    parsed.code.and_then(|code| code.code)
 }
 
 /// The dir Cargo leaves for a unit whose first compile failed: its start stamp and its cached
@@ -203,6 +354,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
         format: Format::Unsupported(reason),
         units,
         not_current: 0,
+        not_current_units: Vec::new(),
         edges: None,
         graph: None,
     };
@@ -219,7 +371,8 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
     };
     let mut units = Vec::new();
     let mut counted = 0usize;
-    let mut not_current = 0usize;
+    let mut not_current_units = Vec::new();
+    let mut shared_features: HashMap<String, Arc<str>> = HashMap::new();
     let mut problem: Option<String> = None;
     let mut dirs: Vec<PathBuf> = Vec::new();
     for entry in entries {
@@ -262,7 +415,16 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
             continue;
         }
         if never_compiled(&names) {
-            not_current += 1;
+            not_current_units.push(NotCurrentUnit {
+                dir: dir.clone(),
+                stem: None,
+                features: None,
+                outputs: names
+                    .iter()
+                    .filter(|n| n.starts_with("output-"))
+                    .cloned()
+                    .collect(),
+            });
             continue;
         }
         let jsons: Vec<&String> = names.iter().filter(|n| n.ends_with(".json")).collect();
@@ -274,12 +436,23 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
             ));
             continue;
         }
-        match read_unit(&dir, jsons[0]) {
-            Ok(Some(u)) => {
+        match read_unit(&dir, jsons[0], &mut shared_features) {
+            Ok(ParsedUnit::Current(u)) => {
                 counted += 1;
                 units.push(u);
             }
-            Ok(None) => not_current += 1,
+            Ok(ParsedUnit::NotCurrent { stem, features }) => {
+                not_current_units.push(NotCurrentUnit {
+                    dir: dir.clone(),
+                    stem: Some(stem),
+                    features: Some(features),
+                    outputs: names
+                        .iter()
+                        .filter(|n| n.starts_with("output-"))
+                        .cloned()
+                        .collect(),
+                });
+            }
             Err(reason) => {
                 counted += 1;
                 problem.get_or_insert(format!("{}: {reason}", dir.display()));
@@ -311,7 +484,8 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
         path,
         format: Format::Supported,
         units: counted,
-        not_current,
+        not_current: not_current_units.len(),
+        not_current_units,
         edges: Some(counts),
         graph: Some(UnitGraph { units, edges }),
     }
@@ -322,6 +496,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn scratch() -> PathBuf {
@@ -346,6 +521,38 @@ mod tests {
             "{{\"rustc\":11722972603611519644,\"features\":\"[]\",\"declared_features\":\"[]\",\"target\":1,\"profile\":2,\"path\":3,\"deps\":[{}],\"local\":[],\"rustflags\":[],\"config\":4,\"compile_kind\":0}}",
             deps.join(",")
         )
+    }
+
+    fn unit_json_with(deps: &[u64], features: &str, declared: &str) -> String {
+        let deps: Vec<String> = deps
+            .iter()
+            .map(|d| format!("[1,\"dep\",false,{d}]"))
+            .collect();
+        format!(
+            "{{\"rustc\":11722972603611519644,\"features\":{},\"declared_features\":{},\"target\":1,\"profile\":2,\"path\":3,\"deps\":[{}],\"local\":[],\"rustflags\":[],\"config\":4,\"compile_kind\":0}}",
+            serde_json::to_string(features).unwrap(),
+            serde_json::to_string(declared).unwrap(),
+            deps.join(",")
+        )
+    }
+
+    fn write_unit_with(
+        profile: &Path,
+        dir: &str,
+        stem: &str,
+        value: u64,
+        deps: &[u64],
+        features: &str,
+        declared: &str,
+    ) {
+        let d = profile.join(".fingerprint").join(dir);
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join(stem), le_hex(value)).unwrap();
+        fs::write(
+            d.join(format!("{stem}.json")),
+            unit_json_with(deps, features, declared),
+        )
+        .unwrap();
     }
 
     fn write_unit(profile: &Path, dir: &str, stem: &str, value: u64, deps: &[u64]) {
@@ -740,5 +947,141 @@ mod tests {
         assert!(matches!(r.format, Format::Unsupported(ref why) if why.contains(".fingerprint")));
         assert_eq!((r.units, r.edges), (0, None));
         fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_unit_keeps_its_stem_features_coverage_and_hashes() {
+        let cases = [
+            (
+                r#"["testkit"]"#,
+                r#"["testkit"]"#,
+                Coverage::AllDeclared,
+                Some("all_declared"),
+            ),
+            ("[]", "[]", Coverage::None, Some("none")),
+            (
+                r#"["a"]"#,
+                r#"["a","b"]"#,
+                Coverage::Partial,
+                Some("partial"),
+            ),
+            ("", "", Coverage::NotRecorded, Some("not_recorded")),
+            ("not json", "[]", Coverage::Unreadable, None),
+        ];
+        let p = scratch();
+        for (i, (features, declared, _, _)) in cases.iter().enumerate() {
+            write_unit_with(
+                &p,
+                &format!("q{i}-000000000000000{}", i + 1),
+                "lib-q",
+                (i as u64) + 1,
+                &[],
+                features,
+                declared,
+            );
+        }
+        let r = read_profile(&p);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!(r.units, cases.len());
+        let units = r.graph.expect("a supported profile keeps its units").units;
+        for (features, _, coverage, label) in cases {
+            let unit = units
+                .iter()
+                .find(|u| u.features.as_ref() == features)
+                .unwrap_or_else(|| panic!("no unit with features {features:?}"));
+            assert_eq!(unit.coverage, coverage, "{features:?}");
+            assert_eq!(unit.coverage.as_str(), label, "{features:?}");
+            assert_eq!(unit.stem, "lib-q", "{features:?}");
+            assert_eq!(
+                (unit.profile, unit.target, unit.path),
+                (2, 1, 3),
+                "{features:?}"
+            );
+        }
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn units_with_the_same_features_share_one_string() {
+        let p = scratch();
+        write_unit(&p, "a-0000000000000001", "lib-a", 1, &[]);
+        write_unit(&p, "b-0000000000000002", "lib-b", 2, &[]);
+        let r = read_profile(&p);
+        let units = r.graph.expect("supported").units;
+        assert!(
+            Arc::ptr_eq(&units[0].features, &units[1].features),
+            "both units are features \"[]\""
+        );
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn not_current_units_are_listed_with_what_explain_needs() {
+        let never = scratch();
+        write_unit(&never, "ok-0000000000000001", "lib-ok", 1, &[]);
+        let failed = never.join(".fingerprint/failed-0000000000000002");
+        fs::create_dir_all(&failed).unwrap();
+        fs::write(failed.join("invoked.timestamp"), "").unwrap();
+        fs::write(failed.join("output-lib-failed"), "{}").unwrap();
+        let r = read_profile(&never);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!(r.not_current, r.not_current_units.len());
+        assert_eq!(
+            r.not_current_units,
+            vec![NotCurrentUnit {
+                dir: failed,
+                stem: None,
+                features: None,
+                outputs: vec!["output-lib-failed".to_string()],
+            }]
+        );
+        fs::remove_dir_all(never).unwrap();
+
+        let emptied = scratch();
+        write_unit(&emptied, "dep-0000000000000001", "lib-dep", 1, &[]);
+        write_unit(&emptied, "user-0000000000000002", "lib-user", 2, &[1]);
+        let dep = emptied.join(".fingerprint/dep-0000000000000001");
+        fs::write(dep.join("lib-dep"), "").unwrap();
+        fs::write(dep.join("dep-lib-dep"), "dep-info").unwrap();
+        let r = read_profile(&emptied);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!(r.not_current, r.not_current_units.len());
+        assert_eq!(
+            r.not_current_units,
+            vec![NotCurrentUnit {
+                dir: dep,
+                stem: Some("lib-dep".to_string()),
+                features: Some(Arc::from("[]")),
+                outputs: vec![],
+            }]
+        );
+        fs::remove_dir_all(emptied).unwrap();
+
+        let unsupported = scratch();
+        fs::remove_dir_all(unsupported.join(".fingerprint")).unwrap();
+        let r = read_profile(&unsupported);
+        assert!(matches!(r.format, Format::Unsupported(_)));
+        assert_eq!(r.not_current, 0);
+        assert!(r.not_current_units.is_empty());
+        fs::remove_dir_all(unsupported).unwrap();
+    }
+
+    #[test]
+    fn the_summary_line_is_recognized_anywhere_and_only_in_its_exact_form() {
+        let summary = r#"{"$message_type":"diagnostic","message":"aborting due to 1 previous error","code":null,"level":"error","spans":[]}"#;
+        let coded = summary.replacen("\"code\":null", "\"code\":{\"code\":\"E0308\"}", 1);
+        let failure_note = r#"{"$message_type":"diagnostic","message":"For more information about this error, try `rustc --explain E0308`.","code":null,"level":"failure-note","spans":[]}"#;
+        let dead_code = r#"{"$message_type":"diagnostic","message":"function is never used","code":{"code":"dead_code","explanation":null},"level":"error","spans":[]}"#;
+        assert_eq!(is_summary_line(summary), Some(true));
+        assert_eq!(is_summary_line(&coded), Some(false));
+        assert_eq!(is_summary_line(failure_note), Some(false));
+        assert_eq!(
+            is_summary_line(r#"{"$message_type":"future_incompat"}"#),
+            Some(false)
+        );
+        assert_eq!(is_summary_line("not json"), None);
+        assert_eq!(error_code(&coded), Some("E0308".to_string()));
+        assert_eq!(error_code(dead_code), Some("dead_code".to_string()));
+        assert_eq!(error_code(summary), None);
     }
 }

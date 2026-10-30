@@ -24,6 +24,34 @@ pub struct Checkout {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// Every target the scan found.
+    All,
+    /// Targets owned by, or lying inside, these checkouts (realpaths).
+    Checkouts(Vec<PathBuf>),
+}
+
+impl Scope {
+    pub fn from_paths(args_empty: bool, checkouts: impl Iterator<Item = PathBuf>) -> Scope {
+        if args_empty {
+            Scope::All
+        } else {
+            Scope::Checkouts(checkouts.collect())
+        }
+    }
+
+    pub fn contains(&self, t: &TargetDir) -> bool {
+        match self {
+            Scope::All => true,
+            Scope::Checkouts(checkouts) => {
+                matches!(&t.owner, Owner::Owned { checkout } if checkouts.contains(checkout))
+                    || checkouts.iter().any(|c| t.path.starts_with(c))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalkFault {
     pub path: PathBuf,
     pub detail: String,
@@ -852,5 +880,68 @@ mod tests {
         };
         let merged = merge_snapshot(incoming, disk, &BTreeSet::new());
         assert!(!merged.metadata.contains_key(Path::new("/w/a")));
+    }
+
+    fn target_at(path: &str, owner: Owner) -> TargetDir {
+        TargetDir {
+            path: PathBuf::from(path),
+            owner,
+            profiles: Vec::new(),
+            size: None,
+            unreadable: None,
+        }
+    }
+
+    #[test]
+    fn a_scope_without_arguments_contains_every_target() {
+        let scope = Scope::from_paths(true, [PathBuf::from("/repo/unused")].into_iter());
+        let owned = target_at(
+            "/cache/owned",
+            Owner::Owned {
+                checkout: PathBuf::from("/repo/other"),
+            },
+        );
+        let orphan = target_at(
+            "/cache/orphan",
+            Owner::OrphanCandidate {
+                owned_under_caller_env: None,
+            },
+        );
+        let unresolved = target_at(
+            "/somewhere/unresolved",
+            Owner::Unresolved {
+                reason: "no checkout".into(),
+            },
+        );
+        assert!(scope.contains(&owned));
+        assert!(scope.contains(&orphan));
+        assert!(scope.contains(&unresolved));
+    }
+
+    #[test]
+    fn a_checkout_scope_contains_targets_owned_by_or_inside_its_checkouts() {
+        let listed = PathBuf::from("/repo/listed");
+        let scope = Scope::from_paths(false, [listed.clone()].into_iter());
+        let owned_by_listed = target_at(
+            "/cache/listed-target",
+            Owner::Owned {
+                checkout: listed.clone(),
+            },
+        );
+        let inside_but_owned_elsewhere = target_at(
+            "/repo/listed/target",
+            Owner::Owned {
+                checkout: PathBuf::from("/repo/other"),
+            },
+        );
+        let orphan_under_cache = target_at(
+            "/cache/root/target",
+            Owner::OrphanCandidate {
+                owned_under_caller_env: Some("CARGO_TARGET_DIR".into()),
+            },
+        );
+        assert!(scope.contains(&owned_by_listed));
+        assert!(scope.contains(&inside_but_owned_elsewhere));
+        assert!(!scope.contains(&orphan_under_cache));
     }
 }

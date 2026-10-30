@@ -74,7 +74,7 @@ fn doctor(hive: &Hive) -> (Output, serde_json::Value) {
     (out, receipt)
 }
 
-const EXPECTED_IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
+const EXPECTED_IDS: [&str; 7] = ["a", "b", "c", "d", "e", "f", "g"];
 
 #[test]
 fn doctor_reports_every_check_with_its_measured_value_and_records_capabilities() {
@@ -106,6 +106,31 @@ fn doctor_reports_every_check_with_its_measured_value_and_records_capabilities()
             .unwrap();
     assert_eq!(caps["toolchain_release"], receipt["toolchain"]);
     assert!(receipt["toolchain"].as_str().is_some());
+}
+
+#[test]
+fn check_g_passes_on_the_proof_machine() {
+    let hive = Hive::new();
+    let (_, receipt) = doctor(&hive);
+    let g = receipt["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "g")
+        .unwrap()
+        .clone();
+    assert_eq!(g["verdict"], "pass", "{g}");
+    assert_eq!(g["measured"]["exit_ok"], false, "{g}");
+    assert!(g["measured"]["outputs"].as_u64().unwrap() >= 1, "{g}");
+    assert!(g["measured"]["summary_lines"].as_u64().unwrap() >= 1, "{g}");
+    let caps: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(hive.home.path.join("capabilities.json")).unwrap())
+            .unwrap();
+    assert_eq!(caps["failed_marker_check"], 1);
+    assert!(
+        caps["disabled"]["failed_unit_reporting"].is_null(),
+        "{caps}"
+    );
 }
 
 #[test]

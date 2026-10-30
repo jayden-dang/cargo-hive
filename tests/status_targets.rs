@@ -1,5 +1,5 @@
 mod common;
-use common::{init_repo, Hive, Scratch};
+use common::{init_repo, register, Hive, Scratch};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -8,15 +8,6 @@ use std::process::{Child, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const TAG: &str = "# This file is a cache directory tag created by cargo.";
-
-fn register(hive: &Hive, repo: &Path) {
-    let out = hive.run(&["repo", "add", repo.to_str().unwrap()]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
 
 fn status(hive: &Hive, args: &[&str]) -> serde_json::Value {
     let mut all = vec!["status"];
