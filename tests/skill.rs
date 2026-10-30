@@ -527,3 +527,39 @@ fn skill_documents_every_mile1_command() {
         );
     }
 }
+
+#[test]
+fn skill_body_fits_the_budget() {
+    let body = skill_body();
+    let count = body.lines().count();
+    assert!(
+        (1..=150).contains(&count),
+        "the skill body has {count} lines, the budget is 1 to 150"
+    );
+    for (i, line) in body.lines().enumerate() {
+        assert!(
+            !line.contains("](") || line.contains("](http"),
+            "skill body line {} links to a local path: {line}",
+            i + 1
+        );
+        assert!(
+            !line.contains(".md"),
+            "skill body line {} names a .md path: {line}",
+            i + 1
+        );
+    }
+    let headings: Vec<&str> = body.lines().filter(|l| l.starts_with("## ")).collect();
+    assert_eq!(
+        headings,
+        [
+            "## Command form",
+            "## Version first",
+            "## The model",
+            "## Which command",
+            "## Command lines",
+            "## Reading a receipt",
+            "## Do not",
+        ],
+        "the skill body headings must be the seven the skill is built around, in order"
+    );
+}
