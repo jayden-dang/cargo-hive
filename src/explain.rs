@@ -313,8 +313,7 @@ fn directory_crate<'a>(dir_name: &'a str, hash_hex: &str) -> &'a str {
 }
 
 fn directory_suffix(dir_name: &str) -> Option<&str> {
-    let (_, tail) = dir_name.rsplit_once('-')?;
-    is_lower_hex_16(tail).then_some(tail)
+    crate::fingerprint::unit_hash(dir_name)
 }
 
 fn crate_and_kind(stem: &str) -> (String, String) {
