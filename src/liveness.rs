@@ -421,7 +421,12 @@ fn mark_live(
             enqueue(&mut node_live, &mut queue, i, Walk::Node(i));
         }
     }
-    let learned = learn_packages(units, nodes, index);
+    // Only a not-current node can be kept by package, so without nodes neither map is read.
+    let learned = if nodes.is_empty() {
+        BTreeMap::new()
+    } else {
+        learn_packages(units, nodes, index)
+    };
     let mut nodes_of: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, node) in nodes.iter().enumerate() {
         if let Some(name) = package_name(node.dir_name) {
