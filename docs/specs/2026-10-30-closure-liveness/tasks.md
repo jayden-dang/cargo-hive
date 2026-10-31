@@ -350,7 +350,7 @@ Design "Proof procedure" and Decisions 9 and 10.
 - [x] **Step 4: Verify** `cargo test --test liveness` passes. Run the merge gate.
 - [x] **Step 5: Commit** `test(liveness): prove on an APFS clone that deleting dead units rebuilds no live unit`.
 
-_Requirements: LIVE-4.2, LIVE-4.3, LIVE-4.4, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.12, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16, LIVE-4.17_
+_Requirements: LIVE-4.2, LIVE-4.4, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16_
 
 ---
 
@@ -374,7 +374,7 @@ Design "Proof procedure", step 1, and the success signals in `.skills/LIVE/close
 - [x] **Step 1: Write the failing test** `missing_proof_variables_are_named` (not ignored): a table over `missing_vars` with none, one, or all three set. Run `cargo test --test liveness_prove`; expect a compile error.
 - [x] **Step 2: Implement** the ignored test. It fails with the missing names, parses `HIVE_PROVE_CMDS` and fails naming any command `check_command` refuses, runs `prove`, prints the report, and fails when `prove` returns `Err`, any window is `RebuiltLive`, or `all_vacuous()`.
 - [x] **Step 3: Verify.** `cargo test --test liveness_prove` passes, with the ignored test skipped. Then run `env -u HIVE_PROVE_TARGET -u HIVE_PROVE_CHECKOUT -u HIVE_PROVE_CMDS cargo test --test liveness_prove -- --ignored`, and expect a failure naming all three, which shows the ignored test really runs. Run the merge gate.
-- [ ] **Step 4: Acceptance on klynt (manual, owner present).** With nothing building in klynt, run:
+- [ ] **Step 4: Acceptance on a real target (manual, owner present).** *Superseded by Task 9 Step 5: the first run on klynt (2026-10-30, `proof-runs.md`) was Vacuous because the baseline ran on a target the commands had never built, and the owner chose to accept on a scratch build of the mailgate project instead. The original text follows for reference.* With nothing building in klynt, run:
   ```
   HIVE_PROVE_TARGET=~/Developer/klynt/klynt/target \
   HIVE_PROVE_CHECKOUT=~/Developer/klynt/klynt \
@@ -385,3 +385,44 @@ Design "Proof procedure", step 1, and the success signals in `.skills/LIVE/close
 - [ ] **Step 5: Commit** `test(liveness): run the deletion proof on a real target and record the klynt results`.
 
 _Requirements: LIVE-4.1, LIVE-4.2, LIVE-4.8, LIVE-4.11_
+
+---
+
+### Task 9: Warm the target up before the baseline, then accept on a scratch build of mailgate
+
+Owner amendment 2026-10-31, after the first klynt run (see `proof-runs.md`): the proof gains a warm-up replay in a clone, the baseline runs on a clone of the warmed-up clone, and every window clone is taken from the warmed-up clone.
+
+**Files:**
+- Modify: `tests/common/prove.rs` (the order in `prove_with`, `ProveReport`, `render`)
+- Modify: `tests/liveness.rs` (tests of the new order and report)
+- Modify: `docs/specs/2026-10-30-closure-liveness/proof-runs.md` (results of the acceptance run)
+- Test: `tests/liveness.rs`
+
+**Reuse:** none — new code (rung 7) for the procedure. It reuses `liveness::liveness`, `gc::measure`, `cargo_target::identify` + `fingerprint::read_profile` (it builds the `TargetDir` by hand, since no function does that for one path), `platform::current()` for `Fs` (`volume`, `try_lock_exclusive`), `serde_json`, the system `cp`, and the tree-walk pattern of `tests/guards.rs`.
+
+**Interfaces:**
+- Consumes: Task 7's `prove_with`, `prove_with_cloner`, `Cloner`, `CloneDir`, `stamps`, `rebuilt`, `mtime_mismatches`, `replay_command_with_env`, `run_logged`, `vacuous_reason`, `outcome`, `render`
+- Produces:
+  - `ProveReport` gains `warm_up: PhaseReport` and `baseline: PhaseReport` (replacing `baseline_rebuilt`), where `PhaseReport { rebuilt: Vec<String>, commands: Vec<(Vec<String>, i32)>, elapsed: Duration }`. `render` prints both.
+  - The warmed-up clone is a `CloneDir` kept until the end of `prove_with`; the baseline clone and every window clone are `cp -c -R -p` copies of it. `mtime_mismatches` compares a window clone with the warmed-up clone's `stamps`.
+
+**Depends-on:** Task 8
+
+- [ ] **Step 1: Write the failing tests** in `tests/liveness.rs`:
+  - `the_warm_up_builds_what_the_commands_need_and_the_baseline_then_rebuilds_nothing`: a fixture whose target holds only `cargo check` output, commands `[["build","--offline"]]`. The warm-up report lists rebuilt units, the baseline report lists none, and a window is not Vacuous for "baseline rebuilt".
+  - `a_baseline_that_still_rebuilds_after_the_warm_up_makes_every_window_vacuous`: a command whose output changes each run (a build script that writes the time and has no `rerun-if-changed`), so the baseline rebuilds. Every window is Vacuous, naming the unit.
+  - `a_failing_warm_up_command_makes_every_window_vacuous_and_deletes_nothing`.
+  - `window_clones_come_from_the_warmed_up_clone_and_are_compared_with_it`: a window clone whose unit timestamp differs from the warmed-up clone's is Vacuous (pure helper); the original is untouched and no clone remains.
+  - `the_report_shows_the_warm_up_and_the_baseline`: `render` contains both phases' rebuilt counts, argv, exit status and elapsed time.
+
+  Run `cargo test --test liveness`; expect failures because the order is still the old one.
+- [ ] **Step 2: Implement** the new order in `prove_with` (warm-up clone and replay; baseline clone of it; per window a clone of it), with `PhaseReport` and the report text. Keep every earlier guard: symlink and clone-root checks, canonical-parent check on delete, the allow-list, `--locked`, the env scrubs and the config scan.
+- [ ] **Step 3: Verify.** `cargo test --test liveness` and `cargo test --lib liveness::` pass. Run the merge gate.
+- [ ] **Step 4: Commit** `test(liveness): warm the target up in a clone before the baseline`.
+- [ ] **Step 5: Acceptance on a scratch build of mailgate (manual, owner present).**
+  1. Make a scratch copy of the mailgate HEAD without touching its checkout or `.git`: `git -C /Users/jayden/Developer/work/CommandOss/mailgate archive HEAD | tar -x -C /private/tmp/hive-it-mailgate-<id>/`.
+  2. In the copy, build with the same commands the proof will replay, so the target holds real history: `cargo check --all-targets --offline`, then backdate every `invoked.timestamp` in the copy's target by 30 days (the copy is ours to modify), then `cargo build --offline`. If dependencies are missing offline, stop and report instead of using the network.
+  3. Run the ignored test with `HIVE_PROVE_TARGET` set to the copy's `target`, `HIVE_PROVE_CHECKOUT` to the copy, and `HIVE_PROVE_CMDS='[["build","--offline"],["check","--all-targets","--offline"]]'`.
+  4. Expect the 6 h and 24 h windows `Passed` with `rebuilt_live == 0`. Record the date, commands, each window's report, the warm-up and baseline reports and the elapsed time in `proof-runs.md`; a `RebuiltLive` result is a stop-and-report. Remove the scratch copy afterwards.
+
+_Requirements: LIVE-4.18, LIVE-4.19, LIVE-4.20, LIVE-4.21, LIVE-4.22_

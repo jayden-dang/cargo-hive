@@ -87,9 +87,14 @@ the narrowest way to reach it from `tests/`.
 10. **The clone is APFS `cp -c -R -p`, preflighted and checked, not trusted.** `Fs::volume` must
     report `apfs`, or the test fails before copying (LIVE-4.16): on another file system `cp -c`
     silently does a full copy. The proof holds every profile's `.cargo-build-lock` for its whole
-    run, so a background `cargo watch` cannot change the original (LIVE-4.15). It compares unit
-    timestamps in the clone with the original (LIVE-4.12), and runs a baseline replay on an
-    undeleted clone, so an environment difference is never blamed on a deletion (LIVE-4.17).
+    run, so a background `cargo watch` cannot change the original (LIVE-4.15). It warms the
+    target up first: one replay in a clone of the original builds whatever the owner's commands
+    need but the target never had, and that warmed-up clone becomes the source of every later
+    clone (LIVE-4.18, LIVE-4.21). A baseline replay on a fresh clone of it must then rebuild
+    nothing, so an environment difference is never blamed on a deletion (LIVE-4.19). Each window
+    clone's unit timestamps are compared with the warmed-up clone's (LIVE-4.20). The first klynt run
+    showed why: a baseline on the original rebuilt hundreds of units the commands had never built,
+    and the run took 3 h 42 min before every window came out Vacuous.
     Cargo's freshness does not depend on inodes, and `-p` kept every mtime at nanosecond
     resolution on klynt, measured in the review.
 11. **No new dependency.** Mtimes are planted with std `File::set_modified` (already used in
@@ -107,7 +112,7 @@ reverse (no wrapper, GOAL-1's wording) are recorded in ARCH-1 and the confirmed 
 - **New:** LIVE-2.8 (listing failure), LIVE-2.9 (no unit hash), LIVE-2.10 (duplicate unit hash),
   LIVE-2.11 (unreadable target dir), LIVE-3.5 (an entry carrying another unit's hash),
   LIVE-3.6 (no artifacts, no files), LIVE-4.15 (hold the build locks), LIVE-4.16 (APFS
-  preflight), LIVE-4.17 (baseline replay).
+  preflight), LIVE-4.17 (baseline replay; superseded 2026-10-31 by LIVE-4.18 to LIVE-4.22).
 - **Retired:** LIVE-3.4, superseded by LIVE-3.6 because it contradicts ARCH-18.
 
 ## Architecture
@@ -240,11 +245,16 @@ Order of one run:
 4. **Decide and measure every window before any clone (LIVE-4.2, LIVE-4.9).** For 6 h, 24 h and
    7 d with one `now`: compute liveness, then `gc::measure` over the dead units' files and,
    separately, over every profile's `incremental/` and direct child files.
-5. **Baseline (LIVE-4.17).** Clone with `cp -c -R -p`, replay, record the rebuilt units, then
-   remove the clone. If any unit rebuilt, every window is Vacuous, naming them.
-6. **Each window with dead units (LIVE-4.3 to LIVE-4.7, LIVE-4.12).**
-   - Clone, then compare every unit timestamp in the clone with the original. Any difference makes
-     the window Vacuous.
+5. **Warm-up and baseline (LIVE-4.18, LIVE-4.19, LIVE-4.22).**
+   - Warm-up: clone the original with `cp -c -R -p` into a warmed-up clone and replay the commands
+     there once. A non-zero exit or no `compiler-artifact` line makes every window Vacuous. Keep
+     the warmed-up clone until the end, and record its unit timestamps.
+   - Baseline: clone the warmed-up clone, replay once more, and record the rebuilt units, then
+     remove that clone. If any unit rebuilt, every window is Vacuous, naming them.
+   - Print the warm-up's and the baseline's rebuilt counts, argv, exit status and elapsed time.
+6. **Each window with dead units (LIVE-4.4 to LIVE-4.7, LIVE-4.20, LIVE-4.21).**
+   - Clone the warmed-up clone, then compare every unit timestamp in the clone with the
+     warmed-up clone's. Any difference makes the window Vacuous.
    - Delete exactly the listed files, rebased onto the clone.
    - Record the clone's unit timestamps and fingerprint dirs, after the deletion and before the
      replay.
@@ -263,8 +273,9 @@ Order of one run:
    `--ignored --nocapture`), stating that a Passed window covers only the replayed commands.
 
 Notes: the proof needs an old-layout target, because a build dir split from the target dir is
-Unsupported and therefore Undecided. On klynt, one clone took 84 s and its removal 30 s, so four
-clones (baseline plus three windows) take about 8 minutes.
+Unsupported and therefore Undecided. On klynt, one clone took 84 s and its removal 30 s. The
+dominant cost is the warm-up compile, which is paid once; later clones are cheap because APFS
+clones share blocks, and the original is never replayed into.
 
 ### Fixture coverage (`tests/liveness.rs`, new test code)
 

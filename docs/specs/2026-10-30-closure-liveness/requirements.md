@@ -149,9 +149,8 @@ rebuilds and how many bytes the deletion would free, before ROAD-6 deletes anyth
 - **LIVE-4.2** WHEN the proof test runs THE SYSTEM SHALL compute the liveness result and the dead
   units' files on the original Cargo target dir, once for each window of 6 hours, 24 hours and
   7 days, with the same current time for all three.
-- **LIVE-4.3** WHEN a window's liveness result is Decided with at least one dead unit THE SYSTEM
-  SHALL delete exactly that window's listed files in a fresh APFS clone of the Cargo target dir,
-  and SHALL NOT delete or modify anything in the original.
+- ~~**LIVE-4.3**~~ superseded by LIVE-4.21 (2026-10-31, owner amendment after the first klynt run):
+  the window clone is now taken from the warmed-up clone, not from the original.
 - **LIVE-4.4** WHEN the proof test replays the commands for a window THE SYSTEM SHALL run each one
   as an argument vector, without a shell, in `HIVE_PROVE_CHECKOUT` with both `CARGO_TARGET_DIR`
   and `CARGO_BUILD_BUILD_DIR` set to that window's clone and `--message-format=json` inserted
@@ -175,9 +174,8 @@ rebuilds and how many bytes the deletion would free, before ROAD-6 deletes anyth
 - **LIVE-4.11** IF a command in `HIVE_PROVE_CMDS` has no cargo subcommand, or carries
   `--message-format`, `--target-dir` or `--artifact-dir` in any form before a `--`, THEN THE
   SYSTEM SHALL fail the test naming that command.
-- **LIVE-4.12** IF, before a window's replay, any unit timestamp's modification time in the clone
-  differs from the same file's in the original THEN THE SYSTEM SHALL report that window as Vacuous
-  with the reason.
+- ~~**LIVE-4.12**~~ superseded by LIVE-4.20 (2026-10-31): the clone is compared with the warmed-up
+  clone it was taken from, because the warm-up legitimately rebuilds units.
 - **LIVE-4.13** IF any entry of the original Cargo target dir, or the checkout's `Cargo.lock`, is
   created, removed, or has its modification time or size changed between the start and the end of
   the proof test THEN THE SYSTEM SHALL fail the test naming the first such entries.
@@ -188,9 +186,25 @@ rebuilds and how many bytes the deletion would free, before ROAD-6 deletes anyth
   by another process THEN THE SYSTEM SHALL fail the test naming that profile dir.
 - **LIVE-4.16** IF the volume holding the original Cargo target dir cannot clone files THEN THE
   SYSTEM SHALL fail the test before copying anything.
-- **LIVE-4.17** WHEN the proof test starts replaying THE SYSTEM SHALL first replay the commands
-  once on a clone with nothing deleted; IF any unit rebuilds in that baseline THEN THE SYSTEM SHALL
-  report every window as Vacuous, naming the rebuilt units.
+- ~~**LIVE-4.17**~~ superseded by LIVE-4.18 and LIVE-4.19 (2026-10-31): a baseline on a target the
+  commands had never built rebuilt hundreds of units and made every window Vacuous (first klynt run).
+- **LIVE-4.18** WHEN the proof test starts replaying THE SYSTEM SHALL first replay the commands
+  once in a clone of the original Cargo target dir, with nothing deleted, as a warm-up, and SHALL
+  keep that warmed-up clone as the source of every later clone; IF a warm-up command exits non-zero
+  or emits no `compiler-artifact` message THEN THE SYSTEM SHALL report every window as Vacuous with
+  the reason.
+- **LIVE-4.19** WHEN the warm-up has finished THE SYSTEM SHALL replay the commands once more in a
+  fresh clone of the warmed-up clone, with nothing deleted, as a baseline; IF any unit rebuilds in
+  that baseline THEN THE SYSTEM SHALL report every window as Vacuous, naming the rebuilt units.
+- **LIVE-4.20** IF, before a window's replay, any unit timestamp's modification time in the window's
+  clone differs from the same file's in the warmed-up clone it was taken from THEN THE SYSTEM SHALL
+  report that window as Vacuous with the reason.
+- **LIVE-4.21** WHEN a window's liveness result is Decided with at least one dead unit THE SYSTEM
+  SHALL delete exactly that window's listed files in a fresh APFS clone of the warmed-up clone, and
+  SHALL NOT delete or modify anything in the original or in the warmed-up clone.
+- **LIVE-4.22** WHEN the proof test prints its report THE SYSTEM SHALL include, for the warm-up and
+  for the baseline, the number of units that rebuilt, each command's argument vector and exit status,
+  and the elapsed time.
 
 ## 5. Existing commands keep working
 
