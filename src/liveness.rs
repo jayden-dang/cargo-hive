@@ -56,6 +56,7 @@ pub enum Uncertain {
     NoUnitHash { dir: PathBuf },
     DuplicateUnitHash { a: PathBuf, b: PathBuf },
     TargetUnreadable { target: PathBuf, why: String },
+    TimestampUnreadable { path: PathBuf, why: String },
 }
 
 impl Uncertain {
@@ -76,6 +77,9 @@ impl Uncertain {
                 "only one unit dir per profile carries that unit hash"
             }
             Uncertain::TargetUnreadable { .. } => "the target dir is readable",
+            Uncertain::TimestampUnreadable { .. } => {
+                "the timestamp file is readable, or the unit is removed"
+            }
         }
     }
 }
@@ -118,6 +122,13 @@ impl fmt::Display for Uncertain {
             Uncertain::TargetUnreadable { target, why } => {
                 write!(f, "{}: target dir unreadable: {why}", target.display())
             }
+            Uncertain::TimestampUnreadable { path, why } => {
+                write!(
+                    f,
+                    "{}: invocation timestamp unreadable: {why}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -136,9 +147,22 @@ fn in_window(mtime: SystemTime, now: SystemTime, window: Duration) -> bool {
     now.checked_sub(window).is_none_or(|cutoff| mtime >= cutoff)
 }
 
-fn invoked_in_window(fs: &dyn Fs, timestamp: &Path, now: SystemTime, window: Duration) -> bool {
-    fs.mtime(timestamp)
-        .is_ok_and(|mtime| in_window(mtime, now, window))
+/// Whether the unit was invoked inside the window. A timestamp that does not exist means it was
+/// never invoked; any other read error leaves the question open, so the caller must not delete.
+fn invoked_in_window(
+    fs: &dyn Fs,
+    timestamp: &Path,
+    now: SystemTime,
+    window: Duration,
+) -> Result<bool, Uncertain> {
+    match fs.mtime(timestamp) {
+        Ok(mtime) => Ok(in_window(mtime, now, window)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(Uncertain::TimestampUnreadable {
+            path: timestamp.to_path_buf(),
+            why: e.to_string(),
+        }),
+    }
 }
 
 pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Duration) -> Liveness {
@@ -162,6 +186,9 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
         }
         for nc in &profile.not_current_units {
             let Some(dir_name) = nc.dir.file_name().and_then(|n| n.to_str()) else {
+                reasons.push(Uncertain::NoUnitHash {
+                    dir: nc.dir.clone(),
+                });
                 continue;
             };
             let kind = nc
@@ -172,10 +199,12 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
                 not_current_hashes.push((profile.path.as_path(), hash));
             }
             let stamp = unit_timestamp(&profile.path, dir_name, &kind);
-            if invoked_in_window(fs, &stamp, now, window) {
-                reasons.push(Uncertain::NotCurrentInWindow {
+            match invoked_in_window(fs, &stamp, now, window) {
+                Ok(true) => reasons.push(Uncertain::NotCurrentInWindow {
                     dir: nc.dir.clone(),
-                });
+                }),
+                Ok(false) => {}
+                Err(reason) => reasons.push(reason),
             }
         }
         if let Some(graph) = &profile.graph {
@@ -208,9 +237,13 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
     let mut queue: Vec<usize> = Vec::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
         let stamp = unit_timestamp(profile, &unit.dir_name, &unit.kind);
-        if invoked_in_window(fs, &stamp, now, window) {
-            live[i] = true;
-            queue.push(i);
+        match invoked_in_window(fs, &stamp, now, window) {
+            Ok(true) => {
+                live[i] = true;
+                queue.push(i);
+            }
+            Ok(false) => {}
+            Err(reason) => reasons.push(reason),
         }
     }
     let mut cursor = 0;
@@ -581,8 +614,15 @@ mod tests {
     }
 
     #[test]
-    fn no_window_means_seven_days() {
-        assert_eq!(DEFAULT_WINDOW, Duration::from_secs(7 * 86_400));
+    fn the_default_window_keeps_a_unit_invoked_just_under_seven_days_ago() {
+        let s = Scratch::new("default-window");
+        let p = s.0.join("debug");
+        write_unit(&p, A, "lib-a", 101, &[], Some(6 * DAY + 23 * HOUR));
+        write_unit(&p, B, "lib-b", 102, &[], Some(7 * DAY + HOUR));
+        let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), DEFAULT_WINDOW));
+        assert_eq!(names(&live), [A]);
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].unit.dir_name, B);
     }
 
     #[test]
@@ -857,7 +897,11 @@ mod tests {
                 b: path.clone(),
             },
             Uncertain::TargetUnreadable {
-                target: path,
+                target: path.clone(),
+                why: "w".into(),
+            },
+            Uncertain::TimestampUnreadable {
+                path,
                 why: "w".into(),
             },
         ];
@@ -887,6 +931,7 @@ mod tests {
     enum Listing {
         Reversed,
         FailOn(&'static str),
+        MtimeFails(io::ErrorKind),
     }
 
     struct FakeFs {
@@ -922,7 +967,12 @@ mod tests {
             self.real.set_mtime(path, t)
         }
         fn mtime(&self, path: &Path) -> io::Result<SystemTime> {
-            self.real.mtime(path)
+            match self.listing {
+                Listing::MtimeFails(kind) if path.ends_with("invoked.timestamp") => {
+                    Err(io::Error::new(kind, "injected"))
+                }
+                _ => self.real.mtime(path),
+            }
         }
         fn inode(&self, path: &Path) -> io::Result<u64> {
             self.real.inode(path)
@@ -1183,5 +1233,85 @@ mod tests {
         assert_eq!(real, shuffled);
         let dead = dead_of(real, D);
         assert_eq!(dead.files.len(), 5);
+    }
+
+    fn mtime_fails_with(kind: io::ErrorKind) -> FakeFs {
+        FakeFs::new(Listing::MtimeFails(kind))
+    }
+
+    #[test]
+    fn a_missing_timestamp_of_a_current_unit_is_not_a_root() {
+        let s = Scratch::new("ts-missing");
+        let p = s.0.join("debug");
+        write_unit(&p, A, "lib-a", 101, &[], Some(HOUR));
+        let target = target_of(&s.0, &[&p]);
+        let fake = mtime_fails_with(io::ErrorKind::NotFound);
+        let (live, dead) = decided(liveness(&fake, &target, now(), 6 * HOUR));
+        assert!(live.is_empty());
+        assert_eq!(dead[0].unit.dir_name, A);
+    }
+
+    #[test]
+    fn an_unreadable_timestamp_of_a_current_unit_makes_the_target_undecided() {
+        let s = Scratch::new("ts-denied");
+        let p = s.0.join("debug");
+        write_unit(&p, A, "lib-a", 101, &[], Some(30 * DAY));
+        let target = target_of(&s.0, &[&p]);
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::Other] {
+            let reasons = undecided(liveness(&mtime_fails_with(kind), &target, now(), 6 * HOUR));
+            assert!(
+                matches!(&reasons[..], [Uncertain::TimestampUnreadable { path, .. }]
+                    if *path == unit_timestamp(&p, A, "lib")),
+                "{kind:?}: {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_timestamp_of_a_not_current_unit_is_ignored() {
+        let s = Scratch::new("nc-ts-missing");
+        let p = s.0.join("debug");
+        never_compiled(&p, B, HOUR);
+        let target = target_of(&s.0, &[&p]);
+        let fake = mtime_fails_with(io::ErrorKind::NotFound);
+        decided(liveness(&fake, &target, now(), 6 * HOUR));
+    }
+
+    #[test]
+    fn an_unreadable_timestamp_of_a_not_current_unit_makes_the_target_undecided() {
+        let s = Scratch::new("nc-ts-denied");
+        let p = s.0.join("debug");
+        never_compiled(&p, B, 30 * DAY);
+        let target = target_of(&s.0, &[&p]);
+        let fake = mtime_fails_with(io::ErrorKind::PermissionDenied);
+        let reasons = undecided(liveness(&fake, &target, now(), 6 * HOUR));
+        assert!(
+            matches!(&reasons[..], [Uncertain::TimestampUnreadable { path, .. }]
+                if *path == p.join(".fingerprint").join(B).join("invoked.timestamp")),
+            "{reasons:?}"
+        );
+    }
+
+    #[test]
+    fn a_not_current_unit_dir_whose_name_is_not_utf8_has_no_unit_hash() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let s = Scratch::new("nc-nonutf8");
+        let p = s.0.join("debug");
+        let odd = p
+            .join(".fingerprint")
+            .join(OsStr::from_bytes(b"caf\xff-1111111111111111"));
+        fs::create_dir_all(p.join(".fingerprint")).unwrap();
+        let mut target = target_of(&s.0, &[&p]);
+        target.profiles[0]
+            .not_current_units
+            .push(crate::fingerprint::NotCurrentUnit {
+                dir: odd.clone(),
+                stem: None,
+                features: None,
+                outputs: Vec::new(),
+            });
+        let reasons = undecided(decide(&target, 6 * HOUR));
+        assert_eq!(reasons, [Uncertain::NoUnitHash { dir: odd }]);
     }
 }

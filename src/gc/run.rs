@@ -380,6 +380,7 @@ impl Runner<'_> {
 }
 
 /// What deleting a set of paths would free, counted per inode.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Footprint {
     pub bytes: Bytes,
@@ -388,6 +389,7 @@ pub struct Footprint {
 
 /// Measures `paths` as one set for `target`, so a hard link listed only once stays shared.
 /// Duplicates and paths under another listed path are ignored. A missing path counts nothing.
+#[doc(hidden)]
 pub fn measure(fs: &dyn Fs, target: &Path, paths: &[PathBuf], account_bytes: bool) -> Footprint {
     let mut roots: Vec<&PathBuf> = paths.iter().collect();
     roots.sort();

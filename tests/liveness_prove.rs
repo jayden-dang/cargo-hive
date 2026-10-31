@@ -1,3 +1,4 @@
+#![cfg(target_os = "macos")]
 mod common;
 use common::prove::{check_command, prove, ProveInput, WindowOutcome};
 use std::path::PathBuf;

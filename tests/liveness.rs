@@ -1,3 +1,4 @@
+#![cfg(target_os = "macos")]
 mod common;
 use cargo_hive::cargo_target::{self, TargetDir};
 use cargo_hive::fingerprint;
@@ -430,31 +431,35 @@ fn status_writes_a_snapshot_with_only_its_two_fields() {
     );
 }
 
+/// The entries of the `include = [...]` array under `[package]`, by plain text scanning.
+fn manifest_includes(manifest: &str) -> Vec<String> {
+    let Some(start) = manifest.find("include = [") else {
+        return Vec::new();
+    };
+    let rest = &manifest[start + "include = [".len()..];
+    let body = &rest[..rest.find(']').unwrap_or(rest.len())];
+    body.split(',')
+        .map(|entry| entry.trim().trim_matches('"').to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
 #[test]
 fn the_package_ships_no_test_file() {
-    let scratch = Scratch::new("liveness-package");
-    let stdout = fs::File::create(scratch.path.join("stdout")).unwrap();
-    let stderr = fs::File::create(scratch.path.join("stderr")).unwrap();
-    let child = Command::new("cargo")
-        .args(["package", "--list", "--allow-dirty", "--offline"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .env("CARGO_TARGET_DIR", scratch.path.join("target"))
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(stderr)
-        .spawn()
-        .unwrap();
-    let out = wait_within(child, CARGO_DEADLINE);
-    let listing = fs::read_to_string(scratch.path.join("stdout")).unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        fs::read_to_string(scratch.path.join("stderr")).unwrap()
-    );
-    assert!(listing.lines().any(|l| l == "Cargo.toml"));
-    assert!(
-        !listing.lines().any(|l| l.starts_with("tests/")),
-        "{listing}"
+    let manifest =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    let includes = manifest_includes(&manifest);
+    assert!(includes.iter().any(|e| e == "Cargo.toml"), "{includes:?}");
+    let tests: Vec<_> = includes.iter().filter(|e| e.starts_with("tests")).collect();
+    assert!(tests.is_empty(), "the package would ship {tests:?}");
+}
+
+#[test]
+fn the_include_scan_sees_a_tests_entry() {
+    let manifest = "[package]\ninclude = [\"src/**/*\", \"tests/**/*\", \"Cargo.toml\"]\n";
+    assert_eq!(
+        manifest_includes(manifest),
+        ["src/**/*", "tests/**/*", "Cargo.toml"]
     );
 }
 
@@ -659,6 +664,8 @@ fn a_config_that_redirects_artifacts_is_refused() {
         .contains("artifact-dir"));
     fs::write(s.path.join("a/.cargo/config.toml"), "[build]\njobs = 2\n").unwrap();
     assert!(prove::check_config(&work).is_ok());
+    fs::write(s.path.join("a/.cargo/config.toml"), vec![b'#'; 1 << 20]).unwrap();
+    assert!(prove::check_config(&work).is_ok(), "exactly 1 MiB");
     fs::write(
         s.path.join("a/.cargo/config.toml"),
         vec![b'#'; (1 << 20) + 1],
@@ -1031,7 +1038,9 @@ fn the_walk_records_metadata_and_stops_at_its_cap() {
     let tree = prove::walk(&s.path, 100).unwrap();
     assert_eq!(tree[&s.path.join("a/b.txt")].1, 5);
     assert!(tree.contains_key(&s.path.join("a")));
-    assert!(prove::walk(&s.path, 2).is_err());
+    assert_eq!(tree.len(), 4);
+    assert_eq!(prove::walk(&s.path, 4).unwrap().len(), 4);
+    assert!(prove::walk(&s.path, 3).is_err());
 }
 
 #[test]
@@ -1483,6 +1492,29 @@ fn window_clones_come_from_the_warmed_up_clone_and_are_compared_with_it() {
 }
 
 #[test]
+fn a_phase_that_never_ran_is_not_shown_as_a_clean_pass() {
+    let ran = prove::PhaseReport {
+        rebuilt: Vec::new(),
+        commands: vec![(argv(&["check"]), 0)],
+        elapsed: Duration::from_secs(2),
+    };
+    let report = |warm_up, baseline| prove::ProveReport {
+        warm_up,
+        baseline,
+        windows: vec![],
+    };
+
+    let text = report(Default::default(), Default::default()).render();
+    assert!(text.contains("warm-up: not run"), "{text}");
+    assert!(text.contains("baseline: not run"), "{text}");
+    assert!(!text.contains("0 rebuilt"), "{text}");
+
+    let text = report(ran.clone(), Default::default()).render();
+    assert!(text.contains("warm-up: 0 rebuilt, 2.0s"), "{text}");
+    assert!(text.contains("baseline: not run"), "{text}");
+}
+
+#[test]
 fn the_report_shows_the_warm_up_and_the_baseline() {
     let phase = |rebuilt: &[&str], exit: i32, secs: u64| prove::PhaseReport {
         rebuilt: rebuilt.iter().map(ToString::to_string).collect(),
@@ -1717,6 +1749,9 @@ fn replayed_cargo_is_locked_and_cannot_be_redirected() {
         "CARGO_BUILD_ARTIFACT_DIR",
         "RUSTC_WRAPPER",
         "RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_BUILD_RUSTC_WRAPPER",
+        "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_BUILD_RUSTC",
     ] {
         assert_eq!(envs.get(gone), Some(&None), "{gone}");
     }
@@ -1820,4 +1855,108 @@ fn a_command_writing_past_the_cap_is_killed_and_refused() {
 
     assert!(err.contains("cap"), "{err}");
     assert!(started.elapsed() < Duration::from_secs(15));
+}
+
+#[test]
+fn a_command_that_outlives_its_deadline_is_killed_and_refused() {
+    let s = Scratch::new("prove-deadline");
+    let started = std::time::Instant::now();
+    let mut cmd = Command::new("sleep");
+    cmd.arg("60");
+
+    let err = prove::run_logged(&s.path, "slow", cmd, Duration::from_secs(1), 1 << 20)
+        .err()
+        .expect("a command past its deadline is an error");
+
+    assert!(err.contains("did not finish within"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(15));
+}
+
+#[test]
+fn output_of_exactly_the_cap_is_accepted_and_one_byte_past_is_refused() {
+    let s = Scratch::new("prove-cap-edge");
+    let emit = |bytes: u64| {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!("head -c {bytes} /dev/zero"));
+        cmd
+    };
+    let ran = prove::run_logged(&s.path, "exact", emit(1000), Duration::from_secs(20), 1000)
+        .expect("exactly the cap is accepted");
+    assert_eq!(ran.exit, 0);
+    let err = prove::run_logged(&s.path, "past", emit(1001), Duration::from_secs(20), 1000)
+        .err()
+        .expect("one byte past the cap is refused");
+    assert!(err.contains("cap"), "{err}");
+
+    let file = s.path.join("lines");
+    fs::write(&file, vec![b'x'; 1024]).unwrap();
+    assert_eq!(prove::count_artifacts(&file, 1024), Ok(0));
+    assert!(prove::count_artifacts(&file, 1023).is_err());
+}
+
+fn profile_report(path: &Path) -> fingerprint::ProfileReport {
+    fingerprint::ProfileReport {
+        path: path.to_path_buf(),
+        format: fingerprint::Format::Supported,
+        units: 0,
+        not_current: 0,
+        not_current_units: Vec::new(),
+        edges: None,
+        graph: None,
+    }
+}
+
+fn target_with(root: &Path, profile: fingerprint::ProfileReport) -> TargetDir {
+    TargetDir {
+        path: root.to_path_buf(),
+        owner: cargo_target::Owner::Unresolved {
+            reason: "test".into(),
+        },
+        profiles: vec![profile],
+        size: None,
+        unreadable: None,
+    }
+}
+
+#[test]
+fn a_profile_listing_over_the_cap_or_gone_is_an_error_not_a_skip() {
+    let s = Scratch::new("prove-unmapped");
+    let profile = s.path.join("debug");
+    for name in ["a", "b", "c"] {
+        write(&profile.join(name), "");
+    }
+    let target = target_with(&s.path, profile_report(&profile));
+    let fs_ = platform::current().unwrap().fs;
+
+    let listed = prove::unmapped_paths(fs_.as_ref(), &target, 3).unwrap();
+    assert!(listed.contains(&profile.join("incremental")));
+    assert!(listed.contains(&profile.join("a")));
+    let err = prove::unmapped_paths(fs_.as_ref(), &target, 2).unwrap_err();
+    assert!(err.contains(&profile.display().to_string()), "{err}");
+
+    fs::remove_dir_all(&profile).unwrap();
+    let err = prove::unmapped_paths(fs_.as_ref(), &target, 3).unwrap_err();
+    assert!(err.contains(&profile.display().to_string()), "{err}");
+}
+
+#[test]
+fn a_not_current_unit_dir_that_is_not_utf8_is_an_error_not_a_skip() {
+    use std::os::unix::ffi::OsStrExt;
+    let root = Path::new("/t");
+    let odd = root
+        .join("debug/.fingerprint")
+        .join(std::ffi::OsStr::from_bytes(b"caf\xff-1111111111111111"));
+    let mut profile = profile_report(&root.join("debug"));
+    profile.not_current_units.push(fingerprint::NotCurrentUnit {
+        dir: odd.clone(),
+        stem: None,
+        features: None,
+        outputs: Vec::new(),
+    });
+    let fs_ = platform::current().unwrap().fs;
+
+    let err = prove::stamps(fs_.as_ref(), &target_with(root, profile)).unwrap_err();
+
+    assert!(err.contains("caf"), "{err}");
+    assert!(err.contains("not UTF-8"), "{err}");
 }

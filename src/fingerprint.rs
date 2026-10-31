@@ -129,7 +129,8 @@ pub fn le_hex(value: u64) -> String {
         .collect()
 }
 
-pub(crate) fn kind_of(stem: &str) -> String {
+#[doc(hidden)]
+pub fn kind_of(stem: &str) -> String {
     KINDS
         .iter()
         .find(|k| stem == **k || stem.starts_with(&format!("{k}-")))
@@ -149,6 +150,7 @@ pub fn unit_hash(dir_name: &str) -> Option<&str> {
     is_hash(tail.as_bytes()).then_some(tail)
 }
 
+#[doc(hidden)]
 pub fn dep_name(fingerprint_dir: &Path, stem: &str, dep: u64) -> Option<String> {
     let mut file = fs::File::open(fingerprint_dir.join(format!("{stem}.json"))).ok()?;
     let bytes = read_capped(&mut file).ok()?;

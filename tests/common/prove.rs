@@ -1,3 +1,8 @@
+//! The cold-start proof of closure liveness: clones a target dir, deletes what `liveness` calls
+//! dead, replays the owner's cargo commands and reports whether any live unit was rebuilt.
+//! Contract: the original target is never written (it is re-walked at the end), every limit
+//! (deadline, output, walk, config size) is an error when hit, and nothing is silently skipped.
+
 use cargo_hive::cargo_target::{self, Owner, TargetDir};
 use cargo_hive::fingerprint;
 use cargo_hive::gc::{measure, Footprint};
@@ -51,7 +56,7 @@ const GLOBAL_SWITCHES: [&str; 8] = [
 /// Config files are scanned for these keys, which redirect build output outside the clone.
 const REDIRECT_KEYS: [&str; 2] = ["artifact-dir", "out-dir"];
 const CONFIG_CAP: u64 = 1 << 20;
-/// The owner's commands run for real in the checkout (that is the owner's choice): only the target dir is protected, not build.rs or test side effects. RUSTFLAGS and the owner's cargo config are left as the shell has them, since they are part of what the commands do; RUSTC_WRAPPER and RUSTC_WORKSPACE_WRAPPER are removed because they change fingerprints.
+/// The owner's commands run for real in the checkout (that is the owner's choice): only the target dir is protected, not build.rs or test side effects. RUSTFLAGS and the owner's cargo config are left as the shell has them, since they are part of what the commands do; RUSTC_WRAPPER, RUSTC_WORKSPACE_WRAPPER and their CARGO_BUILD_* forms, and CARGO_BUILD_RUSTC, are removed because they change fingerprints.
 ///
 /// Arguments after `--` are checked for `build`, `check` and `doc` (none allowed). For `test`, `bench` and `run` they go to the test harness or the program, which runs real project code anyway, so they are the owner's responsibility.
 pub struct ProveInput {
@@ -133,6 +138,10 @@ impl ProveReport {
     pub fn render(&self) -> String {
         let mut out = String::new();
         for (name, phase) in [("warm-up", &self.warm_up), ("baseline", &self.baseline)] {
+            if phase.commands.is_empty() {
+                let _ = writeln!(out, "{name}: not run");
+                continue;
+            }
             let _ = writeln!(
                 out,
                 "{name}: {} rebuilt, {:.1}s",
@@ -252,15 +261,7 @@ pub fn with_json(cmd: &[String]) -> Vec<String> {
     out
 }
 
-fn kind_for(stem: &str) -> &'static str {
-    if stem.starts_with("run-build-script") {
-        "run-build-script"
-    } else {
-        "other"
-    }
-}
-
-pub fn stamps(fs: &dyn Fs, target: &TargetDir) -> Stamps {
+pub fn stamps(fs: &dyn Fs, target: &TargetDir) -> Result<Stamps, String> {
     let mut out = Stamps::new();
     for profile in &target.profiles {
         let rel = profile
@@ -280,13 +281,19 @@ pub fn stamps(fs: &dyn Fs, target: &TargetDir) -> Stamps {
         }
         for nc in &profile.not_current_units {
             let Some(dir) = nc.dir.file_name().and_then(|n| n.to_str()) else {
-                continue;
+                return Err(format!(
+                    "{}: directory name is not UTF-8, so it has no unit hash",
+                    nc.dir.display()
+                ));
             };
-            let kind = nc.stem.as_deref().map_or("other", kind_for);
-            out.insert((rel.clone(), dir.to_string()), stamp(dir, kind));
+            let kind = nc
+                .stem
+                .as_deref()
+                .map_or_else(|| "other".to_string(), fingerprint::kind_of);
+            out.insert((rel.clone(), dir.to_string()), stamp(dir, &kind));
         }
     }
-    out
+    Ok(out)
 }
 
 pub fn rebuilt(before: &Stamps, after: &Stamps) -> Vec<(PathBuf, String)> {
@@ -689,7 +696,10 @@ pub fn replay_command_with_env(
         .env_remove("CARGO_BUILD_BUILD_DIR")
         .env_remove("CARGO_BUILD_ARTIFACT_DIR")
         .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER");
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
+        .env_remove("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("CARGO_BUILD_RUSTC");
     for name in env_names {
         let name_lossy = name.to_string_lossy();
         if name_lossy.starts_with("CARGO_UNSTABLE_") || name_lossy.starts_with("CARGO_ALIAS_") {
@@ -796,20 +806,21 @@ pub fn delete_in_clone(
     Ok(())
 }
 
-fn unmapped_paths(fs: &dyn Fs, target: &TargetDir) -> Vec<PathBuf> {
+pub fn unmapped_paths(fs: &dyn Fs, target: &TargetDir, cap: usize) -> Result<Vec<PathBuf>, String> {
     let mut paths = Vec::new();
     for profile in &target.profiles {
         paths.push(profile.path.join("incremental"));
-        if let Ok(entries) = fs.read_dir_bounded(&profile.path, WALK_CAP) {
-            paths.extend(
-                entries
-                    .into_iter()
-                    .filter(|(_, kind)| *kind == EntryKind::File)
-                    .map(|(name, _)| profile.path.join(name)),
-            );
-        }
+        let entries = fs
+            .read_dir_bounded(&profile.path, cap)
+            .map_err(|e| format!("{}: cannot list: {e}", profile.path.display()))?;
+        paths.extend(
+            entries
+                .into_iter()
+                .filter(|(_, kind)| *kind == EntryKind::File)
+                .map(|(name, _)| profile.path.join(name)),
+        );
     }
-    paths
+    Ok(paths)
 }
 
 struct Decision {
@@ -893,7 +904,12 @@ pub fn prove_with_cloner(
     }
 
     let original_tree = snapshot(input)?;
-    let unmapped = measure(fs, &input.target, &unmapped_paths(fs, &target), true);
+    let unmapped = measure(
+        fs,
+        &input.target,
+        &unmapped_paths(fs, &target, WALK_CAP)?,
+        true,
+    );
 
     let mut decisions = Vec::new();
     for &window in &input.windows {
@@ -932,9 +948,9 @@ pub fn prove_with_cloner(
     if decisions.iter().any(|d| d.pre_vacuous.is_none()) {
         let started = Instant::now();
         let clone = clone_target(fs, scratch, "warm-up", &input.target, cloner)?;
-        let before = stamps(fs, &read_target(&clone.path)?);
+        let before = stamps(fs, &read_target(&clone.path)?)?;
         let ran = replay(scratch, "warm-up", input, &clone.path)?;
-        warmed_stamps = stamps(fs, &read_target(&clone.path)?);
+        warmed_stamps = stamps(fs, &read_target(&clone.path)?)?;
         warm_up = PhaseReport {
             rebuilt: rebuilt(&before, &warmed_stamps)
                 .iter()
@@ -948,9 +964,9 @@ pub fn prove_with_cloner(
         } else {
             let started = Instant::now();
             let copy = clone_target(fs, scratch, "baseline", &clone.path, cloner)?;
-            let before = stamps(fs, &read_target(&copy.path)?);
+            let before = stamps(fs, &read_target(&copy.path)?)?;
             let ran = replay(scratch, "baseline", input, &copy.path)?;
-            let after = stamps(fs, &read_target(&copy.path)?);
+            let after = stamps(fs, &read_target(&copy.path)?)?;
             baseline = PhaseReport {
                 rebuilt: rebuilt(&before, &after).iter().map(unit_name).collect(),
                 commands: ran.commands,
@@ -1000,7 +1016,7 @@ pub fn prove_with_cloner(
         };
         let clone = clone_target(fs, scratch, &format!("w{i}"), &warmed_clone.path, cloner)?;
         let clone_target_dir = read_target(&clone.path)?;
-        let mismatches = mtime_mismatches(&warmed_stamps, &stamps(fs, &clone_target_dir));
+        let mismatches = mtime_mismatches(&warmed_stamps, &stamps(fs, &clone_target_dir)?);
         if !mismatches.is_empty() {
             let names: Vec<String> = mismatches.iter().take(5).map(unit_name).collect();
             report.outcome = WindowOutcome::Vacuous(format!(
@@ -1012,9 +1028,9 @@ pub fn prove_with_cloner(
             continue;
         }
         delete_in_clone(fs, &d.dead_files, &input.target, &clone.path)?;
-        let before = stamps(fs, &read_target(&clone.path)?);
+        let before = stamps(fs, &read_target(&clone.path)?)?;
         let ran = replay(scratch, &format!("w{i}"), input, &clone.path)?;
-        let after = stamps(fs, &read_target(&clone.path)?);
+        let after = stamps(fs, &read_target(&clone.path)?)?;
         let changed = rebuilt(&before, &after);
         let live_hit = rebuilt_live(&changed, &d.live);
         let vacuous = vacuous_reason(&d.result, &ran.exits, &ran.artifact_lines);
