@@ -11,7 +11,7 @@ HIVE_PROVE_CMDS='[["build","--offline"],["check","--all-targets","--offline"],["
 cargo test --release --test liveness_prove -- --ignored --nocapture
 ```
 
-The replay accepts only `build`, `check`, `test`, `doc`, `bench` and `run` by their long names; any other command is refused.
+The replay is compile-only (2026-10-31): it accepts only `build`, `check`, `doc`, and `test` or `bench` with `--no-run`, by their long names, and no argument after `--`; any other command is refused, so no test or binary of the checkout runs.
 
 ## Results
 

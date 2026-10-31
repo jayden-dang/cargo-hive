@@ -481,9 +481,12 @@ fn commands_are_checked_and_json_is_inserted_after_the_subcommand() {
         (vec!["build"], 0),
         (vec!["+stable", "build", "--offline"], 1),
         (vec!["-q", "check"], 1),
-        (vec!["test", "--", "--target-dir"], 0),
         (vec!["check", "--all-targets"], 0),
-        (vec!["test", "--", "--nocapture"], 0),
+        (vec!["doc"], 0),
+        (vec!["test", "--no-run"], 0),
+        (vec!["bench", "--no-run", "--offline"], 0),
+        (vec!["+stable", "test", "--no-run"], 1),
+        (vec!["test", "--offline", "--no-run"], 0),
     ] {
         assert_eq!(prove::check_command(&argv(&cmd)), Ok(index), "{cmd:?}");
     }
@@ -501,8 +504,8 @@ fn commands_are_checked_and_json_is_inserted_after_the_subcommand() {
         assert!(prove::check_command(&argv(&cmd)).is_err(), "{cmd:?}");
     }
     assert_eq!(
-        prove::with_json(&argv(&["test", "--", "--nocapture"])),
-        argv(&["test", "--message-format=json", "--", "--nocapture"])
+        prove::with_json(&argv(&["test", "--no-run"])),
+        argv(&["test", "--message-format=json", "--no-run"])
     );
     assert_eq!(
         prove::with_json(&argv(&["check", "--all-targets"])),
@@ -520,13 +523,42 @@ fn commands_are_checked_and_json_is_inserted_after_the_subcommand() {
 
 #[test]
 fn only_subcommands_that_compile_inside_the_checkout_are_allowed() {
-    for sub in ["build", "check", "test", "doc", "bench", "run"] {
+    for sub in ["build", "check", "doc"] {
         assert_eq!(prove::check_command(&argv(&[sub])), Ok(0), "{sub}");
         assert_eq!(
             prove::check_command(&argv(&["+nightly", sub])),
             Ok(1),
             "{sub}"
         );
+    }
+    for sub in ["test", "bench"] {
+        assert_eq!(
+            prove::check_command(&argv(&[sub, "--no-run"])),
+            Ok(0),
+            "{sub}"
+        );
+        assert_eq!(
+            prove::check_command(&argv(&["+nightly", sub, "--no-run"])),
+            Ok(1),
+            "{sub}"
+        );
+        for cmd in [
+            vec![sub],
+            vec!["+nightly", sub],
+            vec![sub, "--offline"],
+            // `--no-run` after `--` is an argument for the harness, not for cargo.
+            vec![sub, "--", "--no-run"],
+        ] {
+            let err = prove::check_command(&argv(&cmd)).unwrap_err();
+            assert!(
+                err.contains(&format!("`cargo {sub}`")) && err.contains("--no-run"),
+                "{cmd:?}: {err}"
+            );
+        }
+    }
+    for cmd in [vec!["run"], vec!["+nightly", "run", "--offline"]] {
+        let err = prove::check_command(&argv(&cmd)).unwrap_err();
+        assert!(err.contains("`cargo run`"), "{cmd:?}: {err}");
     }
     for sub in [
         "fix",
@@ -574,7 +606,9 @@ fn a_flag_with_a_value_before_the_subcommand_is_parsed_or_refused() {
         Ok(1)
     );
     assert_eq!(
-        prove::check_command(&argv(&["+stable", "--color", "never", "-q", "test"])),
+        prove::check_command(&argv(&[
+            "+stable", "--color", "never", "-q", "test", "--no-run"
+        ])),
         Ok(4)
     );
     assert_eq!(
@@ -723,7 +757,7 @@ fn a_config_alias_cannot_turn_an_allowed_name_into_cargo_fix() {
     let inp = prove::ProveInput {
         target: s.path.join("target"),
         checkout: app.clone(),
-        cmds: vec![argv(&["test"])],
+        cmds: vec![argv(&["test", "--no-run"])],
         windows: vec![WINDOW],
         now: SystemTime::now(),
     };
@@ -731,8 +765,8 @@ fn a_config_alias_cannot_turn_an_allowed_name_into_cargo_fix() {
     let refused = prove::prove_with(fs_.as_ref(), &s.path, &inp).unwrap_err();
     assert!(refused.contains(".cargo/config.toml"), "{refused}");
 
-    // Path 2: even past the config scan, the long name runs the real `test`.
-    let args = prove::replay_args(&argv(&["test"]));
+    // Path 2: even past the config scan, the long name compiles the real `test`.
+    let args = prove::replay_args(&argv(&["test", "--no-run"]));
     assert_eq!(args[0], "test");
     let mut process = prove::replay_command(&args, &app, &s.path.join("clone"));
     process.arg("--offline");
@@ -847,7 +881,24 @@ fn short_names_and_alias_shadowable_subcommands_are_refused() {
 }
 
 #[test]
-fn args_after_the_dashes_are_refused_for_build_check_and_doc_only() {
+fn args_after_the_dashes_are_refused_for_every_subcommand() {
+    for sub in ["build", "check", "doc", "test", "bench"] {
+        let no_run: &[&str] = if matches!(sub, "test" | "bench") {
+            &["--no-run"]
+        } else {
+            &[]
+        };
+        for bad in ["-o", "--print=link-args=/x", "-Cincremental=/x", "anything"] {
+            let cmd: Vec<&str> = [&[sub], no_run, &["--", bad]].concat();
+            let err = prove::check_command(&argv(&cmd)).unwrap_err();
+            assert!(
+                err.contains(bad) && err.contains("after `--`"),
+                "{cmd:?}: {err}"
+            );
+        }
+        let ok: Vec<&str> = [&[sub], no_run, &["--locked"]].concat();
+        assert_eq!(prove::check_command(&argv(&ok)), Ok(0), "{ok:?}");
+    }
     for sub in ["build", "check", "doc"] {
         for bad in ["-o", "--print=link-args=/x", "-Cincremental=/x", "anything"] {
             let err = prove::check_command(&argv(&[sub, "--", bad])).unwrap_err();
@@ -858,13 +909,14 @@ fn args_after_the_dashes_are_refused_for_build_check_and_doc_only() {
         }
         assert_eq!(prove::check_command(&argv(&[sub, "--locked"])), Ok(0));
     }
-    // test, bench and run hand their args to real project code, which runs anyway.
-    for sub in ["test", "bench", "run"] {
-        assert_eq!(
-            prove::check_command(&argv(&[sub, "--", "-o", "x"])),
-            Ok(0),
-            "{sub}"
-        );
+    for cmd in [
+        vec!["test", "--", "--nocapture"],
+        vec!["build", "--", "-v"],
+        vec!["test", "--no-run", "--", "x"],
+        vec!["run", "--", "x"],
+    ] {
+        let err = prove::check_command(&argv(&cmd)).unwrap_err();
+        assert!(err.contains(cmd[0]), "{cmd:?}: {err}");
     }
 }
 
@@ -1708,24 +1760,23 @@ fn replayed_cargo_is_locked_and_cannot_be_redirected() {
             vec!["build", "--locked", "--message-format=json", "--offline"],
         ),
         (
-            vec!["+stable", "test", "--", "--nocapture"],
+            vec!["+stable", "test", "--no-run"],
             vec![
                 "+stable",
                 "test",
                 "--locked",
                 "--message-format=json",
-                "--",
-                "--nocapture",
+                "--no-run",
             ],
         ),
         (
-            vec!["test", "--", "--locked"],
+            vec!["bench", "--no-run", "--offline"],
             vec![
-                "test",
+                "bench",
                 "--locked",
                 "--message-format=json",
-                "--",
-                "--locked",
+                "--no-run",
+                "--offline",
             ],
         ),
         (
@@ -1784,10 +1835,7 @@ fn config_out_dir_and_unstable_flags_are_refused() {
     ] {
         assert!(prove::check_command(&argv(&cmd)).is_err(), "{cmd:?}");
     }
-    assert_eq!(
-        prove::check_command(&argv(&["test", "--", "--config", "-Z"])),
-        Ok(0)
-    );
+    assert!(prove::check_command(&argv(&["test", "--no-run", "--", "--config", "-Z"])).is_err());
 }
 
 #[test]

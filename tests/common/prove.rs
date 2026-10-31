@@ -26,9 +26,9 @@ const FORBIDDEN_FLAGS: [&str; 5] = [
     "--out-dir",
     "--config",
 ];
-/// The only subcommands a replay may run: they compile or run inside the checkout and write nothing but the target dir; all of them accept `--locked`.
+/// The only subcommands a replay may run: they compile inside the checkout and write nothing but the target dir; all of them accept `--locked`. `test` and `bench` also need `--no-run`, so nothing of the checkout executes.
 /// Only long built-in names that cargo 1.97.1 does not let an `[alias]` shadow; short names, `clippy`, `rustc` and `rustdoc` are refused.
-const ALLOWED: [&str; 6] = ["build", "check", "test", "doc", "bench", "run"];
+const ALLOWED: [&str; 5] = ["build", "check", "test", "doc", "bench"];
 /// Names whose alias definition in a cargo config is refused: the allowed ones, plus the short names and external subcommands an alias could shadow (defense in depth).
 const ALIAS_GUARDED: [&str; 14] = [
     "build", "b", "check", "c", "test", "t", "clippy", "doc", "d", "bench", "rustc", "rustdoc",
@@ -56,9 +56,9 @@ const GLOBAL_SWITCHES: [&str; 8] = [
 /// Config files are scanned for these keys, which redirect build output outside the clone.
 const REDIRECT_KEYS: [&str; 2] = ["artifact-dir", "out-dir"];
 const CONFIG_CAP: u64 = 1 << 20;
-/// The owner's commands run for real in the checkout (that is the owner's choice): only the target dir is protected, not build.rs or test side effects. RUSTFLAGS and the owner's cargo config are left as the shell has them, since they are part of what the commands do; RUSTC_WRAPPER, RUSTC_WORKSPACE_WRAPPER and their CARGO_BUILD_* forms, and CARGO_BUILD_RUSTC, are removed because they change fingerprints.
+/// The owner's commands compile in the checkout: only compile steps run (build.rs and proc-macros as in the owner's own build); no test, bench or binary of the checkout is executed. Only the target dir is protected, not build.rs side effects. RUSTFLAGS and the owner's cargo config are left as the shell has them, since they are part of what the commands do; RUSTC_WRAPPER, RUSTC_WORKSPACE_WRAPPER and their CARGO_BUILD_* forms, and CARGO_BUILD_RUSTC, are removed because they change fingerprints.
 ///
-/// Arguments after `--` are checked for `build`, `check` and `doc` (none allowed). For `test`, `bench` and `run` they go to the test harness or the program, which runs real project code anyway, so they are the owner's responsibility.
+/// `test` and `bench` need `--no-run` before any `--`, and no command may carry an argument after `--`.
 pub struct ProveInput {
     pub target: PathBuf,
     pub checkout: PathBuf,
@@ -216,12 +216,17 @@ pub fn check_command(cmd: &[String]) -> Result<usize, String> {
                 "has {arg} before the subcommand; only +toolchain, -q, -v, --color, --locked, --frozen and --offline may precede it"
             ));
         } else if ALLOWED.contains(&arg) {
-            if matches!(arg, "build" | "check" | "doc") {
-                if let Some(bad) = cmd.get(before_dashes + 1..).and_then(|rest| rest.first()) {
-                    return Err(format!(
-                        "passes {bad} after `--`; `cargo {arg}` takes no arguments there"
-                    ));
-                }
+            if let Some(bad) = cmd.get(before_dashes + 1..).and_then(|rest| rest.first()) {
+                return Err(format!(
+                    "passes {bad} after `--`; the replay is compile-only, so `cargo {arg}` takes no arguments there"
+                ));
+            }
+            if matches!(arg, "test" | "bench")
+                && !cmd[i + 1..before_dashes].iter().any(|a| a == "--no-run")
+            {
+                return Err(format!(
+                    "runs `cargo {arg}` without --no-run; --no-run is required (before any `--`) so no test or benchmark of the checkout executes"
+                ));
             }
             return Ok(i);
         } else if let Some((_, long)) = SHORT_NAMES.iter().find(|(short, _)| *short == arg) {
