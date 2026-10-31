@@ -740,9 +740,9 @@ Design "Busy-workspace fixtures", the delete-and-replay case.
 
 **Depends-on:** Task 16, Task 17
 
-- [ ] **Step 1: Write the tests:** for each Decided fixture of Task 16, backdate the check-mode (or `--release`) units it built by 30 days with `backdate_all`, so they are the dead units while still teaching the package id; break and build as in Task 16, restore the broken source, then call `prove_with` with that fixture's rebuild commands and a 6 h window. Each window is `Passed` (not Vacuous: at least one dead unit is listed and deleted), and no live unit rebuilds.
-- [ ] **Step 2: Verify.** `cargo test --test liveness_busy`; the merge gate.
-- [ ] **Step 3: Commit** `test(liveness): delete and replay on busy-workspace fixtures`.
+- [x] **Step 1: Write the tests:** for each Decided fixture of Task 16, backdate the check-mode (or `--release`) units it built by 30 days with `backdate_all`, so they are the dead units while still teaching the package id; break and build as in Task 16, restore the broken source, then call `prove_with` with that fixture's rebuild commands and a 6 h window. Each window is `Passed` (not Vacuous: at least one dead unit is listed and deleted), and no live unit rebuilds.
+- [x] **Step 2: Verify.** `cargo test --test liveness_busy`; the merge gate.
+- [x] **Step 3: Commit** `test(liveness): delete and replay on busy-workspace fixtures`.
 
 _Requirements: LIVE-7.6_
 
