@@ -1,7 +1,7 @@
 # Product Vision: cargo-hive
 
 Status: Approved
-Date: 2026-10-29
+Date: 2026-10-31
 
 <!--
 The repo-level north star: WHAT this project is and for whom, above any single
@@ -29,11 +29,12 @@ Source: the problem lock in `.skills/CORE/close-package.md` (confirmed 2026-10-2
 
 Each goal holds on a machine where `cargo hive doctor` passes. None promises klynt's numbers elsewhere.
 
-- **GOAL-1** Every deletion hive makes causes 0 unit rebuilds, and reported freed bytes never exceed what the volume regained.
+- ~~**GOAL-1** Every deletion hive makes causes 0 unit rebuilds, and reported freed bytes never exceed what the volume regained.~~ Superseded by GOAL-6 (2026-10-31): a command that stays fully fresh for the whole GC window leaves no trace on disk, so a unit hive collects can rebuild when that command next needs it (`SPIKES.md` §9; the closure-liveness spec, `docs/specs/2026-10-30-closure-liveness/`).
 - **GOAL-2** A fresh seeded secondary checkout's first build recompiles 0 seeded units.
 - **GOAL-3** Seeding k secondary checkouts adds about 0 private bytes to their registry part.
 - **GOAL-4** Every number hive reports, in receipts and in explain findings, is measured on this machine, never estimated; seconds come only from `cargo hive bench`.
 - **GOAL-5** An agent reclaims and seeds secondary checkouts with no human in the loop; a plan-tier change on a protected checkout returns `needs-human` until the owner approves it.
+- **GOAL-6** Hive deletes no file of a unit that is live when the deletion is decided (reachable over the fingerprint graph from a unit compiled inside the GC window), so no live unit rebuilds because of a deletion; a unit hive collected rebuilds when a command needs it again. Reported freed bytes never exceed what the volume regained.
 
 Receipts are also the data Cargo lacks for a default target-dir GC policy (cargo#13136; `RESEARCH.md` §6).
 
