@@ -1147,6 +1147,7 @@ mod tests {
                 stem: None,
                 features: None,
                 outputs: Vec::new(),
+                deps: Vec::new(),
             },
             kind_from_output: Some("lib".to_string()),
             outputs: Err("unread".to_string()),
@@ -2552,6 +2553,7 @@ mod tests {
                     .iter()
                     .map(|name| (*name).to_string())
                     .collect(),
+                deps: Vec::new(),
             },
             kind_from_output: kind_from_output.map(str::to_string),
             outputs: outputs.map_err(str::to_string),
@@ -3243,12 +3245,14 @@ mod tests {
                         stem: Some("lib-widget".to_string()),
                         features: Some(Arc::from("[]")),
                         outputs: vec!["output-lib-widget".to_string()],
+                        deps: Vec::new(),
                     },
                     NotCurrentUnit {
                         dir: big_dir.clone(),
                         stem: Some("lib-widget".to_string()),
                         features: Some(Arc::from("[]")),
                         outputs: vec!["output-lib-widget".to_string()],
+                        deps: Vec::new(),
                     },
                 ],
                 edges: None,

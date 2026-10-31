@@ -298,7 +298,7 @@ fn mark_live(
         let (profile, unit) = units[queue[cursor]];
         cursor += 1;
         for &dep in &unit.deps {
-            match index.get(le_hex(dep).as_str()) {
+            match index.get(le_hex(dep.fingerprint).as_str()) {
                 Some(hits) => {
                     for &hit in hits {
                         if !live[hit] {
@@ -311,8 +311,8 @@ fn mark_live(
                     let fp_dir = fingerprint_dir(profile, &unit.dir_name);
                     reasons.push(Uncertain::Unresolved {
                         unit: unit_ref(&(profile, unit)),
-                        dependency: fingerprint::dep_name(&fp_dir, &unit.stem, dep)
-                            .unwrap_or_else(|| le_hex(dep)),
+                        dependency: fingerprint::dep_name(&fp_dir, &unit.stem, dep.fingerprint)
+                            .unwrap_or_else(|| le_hex(dep.fingerprint)),
                     });
                 }
             }
@@ -1423,6 +1423,7 @@ mod tests {
                 stem: None,
                 features: None,
                 outputs: Vec::new(),
+                deps: Vec::new(),
             });
         let reasons = undecided(decide(&target, 6 * HOUR));
         assert_eq!(reasons, [Uncertain::NoUnitHash { dir: odd }]);

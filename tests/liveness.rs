@@ -2000,6 +2000,7 @@ fn a_not_current_unit_dir_that_is_not_utf8_is_an_error_not_a_skip() {
         stem: None,
         features: None,
         outputs: Vec::new(),
+        deps: Vec::new(),
     });
     let fs_ = platform::current().unwrap().fs;
 

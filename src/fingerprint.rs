@@ -68,12 +68,19 @@ impl Coverage {
     }
 }
 
+/// One `deps` entry of a fingerprint report: the dependency's package id and its fingerprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DepEdge {
+    pub package: u64,
+    pub fingerprint: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Unit {
     pub dir_name: String,
     pub kind: String,
     pub hash_hex: String,
-    pub deps: Vec<u64>,
+    pub deps: Vec<DepEdge>,
     #[serde(skip)]
     pub stem: String,
     #[serde(skip)]
@@ -94,6 +101,7 @@ pub struct NotCurrentUnit {
     pub stem: Option<String>,
     pub features: Option<Arc<str>>,
     pub outputs: Vec<String>,
+    pub deps: Vec<DepEdge>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -171,7 +179,7 @@ pub fn dep_name(fingerprint_dir: &Path, stem: &str, dep: u64) -> Option<String> 
         })
 }
 
-fn check_types(obj: &Map<String, Value>) -> Result<Vec<u64>, String> {
+fn check_types(obj: &Map<String, Value>) -> Result<Vec<DepEdge>, String> {
     if obj.len() != KEYS.len() || !KEYS.iter().all(|k| obj.contains_key(*k)) {
         let mut keys: Vec<&String> = obj.keys().collect();
         keys.sort();
@@ -199,7 +207,10 @@ fn check_types(obj: &Map<String, Value>) -> Result<Vec<u64>, String> {
     deps.iter()
         .map(|d| match d.as_array().map(Vec::as_slice) {
             Some([a, b, c, f]) if a.is_u64() && b.is_string() && c.is_boolean() && f.is_u64() => {
-                Ok(f.as_u64().unwrap())
+                Ok(DepEdge {
+                    package: a.as_u64().unwrap(),
+                    fingerprint: f.as_u64().unwrap(),
+                })
             }
             _ => Err(format!("`deps` entry {d} is not [u64, string, bool, u64]")),
         })
@@ -221,7 +232,11 @@ pub(crate) fn read_capped(reader: &mut impl Read) -> Result<Vec<u8>, String> {
 
 enum ParsedUnit {
     Current(Unit),
-    NotCurrent { stem: String, features: Arc<str> },
+    NotCurrent {
+        stem: String,
+        features: Arc<str>,
+        deps: Vec<DepEdge>,
+    },
 }
 
 /// An emptied hash is a unit Cargo is rebuilding. The JSON beside it is stale, so the unit is
@@ -261,7 +276,11 @@ fn read_unit(
     let features = intern(shared_features, features_raw);
     let stem = stem.to_string();
     if hash.is_empty() {
-        return Ok(ParsedUnit::NotCurrent { stem, features });
+        return Ok(ParsedUnit::NotCurrent {
+            stem,
+            features,
+            deps,
+        });
     }
     Ok(ParsedUnit::Current(Unit {
         dir_name: dir
@@ -451,6 +470,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
                     .filter(|n| n.starts_with("output-"))
                     .cloned()
                     .collect(),
+                deps: Vec::new(),
             });
             continue;
         }
@@ -468,7 +488,11 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
                 counted += 1;
                 units.push(u);
             }
-            Ok(ParsedUnit::NotCurrent { stem, features }) => {
+            Ok(ParsedUnit::NotCurrent {
+                stem,
+                features,
+                deps,
+            }) => {
                 not_current_units.push(NotCurrentUnit {
                     dir: dir.clone(),
                     stem: Some(stem),
@@ -478,6 +502,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
                         .filter(|n| n.starts_with("output-"))
                         .cloned()
                         .collect(),
+                    deps,
                 });
             }
             Err(reason) => {
@@ -497,7 +522,10 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
     let mut edges = Vec::new();
     for (i, u) in units.iter().enumerate() {
         for dep in &u.deps {
-            match index.get(le_hex(*dep).as_str()).map(Vec::as_slice) {
+            match index
+                .get(le_hex(dep.fingerprint).as_str())
+                .map(Vec::as_slice)
+            {
                 Some([j]) => {
                     counts.resolved += 1;
                     edges.push((i, *j));
@@ -1099,6 +1127,7 @@ mod tests {
                 stem: None,
                 features: None,
                 outputs: vec!["output-lib-failed".to_string()],
+                deps: Vec::new(),
             }]
         );
         fs::remove_dir_all(never).unwrap();
@@ -1119,6 +1148,7 @@ mod tests {
                 stem: Some("lib-dep".to_string()),
                 features: Some(Arc::from("[]")),
                 outputs: vec![],
+                deps: vec![],
             }]
         );
         fs::remove_dir_all(emptied).unwrap();
@@ -1130,6 +1160,82 @@ mod tests {
         assert_eq!(r.not_current, 0);
         assert!(r.not_current_units.is_empty());
         fs::remove_dir_all(unsupported).unwrap();
+    }
+
+    fn unit_json_edges(edges: &[(u64, u64)]) -> String {
+        let deps: Vec<String> = edges
+            .iter()
+            .map(|(package, fingerprint)| format!("[{package},\"dep\",false,{fingerprint}]"))
+            .collect();
+        unit_json(&[]).replace("\"deps\":[]", &format!("\"deps\":[{}]", deps.join(",")))
+    }
+
+    fn write_unit_edges(profile: &Path, dir: &str, stem: &str, value: u64, edges: &[(u64, u64)]) {
+        write_unit(profile, dir, stem, value, &[]);
+        let d = profile.join(".fingerprint").join(dir);
+        fs::write(d.join(format!("{stem}.json")), unit_json_edges(edges)).unwrap();
+    }
+
+    #[test]
+    fn a_unit_keeps_the_package_id_of_each_of_its_edges() {
+        let p = scratch();
+        write_unit_edges(&p, "u-0000000000000001", "lib-u", 1, &[(11, 7), (12, 9)]);
+        let r = read_profile(&p);
+        let graph = r.graph.unwrap();
+        assert_eq!(
+            graph.units[0].deps,
+            vec![
+                DepEdge {
+                    package: 11,
+                    fingerprint: 7
+                },
+                DepEdge {
+                    package: 12,
+                    fingerprint: 9
+                }
+            ]
+        );
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_unit_with_an_emptied_hash_file_lists_the_edges_of_its_stale_json() {
+        let p = scratch();
+        write_unit_edges(&p, "u-0000000000000001", "lib-u", 1, &[(11, 7), (12, 9)]);
+        fs::write(p.join(".fingerprint/u-0000000000000001/lib-u"), "").unwrap();
+        let r = read_profile(&p);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!(
+            r.not_current_units[0].deps,
+            vec![
+                DepEdge {
+                    package: 11,
+                    fingerprint: 7
+                },
+                DepEdge {
+                    package: 12,
+                    fingerprint: 9
+                }
+            ]
+        );
+        assert_eq!(
+            r.edges,
+            Some(EdgeCounts::default()),
+            "a not-current unit's edges are not counted"
+        );
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_unit_that_never_compiled_has_no_edges() {
+        let p = scratch();
+        let failed = p.join(".fingerprint/failed-0000000000000002");
+        fs::create_dir_all(&failed).unwrap();
+        fs::write(failed.join("invoked.timestamp"), "").unwrap();
+        fs::write(failed.join("output-lib-failed"), "{}").unwrap();
+        let r = read_profile(&p);
+        assert!(r.not_current_units[0].deps.is_empty());
+        fs::remove_dir_all(p).unwrap();
     }
 
     #[test]
