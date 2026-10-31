@@ -573,7 +573,7 @@ Design Decision 13 and the Liveness "Flow amendment" steps 3' and 4'.
 
 **Depends-on:** Task 12
 
-- [ ] **Step 1: Write the failing tests** (synthetic dirs):
+- [x] **Step 1: Write the failing tests** (synthetic dirs):
   - a not-current unit whose unit timestamp is 2 days old but whose emptied hash file is 1 hour old is a root at a 6 h window, and a dependency reachable only through its JSON is live and not dead;
   - the same with the unit timestamp inside the window and the hash file old;
   - both files older than the window: the unit is not a root, the result is Decided, and its unit hash still keeps entries out of dead units' files;
@@ -583,9 +583,9 @@ Design Decision 13 and the Liveness "Flow amendment" steps 3' and 4'.
   - a not-current unit is never in `dead`.
 
   Run `cargo test --lib liveness::`; expect failures (today any not-current unit inside the window gives `NotCurrentInWindow`).
-- [ ] **Step 2: Implement** not-current nodes, last-wanted time, roots and traversal over their `deps`; update the `NotCurrentInWindow` `Display` ("never compiled, invoked inside the window") and its `clears_when`, and `TimestampUnreadable`'s texts.
-- [ ] **Step 3: Verify.** All other existing `liveness::` tests pass unedited except text assertions (house rule 6); `cargo test --test liveness`; the merge gate.
-- [ ] **Step 4: Commit** `feat(liveness): treat a not-current unit a command wanted as a root`.
+- [x] **Step 2: Implement** not-current nodes, last-wanted time, roots and traversal over their `deps`; update the `NotCurrentInWindow` `Display` ("never compiled, invoked inside the window") and its `clears_when`, and `TimestampUnreadable`'s texts.
+- [x] **Step 3: Verify.** All other existing `liveness::` tests pass unedited except text assertions (house rule 6); `cargo test --test liveness`; the merge gate.
+- [x] **Step 4: Commit** `feat(liveness): treat a not-current unit a command wanted as a root`.
 
 _Requirements: LIVE-1.12, LIVE-1.13, LIVE-2.14, LIVE-2.17, LIVE-2.18, LIVE-5.8_
 
