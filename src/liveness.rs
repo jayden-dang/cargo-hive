@@ -1356,6 +1356,7 @@ mod tests {
         emptied_hash(&p, LIBA_3, "lib-liba", Some(30 * DAY), 30 * DAY);
         let target = target_of(&s.0, &[&p]);
         let plain = decide(&target, 6 * HOUR);
+        // `units` come from the sorted `.fingerprint` listing, so only this order can vary.
         let mut reversed = target.clone();
         for profile in &mut reversed.profiles {
             assert_eq!(profile.not_current_units.len(), 2);

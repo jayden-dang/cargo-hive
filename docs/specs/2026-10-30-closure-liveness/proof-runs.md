@@ -4,7 +4,8 @@ Status: runs 2 and 3 passed (2026-10-31, cargo-hive's own target). Run 1 on klyn
 
 ## Command (klynt, nothing building in it)
 
-As run 4 ran it. The checkout is a `git archive` of the klynt commit extracted under `~/Library/Caches`
+This is the command as run in run 4; `.skills/LIVE/proof-run-4.log` records the test output, not the
+environment or checkout setup. The checkout is a `git archive` of the klynt commit extracted under `~/Library/Caches`
 (a path other than the one the target was built in), and `SQLX_OFFLINE=true` lets klynt build without
 its database:
 
@@ -218,7 +219,7 @@ large real target; it does not show how a long-lived dev target behaves.
 | Phase / window | Outcome | Rebuilt | Rebuilt live | Dead units | Dead files (original, before any clone) |
 |---|---|---|---|---|---|
 | Locks held | 10.9 s (snapshot clone included) | n/a | n/a | n/a | n/a |
-| Warm-up | 3 commands exit 0, 411 s | 148 (workspace crates at the new path, and what depends on them) | n/a | n/a | n/a |
+| Warm-up | 3 commands exit 0, 411 s | 148 (cause not established) | n/a | n/a | n/a |
 | Baseline | 3 commands exit 0, 8 s | 0 | n/a | n/a | n/a |
 | 6 h | Passed | 0 | **0** | 13 | 0.64 GB freed, 0.37 GB still shared |
 | 1 d | Passed | 0 | **0** | 13 | 0.64 GB freed, 0.37 GB still shared |
@@ -232,10 +233,10 @@ What the run shows:
 - **Liveness was Decided** because this target had no not-current unit (no build was interrupted or
   failed in it), so this run does not exercise the busy-workspace rule on klynt. That rule is covered
   by the fixtures of `tests/liveness_busy.rs`; a run on a target that is mid-build is still open.
-- **Nothing live rebuilt, but no deleted unit was rebuilt either.** The warm-up rebuilt 148 units
-  because the relocated checkout is a different path from the one the target was built in, so its
-  workspace units were rebuilt in the clone. The deletion trial therefore never had a unit it needed
-  to rebuild: the run shows no live rebuild, but it did not exercise a rebuild of any deleted unit,
+- **Nothing live rebuilt, but no deleted unit was rebuilt either.** The log shows the warm-up
+  rebuilt 148 units, third-party crates among them, so the relocated checkout did not reuse the
+  original's units; a different checkout path is a likely cause, but the log does not establish it.
+  The deletion trial therefore never had a unit it needed to rebuild: the run shows no live rebuild, but it did not exercise a rebuild of any deleted unit,
   so it cannot tell a right rule from a wrong one on klynt. The 7 d window is vacuous because the
   oldest units are 3 days old.
 

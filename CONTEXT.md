@@ -89,7 +89,7 @@ A unit dir under `.fingerprint/` whose hash file is empty or that never compiled
 _Avoid_: stale unit, broken unit
 
 **Node**:
-A not-current unit as the liveness graph sees it: it is kept live, never listed dead, and its recorded dependency edges are followed.
+A not-current unit as the liveness graph sees it: it is never listed dead, is live when wanted inside the window or reached from a live unit, and its recorded dependency edges are followed.
 
 **Package id**:
 The identifier Cargo records on a dependency edge in a fingerprint JSON. An edge that matches no current unit is resolved by the not-current units of the package whose id it names; a package id learned under two names resolves nothing.
