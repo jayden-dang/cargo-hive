@@ -382,7 +382,7 @@ Design "Proof procedure", step 1, and the success signals in `.skills/LIVE/close
   cargo test --release --test liveness_prove -- --ignored --nocapture
   ```
   The replay accepts only `build`, `check`, `test`, `doc`, `bench` and `run`, by their long names (owner decision 2026-10-30); `clippy`, `rustc` and `rustdoc` are refused. Expect the 6 h and 24 h windows `Passed` with `rebuilt_live == 0`, and the 7 d window `Vacuous` until the target is older than 7 days. Record the date, the commands, each window's report and the elapsed time in `proof-runs.md`. A `RebuiltLive` result is a stop-and-report, never something to edit away.
-- [ ] **Step 5: Commit** `test(liveness): run the deletion proof on a real target and record the klynt results`.
+- [x] **Step 5: Commit** `test(liveness): run the deletion proof on a real target and record the klynt results`.
 
 _Requirements: LIVE-4.1, LIVE-4.2, LIVE-4.8, LIVE-4.11_
 
