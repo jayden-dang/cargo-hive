@@ -220,6 +220,13 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
     let index = index_units(&units, &mut reasons);
     let marked = mark_live(fs, &units, &nodes, &index, now, window, &mut reasons);
     let live = marked.units;
+    let live_units: BTreeSet<UnitRef> = units
+        .iter()
+        .zip(&live)
+        .filter(|(_, &is_live)| is_live)
+        .map(|(entry, _)| unit_ref(entry))
+        .chain(marked.live_nodes)
+        .collect();
     let dead_idx = dead_indices(&units, &live);
     let listings = list_dead_files(fs, &units, &dead_idx, &mut reasons);
 
@@ -231,10 +238,8 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
 
     assemble(
         &units,
-        &nodes,
-        &marked.nodes,
         &not_current_hashes,
-        &live,
+        live_units,
         &dead_idx,
         &listings,
     )
@@ -332,10 +337,10 @@ fn index_units<'a>(
     index
 }
 
-/// Which units and not-current nodes are live.
+/// Which units are live (by index), and which not-current nodes are.
 struct Marked {
     units: Vec<bool>,
-    nodes: Vec<bool>,
+    live_nodes: Vec<UnitRef>,
 }
 
 /// A unit or not-current node queued for traversal.
@@ -472,9 +477,15 @@ fn mark_live(
             }
         }
     }
+    let live_nodes = nodes
+        .iter()
+        .zip(&node_live)
+        .filter(|(_, &is_live)| is_live)
+        .map(|(node, _)| node.unit_ref())
+        .collect();
     Marked {
         units: live,
-        nodes: node_live,
+        live_nodes,
     }
 }
 
@@ -525,10 +536,8 @@ fn list_dead_files<'a>(
 /// Builds the decided result: the live units, and per dead unit the files only it owns.
 fn assemble(
     units: &[ProfileUnit],
-    nodes: &[NotCurrentNode],
-    node_live: &[bool],
     not_current_hashes: &[(&Path, &str)],
-    live: &[bool],
+    live_units: BTreeSet<UnitRef>,
     dead_idx: &[usize],
     listings: &BTreeMap<&Path, Vec<(String, PathBuf)>>,
 ) -> Liveness {
@@ -544,20 +553,6 @@ fn assemble(
     for (profile, hash) in not_current_hashes {
         kept_hashes.entry(profile).or_default().insert(hash);
     }
-
-    let live_units: BTreeSet<UnitRef> = units
-        .iter()
-        .zip(live)
-        .filter(|(_, &is_live)| is_live)
-        .map(|(entry, _)| unit_ref(entry))
-        .chain(
-            nodes
-                .iter()
-                .zip(node_live)
-                .filter(|(_, &is_live)| is_live)
-                .map(|(node, _)| node.unit_ref()),
-        )
-        .collect();
 
     let mut dead_by_hash: HashMap<&Path, HashMap<&str, Vec<usize>>> = HashMap::new();
     for &i in dead_idx {
