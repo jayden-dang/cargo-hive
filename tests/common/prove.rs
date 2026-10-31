@@ -1,7 +1,12 @@
 //! The cold-start proof of closure liveness: clones a target dir, deletes what `liveness` calls
 //! dead, replays the owner's cargo commands and reports whether any live unit was rebuilt.
-//! Contract: the original target is never written (it is re-walked at the end), every limit
-//! (deadline, output, walk, config size) is an error when hit, and nothing is silently skipped.
+//! Order of a run: lock every profile's build lock; decide and measure every window on the original;
+//! clone it once as the snapshot; release the locks; replay a warm-up in a clone of the snapshot and
+//! then each window in a clone of the warmed-up clone; finally check that every file a window listed
+//! is still in the original and that the checkout's `Cargo.lock` is unchanged.
+//! Contract: the original target and the snapshot are never written, every deletion lands in a clone,
+//! every replayed artifact lies inside its clone, every limit (deadline, output, walk, config size)
+//! is an error when hit, and nothing is silently skipped.
 
 use cargo_hive::cargo_target::{self, Owner, TargetDir};
 use cargo_hive::fingerprint;
@@ -77,6 +82,7 @@ pub struct PhaseReport {
 pub struct ProveReport {
     pub warm_up: PhaseReport,
     pub baseline: PhaseReport,
+    pub lock_held: Duration,
     pub windows: Vec<WindowReport>,
 }
 
@@ -142,6 +148,7 @@ impl ProveReport {
 
     pub fn render(&self) -> String {
         let mut out = String::new();
+        let _ = writeln!(out, "locks held: {:.1}s", self.lock_held.as_secs_f64());
         for (name, phase) in [("warm-up", &self.warm_up), ("baseline", &self.baseline)] {
             if phase.commands.is_empty() {
                 let _ = writeln!(out, "{name}: not run");
@@ -381,18 +388,6 @@ pub fn walk_links(root: &Path, cap: usize) -> Result<(Tree, Vec<PathBuf>), Strin
     Ok((tree, linked_dirs))
 }
 
-pub fn tree_changes(before: &Tree, after: &Tree) -> Vec<PathBuf> {
-    if before == after {
-        return Vec::new();
-    }
-    let paths: BTreeSet<_> = before.keys().chain(after.keys()).collect();
-    paths
-        .into_iter()
-        .filter(|p| before.get(*p) != after.get(*p))
-        .cloned()
-        .collect()
-}
-
 pub fn vacuous_reason(
     result: &Liveness,
     exits: &[i32],
@@ -455,6 +450,60 @@ pub fn count_artifacts(path: &Path, cap: u64) -> Result<usize, String> {
         }
         if line.starts_with(br#"{"reason":"compiler-artifact""#) {
             count += 1;
+        }
+    }
+}
+
+/// Every file a `compiler-artifact` line of `stdout` names (`filenames` and `executable`) must be an absolute path with no `..` that lies under `clone` (as given or canonical). The first one outside is an error naming it.
+pub fn check_artifact_paths(stdout: &Path, clone: &Path) -> Result<(), String> {
+    let roots: Vec<PathBuf> = [Some(clone.to_path_buf()), clone.canonicalize().ok()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let inside = |file: &str| {
+        let path = Path::new(file);
+        path.is_absolute()
+            && !path.components().any(|c| matches!(c, Component::ParentDir))
+            && roots.iter().any(|root| path.starts_with(root))
+    };
+    let mut reader =
+        BufReader::new(fs::File::open(stdout).map_err(|e| format!("{}: {e}", stdout.display()))?);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader
+            .read_until(b'\n', &mut line)
+            .map_err(|e| format!("{}: {e}", stdout.display()))?
+            == 0
+        {
+            return Ok(());
+        }
+        if !line.starts_with(br#"{"reason":"compiler-artifact""#) {
+            continue;
+        }
+        let message: serde_json::Value = serde_json::from_slice(&line).map_err(|e| {
+            format!(
+                "{}: unreadable compiler-artifact line: {e}",
+                stdout.display()
+            )
+        })?;
+        let files = message["filenames"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .chain(
+                message["executable"]
+                    .as_str()
+                    .map(|_| &message["executable"]),
+            )
+            .filter_map(|f| f.as_str());
+        for file in files {
+            if !inside(file) {
+                return Err(format!(
+                    "a replayed command wrote {file}, outside its clone {}",
+                    clone.display()
+                ));
+            }
         }
     }
 }
@@ -645,24 +694,31 @@ fn clone_target<'a>(
     Ok(guard)
 }
 
+fn profile_dirs_of(path: &Path) -> Result<Vec<PathBuf>, String> {
+    match cargo_target::identify(path) {
+        None => Err(format!("{}: not a Cargo target dir", path.display())),
+        Some(Err(why)) => Err(format!("{}: {why}", path.display())),
+        Some(Ok(profiles)) => Ok(profiles.into_iter().map(|(dir, _)| dir).collect()),
+    }
+}
+
 pub fn read_target(path: &Path) -> Result<TargetDir, String> {
-    let profiles = match cargo_target::identify(path) {
-        None => return Err(format!("{}: not a Cargo target dir", path.display())),
-        Some(Err(why)) => return Err(format!("{}: {why}", path.display())),
-        Some(Ok(profiles)) => profiles,
-    };
-    Ok(TargetDir {
+    Ok(target_of(path, &profile_dirs_of(path)?))
+}
+
+fn target_of(path: &Path, profiles: &[PathBuf]) -> TargetDir {
+    TargetDir {
         path: path.to_path_buf(),
         owner: Owner::Unresolved {
             reason: "proof".into(),
         },
         profiles: profiles
             .iter()
-            .map(|(dir, _)| fingerprint::read_profile(dir))
+            .map(|dir| fingerprint::read_profile(dir))
             .collect(),
         size: None,
         unreadable: None,
-    })
+    }
 }
 
 /// The clone must be a real directory (not a link) whose canonical path is inside the canonical scratch dir and is not the target itself.
@@ -750,6 +806,7 @@ fn replay(scratch: &Path, label: &str, input: &ProveInput, clone: &Path) -> Resu
             COMMAND_DEADLINE,
             OUTPUT_CAP,
         )?;
+        check_artifact_paths(&ran.stdout, clone)?;
         out.commands.push((args, ran.exit));
         out.exits.push(ran.exit);
         out.artifact_lines.push(ran.artifact_lines);
@@ -757,20 +814,57 @@ fn replay(scratch: &Path, label: &str, input: &ProveInput, clone: &Path) -> Resu
     Ok(out)
 }
 
-fn snapshot(input: &ProveInput) -> Result<Tree, String> {
-    let (mut tree, linked) = walk_links(&input.target, WALK_CAP)?;
-    if let Some(link) = linked.first() {
-        return Err(format!(
+fn refuse_linked_dirs(input: &ProveInput) -> Result<(), String> {
+    let (_, linked) = walk_links(&input.target, WALK_CAP)?;
+    match linked.first() {
+        Some(link) => Err(format!(
             "{} is a symbolic link to a directory inside the target; a clone would alias its destination",
             link.display()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// What the end-of-run check compares: the files windows listed for deletion and the checkout's `Cargo.lock`.
+struct Recorded {
+    listed: BTreeSet<PathBuf>,
+    lockfile: PathBuf,
+    lockfile_stamp: Option<(SystemTime, u64)>,
+}
+
+fn lockfile_stamp(lockfile: &Path) -> Result<Option<(SystemTime, u64)>, String> {
+    match fs::symlink_metadata(lockfile) {
+        Ok(meta) => Ok(Some((
+            meta.modified()
+                .map_err(|e| format!("{}: {e}", lockfile.display()))?,
+            meta.len(),
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", lockfile.display())),
+    }
+}
+
+fn check_recorded(recorded: &Recorded) -> Result<(), String> {
+    let missing: Vec<String> = recorded
+        .listed
+        .iter()
+        .filter(|f| fs::symlink_metadata(f).is_err())
+        .take(10)
+        .map(|f| f.display().to_string())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "files a window listed for deletion are missing from the original after the proof: {}",
+            missing.join(", ")
         ));
     }
-    let lock = input.checkout.join("Cargo.lock");
-    if let Ok(meta) = fs::symlink_metadata(&lock) {
-        let mtime = meta.modified().map_err(|e| e.to_string())?;
-        tree.insert(lock, (mtime, meta.len()));
+    if lockfile_stamp(&recorded.lockfile)? != recorded.lockfile_stamp {
+        return Err(format!(
+            "{} changed during the proof",
+            recorded.lockfile.display()
+        ));
     }
-    Ok(tree)
+    Ok(())
 }
 
 fn rebase(path: &Path, target: &Path, clone: &Path) -> Result<PathBuf, String> {
@@ -879,24 +973,25 @@ pub fn prove_with_cloner(
             input.target.display()
         ));
     }
-    let target = read_target(&input.target)?;
+    let profile_dirs = profile_dirs_of(&input.target)?;
 
     let mut locks = Vec::new();
-    for profile in &target.profiles {
-        match fs.try_lock_exclusive(&profile.path.join(".cargo-build-lock")) {
+    for profile in &profile_dirs {
+        match fs.try_lock_exclusive(&profile.join(".cargo-build-lock")) {
             TryLock::Acquired(guard) => locks.push(guard),
             TryLock::Gone => {}
             TryLock::Held => {
                 return Err(format!(
                     "{}: the build lock is held by another process; stop other builds first",
-                    profile.path.display()
+                    profile.display()
                 ))
             }
             TryLock::Unopenable(e) | TryLock::Unlockable(e) => {
-                return Err(format!("{}: cannot lock: {e}", profile.path.display()))
+                return Err(format!("{}: cannot lock: {e}", profile.display()))
             }
         }
     }
+    let locked_at = Instant::now();
 
     let target_volume = fs
         .volume(&input.target)
@@ -919,7 +1014,8 @@ pub fn prove_with_cloner(
         ));
     }
 
-    let original_tree = snapshot(input)?;
+    refuse_linked_dirs(input)?;
+    let target = target_of(&input.target, &profile_dirs);
     let unmapped = measure(
         fs,
         &input.target,
@@ -952,6 +1048,21 @@ pub fn prove_with_cloner(
         });
     }
 
+    let lockfile = input.checkout.join("Cargo.lock");
+    let recorded = Recorded {
+        listed: decisions
+            .iter()
+            .flat_map(|d| d.dead_files.iter())
+            .filter(|f| fs::symlink_metadata(f).is_ok())
+            .cloned()
+            .collect(),
+        lockfile_stamp: lockfile_stamp(&lockfile)?,
+        lockfile,
+    };
+    let snapshot = clone_target(fs, scratch, "snapshot", &input.target, cloner)?;
+    drop(locks);
+    let lock_held = locked_at.elapsed();
+
     let mut warm_up = PhaseReport::default();
     let mut baseline = PhaseReport::default();
     let mut phase_problem = None;
@@ -959,7 +1070,8 @@ pub fn prove_with_cloner(
     let mut warmed_stamps = Stamps::new();
     if decisions.iter().any(|d| d.pre_vacuous.is_none()) {
         let started = Instant::now();
-        let clone = clone_target(fs, scratch, "warm-up", &input.target, cloner)?;
+        let clone = clone_target(fs, scratch, "warm-up", &snapshot.path, cloner)?;
+        snapshot.remove()?;
         let before = stamps_of(fs, &clone.path)?;
         let ran = replay(scratch, "warm-up", input, &clone.path)?;
         warmed_stamps = stamps_of(fs, &clone.path)?;
@@ -1060,24 +1172,11 @@ pub fn prove_with_cloner(
     if let Some(clone) = warmed {
         clone.remove()?;
     }
-    let after_tree = snapshot(input)?;
-    let changed = tree_changes(&original_tree, &after_tree);
-    if !changed.is_empty() {
-        let first: Vec<String> = changed
-            .iter()
-            .take(10)
-            .map(|p| p.display().to_string())
-            .collect();
-        return Err(format!(
-            "the original changed during the proof ({} entries): {}",
-            changed.len(),
-            first.join(", ")
-        ));
-    }
-    drop(locks);
+    check_recorded(&recorded)?;
     Ok(ProveReport {
         warm_up,
         baseline,
+        lock_held,
         windows,
     })
 }

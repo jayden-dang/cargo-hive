@@ -854,7 +854,7 @@ fn a_window_is_vacuous_when_undecided_empty_failed_or_silent() {
 }
 
 #[test]
-fn clone_timestamps_and_original_trees_are_compared_exactly() {
+fn clone_timestamps_are_compared_exactly() {
     let original: prove::Stamps = BTreeMap::from([
         (key("debug", "a-1"), Some(at(1))),
         (key("debug", "b-2"), Some(at(1))),
@@ -870,23 +870,6 @@ fn clone_timestamps_and_original_trees_are_compared_exactly() {
     assert_eq!(
         prove::mtime_mismatches(&original, &clone),
         vec![key("debug", "a-1"), key("debug", "b-2")]
-    );
-
-    let before: prove::Tree = BTreeMap::from([
-        (PathBuf::from("/t/a"), (at(1), 10)),
-        (PathBuf::from("/t/b"), (at(1), 10)),
-        (PathBuf::from("/t/c"), (at(1), 10)),
-        (PathBuf::from("/t/d"), (at(1), 10)),
-    ]);
-    let mut after = before.clone();
-    assert_eq!(prove::tree_changes(&before, &after), Vec::<PathBuf>::new());
-    after.insert(PathBuf::from("/t/a"), (at(2), 10));
-    after.insert(PathBuf::from("/t/b"), (at(1), 11));
-    after.remove(&PathBuf::from("/t/c"));
-    after.insert(PathBuf::from("/t/e"), (at(1), 0));
-    assert_eq!(
-        prove::tree_changes(&before, &after),
-        ["/t/a", "/t/b", "/t/c", "/t/e"].map(PathBuf::from).to_vec()
     );
 }
 
@@ -919,6 +902,7 @@ fn all_vacuous_and_render_name_each_window_command_and_exit() {
     let mut report = prove::ProveReport {
         warm_up: Default::default(),
         baseline: Default::default(),
+        lock_held: Duration::from_millis(2500),
         windows: vec![
             window(6 * 3600, WindowOutcome::Vacuous("none".into()), 0),
             window(7 * 86_400, WindowOutcome::Vacuous("none".into()), 101),
@@ -958,8 +942,23 @@ struct Volumes {
     scratch: PathBuf,
     fs_type: &'static str,
     scratch_mount: String,
-    touch_when_measured: Option<PathBuf>,
     fail_remove_file: bool,
+    removed: std::cell::RefCell<Vec<PathBuf>>,
+}
+
+impl Volumes {
+    fn apfs_over(scratch: &Path, fail_remove_file: bool) -> Volumes {
+        let inner = platform::current().unwrap().fs;
+        let mount = inner.volume(scratch).unwrap().mount;
+        Volumes {
+            inner,
+            scratch: scratch.to_path_buf(),
+            fs_type: "apfs",
+            scratch_mount: mount.to_string_lossy().into_owned(),
+            fail_remove_file,
+            removed: Default::default(),
+        }
+    }
 }
 
 impl platform::Fs for Volumes {
@@ -988,9 +987,6 @@ impl platform::Fs for Volumes {
         self.inner.clone_file(s, d)
     }
     fn sharing(&self, p: &Path) -> std::io::Result<platform::Sharing> {
-        if let Some(path) = &self.touch_when_measured {
-            set_mtime(path, SystemTime::now() + Duration::from_secs(5));
-        }
         self.inner.sharing(p)
     }
     fn compress(&self, p: &Path) -> platform::CompressOutcome {
@@ -1020,9 +1016,11 @@ impl platform::Fs for Volumes {
         self.inner.read_dir_bounded(d, cap)
     }
     fn remove_tree(&self, p: &Path) -> std::io::Result<()> {
+        self.removed.borrow_mut().push(p.to_path_buf());
         self.inner.remove_tree(p)
     }
     fn remove_file(&self, p: &Path) -> std::io::Result<()> {
+        self.removed.borrow_mut().push(p.to_path_buf());
         if self.fail_remove_file {
             return Err(std::io::Error::other("injected remove_file failure"));
         }
@@ -1110,10 +1108,7 @@ fn the_proof_passes_a_window_whose_dead_units_cargo_does_not_need_and_calls_an_e
         WindowOutcome::Vacuous(_)
     ));
     assert!(!report.all_vacuous());
-    assert_eq!(
-        prove::tree_changes(&before, &prove::walk(&fx.target, 5_000_000).unwrap()),
-        Vec::<PathBuf>::new()
-    );
+    assert!(before == prove::walk(&fx.target, 5_000_000).unwrap());
     assert_eq!(
         fs::metadata(fx.app.join("Cargo.lock"))
             .unwrap()
@@ -1157,8 +1152,8 @@ fn a_volume_that_cannot_clone_fails_before_copying() {
             scratch: scratch.path.clone(),
             fs_type,
             scratch_mount: scratch_mount.to_string(),
-            touch_when_measured: None,
             fail_remove_file: false,
+            removed: Default::default(),
         };
         let err = prove::prove_with(&fs_, &scratch.path, &input(&fx, &[WINDOW])).unwrap_err();
         assert!(err.contains(wanted), "{err}");
@@ -1214,10 +1209,7 @@ fn the_warm_up_builds_what_the_commands_need_and_the_baseline_then_rebuilds_noth
         "{}",
         report.render()
     );
-    assert_eq!(
-        prove::tree_changes(&before, &prove::walk(&fx.target, 5_000_000).unwrap()),
-        Vec::<PathBuf>::new()
-    );
+    assert!(before == prove::walk(&fx.target, 5_000_000).unwrap());
     no_clone_left(&scratch.path);
 }
 
@@ -1286,7 +1278,7 @@ fn a_failing_warm_up_command_makes_every_window_vacuous_and_deletes_nothing() {
     assert_ne!(report.warm_up.commands[0].1, 0);
     assert!(report.baseline.commands.is_empty());
     let made: Vec<String> = sources.borrow().iter().map(|(l, _)| l.clone()).collect();
-    assert_eq!(made, vec!["warm-up".to_string()]);
+    assert_eq!(made, vec!["snapshot".to_string(), "warm-up".to_string()]);
     assert_eq!(tree_of(&fx.target), before);
     no_clone_left(&scratch.path);
 }
@@ -1315,12 +1307,15 @@ fn window_clones_come_from_the_warmed_up_clone_and_are_compared_with_it() {
     );
     let sources = sources.borrow();
     let labels: Vec<&str> = sources.iter().map(|(l, _)| l.as_str()).collect();
-    assert_eq!(labels, ["warm-up", "baseline", "w0"]);
+    assert_eq!(labels, ["snapshot", "warm-up", "baseline", "w0"]);
     let fx_target = fx.target.canonicalize().unwrap();
     assert_eq!(sources[0].1.canonicalize().unwrap(), fx_target);
-    assert_eq!(sources[1].1, sources[2].1);
     assert!(sources[1].1.starts_with(&scratch.path));
-    assert_ne!(sources[1].1, fx.target);
+    assert_eq!(sources[1].1.file_name().unwrap(), "clone-snapshot");
+    assert_eq!(sources[2].1, sources[3].1);
+    assert!(sources[2].1.starts_with(&scratch.path));
+    assert_ne!(sources[2].1, sources[1].1);
+    assert_ne!(sources[2].1, fx.target);
     assert_eq!(tree_of(&fx.target), before);
     no_clone_left(&scratch.path);
 
@@ -1361,6 +1356,7 @@ fn a_phase_that_never_ran_is_not_shown_as_a_clean_pass() {
     let report = |warm_up, baseline| prove::ProveReport {
         warm_up,
         baseline,
+        lock_held: Duration::ZERO,
         windows: vec![],
     };
 
@@ -1384,6 +1380,7 @@ fn the_report_shows_the_warm_up_and_the_baseline() {
     let report = prove::ProveReport {
         warm_up: phase(&["debug/a-1", "debug/b-2", "debug/c-3"], 0, 125),
         baseline: phase(&["debug/d-4"], 101, 7),
+        lock_held: Duration::ZERO,
         windows: vec![],
     };
 
@@ -1437,26 +1434,288 @@ fn deleting_dead_check_units_makes_a_check_replay_rebuild_them_without_failing()
     no_clone_left(&scratch.path);
 }
 
+fn listed_files(fx: &Fixture) -> Vec<PathBuf> {
+    let (_, dead) = decide(&fx.target);
+    let files: Vec<PathBuf> = dead.into_iter().flat_map(|d| d.files).collect();
+    assert!(!files.is_empty());
+    files
+}
+
+/// A cloner that copies like `recording_cloner` and runs `act` once the clone labelled `when` exists.
+fn acting_cloner(
+    when: &'static str,
+    act: impl Fn() + 'static,
+) -> impl Fn(&Path, &str, &Path, &Path) -> Result<(), String> {
+    let copy = recording_cloner(&Sources::default());
+    move |scratch, label, source, dest| {
+        copy(scratch, label, source, dest)?;
+        if label == when {
+            act();
+        }
+        Ok(())
+    }
+}
+
 #[test]
-fn a_change_to_the_original_during_the_proof_fails_it_naming_the_entry() {
-    let fx = proof_fixture("prove-changed");
+fn the_profile_locks_are_free_while_the_warm_up_runs_and_the_hold_time_is_reported() {
+    let fx = proof_fixture("prove-lockfree");
     let scratch = Scratch::new("prove-scratch");
-    let touched = fx.app.join("Cargo.lock");
-    let inner = platform::current().unwrap().fs;
-    let mount = inner.volume(&scratch.path).unwrap().mount;
-    let fs_ = Volumes {
-        inner,
-        scratch: scratch.path.clone(),
-        fs_type: "apfs",
-        scratch_mount: mount.to_string_lossy().into_owned(),
-        touch_when_measured: Some(touched),
-        fail_remove_file: false,
+    let fs_ = platform::current().unwrap().fs;
+    let profiles = profile_dirs(&fx.target);
+    let free_during_warm_up = move |scratch_: &Path, label: &str, source: &Path, dest: &Path| {
+        recording_cloner(&Sources::default())(scratch_, label, source, dest)?;
+        if label == "warm-up" {
+            let platform = platform::current().unwrap();
+            for profile in &profiles {
+                match platform
+                    .fs
+                    .try_lock_exclusive(&profile.join(".cargo-build-lock"))
+                {
+                    platform::TryLock::Acquired(_) => {}
+                    other => {
+                        return Err(format!("{} is still locked: {other:?}", profile.display()))
+                    }
+                }
+            }
+        }
+        Ok(())
+    };
+    let started = std::time::Instant::now();
+
+    let report = prove::prove_with_cloner(
+        fs_.as_ref(),
+        &scratch.path,
+        &input(&fx, &[WINDOW]),
+        &free_during_warm_up,
+    )
+    .unwrap();
+
+    let whole_run = started.elapsed();
+    println!("{}", report.render());
+    assert!(report.lock_held > Duration::ZERO);
+    assert!(
+        report.lock_held < whole_run,
+        "{:?} vs {whole_run:?}",
+        report.lock_held
+    );
+    assert!(
+        report.render().contains("locks held"),
+        "{}",
+        report.render()
+    );
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn a_build_lock_held_by_another_process_fails_the_proof_naming_the_profile() {
+    let fx = proof_fixture("prove-otherproc");
+    let scratch = Scratch::new("prove-scratch");
+    let fs_ = platform::current().unwrap().fs;
+    let profile = fx.target.join("debug");
+    let mut holder = Command::new("perl")
+        .args([
+            "-e",
+            r#"use Fcntl ":flock"; open(my $f, "<", $ARGV[0]) or die; flock($f, LOCK_EX) or die; print "locked\n"; $| = 1; <STDIN>;"#,
+        ])
+        .arg(profile.join(".cargo-build-lock"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(holder.stdout.as_mut().unwrap()),
+        &mut line,
+    )
+    .unwrap();
+    assert_eq!(line.trim(), "locked");
+
+    let result = prove::prove_with(fs_.as_ref(), &scratch.path, &input(&fx, &[WINDOW]));
+
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+    let err = result.unwrap_err();
+    assert!(err.contains(&profile.display().to_string()), "{err}");
+    assert_eq!(entries(&scratch.path), Vec::<String>::new());
+}
+
+#[test]
+fn removing_a_listed_file_of_the_original_during_the_run_fails_naming_it() {
+    let fx = proof_fixture("prove-listed-gone");
+    let scratch = Scratch::new("prove-scratch");
+    let fs_ = platform::current().unwrap().fs;
+    let victim = listed_files(&fx).remove(0);
+    let victim_ = victim.clone();
+    let remove = move || {
+        let victim = &victim_;
+        let meta = fs::symlink_metadata(victim).unwrap();
+        if meta.is_dir() {
+            fs::remove_dir_all(victim).unwrap();
+        } else {
+            fs::remove_file(victim).unwrap();
+        }
     };
 
-    let err = prove::prove_with(&fs_, &scratch.path, &input(&fx, &[WINDOW])).unwrap_err();
+    let err = prove::prove_with_cloner(
+        fs_.as_ref(),
+        &scratch.path,
+        &input(&fx, &[WINDOW]),
+        &acting_cloner("warm-up", remove),
+    )
+    .unwrap_err();
 
-    assert!(err.contains("Cargo.lock"), "{err}");
+    assert!(err.contains(&victim.display().to_string()), "{err}");
     no_clone_left(&scratch.path);
+}
+
+#[test]
+fn touching_an_unlisted_file_of_the_original_during_the_run_does_not_fail() {
+    let fx = proof_fixture("prove-unlisted");
+    let scratch = Scratch::new("prove-scratch");
+    let fs_ = platform::current().unwrap().fs;
+    let listed = listed_files(&fx);
+    let unlisted = fs::read_dir(fx.target.join("debug/deps"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| !listed.contains(p))
+        .unwrap();
+    let touch_unlisted = unlisted.clone();
+    let new_file = fx.target.join("debug/new-by-the-owner.txt");
+    let touch = move || {
+        set_mtime(&touch_unlisted, SystemTime::now() + Duration::from_secs(60));
+        write(&new_file, "x");
+    };
+
+    let report = prove::prove_with_cloner(
+        fs_.as_ref(),
+        &scratch.path,
+        &input(&fx, &[WINDOW]),
+        &acting_cloner("warm-up", touch),
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.windows[0].outcome,
+        WindowOutcome::Passed,
+        "{}",
+        report.render()
+    );
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn a_change_to_the_checkouts_cargo_lock_during_the_run_fails_naming_it() {
+    let fx = proof_fixture("prove-lockfile");
+    let scratch = Scratch::new("prove-scratch");
+    let fs_ = platform::current().unwrap().fs;
+    let lockfile = fx.app.join("Cargo.lock");
+    let touched = lockfile.clone();
+    let touch = move || set_mtime(&touched, SystemTime::now() + Duration::from_secs(60));
+
+    let err = prove::prove_with_cloner(
+        fs_.as_ref(),
+        &scratch.path,
+        &input(&fx, &[WINDOW]),
+        &acting_cloner("warm-up", touch),
+    )
+    .unwrap_err();
+
+    assert!(err.contains(&lockfile.display().to_string()), "{err}");
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn every_deletion_lands_in_a_window_clone_and_the_original_keeps_its_listed_files() {
+    let fx = proof_fixture("prove-deletions");
+    let scratch = Scratch::new("prove-scratch");
+    let fs_ = Volumes::apfs_over(&scratch.path, false);
+    let listed = listed_files(&fx);
+    let lockfile = fx.app.join("Cargo.lock");
+    let lock_before = fs::metadata(&lockfile).unwrap().modified().unwrap();
+    let before = tree_of(&fx.target);
+
+    let report = prove::prove_with(&fs_, &scratch.path, &input(&fx, &[WINDOW])).unwrap();
+
+    assert_eq!(
+        report.windows[0].outcome,
+        WindowOutcome::Passed,
+        "{}",
+        report.render()
+    );
+    let removed = fs_.removed.borrow();
+    assert!(!removed.is_empty());
+    for path in removed.iter() {
+        let name = path
+            .strip_prefix(&scratch.path)
+            .unwrap_or_else(|_| panic!("{} was removed outside the scratch", path.display()))
+            .components()
+            .next()
+            .unwrap()
+            .as_os_str()
+            .to_string_lossy()
+            .into_owned();
+        assert!(name.starts_with("clone-"), "{}", path.display());
+        let whole_clone = path.parent() == Some(scratch.path.as_path());
+        assert!(
+            whole_clone || name == "clone-w0",
+            "{} deleted inside {name}",
+            path.display()
+        );
+    }
+    for file in &listed {
+        assert!(fs::symlink_metadata(file).is_ok(), "{}", file.display());
+    }
+    assert_eq!(
+        fs::metadata(&lockfile).unwrap().modified().unwrap(),
+        lock_before
+    );
+    assert_eq!(tree_of(&fx.target), before);
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn a_compiler_artifact_outside_the_clone_fails_naming_the_file() {
+    let s = Scratch::new("prove-artifacts");
+    let clone = s.path.join("clone-w0");
+    let line = |files: &[&str]| {
+        let names: Vec<String> = files.iter().map(|f| format!("{f:?}")).collect();
+        format!(
+            "{{\"reason\":\"compiler-artifact\",\"filenames\":[{}],\"executable\":null}}\n",
+            names.join(",")
+        )
+    };
+    let inside = clone.join("debug/deps/libfoo-1.rlib").display().to_string();
+    let outside = "/Users/owner/proj/target/debug/deps/libfoo-1.rlib";
+    let sneaky = format!("{}/../elsewhere/libbar.rlib", clone.display());
+    let log = s.path.join("out");
+
+    fs::write(
+        &log,
+        format!(
+            "{{\"reason\":\"build-finished\",\"success\":true}}\nnoise\n{}",
+            line(&[&inside])
+        ),
+    )
+    .unwrap();
+    assert_eq!(prove::check_artifact_paths(&log, &clone), Ok(()));
+
+    fs::write(&log, format!("{}{}", line(&[&inside]), line(&[outside]))).unwrap();
+    let err = prove::check_artifact_paths(&log, &clone).unwrap_err();
+    assert!(err.contains(outside), "{err}");
+
+    fs::write(&log, line(&[&sneaky])).unwrap();
+    let err = prove::check_artifact_paths(&log, &clone).unwrap_err();
+    assert!(err.contains("elsewhere/libbar.rlib"), "{err}");
+
+    fs::write(
+        &log,
+        format!(
+            "{{\"reason\":\"compiler-artifact\",\"filenames\":[],\"executable\":{outside:?}}}\n"
+        ),
+    )
+    .unwrap();
+    let err = prove::check_artifact_paths(&log, &clone).unwrap_err();
+    assert!(err.contains(outside), "{err}");
 }
 
 fn tree_of(dir: &Path) -> Vec<(PathBuf, bool)> {
@@ -1492,10 +1751,7 @@ fn a_symlinked_target_root_is_refused_and_nothing_is_touched() {
     assert!(err.contains(&link.display().to_string()), "{err}");
     assert!(err.contains("symbolic link"), "{err}");
     assert_eq!(tree_of(&fx.target), before);
-    assert_eq!(
-        prove::tree_changes(&walked, &prove::walk(&fx.target, 5_000_000).unwrap()),
-        Vec::<PathBuf>::new()
-    );
+    assert!(walked == prove::walk(&fx.target, 5_000_000).unwrap());
     assert_eq!(entries(&scratch.path), Vec::<String>::new());
     assert!(prove::walk(&link, 5_000_000).is_err());
 }
@@ -1650,16 +1906,7 @@ fn config_out_dir_and_unstable_flags_are_refused() {
 fn an_error_after_a_clone_exists_removes_the_clone_before_the_scratch_does() {
     let fx = proof_fixture("prove-errclone");
     let scratch = Scratch::new("prove-scratch");
-    let inner = platform::current().unwrap().fs;
-    let mount = inner.volume(&scratch.path).unwrap().mount;
-    let fs_ = Volumes {
-        inner,
-        scratch: scratch.path.clone(),
-        fs_type: "apfs",
-        scratch_mount: mount.to_string_lossy().into_owned(),
-        touch_when_measured: None,
-        fail_remove_file: true,
-    };
+    let fs_ = Volumes::apfs_over(&scratch.path, true);
 
     let err = prove::prove_with(&fs_, &scratch.path, &input(&fx, &[WINDOW])).unwrap_err();
 
