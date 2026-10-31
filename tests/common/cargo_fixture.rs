@@ -3,7 +3,7 @@
 //! decide liveness. Shared by the liveness tests; `cargo_in` kills a cargo that outlives its deadline.
 
 use super::{prove, wait_within, Scratch};
-use cargo_hive::cargo_target::{self, TargetDir};
+use cargo_hive::cargo_target::TargetDir;
 use cargo_hive::liveness::{liveness, DeadUnit, Liveness, UnitRef};
 use cargo_hive::platform;
 use std::collections::{BTreeMap, BTreeSet};
@@ -122,12 +122,7 @@ pub fn host_triple() -> String {
 }
 
 pub fn profile_dirs(target: &Path) -> Vec<PathBuf> {
-    cargo_target::identify(target)
-        .expect("a cargo-tagged target dir")
-        .expect("readable profiles")
-        .into_iter()
-        .map(|(path, _)| path)
-        .collect()
+    prove::profile_dirs_of(target).expect("a cargo-tagged target dir with readable profiles")
 }
 
 pub fn set_mtime(path: &Path, time: SystemTime) {

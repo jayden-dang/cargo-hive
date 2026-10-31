@@ -713,7 +713,7 @@ fn clone_target<'a>(
     Ok(guard)
 }
 
-fn profile_dirs_of(path: &Path) -> Result<Vec<PathBuf>, String> {
+pub fn profile_dirs_of(path: &Path) -> Result<Vec<PathBuf>, String> {
     match cargo_target::identify(path) {
         None => Err(format!("{}: not a Cargo target dir", path.display())),
         Some(Err(why)) => Err(format!("{}: {why}", path.display())),
