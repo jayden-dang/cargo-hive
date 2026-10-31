@@ -408,7 +408,7 @@ Owner amendment 2026-10-31, after the first klynt run (see `proof-runs.md`): the
 
 **Depends-on:** Task 8
 
-- [ ] **Step 1: Write the failing tests** in `tests/liveness.rs`:
+- [x] **Step 1: Write the failing tests** in `tests/liveness.rs`:
   - `the_warm_up_builds_what_the_commands_need_and_the_baseline_then_rebuilds_nothing`: a fixture whose target holds only `cargo check` output, commands `[["build","--offline"]]`. The warm-up report lists rebuilt units, the baseline report lists none, and a window is not Vacuous for "baseline rebuilt".
   - `a_baseline_that_still_rebuilds_after_the_warm_up_makes_every_window_vacuous`: a command whose output changes each run (a build script that writes the time and has no `rerun-if-changed`), so the baseline rebuilds. Every window is Vacuous, naming the unit.
   - `a_failing_warm_up_command_makes_every_window_vacuous_and_deletes_nothing`.
@@ -416,9 +416,9 @@ Owner amendment 2026-10-31, after the first klynt run (see `proof-runs.md`): the
   - `the_report_shows_the_warm_up_and_the_baseline`: `render` contains both phases' rebuilt counts, argv, exit status and elapsed time.
 
   Run `cargo test --test liveness`; expect failures because the order is still the old one.
-- [ ] **Step 2: Implement** the new order in `prove_with` (warm-up clone and replay; baseline clone of it; per window a clone of it), with `PhaseReport` and the report text. Keep every earlier guard: symlink and clone-root checks, canonical-parent check on delete, the allow-list, `--locked`, the env scrubs and the config scan.
-- [ ] **Step 3: Verify.** `cargo test --test liveness` and `cargo test --lib liveness::` pass. Run the merge gate.
-- [ ] **Step 4: Commit** `test(liveness): warm the target up in a clone before the baseline`.
+- [x] **Step 2: Implement** the new order in `prove_with` (warm-up clone and replay; baseline clone of it; per window a clone of it), with `PhaseReport` and the report text. Keep every earlier guard: symlink and clone-root checks, canonical-parent check on delete, the allow-list, `--locked`, the env scrubs and the config scan.
+- [x] **Step 3: Verify.** `cargo test --test liveness` and `cargo test --lib liveness::` pass. Run the merge gate.
+- [x] **Step 4: Commit** `test(liveness): warm the target up in a clone before the baseline`.
 - [x] **Step 5: Acceptance on a scratch build of mailgate (manual, owner present).**
   1. *(Not done: mailgate has no target and 526 of its 1,004 registry crates are missing offline. The owner chose cargo-hive's own target instead; see `proof-runs.md` run 2.)* Make a scratch copy of the mailgate HEAD without touching its checkout or `.git`: `git -C /Users/jayden/Developer/work/CommandOss/mailgate archive HEAD | tar -x -C /private/tmp/hive-it-mailgate-<id>/`.
   2. In the copy, build with the same commands the proof will replay, so the target holds real history: `cargo check --all-targets --offline`, then backdate every `invoked.timestamp` in the copy's target by 30 days (the copy is ours to modify), then `cargo build --offline`. If dependencies are missing offline, stop and report instead of using the network.
