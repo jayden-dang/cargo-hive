@@ -1,3 +1,7 @@
+//! Fixtures that run real `cargo` offline in a scratch workspace: builds into a scratch target dir
+//! with a scratch `CARGO_HOME`, backdating of what a build wrote, and reading a target dir to
+//! decide liveness. Shared by the liveness tests; `cargo_in` kills a cargo that outlives its deadline.
+
 use super::{prove, wait_within, Scratch};
 use cargo_hive::cargo_target::{self, TargetDir};
 use cargo_hive::liveness::{liveness, DeadUnit, Liveness, UnitRef};

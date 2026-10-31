@@ -1,4 +1,8 @@
 #![cfg(target_os = "macos")]
+//! Liveness against workspaces driven by real Cargo into the states a busy owner leaves behind
+//! (a failed build, a build that never started, a renamed dependency, a host dependency): the
+//! not-current units must keep what they wanted live, and deleting the dead units must not make
+//! Cargo rebuild a live one.
 mod common;
 use cargo_hive::liveness::{Liveness, Uncertain, UnitRef};
 use cargo_hive::platform;
@@ -473,7 +477,7 @@ fn a_failed_build_keeps_the_library_live_through_an_unmatched_edge_alone() {
 }
 
 #[test]
-fn a_failed_build_with_nothing_wanted_leaves_the_library_dead() {
+fn a_failed_build_with_nothing_wanted_leaves_the_library_out_of_both_sets() {
     let ws = failed_build("busy-failed-dead");
     let broken = reached_not_current(&ws, "l", |_| true);
     let c = reached_not_current(&ws, "c", |_| true);
@@ -531,7 +535,7 @@ fn a_renamed_dependency_stays_live_through_an_unmatched_edge_alone() {
 }
 
 #[test]
-fn a_renamed_dependency_with_nothing_wanted_is_dead() {
+fn a_renamed_dependency_with_nothing_wanted_is_left_out_of_both_sets() {
     let ws = renamed_dep("busy-renamed-dead", true);
     let liba = reached_not_current(&ws, "liba", |_| true);
     let app = reached_not_current(&ws, "app", |_| true);
@@ -609,7 +613,7 @@ fn a_host_dependency_stays_live_through_an_unmatched_edge_alone() {
 }
 
 #[test]
-fn a_host_dependency_with_nothing_wanted_is_dead() {
+fn a_host_dependency_with_nothing_wanted_is_left_out_of_both_sets() {
     let ws = host_dep("busy-host-dead");
     let triple = host_triple();
     let pm = host_pm(&ws, &triple);

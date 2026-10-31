@@ -1506,25 +1506,37 @@ fn the_profile_locks_are_free_while_the_warm_up_runs_and_the_hold_time_is_report
     no_clone_left(&scratch.path);
 }
 
+/// A child process killed and reaped when dropped, so a failing assert cannot leak it.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 #[test]
 fn a_build_lock_held_by_another_process_fails_the_proof_naming_the_profile() {
     let fx = proof_fixture("prove-otherproc");
     let scratch = Scratch::new("prove-scratch");
     let fs_ = platform::current().unwrap().fs;
     let profile = fx.target.join("debug");
-    let mut holder = Command::new("perl")
-        .args([
-            "-e",
-            r#"use Fcntl ":flock"; open(my $f, "<", $ARGV[0]) or die; flock($f, LOCK_EX) or die; print "locked\n"; $| = 1; <STDIN>;"#,
-        ])
-        .arg(profile.join(".cargo-build-lock"))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut holder = KillOnDrop(
+        Command::new("perl")
+            .args([
+                "-e",
+                r#"use Fcntl ":flock"; open(my $f, "<", $ARGV[0]) or die; flock($f, LOCK_EX) or die; print "locked\n"; $| = 1; <STDIN>;"#,
+            ])
+            .arg(profile.join(".cargo-build-lock"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
     let mut line = String::new();
     std::io::BufRead::read_line(
-        &mut std::io::BufReader::new(holder.stdout.as_mut().unwrap()),
+        &mut std::io::BufReader::new(holder.0.stdout.as_mut().unwrap()),
         &mut line,
     )
     .unwrap();
@@ -1532,8 +1544,7 @@ fn a_build_lock_held_by_another_process_fails_the_proof_naming_the_profile() {
 
     let result = prove::prove_with(fs_.as_ref(), &scratch.path, &input(&fx, &[WINDOW]));
 
-    holder.kill().unwrap();
-    holder.wait().unwrap();
+    drop(holder);
     let err = result.unwrap_err();
     assert!(err.contains(&profile.display().to_string()), "{err}");
     assert_eq!(entries(&scratch.path), Vec::<String>::new());
@@ -2157,7 +2168,7 @@ fn cargo_in_reports_a_failed_build_instead_of_asserting_it() {
 }
 
 #[test]
-fn decide_at_decides_for_the_given_instant_without_panicking_on_undecided() {
+fn decide_at_decides_a_backdated_target_for_the_given_instant() {
     let fx = fixture("liveness-decide-at");
     cargo(&fx, &["build"]);
     backdate_all(&fx.target, THIRTY_DAYS);
