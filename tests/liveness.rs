@@ -1108,7 +1108,7 @@ fn the_proof_passes_a_window_whose_dead_units_cargo_does_not_need_and_calls_an_e
         WindowOutcome::Vacuous(_)
     ));
     assert!(!report.all_vacuous());
-    assert!(before == prove::walk(&fx.target, 5_000_000).unwrap());
+    assert_eq!(before, prove::walk(&fx.target, 5_000_000).unwrap());
     assert_eq!(
         fs::metadata(fx.app.join("Cargo.lock"))
             .unwrap()
@@ -1209,7 +1209,7 @@ fn the_warm_up_builds_what_the_commands_need_and_the_baseline_then_rebuilds_noth
         "{}",
         report.render()
     );
-    assert!(before == prove::walk(&fx.target, 5_000_000).unwrap());
+    assert_eq!(before, prove::walk(&fx.target, 5_000_000).unwrap());
     no_clone_left(&scratch.path);
 }
 
@@ -1565,6 +1565,10 @@ fn removing_a_listed_file_of_the_original_during_the_run_fails_naming_it() {
     .unwrap_err();
 
     assert!(err.contains(&victim.display().to_string()), "{err}");
+    assert!(
+        err.contains("in the owner's checkout after the locks were released"),
+        "{err}"
+    );
     no_clone_left(&scratch.path);
 }
 
@@ -1621,6 +1625,10 @@ fn a_change_to_the_checkouts_cargo_lock_during_the_run_fails_naming_it() {
     .unwrap_err();
 
     assert!(err.contains(&lockfile.display().to_string()), "{err}");
+    assert!(
+        err.contains("in the owner's checkout after the locks were released"),
+        "{err}"
+    );
     no_clone_left(&scratch.path);
 }
 
@@ -1718,6 +1726,72 @@ fn a_compiler_artifact_outside_the_clone_fails_naming_the_file() {
     assert!(err.contains(outside), "{err}");
 }
 
+#[test]
+fn a_compiler_artifact_line_that_cannot_be_checked_fails_naming_the_line() {
+    let s = Scratch::new("prove-artifacts-malformed");
+    let clone = s.path.join("clone-w0");
+    let log = s.path.join("out");
+    let inside = clone.join("debug/deps/libfoo-1.rlib").display().to_string();
+    let good = format!(
+        "{{\"reason\":\"compiler-artifact\",\"filenames\":[{inside:?}],\"executable\":null}}\n"
+    );
+    for (what, bad) in [
+        (
+            "missing filenames",
+            r#"{"reason":"compiler-artifact","executable":null}"#,
+        ),
+        (
+            "filenames not an array",
+            r#"{"reason":"compiler-artifact","filenames":"/x/libbar.rlib","executable":null}"#,
+        ),
+        (
+            "a non-string filename",
+            r#"{"reason":"compiler-artifact","filenames":[7],"executable":null}"#,
+        ),
+        (
+            "executable not a string",
+            r#"{"reason":"compiler-artifact","filenames":[],"executable":7}"#,
+        ),
+        (
+            "missing executable",
+            r#"{"reason":"compiler-artifact","filenames":[]}"#,
+        ),
+    ] {
+        fs::write(&log, format!("noise\n{good}{bad}\n")).unwrap();
+        let err = prove::check_artifact_paths(&log, &clone)
+            .expect_err(&format!("{what} must fail the proof"));
+        assert!(err.contains(bad), "{what}: {err}");
+        assert!(err.contains("line 3"), "{what}: {err}");
+    }
+}
+
+#[test]
+fn a_compiler_artifact_with_reordered_keys_is_still_checked() {
+    let s = Scratch::new("prove-artifacts-reordered");
+    let clone = s.path.join("clone-w0");
+    let log = s.path.join("out");
+    let outside = "/Users/owner/proj/target/debug/deps/libfoo-1.rlib";
+    fs::write(
+        &log,
+        format!(
+            "{{\"package_id\":\"foo\",\"filenames\":[{outside:?}],\"reason\":\"compiler-artifact\",\"executable\":null}}\n"
+        ),
+    )
+    .unwrap();
+    let err = prove::check_artifact_paths(&log, &clone).unwrap_err();
+    assert!(err.contains(outside), "{err}");
+
+    let inside = clone.join("debug/deps/libfoo-1.rlib").display().to_string();
+    fs::write(
+        &log,
+        format!(
+            "{{\"executable\":null,\"reason\":\"compiler-artifact\",\"filenames\":[{inside:?}]}}\n"
+        ),
+    )
+    .unwrap();
+    assert_eq!(prove::check_artifact_paths(&log, &clone), Ok(()));
+}
+
 fn tree_of(dir: &Path) -> Vec<(PathBuf, bool)> {
     let mut out = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
@@ -1751,7 +1825,7 @@ fn a_symlinked_target_root_is_refused_and_nothing_is_touched() {
     assert!(err.contains(&link.display().to_string()), "{err}");
     assert!(err.contains("symbolic link"), "{err}");
     assert_eq!(tree_of(&fx.target), before);
-    assert!(walked == prove::walk(&fx.target, 5_000_000).unwrap());
+    assert_eq!(walked, prove::walk(&fx.target, 5_000_000).unwrap());
     assert_eq!(entries(&scratch.path), Vec::<String>::new());
     assert!(prove::walk(&link, 5_000_000).is_err());
 }

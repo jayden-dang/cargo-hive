@@ -4,9 +4,11 @@
 //! clone it once as the snapshot; release the locks; replay a warm-up in a clone of the snapshot and
 //! then each window in a clone of the warmed-up clone; finally check that every file a window listed
 //! is still in the original and that the checkout's `Cargo.lock` is unchanged.
-//! Contract: the original target and the snapshot are never written, every deletion lands in a clone,
-//! every replayed artifact lies inside its clone, every limit (deadline, output, walk, config size)
-//! is an error when hit, and nothing is silently skipped.
+//! Contract: every replay is pointed at a clone, never at the original, and every deletion lands in
+//! a clone; the end-of-run check proves only that the listed files still exist and that `Cargo.lock`
+//! is unchanged, not that nothing else in the original changed; every `compiler-artifact` a replay
+//! reports lies inside its clone (a build script writing elsewhere is not detected); every limit
+//! (deadline, output, walk, config size) is an error when hit, and nothing is silently skipped.
 
 use cargo_hive::cargo_target::{self, Owner, TargetDir};
 use cargo_hive::fingerprint;
@@ -454,7 +456,7 @@ pub fn count_artifacts(path: &Path, cap: u64) -> Result<usize, String> {
     }
 }
 
-/// Every file a `compiler-artifact` line of `stdout` names (`filenames` and `executable`) must be an absolute path with no `..` that lies under `clone` (as given or canonical). The first one outside is an error naming it.
+/// Every file a `compiler-artifact` message of `stdout` names (`filenames` and `executable`) must be an absolute path with no `..` that lies under `clone` (as given or canonical). Each line is parsed as JSON whatever its key order; a line that is not JSON is skipped unless it mentions `compiler-artifact`. A compiler-artifact message whose `filenames` or `executable` is missing or of the wrong type, and the first file outside the clone, are errors naming the line or the file.
 pub fn check_artifact_paths(stdout: &Path, clone: &Path) -> Result<(), String> {
     let roots: Vec<PathBuf> = [Some(clone.to_path_buf()), clone.canonicalize().ok()]
         .into_iter()
@@ -469,6 +471,7 @@ pub fn check_artifact_paths(stdout: &Path, clone: &Path) -> Result<(), String> {
     let mut reader =
         BufReader::new(fs::File::open(stdout).map_err(|e| format!("{}: {e}", stdout.display()))?);
     let mut line = Vec::new();
+    let mut number = 0;
     loop {
         line.clear();
         if reader
@@ -478,26 +481,37 @@ pub fn check_artifact_paths(stdout: &Path, clone: &Path) -> Result<(), String> {
         {
             return Ok(());
         }
-        if !line.starts_with(br#"{"reason":"compiler-artifact""#) {
-            continue;
-        }
-        let message: serde_json::Value = serde_json::from_slice(&line).map_err(|e| {
+        number += 1;
+        let text = String::from_utf8_lossy(&line);
+        let text = text.trim_end();
+        let unreadable = |why: &str| {
             format!(
-                "{}: unreadable compiler-artifact line: {e}",
+                "{} line {number}: cannot check the compiler-artifact message ({why}): {text}",
                 stdout.display()
             )
-        })?;
-        let files = message["filenames"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .chain(
-                message["executable"]
-                    .as_str()
-                    .map(|_| &message["executable"]),
-            )
-            .filter_map(|f| f.as_str());
+        };
+        let message = match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(message) => message,
+            Err(e) if text.contains("compiler-artifact") => return Err(unreadable(&e.to_string())),
+            Err(_) => continue,
+        };
+        if message["reason"].as_str() != Some("compiler-artifact") {
+            continue;
+        }
+        let mut files: Vec<&serde_json::Value> = Vec::new();
+        match message["filenames"].as_array() {
+            Some(names) => files.extend(names),
+            None => return Err(unreadable("filenames is missing or not an array")),
+        }
+        match message.get("executable") {
+            Some(serde_json::Value::Null) => {}
+            Some(executable @ serde_json::Value::String(_)) => files.push(executable),
+            _ => return Err(unreadable("executable is missing or not a string or null")),
+        }
         for file in files {
+            let Some(file) = file.as_str() else {
+                return Err(unreadable("a filename is not a string"));
+            };
             if !inside(file) {
                 return Err(format!(
                     "a replayed command wrote {file}, outside its clone {}",
@@ -854,13 +868,14 @@ fn check_recorded(recorded: &Recorded) -> Result<(), String> {
         .collect();
     if !missing.is_empty() {
         return Err(format!(
-            "files a window listed for deletion are missing from the original after the proof: {}",
+            "files a window listed for deletion are missing from the original after the proof: {} \
+             (a build in the owner's checkout after the locks were released is a likely cause; rerun with nothing building)",
             missing.join(", ")
         ));
     }
     if lockfile_stamp(&recorded.lockfile)? != recorded.lockfile_stamp {
         return Err(format!(
-            "{} changed during the proof",
+            "{} changed during the proof (a build or `cargo update` in the owner's checkout after the locks were released is a likely cause; rerun with nothing building)",
             recorded.lockfile.display()
         ));
     }

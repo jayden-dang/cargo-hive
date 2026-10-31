@@ -1899,9 +1899,10 @@ mod tests {
         ));
         let stamp = unit_timestamp(&p, A, "lib");
         assert!(
-            reasons[0]
-                .to_string()
-                .starts_with(&format!("{}: invocation timestamp unreadable: ", stamp.display())),
+            reasons[0].to_string().starts_with(&format!(
+                "{}: invocation timestamp unreadable: ",
+                stamp.display()
+            )),
             "{}",
             reasons[0]
         );
