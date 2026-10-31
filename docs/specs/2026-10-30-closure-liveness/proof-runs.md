@@ -127,7 +127,7 @@ What these numbers say:
 - **On an actively developed workspace Undecided is the normal result.** klynt was Decided at the 6 h
   window in run 1 (1,598 dead units) and is Undecided now, because units are mid-rebuild or failed
   inside the window. The `Unresolved` reasons are most likely the same cause (a dependency unit with
-  no hash to match), which was not verified.
+  no hash to match), which was not verified here; the next section verifies it.
 - **The dead-unit count of cargo-hive fell from 294 (run 3) to 106** because the target was rebuilt in
   between by the full test run on `main`.
 - **Most bytes are outside this feature.** On klynt, `incremental/` plus the files directly under the
@@ -137,3 +137,56 @@ What these numbers say:
 Open for ROAD-6 and later: decide a target dir partly, not all or nothing; reconsider `incremental/`;
 and measure a 7-day window on a quiet target that is old enough.
 
+## Unresolved edges on klynt — 2026-10-31 (read-only)
+
+Not a proof run: nothing was deleted or replayed. A throwaway probe crate (source kept outside git
+in `.skills/LIVE/probe-unresolved/`, the crate itself removed from `/private/tmp`) read klynt's
+target between 10:50 and 11:10 (+07) while klynt was building: `cargo watch -x 'run --bin server'`
+ran the whole time, and an agent ran `cargo nextest run -p persistence`. Counts drift between
+snapshots for that reason.
+
+For every `Unresolved` reason, the probe reread the dependent unit's JSON, took the edge's package
+id, crate name and fingerprint, and looked for unit dirs of that package in the same profile.
+
+| Snapshot | 6 h and 1 d | 7 d | Edges whose package has a not-current dir |
+|---|---|---|---|
+| first | 120 edges from 5 bins (all roots) | 349 edges from 20 units | all |
+| a few minutes later | 10 edges | 60 edges | all |
+
+No edge pointed at a package with no unit dir, and none at a package whose dirs were all current.
+
+What this establishes:
+- **`Unresolved` has the same cause as `NotCurrentInWindow`.** A dependent records the fingerprint
+  its dependency had when the dependent was built. While Cargo rebuilds that dependency, or after
+  the rebuild fails, the dependency's hash file is empty, so nothing carries that fingerprint.
+- **Direct evidence for one edge.** The bin `emit_native_config` (`gateways-035d4a632163c5b9`, built
+  10:30) depends on `observability` with fingerprint `e5f9dbae472a3fef`, unresolved while
+  `observability-fd0041f2fbb1deec` was rebuilding. One minute later that dir's hash file read
+  `e5f9dbae472a3fef`: the same dir, rebuilt to the same fingerprint, and the edge resolved.
+- **A failed build keeps edges unresolved.** Watched for 5 minutes, the 10 remaining edges stayed
+  unresolved: `persistence-754f90deb43e28e1` had failed (19 errors in its `output-lib-persistence`)
+  where the agent was editing `persistence`.
+- **Not-current dirs last for days.** About 224 dirs were not current; 2 had error output. 138 of
+  them carried the same invocation minute, 2026-10-29 10:39, two days earlier. They clear only when
+  Cargo rebuilds that exact unit or they age out of the window. Why Cargo leaves a whole batch
+  behind was not checked in Cargo's source.
+- **klynt is never quiet.** Waiting for a quiet moment is not a way to reach Decided there.
+- **The 7-day window reclaims nothing on klynt even if Decided**: every unit, current or not, was
+  invoked inside the last 7 days.
+
+A simulated rule, measured in the same probe on one snapshot (not implemented, not proven by a
+deletion trial): a not-current dir invoked inside the window is a root and its last JSON's `deps`
+are followed; an edge that matches no fingerprint keeps the not-current dirs of that package in the
+same profile (a current dir carrying that fingerprint would have matched). For comparison, the
+same with every dir of the package kept:
+
+| Window | Today | Not-current dirs of the package kept | Every dir of the package kept |
+|---|---|---|---|
+| 6 h | Undecided | 1,129 dead units, 137,577 files, 38.89 GB allocated | 126 dead units, 2.73 GB |
+| 1 d | Undecided | 1,107 dead units, 38.54 GB allocated | 106 dead units, 2.42 GB |
+| 3 d | Undecided | 37 dead units, 2.85 GB allocated | 16 dead units, 0.39 GB |
+| 7 d | Undecided | 0 | 0 |
+
+Allocated bytes count clone-shared blocks in full; run 1 reported 25.06 GB of which 11.35 GB was
+shared, so the volume would regain noticeably less. In this snapshot no unresolved edge lacked a
+not-current dir of its package; a rule still has to say what happens then.
