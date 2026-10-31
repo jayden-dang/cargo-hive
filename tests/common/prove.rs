@@ -26,8 +26,7 @@ const FORBIDDEN_FLAGS: [&str; 5] = [
     "--out-dir",
     "--config",
 ];
-/// The only subcommands a replay may run: they compile inside the checkout and write nothing but the target dir; all of them accept `--locked`. `test` and `bench` also need `--no-run`, so nothing of the checkout executes.
-/// Only long built-in names that cargo 1.97.1 does not let an `[alias]` shadow; short names, `clippy`, `rustc` and `rustdoc` are refused.
+/// The only subcommands a replay may run: long built-in names that cargo 1.97.1 does not let an `[alias]` shadow (short names, `clippy`, `rustc` and `rustdoc` are refused). They only compile, but compiling runs the checkout's build.rs and proc-macros; all of them accept `--locked`, and `test` and `bench` also need `--no-run`, so no test, bench or binary of the checkout executes.
 const ALLOWED: [&str; 5] = ["build", "check", "test", "doc", "bench"];
 /// Names whose alias definition in a cargo config is refused: the allowed ones, plus the short names and external subcommands an alias could shadow (defense in depth).
 const ALIAS_GUARDED: [&str; 14] = [
@@ -56,7 +55,7 @@ const GLOBAL_SWITCHES: [&str; 8] = [
 /// Config files are scanned for these keys, which redirect build output outside the clone.
 const REDIRECT_KEYS: [&str; 2] = ["artifact-dir", "out-dir"];
 const CONFIG_CAP: u64 = 1 << 20;
-/// The owner's commands compile in the checkout: only compile steps run (build.rs and proc-macros as in the owner's own build); no test, bench or binary of the checkout is executed. Only the target dir is protected, not build.rs side effects. RUSTFLAGS and the owner's cargo config are left as the shell has them, since they are part of what the commands do; RUSTC_WRAPPER, RUSTC_WORKSPACE_WRAPPER and their CARGO_BUILD_* forms, and CARGO_BUILD_RUSTC, are removed because they change fingerprints.
+/// The owner's commands compile in the checkout: only compile steps run (build.rs and proc-macros as in the owner's own build); no test, bench or binary of the checkout is executed. Only the target dir is protected, not build.rs side effects.
 ///
 /// `test` and `bench` need `--no-run` before any `--`, and no command may carry an argument after `--`.
 pub struct ProveInput {
@@ -128,6 +127,12 @@ fn footprint_line(f: &Footprint) -> String {
     )
 }
 
+fn command_lines(out: &mut String, commands: &[(Vec<String>, i32)]) {
+    for (cmd, exit) in commands {
+        let _ = writeln!(out, "  cargo {} -> exit {exit}", cmd.join(" "));
+    }
+}
+
 impl ProveReport {
     pub fn all_vacuous(&self) -> bool {
         self.windows
@@ -151,9 +156,7 @@ impl ProveReport {
             if !phase.rebuilt.is_empty() {
                 let _ = writeln!(out, "  rebuilt: {}", phase.rebuilt.join(", "));
             }
-            for (cmd, exit) in &phase.commands {
-                let _ = writeln!(out, "  cargo {} -> exit {exit}", cmd.join(" "));
-            }
+            command_lines(&mut out, &phase.commands);
         }
         for w in &self.windows {
             let verdict = match &w.outcome {
@@ -179,9 +182,7 @@ impl ProveReport {
             for reason in &w.reasons {
                 let _ = writeln!(out, "  reason: {reason}");
             }
-            for (cmd, exit) in &w.commands {
-                let _ = writeln!(out, "  cargo {} -> exit {exit}", cmd.join(" "));
-            }
+            command_lines(&mut out, &w.commands);
         }
         out.push_str("A passed window covers only the replayed commands.\n");
         out
@@ -266,14 +267,19 @@ pub fn with_json(cmd: &[String]) -> Vec<String> {
     out
 }
 
+/// `path` relative to the target dir, or unchanged when it is not under it.
+fn rel(path: &Path, target: &Path) -> PathBuf {
+    path.strip_prefix(target).unwrap_or(path).to_path_buf()
+}
+
+fn stamps_of(fs: &dyn Fs, target_path: &Path) -> Result<Stamps, String> {
+    stamps(fs, &read_target(target_path)?)
+}
+
 pub fn stamps(fs: &dyn Fs, target: &TargetDir) -> Result<Stamps, String> {
     let mut out = Stamps::new();
     for profile in &target.profiles {
-        let rel = profile
-            .path
-            .strip_prefix(&target.path)
-            .unwrap_or(&profile.path)
-            .to_path_buf();
+        let rel = rel(&profile.path, &target.path);
         let stamp =
             |dir: &str, kind: &str| fs.mtime(&unit_timestamp(&profile.path, dir, kind)).ok();
         if let Some(graph) = &profile.graph {
@@ -351,16 +357,18 @@ pub fn walk_links(root: &Path, cap: usize) -> Result<(Tree, Vec<PathBuf>), Strin
             .modified()
             .map_err(|e| format!("{}: {e}", path.display()))?;
         tree.insert(path.clone(), (mtime, meta.len()));
-        if meta.file_type().is_symlink() && fs::metadata(&path).is_ok_and(|m| m.is_dir()) {
-            linked_dirs.push(path.clone());
-        }
+        let linked_dir =
+            meta.file_type().is_symlink() && fs::metadata(&path).is_ok_and(|m| m.is_dir());
         if tree.len() > cap {
             return Err(format!(
                 "{}: more than {cap} entries, refusing to walk further",
                 root.display()
             ));
         }
-        if meta.is_dir() {
+        if linked_dir {
+            // A link is never a directory by `symlink_metadata`, so `path` is not needed again.
+            linked_dirs.push(path);
+        } else if meta.is_dir() {
             for entry in fs::read_dir(&path).map_err(|e| format!("{}: {e}", path.display()))? {
                 pending.push(
                     entry
@@ -374,6 +382,9 @@ pub fn walk_links(root: &Path, cap: usize) -> Result<(Tree, Vec<PathBuf>), Strin
 }
 
 pub fn tree_changes(before: &Tree, after: &Tree) -> Vec<PathBuf> {
+    if before == after {
+        return Vec::new();
+    }
     let paths: BTreeSet<_> = before.keys().chain(after.keys()).collect();
     paths
         .into_iter()
@@ -685,6 +696,8 @@ pub fn replay_command(args: &[String], checkout: &Path, clone: &Path) -> Command
     replay_command_with_env(args, checkout, clone, &names)
 }
 
+/// RUSTFLAGS and the owner's cargo config are left as the shell has them, since they are part of what the commands do; RUSTC_WRAPPER, RUSTC_WORKSPACE_WRAPPER and their CARGO_BUILD_* forms, and CARGO_BUILD_RUSTC, are removed because they change fingerprints. The target and build dirs are pointed at `clone`.
+///
 /// `env_names` are the variables present in the environment; every `CARGO_UNSTABLE_*` among them is removed so a nightly opt-in cannot enable artifact redirection, and every `CARGO_ALIAS_*` so an env alias cannot turn an allowed name into another subcommand.
 pub fn replay_command_with_env(
     args: &[String],
@@ -696,9 +709,7 @@ pub fn replay_command_with_env(
     process
         .args(args)
         .current_dir(checkout)
-        .env_remove("CARGO_TARGET_DIR")
         .env_remove("CARGO_BUILD_TARGET_DIR")
-        .env_remove("CARGO_BUILD_BUILD_DIR")
         .env_remove("CARGO_BUILD_ARTIFACT_DIR")
         .env_remove("RUSTC_WRAPPER")
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
@@ -923,11 +934,7 @@ pub fn prove_with_cloner(
         let mut dead_files = Vec::new();
         if let Liveness::Decided { live: l, dead } = &result {
             for unit in l {
-                let rel = unit
-                    .profile
-                    .strip_prefix(&input.target)
-                    .unwrap_or(&unit.profile);
-                live.insert((rel.to_path_buf(), unit.dir_name.clone()));
+                live.insert((rel(&unit.profile, &input.target), unit.dir_name.clone()));
             }
             for d in dead {
                 dead_files.extend(d.files.iter().cloned());
@@ -953,9 +960,9 @@ pub fn prove_with_cloner(
     if decisions.iter().any(|d| d.pre_vacuous.is_none()) {
         let started = Instant::now();
         let clone = clone_target(fs, scratch, "warm-up", &input.target, cloner)?;
-        let before = stamps(fs, &read_target(&clone.path)?)?;
+        let before = stamps_of(fs, &clone.path)?;
         let ran = replay(scratch, "warm-up", input, &clone.path)?;
-        warmed_stamps = stamps(fs, &read_target(&clone.path)?)?;
+        warmed_stamps = stamps_of(fs, &clone.path)?;
         warm_up = PhaseReport {
             rebuilt: rebuilt(&before, &warmed_stamps)
                 .iter()
@@ -969,9 +976,9 @@ pub fn prove_with_cloner(
         } else {
             let started = Instant::now();
             let copy = clone_target(fs, scratch, "baseline", &clone.path, cloner)?;
-            let before = stamps(fs, &read_target(&copy.path)?)?;
+            let before = stamps_of(fs, &copy.path)?;
             let ran = replay(scratch, "baseline", input, &copy.path)?;
-            let after = stamps(fs, &read_target(&copy.path)?)?;
+            let after = stamps_of(fs, &copy.path)?;
             baseline = PhaseReport {
                 rebuilt: rebuilt(&before, &after).iter().map(unit_name).collect(),
                 commands: ran.commands,
@@ -1033,9 +1040,9 @@ pub fn prove_with_cloner(
             continue;
         }
         delete_in_clone(fs, &d.dead_files, &input.target, &clone.path)?;
-        let before = stamps(fs, &read_target(&clone.path)?)?;
+        let before = stamps_of(fs, &clone.path)?;
         let ran = replay(scratch, &format!("w{i}"), input, &clone.path)?;
-        let after = stamps(fs, &read_target(&clone.path)?)?;
+        let after = stamps_of(fs, &clone.path)?;
         let changed = rebuilt(&before, &after);
         let live_hit = rebuilt_live(&changed, &d.live);
         let vacuous = vacuous_reason(&d.result, &ran.exits, &ran.artifact_lines);
