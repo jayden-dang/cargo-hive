@@ -672,7 +672,7 @@ before deciding.
 
 **Depends-on:** Task 14, Task 15
 
-- [ ] **Step 1: Write the tests**, one per state:
+- [x] **Step 1: Write the tests**, one per state:
   - failed build: lib `l`, bins `b` and `c` depending on it; `cargo check` the workspace, then build all; break `l`; `cargo build --bin c` fails; `l`'s build-mode hash file is empty, its check-mode unit and `b` are current, and `l`'s package id is learned; liveness is Decided and `l`'s not-current unit is live;
   - never started: `n` ← `m` ← bin, and `m` also depends on `k`; `cargo check` the workspace, then build all; touch `m`, break `n`; `cargo build -p m` fails; `m`'s build-mode hash file is empty and the bin is current; backdate `m`'s unit timestamp and every unit of `k`, the bin and the check-mode units by 2 days; at a 6 h window `m` is live as a root and `k` is live through `m`'s JSON;
   - renamed dependency, with `tool`: `app` depends on `liba2 = { package = "liba" }`, `tool` on `liba`; `cargo check -p tool`, `cargo build -p app`; break `liba`; `cargo build -p app` fails; Decided, `liba`'s not-current build-mode unit live;
@@ -680,8 +680,8 @@ before deciding.
   - host dependency: proc-macro `pm` used by bin `b` and lib `o`; build all with `--target <host triple>`, and once more with `--release`, so a current `pm` unit teaches its package id; break `pm`; `cargo build --target <host triple> -p o` fails; `pm`'s debug not-current unit is in the host profile dir and is live, and `b` in the triple dir is current.
 
   Builds that must fail use `cargo_in` and assert it returned false; each Decided case uses `decide_at`. Run `cargo test --test liveness_busy`; expect them to pass on Task 14's code. Red-first evidence for the rule is the unit tests of Tasks 13 and 14; these fixtures prove Cargo produces the states those tests model.
-- [ ] **Step 2: Verify.** `cargo test --test liveness_busy` passes; the merge gate.
-- [ ] **Step 3: Commit** `test(liveness): decide busy-workspace states on real Cargo builds`.
+- [x] **Step 2: Verify.** `cargo test --test liveness_busy` passes; the merge gate.
+- [x] **Step 3: Commit** `test(liveness): decide busy-workspace states on real Cargo builds`.
 
 _Requirements: LIVE-7.1, LIVE-7.2, LIVE-7.3, LIVE-7.4, LIVE-7.5_
 
