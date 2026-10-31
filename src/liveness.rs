@@ -374,16 +374,16 @@ fn assemble(
     listings: &BTreeMap<&Path, Vec<(String, PathBuf)>>,
 ) -> Liveness {
     let dead_set: HashSet<usize> = dead_idx.iter().copied().collect();
-    let mut kept_hashes: HashMap<&Path, Vec<&str>> = HashMap::new();
+    let mut kept_hashes: HashMap<&Path, HashSet<&str>> = HashMap::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
         if !dead_set.contains(&i) {
             if let Some(hash) = fingerprint::unit_hash(&unit.dir_name) {
-                kept_hashes.entry(profile).or_default().push(hash);
+                kept_hashes.entry(profile).or_default().insert(hash);
             }
         }
     }
     for (profile, hash) in not_current_hashes {
-        kept_hashes.entry(profile).or_default().push(hash);
+        kept_hashes.entry(profile).or_default().insert(hash);
     }
 
     let live_units: BTreeSet<UnitRef> = units
@@ -392,20 +392,41 @@ fn assemble(
         .filter(|(_, &is_live)| is_live)
         .map(|(entry, _)| unit_ref(entry))
         .collect();
+
+    let mut dead_by_hash: HashMap<&Path, HashMap<&str, Vec<usize>>> = HashMap::new();
+    for &i in dead_idx {
+        let (profile, unit) = units[i];
+        if let Some(hash) = fingerprint::unit_hash(&unit.dir_name) {
+            dead_by_hash
+                .entry(profile)
+                .or_default()
+                .entry(hash)
+                .or_default()
+                .push(i);
+        }
+    }
+    let no_hashes = HashSet::new();
+    let mut claimed: HashMap<usize, Vec<&PathBuf>> = HashMap::new();
+    for (profile, entries) in listings {
+        let Some(dead) = dead_by_hash.get(profile) else {
+            continue;
+        };
+        let kept = kept_hashes.get(profile).unwrap_or(&no_hashes);
+        for (name, path) in entries {
+            for i in claimants(name, kept, dead) {
+                claimed.entry(i).or_default().push(path);
+            }
+        }
+    }
+
     let mut dead_units: BTreeMap<UnitRef, Vec<PathBuf>> = BTreeMap::new();
     for &i in dead_idx {
         let (profile, unit) = units[i];
-        let Some(hash) = fingerprint::unit_hash(&unit.dir_name) else {
+        if fingerprint::unit_hash(&unit.dir_name).is_none() {
             continue;
-        };
-        let kept = kept_hashes.get(profile).map_or(&[][..], Vec::as_slice);
-        let matching: Vec<&PathBuf> = listings[profile]
-            .iter()
-            .filter(|(name, _)| carries(name, hash) && !kept.iter().any(|h| carries(name, h)))
-            .map(|(_, path)| path)
-            .collect();
+        }
         let mut files = Vec::new();
-        if !matching.is_empty() {
+        if let Some(matching) = claimed.remove(&i) {
             files.push(fingerprint_dir(profile, &unit.dir_name));
             files.extend(matching.into_iter().cloned());
         }
@@ -420,6 +441,39 @@ fn assemble(
     }
 }
 
+/// The dead units a file name belongs to: none when the name carries a kept unit's hash, else
+/// each dead unit whose hash it carries, once and in ascending index order.
+fn claimants(name: &str, kept: &HashSet<&str>, dead: &HashMap<&str, Vec<usize>>) -> Vec<usize> {
+    let mut owners: Vec<usize> = Vec::new();
+    for hash in embedded_hashes(name) {
+        if kept.contains(hash) {
+            return Vec::new();
+        }
+        if let Some(units) = dead.get(hash) {
+            owners.extend(units);
+        }
+    }
+    owners.sort_unstable();
+    owners.dedup();
+    owners
+}
+
+/// The `<hash>` of every `-<hash>` in `name` where `<hash>` is 16 lowercase hex digits and is
+/// followed by `.` or the end of the name.
+fn embedded_hashes(name: &str) -> impl Iterator<Item = &str> {
+    name.match_indices('-').filter_map(move |(at, _)| {
+        let tail = &name[at + 1..];
+        let hash = tail.get(..16)?;
+        let rest = &tail[16..];
+        let boundary = rest.is_empty() || rest.starts_with('.');
+        (boundary
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        .then_some(hash)
+    })
+}
+
 fn fingerprint_dir(profile: &Path, dir_name: &str) -> PathBuf {
     profile.join(".fingerprint").join(dir_name)
 }
@@ -429,14 +483,6 @@ fn unit_ref((profile, unit): &ProfileUnit) -> UnitRef {
         profile: profile.to_path_buf(),
         dir_name: unit.dir_name.clone(),
     }
-}
-
-fn carries(name: &str, unit_hash: &str) -> bool {
-    let needle = format!("-{unit_hash}");
-    name.match_indices(&needle).any(|(at, _)| {
-        let rest = &name[at + needle.len()..];
-        rest.is_empty() || rest.starts_with('.')
-    })
 }
 
 #[cfg(test)]
