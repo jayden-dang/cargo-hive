@@ -63,8 +63,9 @@ liveness, Dead unit, Undecided, Vacuous, Fingerprint format signature. Further t
 - **Edge package** (amendment): for a `deps` edge that matches no current unit, the package
   name read from the directory names (the part before the last `-`) of the current units that
   other edges carrying the same package id (the first u64 of the `deps` entry) match, in any
-  profile dir; when no such edge exists, the edge's crate name. Names compare with `-` and `_`
-  treated as equal. The edge package cannot be determined when those directory names disagree. A
+  profile dir. Names compare with `-` and `_` treated as equal. The edge package cannot be
+  determined when no such edge exists or those directory names disagree; the edge's crate name is
+  never used to guess it (owner decision 2026-10-31: an alias can equal another package's name). A
   unit directory whose name has no `-` belongs to no package.
 - **Liveness result:** for one Cargo target dir, either *Decided* (live units and dead units) or
   *Undecided* (one or more reasons).
@@ -86,7 +87,8 @@ the fingerprint graph from a unit whose timestamp falls inside the window.
   signature; one that does not makes its profile dir unsupported, LIVE-2.1).
 - **LIVE-1.14** WHEN an edge from a live unit matches no current unit in any profile dir of the
   Cargo target dir THE SYSTEM SHALL mark live every not-current unit, in any profile dir of that
-  target dir, whose directory name before the last `-` equals the edge package.
+  target dir, whose directory name before the last `-` equals the edge package, comparing names
+  as the Edge package term does.
 - ~~**LIVE-1.2**~~ superseded by LIVE-1.11 and LIVE-2.12 (2026-10-31, whole-branch review): a
   timestamp that exists but cannot be read is doubt, not absence, and doubt must not let a recently
   built unit be listed as dead.
@@ -375,9 +377,11 @@ liveness and takes a snapshot, so that I can run it on klynt while `cargo watch`
   clone as the source of every later clone; IF a warm-up command exits non-zero or emits no
   `compiler-artifact` message THEN THE SYSTEM SHALL report every window as Vacuous with the reason.
 - **LIVE-8.5** IF a file that a window listed for deletion is missing from the original at the end
-  of the proof test, or the checkout's `Cargo.lock` changed during it, THEN THE SYSTEM SHALL fail the
-  test naming them.
+  of the proof test, or the `Cargo.lock` of `HIVE_PROVE_CHECKOUT` changed during it, THEN THE SYSTEM
+  SHALL fail the test naming them.
 - **LIVE-8.6** THE SYSTEM SHALL never delete or modify anything in the original or in the snapshot.
+- **LIVE-8.7** IF a replayed command reports a `compiler-artifact` file outside the clone it
+  replays into THEN THE SYSTEM SHALL fail the test naming that file.
 
 ## Out of Scope
 
@@ -417,4 +421,6 @@ liveness and takes a snapshot, so that I can run it on klynt while `cargo watch`
   compiles) reuses the original units' directories and fingerprints — project owner — 2026-10-31 —
   forbid-guess (cấm đoán). Cargo is reported to hash path packages relative to the workspace root;
   not verified. Design verifies it before the klynt run; if it does not hold, the replay runs in
-  the klynt checkout at a commit that compiles.
+  the klynt checkout at a commit that compiles. Answered 2026-10-31 (design Decision 16): measured on a two-crate
+  path workspace, the relocated copy built fresh into a clone of the target with the same
+  fingerprint dirs; build scripts that record absolute paths may still rebuild in the warm-up.

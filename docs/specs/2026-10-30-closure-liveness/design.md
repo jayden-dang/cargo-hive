@@ -34,6 +34,17 @@ commands against a clone. The proof needs the per-inode byte accounting gc uses 
 is private today (`src/gc.rs:6`; `Ledger` is `pub(crate)`). One small public measuring function is
 the narrowest way to reach it from `tests/`.
 
+**ROAD-5 amendment (2026-10-31).** On klynt, where `cargo watch` always builds, every window was
+Undecided: each `Unresolved` edge pointed at a package with a not-current unit, because Cargo empties
+the hash of every dirty unit when it plans a build and writes hash and JSON back only after a
+successful compile (`.skills/LIVE/cargo-notcurrent-research.md`). The JSON left beside an emptied
+hash is the last successful build's. The binding constraint is unchanged: status must not pay for
+liveness (CORE-6.1), and liveness stays read-only and runs no cargo (ARCH-17). That rules out
+resolving an unmatched edge by asking Cargo, or by parsing manifests; the reader instead keeps what
+the JSON already holds (the package id of each edge, and a not-current unit's `deps`), and liveness
+does the rest from it. The proof harness's whole-run lock rules out running it on klynt while the
+owner works, so the lock now covers only deciding and one snapshot clone.
+
 ## Decisions
 
 1. **Liveness is a pure, read-only function over an already-read `TargetDir`.** Its signature is
@@ -101,6 +112,81 @@ the narrowest way to reach it from `tests/`.
     `tests/explain.rs`), `HIVE_PROVE_CMDS` is parsed with `serde_json` (already a dependency), and
     the clone uses the system `cp`.
 
+12. **(amendment) The reader keeps the package id of every edge, and a not-current unit's edges.**
+    `Unit.deps` becomes `Vec<DepEdge { package: u64, fingerprint: u64 }>` (the first and last
+    elements of each `deps` entry, already type-checked by `check_types`). `NotCurrentUnit` gains
+    `deps: Vec<DepEdge>`, filled when its JSON passed the signature (`stem` is Some) and empty for a
+    unit that never compiled. Status's edge counts read `.fingerprint` only (LIVE-5.1, LIVE-5.9).
+    The dependency's crate name stays lazy (`dep_name`), as Decision 4 chose. Compat None: one shape,
+    every literal updated.
+13. **(amendment) A not-current unit with a JSON is a graph node, never a dead unit.** Its
+    last-wanted time is the later of `fs.mtime` of its unit timestamp and of its hash file
+    (`<fingerprint dir>/<stem>`); NotFound means absent, any other error is `TimestampUnreadable`
+    (LIVE-2.12, LIVE-2.18). Inside the window it is a root (LIVE-1.12); once live, its `deps` are
+    followed like a current unit's (LIVE-1.13). A not-current unit without a JSON keeps the old rule
+    through `NotCurrentInWindow`, judged by its unit timestamp (LIVE-2.14). Not-current units are
+    excluded from dead units and keep their unit hashes out of other units' files (unchanged).
+    Decision 3 still holds for every remaining reason.
+14. **(amendment) An unmatched edge is resolved to the not-current units of its edge package.**
+    Before traversal, liveness learns `package id → package names` from every edge (of current and
+    not-current nodes) that matches a current unit: the name is the matched unit's directory name
+    before the last `-`, with `-` and `_` equal. During traversal, an edge with no fingerprint match
+    takes its edge package from that map (exactly one name). The crate name is never used to guess
+    it: an alias such as `foo = { package = "bar" }` could equal another package's name (review
+    finding 5; owner decision, 2026-10-31; on klynt all 1,094 unmatched edges at 3 d had a learned
+    id). An unknown id, two or more names, or no not-current unit of that package in any profile
+    dir → `Unresolved` (LIVE-2.15); otherwise every such not-current unit is
+    marked live (LIVE-1.14). `Liveness`, `UnitRef`, `DeadUnit` and the `Uncertain` variants keep
+    their shape; `live` now also lists the not-current units marked live. Only `clears_when` texts
+    and `NotCurrentInWindow`'s `Display` change (LIVE-2.16); `Unresolved` keeps its `Display` and its
+    `dependency` string (`dep_name`, else the fingerprint hex), and the package map is consulted
+    only for an unmatched edge, so a target dir with no not-current unit decides exactly as before
+    (LIVE-5.8). The map is a `BTreeMap`, built from every node before traversal, so marking does not
+    depend on order (LIVE-1.9). A not-current dir without a unit hash is never a candidate and never
+    a reason: it is never dead, and LIVE-2.9 concerns current units whose files need the hash.
+    *Why an unmatched edge needs no current unit of its package marked live* (review finding 4):
+    the edge's fingerprint F belonged to a dir X when the depending unit U was built. If X is now
+    current with another fingerprint, X was rebuilt after U's last build, and no build that needed U
+    has run since (it would have rebuilt U or emptied its hash). Every root that reaches U was
+    therefore built or planned before X's rebuild, so X's unit timestamp is later than a time inside
+    the window: X is itself a root. This relies on file times moving forward; a target restored with
+    old mtimes, or clock skew, breaks it, and the fixtures must not backdate in a way that creates
+    this case. When U is a not-current node, X's new fingerprint is part of U's next build, which its
+    old JSON does not describe: the accepted risk in Out of Scope.
+    *Known limit* (review finding 6): every not-current unit of a package is marked live, including
+    leftovers of old failures, and their JSON edges are followed; an unmatched edge there with no
+    not-current unit of its package makes the whole target dir Undecided again. That costs reclaim,
+    not safety; measured on klynt on 2026-10-31, no such edge occurred (0 of 1,094 edges at 3 d).
+15. **(amendment) The proof locks only while it decides and takes a snapshot.** Under the locks it
+    refuses symlinked dirs (the existing walk, kept for that check only), decides and measures every
+    window, and clones the original once as the snapshot; then it releases the locks and prints how
+    long it held them (LIVE-8.1 to LIVE-8.3). The locks are taken on the profile dirs listed by
+    `cargo_target::identify` *before* any fingerprint is read, so the `TargetDir` liveness judges
+    is the one the snapshot copies (review finding 1; today `read_target` runs first,
+    tests/common/prove.rs:882). Because the original is no longer compared as a whole tree, every
+    replay's `compiler-artifact` file paths must lie under the clone it replays into, else the test
+    fails (LIVE-8.7); this is what still catches a replay writing into the original. The
+    `Cargo.lock` of LIVE-8.5 is the one in `HIVE_PROVE_CHECKOUT`, the copy the replay runs in, so the
+    owner editing the real worktree cannot fail the test. A single clone serving as both snapshot
+    and warm-up target was considered (saves about 2 minutes on klynt) and not taken, to keep the
+    snapshot untouched (LIVE-8.6). The warm-up clones the snapshot (LIVE-8.4), and the
+    snapshot is removed once the warmed-up clone exists. The whole-tree comparison is replaced by:
+    every file any window listed still exists in the original, and the checkout's `Cargo.lock`
+    keeps its mtime and size (LIVE-8.5). This changes the 2026-10-31 exception in
+    `docs/standards/testing.md`, whose wording must be amended with the owner's approval.
+16. **(amendment) Replay from a relocated copy reuses the original units.** Measured 2026-10-31 in a
+    scratch workspace under `~/Library/Caches` (removed): a two-crate path workspace built into a
+    target, re-extracted with `git archive` at another path and built into an APFS clone of that
+    target, reported both units fresh with identical fingerprint dir names. A build script that
+    records an absolute path (`rerun-if-changed=/abs`) can still rebuild; the warm-up absorbs it. The
+    klynt run therefore replays in a `git archive` of a klynt commit that compiles, placed outside
+    `/private/tmp` and `$TMPDIR` (the default secondary roots).
+17. **(amendment) Busy-workspace fixtures are real cargo builds driven into each state.** A fixture
+    breaks a library with a compile error and builds a subset, so Cargo itself empties the hashes;
+    unit timestamps are backdated with `File::set_modified` to place a unit outside the window. Each
+    fixture asserts it reached its state (the expected dir has an empty hash file) before deciding,
+    so a Cargo change fails the test instead of passing it (LIVE-7 preamble).
+
 No ADR: Decisions 2, 3 and 5 are cheap to reverse inside one module. The choices that are hard to
 reverse (no wrapper, GOAL-1's wording) are recorded in ARCH-1 and the confirmed close package.
 
@@ -123,7 +209,7 @@ deep modules — an interface much simpler than what it hides.
 
 ### Liveness (`src/liveness.rs`, new)
 
-Satisfies: LIVE-1.1, LIVE-1.11, LIVE-1.3, LIVE-1.4, LIVE-1.5, LIVE-1.6, LIVE-1.7, LIVE-1.8, LIVE-1.9, LIVE-1.10, LIVE-2.1, LIVE-2.2, LIVE-2.3, LIVE-2.12, LIVE-2.13, LIVE-2.5, LIVE-2.6, LIVE-2.7, LIVE-2.8, LIVE-2.9, LIVE-2.10, LIVE-2.11, LIVE-3.1, LIVE-3.2, LIVE-3.3, LIVE-3.5, LIVE-3.6
+Satisfies: LIVE-1.12, LIVE-1.13, LIVE-1.14, LIVE-1.11, LIVE-1.3, LIVE-1.4, LIVE-1.5, LIVE-1.6, LIVE-1.7, LIVE-1.8, LIVE-1.9, LIVE-1.10, LIVE-2.1, LIVE-2.14, LIVE-2.15, LIVE-2.12, LIVE-2.17, LIVE-2.18, LIVE-2.5, LIVE-2.6, LIVE-2.16, LIVE-2.8, LIVE-2.9, LIVE-2.10, LIVE-2.11, LIVE-3.1, LIVE-3.2, LIVE-3.3, LIVE-3.5, LIVE-3.6
 Reuse: none — new code (rung 7). Nothing computes reachability or lists files per unit. The inputs come from rung 2: `TargetDir`/`ProfileReport`/`Unit`/`NotCurrentUnit`, `fingerprint::{le_hex, kind_of, unit_hash, dep_name}`, `Fs::{mtime, read_dir_bounded}`, and `gc::DEPS_CAP` as the listing cap.
 Respects: ARCH-1, ARCH-9, ARCH-15, ARCH-16, ARCH-17, ARCH-18, ARCH-20
 Interface:
@@ -139,8 +225,25 @@ pub enum Uncertain { ProfileUnsupported { profile, why }, NotCurrentInWindow { d
                      NoUnitHash { dir }, DuplicateUnitHash { a, b }, TargetUnreadable { target, why } }
 impl Uncertain { pub fn clears_when(&self) -> &'static str }
 ```
-Depth: callers know a target dir, a time and a window go in, and either live/dead units with file lists or a set of reasons come out. The index, root selection, traversal, kind filter, name matching and every check stay hidden.
+Depth: callers know a target dir, a time and a window go in, and either live/dead units with file lists or a set of reasons come out. The index, root selection, traversal, kind filter, name matching, the package-learning map (amendment) and every check stay hidden.
 Locality: all edits for these IDs land in the new module, plus one `pub mod liveness;` line in `src/lib.rs` after `git` (leave). Neighbors `fingerprint` (extend, next section), `explain`, `discover`, `cli`: leave.
+Surface (amendment, Decisions 13-14; the public types keep their shape):
+- `Liveness::Decided.live` now also lists not-current units — readers `tests/common/prove.rs` (`rebuilt_live`, :322; matched at :935, :1004-1006) — **replace**: a not-current unit that rebuilds in a window replay after deletion is rightly a live rebuild; the warm-up absorbs the expected rebuild of not-current units.
+- `Uncertain` `Display` and `clears_when` texts — readers `tests/common/prove.rs:1006` (prints Display), `tests/liveness.rs:1007-1025` (builds literals, no text assertion found) and the module's own tests — **replace**: tests assert the new texts.
+- `NotCurrentInWindow` now arises only for a not-current unit without a JSON; `Unresolved` only for an edge without a not-current unit of its package — module tests asserting the old triggers — **replace**.
+
+Flow amendment (Decisions 13-14), replacing steps 3 to 5 below:
+- 3'. Each not-current unit of a supported profile: with a JSON it becomes a node with its `deps`;
+  its last-wanted time is the later of its unit timestamp's and its hash file's mtimes. Without a
+  JSON, a unit timestamp inside the window → `NotCurrentInWindow` (LIVE-2.14). Unreadable mtime →
+  `TimestampUnreadable` (LIVE-2.12, LIVE-2.18).
+- 4'. Roots: current units with a timestamp in the window, and not-current nodes with a last-wanted
+  time in the window (LIVE-1.12). Neither file present → not a root (LIVE-2.17).
+- 4''. Learn `package id → names` from every edge of every node that matches a current unit.
+- 5'. Traverse breadth-first over every node's `deps`: a fingerprint match is an edge as before
+  (LIVE-1.3, LIVE-1.4); no match → edge package (learned map only), then every not-current node
+  of that package in any profile dir is marked live (LIVE-1.14, LIVE-1.13); none, or an
+  undeterminable package → `Unresolved` (LIVE-2.15).
 
 Flow for one `TargetDir`. Every step adds to one reason list, and nothing returns early:
 1. `target.unreadable` is Some → `TargetUnreadable` (LIVE-2.11). Each Unsupported profile →
@@ -182,13 +285,17 @@ Surface:
 - `explain::directory_crate` (:302) and `failed_crate` (:602) — **leave**: they split the crate part, not the hash, and their output is unchanged (LIVE-5.3).
 - `explain::mode_index` (:343-349) — **leave**: it keeps its tail rule. Liveness's broader match is its own.
 - `read_profile`, `Unit`, `ProfileReport`, `EdgeCounts` and status's use of them (src/cli.rs:660-684) — untouched. Liveness only reads them.
+- (amendment, Decision 12) `Unit.deps: Vec<u64>` → `Vec<DepEdge>` — readers: `read_profile` edge counting (:499) and `liveness::mark_live` (:300) — **replace**, both read `.fingerprint`; literals at src/fingerprint.rs:266 and src/explain.rs:943 — **replace**. Status's counts are unchanged (LIVE-5.1, LIVE-5.9).
+- (amendment) `NotCurrentUnit` gains `deps: Vec<DepEdge>` — constructors at :445 (never compiled, empty) and :472 (from the stale JSON), fed by `ParsedUnit::NotCurrent` (:224, :264) and `check_types`, whose return type becomes `Vec<DepEdge>` (:174) — **replace**; readers that ignore it: `explain` (:34, :829, :842, :1145, :2547, :2572, :3235-3247), `tests/common/prove.rs:293-303` — **leave**; `NotCurrentUnit` literals in tests/liveness.rs:1998, src/liveness.rs:1420, explain tests and the fingerprint tests :1085-1131 — **replace** (add the field). The `ProfileReport` literals at src/gc/run.rs:778-783 and tests/liveness.rs:1946-1951 build no `NotCurrentUnit` and need no edit. explain's output is unchanged (LIVE-5.3).
+- `DepEdge` derives `Debug, Clone, Copy, PartialEq, Eq, Serialize`, because `Unit` derives `Serialize`.
 Interface:
 ```
 pub fn unit_hash(dir_name: &str) -> Option<&str>;      // tail after last '-', 16 lowercase hex
 pub fn dep_name(fingerprint_dir: &Path, stem: &str, dep: u64) -> Option<String>;
+pub struct DepEdge { pub package: u64, pub fingerprint: u64 }   // amendment
 ```
 Depth: n/a — extends `fingerprint`.
-Locality: two small functions in `fingerprint` (extend). `explain::directory_suffix` becomes a one-line call (extract). Nothing else changes.
+Locality: two small functions in `fingerprint` (extend). `explain::directory_suffix` becomes a one-line call (extract). Amendment: `DepEdge`, `check_types`' return, `ParsedUnit::NotCurrent` and `NotCurrentUnit` carry edges (extend); explain's `Unit` literal (:943) gains the new edge type (extend).
 
 ### gc byte measurement (`src/gc/run.rs`, `src/gc.rs`, extend)
 
@@ -208,7 +315,7 @@ Locality: `run.rs` (extract `scan`, add `measure`) and `gc.rs` (one re-export li
 
 ### Proof procedure (`tests/common/prove.rs`, `tests/liveness_prove.rs`, new test code)
 
-Satisfies: LIVE-4.1, LIVE-4.2, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16, LIVE-4.18, LIVE-4.19, LIVE-4.20, LIVE-4.21, LIVE-4.22, LIVE-4.23, LIVE-4.25, LIVE-4.26, LIVE-4.27, LIVE-4.28
+Satisfies: LIVE-4.1, LIVE-4.2, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.14, LIVE-4.16, LIVE-8.1, LIVE-8.2, LIVE-8.3, LIVE-8.4, LIVE-8.5, LIVE-8.6, LIVE-8.7, LIVE-4.19, LIVE-4.20, LIVE-4.21, LIVE-4.22, LIVE-4.23, LIVE-4.25, LIVE-4.26, LIVE-4.27, LIVE-4.28
 Reuse: none — new code (rung 7) for the procedure. It reuses `liveness::liveness`, `gc::measure`, `cargo_target::identify` + `fingerprint::read_profile` (it builds the `TargetDir` by hand, since no function does that for one path), `platform::current()` for `Fs` (`volume`, `try_lock_exclusive`), `serde_json`, the system `cp`, and the tree-walk pattern of `tests/guards.rs`.
 Respects: ARCH-17 (it runs cargo only to verify, after liveness has decided, never as an input to it)
 Interface:
@@ -272,6 +379,25 @@ Order of one run:
    a panic still removes them. Each window prints its report block (run with
    `--ignored --nocapture`), stating that a Passed window covers only the replayed commands.
 
+Order amendment (Decision 15), replacing steps 2, 3, 5 (warm-up source) and 7:
+- 2'. Try-lock every profile's `.cargo-build-lock` and start a timer (LIVE-8.1). Volume preflight
+  as before. Walk the target once only to refuse symlinked dirs.
+- 4. Decide and measure every window, unchanged, still under the locks (LIVE-8.2).
+- 4'. Clone the original as the snapshot; record the union of every window's listed files and the
+  checkout's `Cargo.lock` (mtime, size); drop the locks and record the held time (LIVE-8.3), which
+  `ProveReport` gains as `lock_held` and `render` prints.
+- 5'. The warm-up clones the snapshot, then the snapshot is removed (LIVE-8.4, LIVE-8.6).
+- 7'. Finish: every recorded listed file must still exist in the original (lstat), and `Cargo.lock`
+  must keep its mtime and size, else the test fails naming them (LIVE-8.5).
+Surface (amendment): `snapshot`/`tree_changes` and the `original_changed` field — tests at
+tests/liveness.rs:1048, :1085, :1268-1317 — **replace** with tests of the listed-files check;
+the original-changed tests at :1410, :1633-1652 and :1688 — **replace** likewise; lock tests at
+:1319-1337 — **replace** with "locks free after the snapshot" and "held lock fails"; the
+interface listing above shows an `original_changed` field that the code never had — the report
+gains `lock_held: Duration` only;
+`docs/standards/testing.md` 2026-10-31 exception — **frozen**, gated on the owner approving the
+reworded condition (Decision 15).
+
 Notes: the proof needs an old-layout target, because a build dir split from the target dir is
 Unsupported and therefore Undecided. On klynt, one clone took 84 s and its removal 30 s. The
 dominant cost is the warm-up compile, which is paid once; later clones are cheap because APFS
@@ -302,6 +428,34 @@ Cases:
   - a dead unit with no entries;
   - a shuffled listing, for determinism.
 
+### Busy-workspace fixtures (`tests/liveness_busy.rs`, new test code; amendment)
+
+Satisfies: LIVE-7.1, LIVE-7.2, LIVE-7.3, LIVE-7.4, LIVE-7.5, LIVE-7.6
+Reuse: rung 2 — `tests/liveness.rs`'s real-cargo pattern (`cargo()` isolation with a scratch `CARGO_HOME`, `--offline`, `CARGO_DEADLINE`; `backdate_all`, `set_mtime`, `read_target`, `host_triple`) moved into `tests/common` where both files need it; `tests/common/prove.rs` `prove_with` for LIVE-7.6; `Scratch` for cleanup.
+Interface: test functions only.
+Depth: n/a — test code.
+Locality: one new test file; the shared helpers, with the `Fixture` type `cargo()` takes, move from `tests/liveness.rs` to `tests/common/` (extract); no other neighbor changes.
+
+Fixtures (path-only workspaces, no registry dependency; each asserts its state before deciding):
+- **Failed build (LIVE-7.1):** lib `l`, bins `b` and `c` depending on it; build all; break `l`;
+  `cargo build --bin c` fails, leaving `l` not current; `b` is live with an unmatched edge to it.
+- **Never started (LIVE-7.2):** `n` ← `m` ← bin; build all; touch `m`, break `n`;
+  `cargo build -p m` fails before `m` starts and leaves `bin` current (a full `cargo build` would
+  empty `bin` too and make the test pass for the wrong reason, review finding 3); backdate `m`'s unit timestamp beyond the window, so only its hash file time
+  is inside it; `m` is a root, and `m`'s other dependency `k` (backdated, reached by nothing else)
+  is live through `m`'s old JSON.
+- **Renamed dependency (LIVE-7.3, LIVE-7.4):** `app` depends on `liba2 = { package = "liba" }`.
+  With `tool` checked (`cargo check -p tool`, a current check-mode `liba` unit teaching the package
+  id) and `app` built, break `liba` and build `app`: Decided, `liba`'s not-current unit live.
+  Without `tool`, in a workspace with no 30-day variant (whose `cargo check` would teach the id):
+  Undecided with `Unresolved`.
+- **Host dependency under `--target` (LIVE-7.5):** proc-macro `pm` used by bin `b` and lib `o`;
+  build all with `--target <host>`; break `pm`, build `-p o`; `b` (triple dir) is live with an
+  unmatched edge to `pm`'s not-current unit in the host dir, which is marked live.
+- **Delete and replay (LIVE-7.6):** each Decided fixture also holds a variant built 30 days earlier
+  (`cargo check` then backdate, as `proof_fixture` does), so it has dead units; restore the broken
+  source, then `prove_with` with that fixture's commands; the window must be `Passed`.
+
 ## Seams for testing
 
 New seams: `liveness::liveness` and `prove` (the test-side procedure). `gc::measure` and the
@@ -309,13 +463,17 @@ New seams: `liveness::liveness` and `prove` (the test-side procedure). `gc::meas
 
 | Seam | Kind | Covers |
 |---|---|---|
-| `liveness::liveness` on synthetic fingerprint dirs (`src/liveness.rs` tests) | unit | LIVE-1.11, LIVE-1.4, LIVE-1.5, LIVE-1.6, LIVE-1.8, LIVE-1.9, LIVE-1.10, LIVE-2.1, LIVE-2.2, LIVE-2.3, LIVE-2.12, LIVE-2.13, LIVE-2.5, LIVE-2.6, LIVE-2.7, LIVE-2.8, LIVE-2.9, LIVE-2.10, LIVE-2.11, LIVE-3.2, LIVE-3.3, LIVE-3.5, LIVE-3.6 |
-| `liveness::liveness` on real Cargo builds (`tests/liveness.rs`) | integration | LIVE-1.1, LIVE-1.3, LIVE-3.1 |
+| `liveness::liveness` on synthetic fingerprint dirs (`src/liveness.rs` tests) | unit | LIVE-1.11, LIVE-1.4, LIVE-1.5, LIVE-1.6, LIVE-1.8, LIVE-1.9, LIVE-1.10, LIVE-2.1, LIVE-2.12, LIVE-2.5, LIVE-2.6, LIVE-2.8, LIVE-2.9, LIVE-2.10, LIVE-2.11, LIVE-3.2, LIVE-3.3, LIVE-3.5, LIVE-3.6 |
+| `liveness::liveness` on real Cargo builds (`tests/liveness.rs`) | integration | LIVE-1.3, LIVE-3.1 (roots: LIVE-1.12, also in the amendment rows) |
 | Source guard: `src/liveness.rs` uses no process-spawning API (`tests/guards.rs`, existing) | integration | LIVE-1.7 |
-| `fingerprint::{unit_hash, dep_name}` (`src/fingerprint.rs` tests) | unit | LIVE-2.3, LIVE-2.9 (name rules) |
+| `fingerprint::{unit_hash, dep_name}`, `DepEdge` and not-current `deps` (`src/fingerprint.rs` tests) | unit | LIVE-2.15, LIVE-2.9 (name rules), LIVE-1.13 (reader side) |
 | `gc::measure` and the file-root `scan` (`src/gc/run.rs` tests with the existing `Rec` fake) | unit | LIVE-4.9 (byte accounting) |
-| `prove` / `prove_with` and its pure helpers on a fixture crate (`tests/liveness.rs`) | integration | LIVE-4.2, LIVE-4.18, LIVE-4.19, LIVE-4.21, LIVE-4.22, LIVE-4.23, LIVE-4.25, LIVE-4.26, LIVE-4.27, LIVE-4.28, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.20, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16 |
+| `prove` / `prove_with` and its pure helpers on a fixture crate (`tests/liveness.rs`) | integration | LIVE-4.2, LIVE-4.19, LIVE-4.21, LIVE-4.22, LIVE-4.23, LIVE-4.25, LIVE-4.26, LIVE-4.27, LIVE-4.28, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.20, LIVE-4.14, LIVE-4.16 |
 | `tests/liveness_prove.rs` (`missing_vars` in CI; the `#[ignore]` env-driven run) | integration | LIVE-4.1 |
+| (amendment) `liveness::liveness` on synthetic dirs: not-current roots by either time, followed `deps`, unmatched edges by learned id, by name, ambiguous and absent packages, unreadable hash-file time, new texts | unit | LIVE-1.12, LIVE-1.13, LIVE-1.14, LIVE-2.14, LIVE-2.15, LIVE-2.16, LIVE-2.17, LIVE-2.18 |
+| (amendment) busy-workspace fixtures (`tests/liveness_busy.rs`) | integration | LIVE-7.1 to LIVE-7.6 |
+| (amendment) `prove_with` lock window, snapshot, listed-files check, artifact paths (`tests/liveness.rs`, replacing the tree tests) | integration | LIVE-8.1 to LIVE-8.7 |
+| (amendment) the existing liveness unit and real-cargo tests unchanged except clear texts; `read_profile` edge-count tests | unit, integration | LIVE-5.8, LIVE-5.9 |
 | `read_profile` per-profile edge counts and not-current handling (`src/fingerprint.rs` tests at :598, :848-1019, existing) | unit | LIVE-5.1, LIVE-5.2 |
 | `cargo hive status` snapshot keys (`tests/liveness.rs`, new assertion) | integration | LIVE-5.6 |
 | `cargo hive explain` (`tests/explain.rs`, existing) | integration | LIVE-5.3 |
@@ -326,12 +484,15 @@ New seams: `liveness::liveness` and `prove` (the test-side procedure). `gc::meas
 ## Coverage check
 
 Every live requirement ID appears in exactly one `Satisfies:` line:
-- LIVE-1.1 to LIVE-1.10, LIVE-2.1 to LIVE-2.11, LIVE-3.1 to LIVE-3.3, LIVE-3.5 and LIVE-3.6 →
-  Liveness.
-- LIVE-4.1 to LIVE-4.28 (except the superseded 4.3, 4.4, 4.12, 4.17 and 4.24) → Proof procedure.
+- LIVE-1.3 to LIVE-1.14, LIVE-2.1, LIVE-2.5, LIVE-2.6, LIVE-2.8 to LIVE-2.12, LIVE-2.14 to
+  LIVE-2.18, LIVE-3.1 to LIVE-3.3, LIVE-3.5 and LIVE-3.6 → Liveness.
+- LIVE-4.1 to LIVE-4.28 (except the superseded 4.3, 4.4, 4.12, 4.13, 4.15, 4.17, 4.18 and 4.24) and
+  LIVE-8.1 to LIVE-8.7 → Proof procedure.
+- LIVE-7.1 to LIVE-7.6 → Busy-workspace fixtures.
+- Struck by the amendment: LIVE-1.1, 2.2, 2.3, 2.7, 2.13, 4.13, 4.15, 4.18.
 - Deliberately unmapped:
   - LIVE-3.4 is retired (struck through).
-  - LIVE-5.1 to LIVE-5.7 are guards, held by the `Surface:` dispositions (fingerprint, gc) and the
+  - LIVE-5.1 to LIVE-5.9 are guards, held by the `Surface:` dispositions (fingerprint, gc) and the
     existing seams in the table.
   - LIVE-6 (NFR) has no IDed criteria; all four attributes are `None` with reasons.
 
@@ -341,3 +502,6 @@ Every live requirement ID appears in exactly one `Satisfies:` line:
 - An unreadable timestamp is now doubt: `Uncertain::TimestampUnreadable` (LIVE-2.12). A non-UTF-8 unit dir name is `NoUnitHash`.
 - The replay guards added during review are written down as LIVE-4.23 to LIVE-4.27: `--locked`, the six-command allow-list, flag and `--` refusals, the config scan, the environment scrub, bounds that fail instead of skipping, and `not run` in the report.
 - The deliberately `#[doc(hidden)]` public items (`liveness`, `gc::measure`, `Footprint`, `dep_name`) have no consumer in the binary yet; ROAD-6 will use them.
+- ROAD-5 amendment (2026-10-31): Decisions 12-17, the Liveness and Fingerprint surface notes, the
+  Proof order amendment, and the Busy-workspace fixtures section. Requirements' Open Question on a
+  relocated replay is answered by Decision 16.
