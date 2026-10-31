@@ -43,7 +43,7 @@ None — the 2026-10-28 interview ratified no rule beyond the `test-first` skill
   - it never runs by default, and it has no default target or checkout;
   - only `build`, `check`, `doc`, `test --no-run` and `bench --no-run` are replayed, so no test or binary of the checkout is executed; the checkout's own `build.rs` and proc-macros run as they do in the owner's own `cargo build`;
   - every replay uses `--locked` and has `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` set to a clone inside the test's `/private/tmp/hive-it-*` scratch dir;
-  - the original target dir is locked only while the test decides liveness and takes one APFS snapshot clone of it; every later step works on clones, and nothing in the original or the snapshot is deleted or modified;
+  - the original target dir is locked only while the test decides liveness and takes one APFS snapshot clone of it; every later step works on clones, and the test itself deletes or modifies nothing in the original (it removes the snapshot once the warm-up clone exists); the end-of-run checks below catch only the breaches they name, not every possible change to the original;
   - at the end, every file the test listed for deletion must still exist in the original, the `Cargo.lock` of `HIVE_PROVE_CHECKOUT` must be unchanged, and every `compiler-artifact` a replay reports must lie inside the clone it replays into; any breach fails the test.
 
 ## Not a substitute for acceptance
