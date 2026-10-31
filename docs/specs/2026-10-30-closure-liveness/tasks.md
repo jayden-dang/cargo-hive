@@ -772,4 +772,4 @@ and clones.
 - [x] **Step 4: Record** run 4 in `proof-runs.md`: commit, commands, lock-held time, warm-up and baseline counts and times, per window the outcome, dead units, freed bytes and bytes shared with other inodes, rebuilt and rebuilt-live counts, and the Vacuous reasons; correct the 2026-10-29 sentence; then remove `~/Library/Caches/klynt-replay-<sha>`.
 - [x] **Step 5: Commit** `docs(LIVE): record the short-lock proof run on klynt`.
 
-_Requirements: LIVE-4.1, LIVE-8.1, LIVE-8.3, LIVE-1.12, LIVE-1.14_
+_Requirements: LIVE-4.1, LIVE-8.1, LIVE-8.3_

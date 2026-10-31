@@ -4,9 +4,14 @@ Status: runs 2 and 3 passed (2026-10-31, cargo-hive's own target). Run 1 on klyn
 
 ## Command (klynt, nothing building in it)
 
+As run 4 ran it. The checkout is a `git archive` of the klynt commit extracted under `~/Library/Caches`
+(a path other than the one the target was built in), and `SQLX_OFFLINE=true` lets klynt build without
+its database:
+
 ```
+SQLX_OFFLINE=true \
 HIVE_PROVE_TARGET=~/Developer/klynt/klynt/target \
-HIVE_PROVE_CHECKOUT=~/Developer/klynt/klynt \
+HIVE_PROVE_CHECKOUT=~/Library/Caches/klynt-replay-ef3e544dc \
 HIVE_PROVE_CMDS='[["build","--offline"],["check","--all-targets","--offline"],["test","--no-run","--offline"]]' \
 cargo test --release --test liveness_prove -- --ignored --nocapture
 ```
@@ -203,9 +208,9 @@ extracted to `~/Library/Caches/klynt-replay-ef3e544dc` (removed afterwards). Com
 **The target's history is synthetic.** klynt had no target when this run was prepared, so one was
 built for it: klynt `c91e88d312` (100 commits before `ef3e544dc`) was built with the same three
 commands into this target dir, every file in the target was then given an mtime three days earlier
-(`touch`), and `ef3e544dc` was built on top. The old build's workspace units (a different checkout
-path, so different hashes) and the dependency versions the lockfile has since dropped are the dead
-units. This is not the history a developer's target grows. It shows the procedure and the rule on a
+(`touch`), and `ef3e544dc` was built on top. The run found 13 dead units; the log gives their
+count and the bytes of their files, not their names, so this record does not say what they are.
+This is not the history a developer's target grows. It shows the procedure and the rule on a
 large real target; it does not show how a long-lived dev target behaves.
 
 **Outcome: test passed.**
@@ -227,8 +232,12 @@ What the run shows:
 - **Liveness was Decided** because this target had no not-current unit (no build was interrupted or
   failed in it), so this run does not exercise the busy-workspace rule on klynt. That rule is covered
   by the fixtures of `tests/liveness_busy.rs`; a run on a target that is mid-build is still open.
-- **Nothing live rebuilt**, and no dead unit rebuilt either: the 13 dead units are not needed by the
-  replayed commands. The 7 d window is vacuous because the oldest units are 3 days old.
+- **Nothing live rebuilt, but no deleted unit was rebuilt either.** The warm-up rebuilt 148 units
+  because the relocated checkout is a different path from the one the target was built in, so its
+  workspace units were rebuilt in the clone. The deletion trial therefore never had a unit it needed
+  to rebuild: the run shows no live rebuild, but it did not exercise a rebuild of any deleted unit,
+  so it cannot tell a right rule from a wrong one on klynt. The 7 d window is vacuous because the
+  oldest units are 3 days old.
 
 Limits: one run, synthetic history, `debug` profile only, and only the replayed commands. A passed
 window covers only those.
