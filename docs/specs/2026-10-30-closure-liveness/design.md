@@ -208,7 +208,7 @@ Locality: `run.rs` (extract `scan`, add `measure`) and `gc.rs` (one re-export li
 
 ### Proof procedure (`tests/common/prove.rs`, `tests/liveness_prove.rs`, new test code)
 
-Satisfies: LIVE-4.1, LIVE-4.2, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16, LIVE-4.18, LIVE-4.19, LIVE-4.20, LIVE-4.21, LIVE-4.22, LIVE-4.23, LIVE-4.24, LIVE-4.25, LIVE-4.26, LIVE-4.27
+Satisfies: LIVE-4.1, LIVE-4.2, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16, LIVE-4.18, LIVE-4.19, LIVE-4.20, LIVE-4.21, LIVE-4.22, LIVE-4.23, LIVE-4.25, LIVE-4.26, LIVE-4.27, LIVE-4.28
 Reuse: none — new code (rung 7) for the procedure. It reuses `liveness::liveness`, `gc::measure`, `cargo_target::identify` + `fingerprint::read_profile` (it builds the `TargetDir` by hand, since no function does that for one path), `platform::current()` for `Fs` (`volume`, `try_lock_exclusive`), `serde_json`, the system `cp`, and the tree-walk pattern of `tests/guards.rs`.
 Respects: ARCH-17 (it runs cargo only to verify, after liveness has decided, never as an input to it)
 Interface:
@@ -314,7 +314,7 @@ New seams: `liveness::liveness` and `prove` (the test-side procedure). `gc::meas
 | Source guard: `src/liveness.rs` uses no process-spawning API (`tests/guards.rs`, existing) | integration | LIVE-1.7 |
 | `fingerprint::{unit_hash, dep_name}` (`src/fingerprint.rs` tests) | unit | LIVE-2.3, LIVE-2.9 (name rules) |
 | `gc::measure` and the file-root `scan` (`src/gc/run.rs` tests with the existing `Rec` fake) | unit | LIVE-4.9 (byte accounting) |
-| `prove` / `prove_with` and its pure helpers on a fixture crate (`tests/liveness.rs`) | integration | LIVE-4.2, LIVE-4.18, LIVE-4.19, LIVE-4.21, LIVE-4.22, LIVE-4.23, LIVE-4.24, LIVE-4.25, LIVE-4.26, LIVE-4.27, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.20, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16 |
+| `prove` / `prove_with` and its pure helpers on a fixture crate (`tests/liveness.rs`) | integration | LIVE-4.2, LIVE-4.18, LIVE-4.19, LIVE-4.21, LIVE-4.22, LIVE-4.23, LIVE-4.25, LIVE-4.26, LIVE-4.27, LIVE-4.28, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.20, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16 |
 | `tests/liveness_prove.rs` (`missing_vars` in CI; the `#[ignore]` env-driven run) | integration | LIVE-4.1 |
 | `read_profile` per-profile edge counts and not-current handling (`src/fingerprint.rs` tests at :598, :848-1019, existing) | unit | LIVE-5.1, LIVE-5.2 |
 | `cargo hive status` snapshot keys (`tests/liveness.rs`, new assertion) | integration | LIVE-5.6 |
@@ -328,7 +328,7 @@ New seams: `liveness::liveness` and `prove` (the test-side procedure). `gc::meas
 Every live requirement ID appears in exactly one `Satisfies:` line:
 - LIVE-1.1 to LIVE-1.10, LIVE-2.1 to LIVE-2.11, LIVE-3.1 to LIVE-3.3, LIVE-3.5 and LIVE-3.6 →
   Liveness.
-- LIVE-4.1 to LIVE-4.27 (except the superseded 4.3, 4.4, 4.12 and 4.17) → Proof procedure.
+- LIVE-4.1 to LIVE-4.28 (except the superseded 4.3, 4.4, 4.12, 4.17 and 4.24) → Proof procedure.
 - Deliberately unmapped:
   - LIVE-3.4 is retired (struck through).
   - LIVE-5.1 to LIVE-5.7 are guards, held by the `Surface:` dispositions (fingerprint, gc) and the

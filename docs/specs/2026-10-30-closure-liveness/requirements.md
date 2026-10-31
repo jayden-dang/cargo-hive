@@ -226,6 +226,11 @@ rebuilds and how many bytes the deletion would free, before ROAD-6 deletes anyth
   continue with a partial result.
 - **LIVE-4.27** IF the warm-up or the baseline did not run THEN THE SYSTEM SHALL print "not run" for
   it in the report, not a count of zero.
+- **LIVE-4.28** IF a command in `HIVE_PROVE_CMDS` is not one of `build`, `check`, `doc`,
+  `test --no-run` or `bench --no-run` (long names only; `test` or `bench` without `--no-run`, and
+  `run`, are refused), or has any flag other than `+toolchain`, `-q`, `-v`, `--locked`, `--frozen`,
+  `--offline` or `--color <value>` before the subcommand, or has an argument after `--`, THEN THE
+  SYSTEM SHALL fail the test naming that command.
 
 ## 5. Existing commands keep working
 
@@ -293,10 +298,9 @@ Files this feature touches, and what each must keep doing:
 ## Open Questions
 
 - Closure-scan cost and steady-state reclaim at a 7-day window — project owner — 2026-10-25 —
-  forbid-guess (cấm đoán); carried from foundation `requirements.md:154`. Measured by LIVE-4.9 on
-  klynt once its target is older than 7 days (oldest `invoked.timestamp` was 2026-10-26 20:14).
-- **LIVE-4.28** IF a command in `HIVE_PROVE_CMDS` is not one of `build`, `check`, `doc`,
-  `test --no-run` or `bench --no-run` (long names only; `test` or `bench` without `--no-run`, and
-  `run`, are refused), or has any flag other than `+toolchain`, `-q`, `-v`, `--locked`, `--frozen`,
-  `--offline` or `--color <value>` before the subcommand, or has an argument after `--`, THEN THE
-  SYSTEM SHALL fail the test naming that command.
+  forbid-guess (cấm đoán); carried from foundation `requirements.md:154`. Partly answered on
+  2026-10-31 (`proof-runs.md`): on cargo-hive's own 1.7 GB target the 6 h and 1 d windows were
+  measured (294 and 133 dead units, 0.98 and 0.41 GB freed, 0 live units rebuilt) and the 7 d window
+  was vacuous because no unit was old enough; on klynt the 7 d window is Undecided (169 not-current
+  units inside it) and no deletion trial completed there. Still open: reclaim and liveness cost at a
+  7-day window on a large, active workspace.
