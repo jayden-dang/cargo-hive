@@ -766,10 +766,10 @@ and clones.
 
 **Depends-on:** Task 14, Task 17, Task 18
 
-- [ ] **Step 1: Prepare the checkout** with the owner: pick a klynt commit that compiles, extract it with `git -C ~/Developer/klynt/klynt archive <sha> | tar -x -C ~/Library/Caches/klynt-replay-<sha>` (outside `/private/tmp` and `$TMPDIR`), and agree the compile-only commands and the environment the owner's build needs (for example `SQLX_OFFLINE=true`).
-- [ ] **Step 2: Run** `HIVE_PROVE_TARGET=~/Developer/klynt/klynt/target HIVE_PROVE_CHECKOUT=~/Library/Caches/klynt-replay-<sha> HIVE_PROVE_CMDS='<agreed JSON>' cargo test --release --test liveness_prove -- --ignored --nocapture`, keeping the full output in `.skills/LIVE/proof-run-4.log`.
-- [ ] **Step 3: Judge.** Passed windows with 0 rebuilt live units meet the amendment's success signal. Any `RebuiltLive`, or 6 h and 1 d both Vacuous because of Undecided, is the stop condition: report it to the owner and go to `reroute-plan`, do not adjust the rule here.
-- [ ] **Step 4: Record** run 4 in `proof-runs.md`: commit, commands, lock-held time, warm-up and baseline counts and times, per window the outcome, dead units, freed bytes and bytes shared with other inodes, rebuilt and rebuilt-live counts, and the Vacuous reasons; correct the 2026-10-29 sentence; then remove `~/Library/Caches/klynt-replay-<sha>`.
-- [ ] **Step 5: Commit** `docs(LIVE): record the short-lock proof run on klynt`.
+- [x] **Step 1: Prepare the checkout** with the owner: pick a klynt commit that compiles, extract it with `git -C ~/Developer/klynt/klynt archive <sha> | tar -x -C ~/Library/Caches/klynt-replay-<sha>` (outside `/private/tmp` and `$TMPDIR`), and agree the compile-only commands and the environment the owner's build needs (for example `SQLX_OFFLINE=true`).
+- [x] **Step 2: Run** `HIVE_PROVE_TARGET=~/Developer/klynt/klynt/target HIVE_PROVE_CHECKOUT=~/Library/Caches/klynt-replay-<sha> HIVE_PROVE_CMDS='<agreed JSON>' cargo test --release --test liveness_prove -- --ignored --nocapture`, keeping the full output in `.skills/LIVE/proof-run-4.log`.
+- [x] **Step 3: Judge.** Passed windows with 0 rebuilt live units meet the amendment's success signal. Any `RebuiltLive`, or 6 h and 1 d both Vacuous because of Undecided, is the stop condition: report it to the owner and go to `reroute-plan`, do not adjust the rule here.
+- [x] **Step 4: Record** run 4 in `proof-runs.md`: commit, commands, lock-held time, warm-up and baseline counts and times, per window the outcome, dead units, freed bytes and bytes shared with other inodes, rebuilt and rebuilt-live counts, and the Vacuous reasons; correct the 2026-10-29 sentence; then remove `~/Library/Caches/klynt-replay-<sha>`.
+- [x] **Step 5: Commit** `docs(LIVE): record the short-lock proof run on klynt`.
 
 _Requirements: LIVE-4.1, LIVE-8.1, LIVE-8.3, LIVE-1.12, LIVE-1.14_
