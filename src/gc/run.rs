@@ -394,11 +394,13 @@ pub fn measure(fs: &dyn Fs, target: &Path, paths: &[PathBuf], account_bytes: boo
     let mut roots: Vec<&PathBuf> = paths.iter().collect();
     roots.sort();
     roots.dedup();
-    let outermost: Vec<&PathBuf> = roots
-        .iter()
-        .copied()
-        .filter(|p| !roots.iter().any(|q| *q != *p && p.starts_with(q)))
-        .collect();
+    // Sorted, a path's descendants follow it directly, so only the last kept root can contain `p`.
+    let mut outermost: Vec<&PathBuf> = Vec::new();
+    for p in roots {
+        if outermost.last().is_none_or(|q| !p.starts_with(q)) {
+            outermost.push(p);
+        }
+    }
     let mut ledger = Ledger::new();
     for path in outermost {
         let stat = match fs.entry_stat(path) {
