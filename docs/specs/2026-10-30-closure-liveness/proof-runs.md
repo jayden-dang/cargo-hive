@@ -1,6 +1,6 @@
 # Closure liveness: proof runs on a real target
 
-Status: run 2 passed (2026-10-31, cargo-hive's own target). Run 1 on klynt was vacuous.
+Status: runs 2 and 3 passed (2026-10-31, cargo-hive's own target). Run 1 on klynt was vacuous.
 
 ## Command (klynt, nothing building in it)
 
@@ -75,3 +75,27 @@ What the run shows:
 
 Limits: one run, one project, one toolchain (rustc 1.97.1), and only the replayed commands
 (`build`, `check --all-targets`; no `test`, `bench`, `doc`). A passed window covers only those.
+
+### Run 3 — 2026-10-31 09:38 to 09:39 (+07), 45 s, after the whole-branch review fixes, the compile-only replay and the polish (`live` at `cd82e92`)
+
+Same target and checkout as run 2 (`c1dc6d5`), commands `build`, `check --all-targets` and
+`test --no-run`, each with `--offline`; the proof added `--locked` and `--message-format=json`. The
+target had not been built since run 2. The checkout stayed clean, no clone remained.
+
+**Outcome: test passed.**
+
+| Phase / window | Outcome | Rebuilt | Rebuilt live | Dead units | Dead files (original, before any clone) |
+|---|---|---|---|---|---|
+| Warm-up | 3 commands exit 0 | 3 (`cargo-hive`, 3 units) | n/a | n/a | n/a |
+| Baseline | 3 commands exit 0 | 0 | n/a | n/a | n/a |
+| 6 h | Passed | 166 | **0** | 294 | 0.98 GB freed, 0.23 GB still shared |
+| 1 d | Passed | 17 | **0** | 133 | 0.41 GB freed, 0.07 GB still shared |
+| 7 d | Vacuous: no dead unit lists a file to delete | 0 | 0 | 0 | 0 |
+
+Why the 1-day figures differ from run 2 (90 dead units, 0.14 GB, 0 rebuilt): about 19 hours passed
+between the runs, so more units fell outside the 1-day window, and the added `test --no-run` needs
+units the other two commands do not. The 17 units that rebuilt were all dead by the window's rule,
+the window gap again; none was live.
+
+Limits are those of run 2, plus this: `test --no-run` compiles test binaries but, by design, no test
+or binary of the checkout ran (LIVE-4.28).
