@@ -24,6 +24,7 @@ const NEVER_COLLECTED: [&str; 5] = [
     "other",
 ];
 
+/// The verdict for a target dir: every unit sorted live or dead, or the reasons it cannot be decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Liveness {
     Decided {
@@ -47,6 +48,7 @@ pub struct DeadUnit {
     pub files: Vec<PathBuf>,
 }
 
+/// Something the liveness check could not decide, which blocks any deletion.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Uncertain {
     ProfileUnsupported { profile: PathBuf, why: String },
@@ -98,10 +100,7 @@ impl fmt::Display for Uncertain {
             Uncertain::Unresolved { unit, dependency } => write!(
                 f,
                 "{}: dependency `{dependency}` matches no unit of the target",
-                unit.profile
-                    .join(".fingerprint")
-                    .join(&unit.dir_name)
-                    .display()
+                fingerprint_dir(&unit.profile, &unit.dir_name).display()
             ),
             Uncertain::ListingFailed { dir, why } => {
                 write!(f, "{}: cannot list: {why}", dir.display())
@@ -168,6 +167,7 @@ fn invoked_in_window(
     }
 }
 
+/// Decides which units of `target` are live and which dead, or why it cannot decide.
 pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Duration) -> Liveness {
     let mut reasons: Vec<Uncertain> = Vec::new();
     if let Some(why) = &target.unreadable {
@@ -177,7 +177,33 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
         });
     }
 
-    let mut units: Vec<(&Path, &Unit)> = Vec::new();
+    let (units, not_current_hashes) = collect_units(fs, target, now, window, &mut reasons);
+    let index = index_units(&units, &mut reasons);
+    let live = mark_live(fs, &units, &index, now, window, &mut reasons);
+    let dead_idx = dead_indices(&units, &live);
+    let listings = list_dead_files(fs, &units, &dead_idx, &mut reasons);
+
+    if !reasons.is_empty() {
+        reasons.sort();
+        reasons.dedup();
+        return Liveness::Undecided { reasons };
+    }
+
+    assemble(&units, &not_current_hashes, &live, &dead_idx, &listings)
+}
+
+type ProfileUnit<'a> = (&'a Path, &'a Unit);
+
+/// Walks every profile: reports unsupported profiles and mid-rebuild units, and gathers the units
+/// of the supported ones plus the hashes of the not-current unit dirs.
+fn collect_units<'a>(
+    fs: &dyn Fs,
+    target: &'a TargetDir,
+    now: SystemTime,
+    window: Duration,
+    reasons: &mut Vec<Uncertain>,
+) -> (Vec<ProfileUnit<'a>>, Vec<(&'a Path, &'a str)>) {
+    let mut units: Vec<ProfileUnit> = Vec::new();
     let mut not_current_hashes: Vec<(&Path, &str)> = Vec::new();
     for profile in &target.profiles {
         if let Format::Unsupported(why) = &profile.format {
@@ -214,19 +240,26 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
             units.extend(graph.units.iter().map(|u| (profile.path.as_path(), u)));
         }
     }
+    (units, not_current_hashes)
+}
 
+/// Indexes units by their report hash, and reports dirs without a unit hash or sharing one.
+fn index_units<'a>(
+    units: &[ProfileUnit<'a>],
+    reasons: &mut Vec<Uncertain>,
+) -> HashMap<&'a str, Vec<usize>> {
     let mut index: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut by_unit_hash: HashMap<(&Path, &str), usize> = HashMap::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
         index.entry(unit.hash_hex.as_str()).or_default().push(i);
-        let dir = profile.join(".fingerprint").join(&unit.dir_name);
+        let dir = fingerprint_dir(profile, &unit.dir_name);
         match fingerprint::unit_hash(&unit.dir_name) {
             None => reasons.push(Uncertain::NoUnitHash { dir }),
             Some(hash) => {
                 if let Some(&first) = by_unit_hash.get(&(*profile, hash)) {
                     let (_, other) = units[first];
                     reasons.push(Uncertain::DuplicateUnitHash {
-                        a: profile.join(".fingerprint").join(&other.dir_name),
+                        a: fingerprint_dir(profile, &other.dir_name),
                         b: dir,
                     });
                 } else {
@@ -235,7 +268,18 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
             }
         }
     }
+    index
+}
 
+/// Marks units invoked inside the window live, then everything they depend on.
+fn mark_live(
+    fs: &dyn Fs,
+    units: &[ProfileUnit],
+    index: &HashMap<&str, Vec<usize>>,
+    now: SystemTime,
+    window: Duration,
+    reasons: &mut Vec<Uncertain>,
+) -> Vec<bool> {
     let mut live = vec![false; units.len()];
     let mut queue: Vec<usize> = Vec::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
@@ -264,12 +308,9 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
                     }
                 }
                 None => {
-                    let fp_dir = profile.join(".fingerprint").join(&unit.dir_name);
+                    let fp_dir = fingerprint_dir(profile, &unit.dir_name);
                     reasons.push(Uncertain::Unresolved {
-                        unit: UnitRef {
-                            profile: profile.to_path_buf(),
-                            dir_name: unit.dir_name.clone(),
-                        },
+                        unit: unit_ref(&(profile, unit)),
                         dependency: fingerprint::dep_name(&fp_dir, &unit.stem, dep)
                             .unwrap_or_else(|| le_hex(dep)),
                     });
@@ -277,17 +318,29 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
             }
         }
     }
+    live
+}
 
-    let dead_idx: Vec<usize> = (0..units.len())
+/// Indices of units that are not live, are collectable and carry a unit hash.
+fn dead_indices(units: &[ProfileUnit], live: &[bool]) -> Vec<usize> {
+    (0..units.len())
         .filter(|&i| {
             !live[i]
                 && !NEVER_COLLECTED.contains(&units[i].1.kind.as_str())
                 && fingerprint::unit_hash(&units[i].1.dir_name).is_some()
         })
-        .collect();
+        .collect()
+}
 
+/// Lists `deps/` and `examples/` of every profile that has a dead unit, sorted by name.
+fn list_dead_files<'a>(
+    fs: &dyn Fs,
+    units: &[ProfileUnit<'a>],
+    dead_idx: &[usize],
+    reasons: &mut Vec<Uncertain>,
+) -> BTreeMap<&'a Path, Vec<(String, PathBuf)>> {
     let mut listings: BTreeMap<&Path, Vec<(String, PathBuf)>> = BTreeMap::new();
-    for &i in &dead_idx {
+    for &i in dead_idx {
         listings.entry(units[i].0).or_default();
     }
     for (profile, entries) in &mut listings {
@@ -309,17 +362,17 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
         }
         entries.sort();
     }
+    listings
+}
 
-    if !reasons.is_empty() {
-        reasons.sort();
-        reasons.dedup();
-        return Liveness::Undecided { reasons };
-    }
-
-    let unit_ref = |(profile, unit): &(&Path, &Unit)| UnitRef {
-        profile: profile.to_path_buf(),
-        dir_name: unit.dir_name.clone(),
-    };
+/// Builds the decided result: the live units, and per dead unit the files only it owns.
+fn assemble(
+    units: &[ProfileUnit],
+    not_current_hashes: &[(&Path, &str)],
+    live: &[bool],
+    dead_idx: &[usize],
+    listings: &BTreeMap<&Path, Vec<(String, PathBuf)>>,
+) -> Liveness {
     let dead_set: HashSet<usize> = dead_idx.iter().copied().collect();
     let mut kept_hashes: HashMap<&Path, Vec<&str>> = HashMap::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
@@ -329,18 +382,18 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
             }
         }
     }
-    for (profile, hash) in &not_current_hashes {
+    for (profile, hash) in not_current_hashes {
         kept_hashes.entry(profile).or_default().push(hash);
     }
 
-    let mut live_units = BTreeSet::new();
-    for (i, entry) in units.iter().enumerate() {
-        if live[i] {
-            live_units.insert(unit_ref(entry));
-        }
-    }
+    let live_units: BTreeSet<UnitRef> = units
+        .iter()
+        .zip(live)
+        .filter(|(_, &is_live)| is_live)
+        .map(|(entry, _)| unit_ref(entry))
+        .collect();
     let mut dead_units: BTreeMap<UnitRef, Vec<PathBuf>> = BTreeMap::new();
-    for &i in &dead_idx {
+    for &i in dead_idx {
         let (profile, unit) = units[i];
         let Some(hash) = fingerprint::unit_hash(&unit.dir_name) else {
             continue;
@@ -353,7 +406,7 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
             .collect();
         let mut files = Vec::new();
         if !matching.is_empty() {
-            files.push(profile.join(".fingerprint").join(&unit.dir_name));
+            files.push(fingerprint_dir(profile, &unit.dir_name));
             files.extend(matching.into_iter().cloned());
         }
         dead_units.insert(unit_ref(&units[i]), files);
@@ -364,6 +417,17 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
             .into_iter()
             .map(|(unit, files)| DeadUnit { unit, files })
             .collect(),
+    }
+}
+
+fn fingerprint_dir(profile: &Path, dir_name: &str) -> PathBuf {
+    profile.join(".fingerprint").join(dir_name)
+}
+
+fn unit_ref((profile, unit): &ProfileUnit) -> UnitRef {
+    UnitRef {
+        profile: profile.to_path_buf(),
+        dir_name: unit.dir_name.clone(),
     }
 }
 
