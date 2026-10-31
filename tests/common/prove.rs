@@ -62,9 +62,17 @@ pub struct ProveInput {
     pub now: SystemTime,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct PhaseReport {
+    pub rebuilt: Vec<String>,
+    pub commands: Vec<(Vec<String>, i32)>,
+    pub elapsed: Duration,
+}
+
 #[derive(Debug)]
 pub struct ProveReport {
-    pub baseline_rebuilt: Vec<String>,
+    pub warm_up: PhaseReport,
+    pub baseline: PhaseReport,
     pub windows: Vec<WindowReport>,
 }
 
@@ -124,12 +132,19 @@ impl ProveReport {
 
     pub fn render(&self) -> String {
         let mut out = String::new();
-        if !self.baseline_rebuilt.is_empty() {
+        for (name, phase) in [("warm-up", &self.warm_up), ("baseline", &self.baseline)] {
             let _ = writeln!(
                 out,
-                "baseline rebuilt: {}",
-                self.baseline_rebuilt.join(", ")
+                "{name}: {} rebuilt, {:.1}s",
+                phase.rebuilt.len(),
+                phase.elapsed.as_secs_f64()
             );
+            if !phase.rebuilt.is_empty() {
+                let _ = writeln!(out, "  rebuilt: {}", phase.rebuilt.join(", "));
+            }
+            for (cmd, exit) in &phase.commands {
+                let _ = writeln!(out, "  cargo {} -> exit {exit}", cmd.join(" "));
+            }
         }
         for w in &self.windows {
             let verdict = match &w.outcome {
@@ -878,7 +893,6 @@ pub fn prove_with_cloner(
     }
 
     let original_tree = snapshot(input)?;
-    let original_stamps = stamps(fs, &target);
     let unmapped = measure(fs, &input.target, &unmapped_paths(fs, &target), true);
 
     let mut decisions = Vec::new();
@@ -910,25 +924,50 @@ pub fn prove_with_cloner(
         });
     }
 
-    let mut baseline_rebuilt = Vec::new();
-    let mut baseline_problem = None;
+    let mut warm_up = PhaseReport::default();
+    let mut baseline = PhaseReport::default();
+    let mut phase_problem = None;
+    let mut warmed = None;
+    let mut warmed_stamps = Stamps::new();
     if decisions.iter().any(|d| d.pre_vacuous.is_none()) {
-        let clone = clone_target(fs, scratch, "baseline", &input.target, cloner)?;
-        let clone_target_dir = read_target(&clone.path)?;
-        let before = stamps(fs, &clone_target_dir);
-        let ran = replay(scratch, "baseline", input, &clone.path)?;
-        let after = stamps(fs, &read_target(&clone.path)?);
-        baseline_rebuilt = rebuilt(&before, &after).iter().map(unit_name).collect();
-        clone.remove()?;
+        let started = Instant::now();
+        let clone = clone_target(fs, scratch, "warm-up", &input.target, cloner)?;
+        let before = stamps(fs, &read_target(&clone.path)?);
+        let ran = replay(scratch, "warm-up", input, &clone.path)?;
+        warmed_stamps = stamps(fs, &read_target(&clone.path)?);
+        warm_up = PhaseReport {
+            rebuilt: rebuilt(&before, &warmed_stamps)
+                .iter()
+                .map(unit_name)
+                .collect(),
+            commands: ran.commands,
+            elapsed: started.elapsed(),
+        };
         if let Some(why) = replay_problem(&ran.exits, &ran.artifact_lines) {
-            baseline_problem = Some(format!("baseline replay: {why}"));
+            phase_problem = Some(format!("warm-up replay: {why}"));
+        } else {
+            let started = Instant::now();
+            let copy = clone_target(fs, scratch, "baseline", &clone.path, cloner)?;
+            let before = stamps(fs, &read_target(&copy.path)?);
+            let ran = replay(scratch, "baseline", input, &copy.path)?;
+            let after = stamps(fs, &read_target(&copy.path)?);
+            baseline = PhaseReport {
+                rebuilt: rebuilt(&before, &after).iter().map(unit_name).collect(),
+                commands: ran.commands,
+                elapsed: started.elapsed(),
+            };
+            copy.remove()?;
+            if let Some(why) = replay_problem(&ran.exits, &ran.artifact_lines) {
+                phase_problem = Some(format!("baseline replay: {why}"));
+            }
+            if !baseline.rebuilt.is_empty() {
+                phase_problem = Some(format!(
+                    "baseline replay rebuilt {}",
+                    baseline.rebuilt.join(", ")
+                ));
+            }
         }
-        if !baseline_rebuilt.is_empty() {
-            baseline_problem = Some(format!(
-                "baseline replay rebuilt {}",
-                baseline_rebuilt.join(", ")
-            ));
-        }
+        warmed = Some(clone);
     }
 
     let mut windows = Vec::new();
@@ -950,19 +989,22 @@ pub fn prove_with_cloner(
             reasons,
             commands: Vec::new(),
         };
-        if let Some(why) = d.pre_vacuous.or(baseline_problem.clone()) {
+        if let Some(why) = d.pre_vacuous.or(phase_problem.clone()) {
             report.outcome = WindowOutcome::Vacuous(why);
             windows.push(report);
             continue;
         }
 
-        let clone = clone_target(fs, scratch, &format!("w{i}"), &input.target, cloner)?;
+        let Some(warmed_clone) = &warmed else {
+            return Err("no warmed-up clone to copy a window from".to_string());
+        };
+        let clone = clone_target(fs, scratch, &format!("w{i}"), &warmed_clone.path, cloner)?;
         let clone_target_dir = read_target(&clone.path)?;
-        let mismatches = mtime_mismatches(&original_stamps, &stamps(fs, &clone_target_dir));
+        let mismatches = mtime_mismatches(&warmed_stamps, &stamps(fs, &clone_target_dir));
         if !mismatches.is_empty() {
             let names: Vec<String> = mismatches.iter().take(5).map(unit_name).collect();
             report.outcome = WindowOutcome::Vacuous(format!(
-                "the clone's unit timestamps differ from the original's: {}",
+                "the clone's unit timestamps differ from the warmed-up clone's: {}",
                 names.join(", ")
             ));
             clone.remove()?;
@@ -987,6 +1029,9 @@ pub fn prove_with_cloner(
         windows.push(report);
     }
 
+    if let Some(clone) = warmed {
+        clone.remove()?;
+    }
     let after_tree = snapshot(input)?;
     let changed = tree_changes(&original_tree, &after_tree);
     if !changed.is_empty() {
@@ -1003,7 +1048,8 @@ pub fn prove_with_cloner(
     }
     drop(locks);
     Ok(ProveReport {
-        baseline_rebuilt,
+        warm_up,
+        baseline,
         windows,
     })
 }

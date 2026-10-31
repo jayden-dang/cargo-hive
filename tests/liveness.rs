@@ -1048,7 +1048,8 @@ fn all_vacuous_and_render_name_each_window_command_and_exit() {
         commands: vec![(argv(&["build", "--message-format=json", "--offline"]), exit)],
     };
     let mut report = prove::ProveReport {
-        baseline_rebuilt: vec![],
+        warm_up: Default::default(),
+        baseline: Default::default(),
         windows: vec![
             window(6 * 3600, WindowOutcome::Vacuous("none".into()), 0),
             window(7 * 86_400, WindowOutcome::Vacuous("none".into()), 101),
@@ -1221,7 +1222,7 @@ fn the_proof_passes_a_window_whose_dead_units_cargo_does_not_need_and_calls_an_e
         prove::prove_with(fs_.as_ref(), &scratch.path, &input(&fx, &[window, long])).unwrap();
 
     println!("{}", report.render());
-    assert_eq!(report.baseline_rebuilt, Vec::<String>::new());
+    assert_eq!(report.baseline.rebuilt, Vec::<String>::new());
     let first = &report.windows[0];
     assert_eq!(first.outcome, WindowOutcome::Passed, "{}", report.render());
     assert!(first.dead_units > 0);
@@ -1296,17 +1297,71 @@ fn a_volume_that_cannot_clone_fails_before_copying() {
     }
 }
 
+type Sources = std::rc::Rc<std::cell::RefCell<Vec<(String, PathBuf)>>>;
+
+fn recording_cloner(sources: &Sources) -> impl Fn(&Path, &str, &Path, &Path) -> Result<(), String> {
+    let sources = sources.clone();
+    move |_scratch, label, source, dest| {
+        sources
+            .borrow_mut()
+            .push((label.to_string(), source.to_path_buf()));
+        let status = Command::new("cp")
+            .args(["-c", "-R", "-p"])
+            .arg(source)
+            .arg(dest)
+            .status()
+            .map_err(|e| e.to_string())?;
+        status
+            .success()
+            .then_some(())
+            .ok_or("cp failed".to_string())
+    }
+}
+
+fn check_only_fixture(label: &str) -> Fixture {
+    let fx = fixture(label);
+    cargo(&fx, &["check"]);
+    backdate_all(&fx.target, THIRTY_DAYS);
+    fx
+}
+
 #[test]
-fn a_baseline_rebuild_makes_every_window_vacuous() {
-    let fx = proof_fixture("prove-baseline");
+fn the_warm_up_builds_what_the_commands_need_and_the_baseline_then_rebuilds_nothing() {
+    let fx = check_only_fixture("prove-warm");
     let scratch = Scratch::new("prove-scratch");
-    let source = fx.app.join("src/main.rs");
-    fs::write(
-        &source,
-        "pm::m!();\nfn main() { println!(\"{}\", dep::answer()); }\n",
-    )
-    .unwrap();
-    set_mtime(&source, SystemTime::now() + Duration::from_secs(120));
+    let before = prove::walk(&fx.target, 5_000_000).unwrap();
+    let fs_ = platform::current().unwrap().fs;
+
+    let report = prove::prove_with(fs_.as_ref(), &scratch.path, &input(&fx, &[WINDOW])).unwrap();
+
+    println!("{}", report.render());
+    assert!(!report.warm_up.rebuilt.is_empty(), "{}", report.render());
+    assert_eq!(report.warm_up.commands.len(), 1);
+    assert_eq!(report.baseline.rebuilt, Vec::<String>::new());
+    assert_eq!(report.baseline.commands.len(), 1);
+    assert_eq!(
+        report.windows[0].outcome,
+        WindowOutcome::Passed,
+        "{}",
+        report.render()
+    );
+    assert_eq!(
+        prove::tree_changes(&before, &prove::walk(&fx.target, 5_000_000).unwrap()),
+        Vec::<PathBuf>::new()
+    );
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn a_baseline_that_still_rebuilds_after_the_warm_up_makes_every_window_vacuous() {
+    let fx = proof_fixture("prove-baseline");
+    write(
+        &fx.app.join("build.rs"),
+        "fn main() { println!(\"cargo:rerun-if-changed=never-exists.marker\"); }\n",
+    );
+    cargo(&fx, &["build", "--bins", "--examples"]);
+    backdate_all(&fx.target, THIRTY_DAYS);
+    let scratch = Scratch::new("prove-scratch");
     let fs_ = platform::current().unwrap().fs;
 
     let report = prove::prove_with(
@@ -1316,9 +1371,11 @@ fn a_baseline_rebuild_makes_every_window_vacuous() {
     )
     .unwrap();
 
+    println!("{}", report.render());
     assert!(
-        report.baseline_rebuilt.iter().any(|u| u.contains("app-")),
-        "{report:?}"
+        report.baseline.rebuilt.iter().any(|u| u.contains("app-")),
+        "{}",
+        report.render()
     );
     assert!(report.all_vacuous());
     for w in &report.windows {
@@ -1330,6 +1387,127 @@ fn a_baseline_rebuild_makes_every_window_vacuous() {
         }
     }
     no_clone_left(&scratch.path);
+}
+
+#[test]
+fn a_failing_warm_up_command_makes_every_window_vacuous_and_deletes_nothing() {
+    let fx = proof_fixture("prove-warm-fail");
+    let scratch = Scratch::new("prove-scratch");
+    let before = tree_of(&fx.target);
+    let mut request = input(&fx, &[WINDOW, THIRTY_DAYS]);
+    request.cmds = vec![argv(&["build", "--offline", "--bogus-flag"])];
+    let fs_ = platform::current().unwrap().fs;
+    let sources = Sources::default();
+
+    let report = prove::prove_with_cloner(
+        fs_.as_ref(),
+        &scratch.path,
+        &request,
+        &recording_cloner(&sources),
+    )
+    .unwrap();
+
+    assert!(report.all_vacuous());
+    for w in &report.windows {
+        match &w.outcome {
+            WindowOutcome::Vacuous(why) => assert!(why.contains("warm-up"), "{why}"),
+            other => panic!("expected Vacuous, got {other:?}"),
+        }
+    }
+    assert_ne!(report.warm_up.commands[0].1, 0);
+    assert!(report.baseline.commands.is_empty());
+    let made: Vec<String> = sources.borrow().iter().map(|(l, _)| l.clone()).collect();
+    assert_eq!(made, vec!["warm-up".to_string()]);
+    assert_eq!(tree_of(&fx.target), before);
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn window_clones_come_from_the_warmed_up_clone_and_are_compared_with_it() {
+    let fx = proof_fixture("prove-sources");
+    let scratch = Scratch::new("prove-scratch");
+    let before = tree_of(&fx.target);
+    let fs_ = platform::current().unwrap().fs;
+    let sources = Sources::default();
+
+    let report = prove::prove_with_cloner(
+        fs_.as_ref(),
+        &scratch.path,
+        &input(&fx, &[WINDOW]),
+        &recording_cloner(&sources),
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.windows[0].outcome,
+        WindowOutcome::Passed,
+        "{}",
+        report.render()
+    );
+    let sources = sources.borrow();
+    let labels: Vec<&str> = sources.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(labels, ["warm-up", "baseline", "w0"]);
+    let fx_target = fx.target.canonicalize().unwrap();
+    assert_eq!(sources[0].1.canonicalize().unwrap(), fx_target);
+    assert_eq!(sources[1].1, sources[2].1);
+    assert!(sources[1].1.starts_with(&scratch.path));
+    assert_ne!(sources[1].1, fx.target);
+    assert_eq!(tree_of(&fx.target), before);
+    no_clone_left(&scratch.path);
+
+    let disturbing = |scratch_: &Path, label: &str, source: &Path, dest: &Path| {
+        recording_cloner(&Sources::default())(scratch_, label, source, dest)?;
+        if label.starts_with('w') {
+            let stamp = prove::walk(dest, 5_000_000)
+                .unwrap()
+                .into_keys()
+                .find(|p| p.file_name().is_some_and(|n| n == "invoked.timestamp"))
+                .unwrap();
+            set_mtime(&stamp, SystemTime::now() + Duration::from_secs(3600));
+        }
+        Ok(())
+    };
+    let report = prove::prove_with_cloner(
+        fs_.as_ref(),
+        &scratch.path,
+        &input(&fx, &[WINDOW]),
+        &disturbing,
+    )
+    .unwrap();
+    match &report.windows[0].outcome {
+        WindowOutcome::Vacuous(why) => assert!(why.contains("warmed-up clone"), "{why}"),
+        other => panic!("expected Vacuous, got {other:?}"),
+    }
+    assert_eq!(tree_of(&fx.target), before);
+    no_clone_left(&scratch.path);
+}
+
+#[test]
+fn the_report_shows_the_warm_up_and_the_baseline() {
+    let phase = |rebuilt: &[&str], exit: i32, secs: u64| prove::PhaseReport {
+        rebuilt: rebuilt.iter().map(ToString::to_string).collect(),
+        commands: vec![(argv(&["check", "--locked", "--offline"]), exit)],
+        elapsed: Duration::from_secs(secs),
+    };
+    let report = prove::ProveReport {
+        warm_up: phase(&["debug/a-1", "debug/b-2", "debug/c-3"], 0, 125),
+        baseline: phase(&["debug/d-4"], 101, 7),
+        windows: vec![],
+    };
+
+    let text = report.render();
+
+    assert!(text.contains("warm-up: 3 rebuilt, 125.0s"), "{text}");
+    assert!(text.contains("baseline: 1 rebuilt, 7.0s"), "{text}");
+    assert!(
+        text.contains("check --locked --offline -> exit 0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("check --locked --offline -> exit 101"),
+        "{text}"
+    );
+    assert!(text.contains("debug/d-4"), "{text}");
 }
 
 #[test]
