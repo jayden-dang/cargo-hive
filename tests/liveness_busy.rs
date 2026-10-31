@@ -54,6 +54,12 @@ impl Busy {
     }
 }
 
+fn age_if(aged: bool, target: &Path) {
+    if aged {
+        backdate_all(target, THIRTY_DAYS);
+    }
+}
+
 fn commands(list: &[&[&str]]) -> Vec<Vec<String>> {
     list.iter()
         .map(|c| c.iter().map(|a| a.to_string()).collect())
@@ -146,9 +152,7 @@ pub fn failed_build_aged(label: &str, aged: bool) -> Busy {
     );
     ws.cargo(&["check", "--workspace"]);
     ws.checked = kinds(&ws.target).into_keys().collect();
-    if aged {
-        backdate_all(&ws.target, THIRTY_DAYS);
-    }
+    age_if(aged, &ws.target);
     ws.cargo(&["build", "--workspace"]);
     ws.break_source("l");
     ws.cargo_fails(&["build", "--bin", "c"]);
@@ -184,9 +188,7 @@ pub fn never_started_aged(label: &str, aged: bool) -> Busy {
     );
     ws.cargo(&["check", "--workspace"]);
     ws.checked = kinds(&ws.target).into_keys().collect();
-    if aged {
-        backdate_all(&ws.target, THIRTY_DAYS);
-    }
+    age_if(aged, &ws.target);
     ws.cargo(&["build", "--workspace"]);
     let m = ws.src("m");
     let text = fs::read_to_string(&m).unwrap();
@@ -205,6 +207,10 @@ pub fn renamed_dep(label: &str, with_tool: bool) -> Busy {
 /// As `renamed_dep`; with `aged`, the units of the `tool` check are backdated 30 days before the
 /// build.
 pub fn renamed_dep_aged(label: &str, with_tool: bool, aged: bool) -> Busy {
+    assert!(
+        with_tool || !aged,
+        "without `tool` there is no check-mode unit to age"
+    );
     let mut rebuild = vec![vec![
         "build".to_string(),
         "-p".to_string(),
@@ -232,9 +238,7 @@ pub fn renamed_dep_aged(label: &str, with_tool: bool, aged: bool) -> Busy {
     if with_tool {
         ws.cargo(&["check", "-p", "tool"]);
         ws.checked = kinds(&ws.target).into_keys().collect();
-        if aged {
-            backdate_all(&ws.target, THIRTY_DAYS);
-        }
+        age_if(aged, &ws.target);
     }
     ws.cargo(&["build", "-p", "app"]);
     ws.break_source("liba");
@@ -622,7 +626,7 @@ fn a_host_dependency_with_nothing_wanted_is_dead() {
 fn replay(ws: &Busy) -> prove::WindowReport {
     fs::write(&ws.restore.0, &ws.restore.1).unwrap();
     let scratch = Scratch::new("busy-prove");
-    let fs_ = platform::current().unwrap().fs;
+    let platform_fs = platform::current().unwrap().fs;
     let input = prove::ProveInput {
         target: ws.target.clone(),
         checkout: ws.dir.clone(),
@@ -630,7 +634,7 @@ fn replay(ws: &Busy) -> prove::WindowReport {
         windows: vec![WINDOW],
         now: SystemTime::now(),
     };
-    let report = prove::prove_with(fs_.as_ref(), &scratch.path, &input).unwrap();
+    let report = prove::prove_with(platform_fs.as_ref(), &scratch.path, &input).unwrap();
     println!("{}", report.render());
     assert_eq!(report.baseline.rebuilt, Vec::<String>::new());
     report.windows.into_iter().next().unwrap()
@@ -639,6 +643,10 @@ fn replay(ws: &Busy) -> prove::WindowReport {
 fn assert_passed_with_dead_units(window: &prove::WindowReport) {
     assert_eq!(window.outcome, WindowOutcome::Passed, "{window:#?}");
     assert!(window.dead_units > 0, "{window:#?}");
+    assert!(
+        window.rebuilt > 0,
+        "the deleted dead units were not rebuilt: {window:#?}"
+    );
     assert_eq!(window.rebuilt_live, 0, "{window:#?}");
 }
 
@@ -676,15 +684,17 @@ fn deleting_the_dead_units_beside_a_host_dependency_rebuilds_no_live_unit() {
 }
 
 #[test]
-fn a_replay_that_deletes_nothing_is_not_a_pass() {
+fn a_replay_with_nothing_dead_is_vacuous_and_rebuilds_nothing() {
     let ws = failed_build("busy-replay-unaged");
     reached_not_current(&ws, "l", |_| true);
 
     let window = replay(&ws);
 
     assert_eq!(window.dead_units, 0, "{window:#?}");
-    assert!(
-        matches!(window.outcome, WindowOutcome::Vacuous(_)),
+    assert_eq!(window.rebuilt, 0, "{window:#?}");
+    assert_eq!(
+        window.outcome,
+        WindowOutcome::Vacuous("no dead unit lists a file to delete".to_string()),
         "{window:#?}"
     );
 }
