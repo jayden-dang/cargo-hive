@@ -186,10 +186,7 @@ struct NotCurrentNode<'a> {
 
 impl NotCurrentNode<'_> {
     fn unit_ref(&self) -> UnitRef {
-        UnitRef {
-            profile: self.profile.to_path_buf(),
-            dir_name: self.dir_name.to_string(),
-        }
+        make_unit_ref(self.profile, self.dir_name)
     }
 
     /// The later of the unit timestamp's and the emptied hash file's mtimes. Both files are read
@@ -471,10 +468,7 @@ fn mark_live(
                     reasons.push(Uncertain::Unresolved {
                         dependency: fingerprint::dep_name(&fp_dir, stem, dep.fingerprint)
                             .unwrap_or_else(|| le_hex(dep.fingerprint)),
-                        unit: UnitRef {
-                            profile: profile.to_path_buf(),
-                            dir_name: dir_name.to_string(),
-                        },
+                        unit: make_unit_ref(profile, dir_name),
                     });
                 }
             }
@@ -653,9 +647,13 @@ fn fingerprint_dir(profile: &Path, dir_name: &str) -> PathBuf {
 }
 
 fn unit_ref((profile, unit): &ProfileUnit) -> UnitRef {
+    make_unit_ref(profile, &unit.dir_name)
+}
+
+fn make_unit_ref(profile: &Path, dir_name: &str) -> UnitRef {
     UnitRef {
         profile: profile.to_path_buf(),
-        dir_name: unit.dir_name.clone(),
+        dir_name: dir_name.to_string(),
     }
 }
 
