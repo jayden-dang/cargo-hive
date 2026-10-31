@@ -1,7 +1,9 @@
 #![cfg(target_os = "macos")]
 mod common;
 use cargo_hive::liveness::{Liveness, Uncertain, UnitRef};
+use cargo_hive::platform;
 use common::cargo_fixture::*;
+use common::prove::{self, WindowOutcome};
 use common::Scratch;
 use std::collections::BTreeSet;
 use std::fs;
@@ -123,6 +125,11 @@ fn workspace(
 
 /// Lib `l`, bins `b` and `c` depending on it; `l` is broken, then `cargo build --bin c` fails.
 pub fn failed_build(label: &str) -> Busy {
+    failed_build_aged(label, false)
+}
+
+/// As `failed_build`; with `aged`, the check-mode units are backdated 30 days before the build.
+pub fn failed_build_aged(label: &str, aged: bool) -> Busy {
     let mut ws = workspace(
         label,
         &[("l", "", false)],
@@ -139,6 +146,9 @@ pub fn failed_build(label: &str) -> Busy {
     );
     ws.cargo(&["check", "--workspace"]);
     ws.checked = kinds(&ws.target).into_keys().collect();
+    if aged {
+        backdate_all(&ws.target, THIRTY_DAYS);
+    }
     ws.cargo(&["build", "--workspace"]);
     ws.break_source("l");
     ws.cargo_fails(&["build", "--bin", "c"]);
@@ -148,6 +158,11 @@ pub fn failed_build(label: &str) -> Busy {
 /// `n` <- `m` <- `app`, and `m` also depends on `k`; `m` is touched and `n` broken, then
 /// `cargo build -p m` fails before `m` starts.
 pub fn never_started(label: &str) -> Busy {
+    never_started_aged(label, false)
+}
+
+/// As `never_started`; with `aged`, the check-mode units are backdated 30 days before the build.
+pub fn never_started_aged(label: &str, aged: bool) -> Busy {
     let mut ws = workspace(
         label,
         &[
@@ -169,6 +184,9 @@ pub fn never_started(label: &str) -> Busy {
     );
     ws.cargo(&["check", "--workspace"]);
     ws.checked = kinds(&ws.target).into_keys().collect();
+    if aged {
+        backdate_all(&ws.target, THIRTY_DAYS);
+    }
     ws.cargo(&["build", "--workspace"]);
     let m = ws.src("m");
     let text = fs::read_to_string(&m).unwrap();
@@ -181,6 +199,12 @@ pub fn never_started(label: &str) -> Busy {
 /// `app` depends on `liba2 = { package = "liba" }`; `tool` depends on `liba`. With `with_tool`,
 /// `tool` is checked first so a current check-mode `liba` unit teaches the package id.
 pub fn renamed_dep(label: &str, with_tool: bool) -> Busy {
+    renamed_dep_aged(label, with_tool, false)
+}
+
+/// As `renamed_dep`; with `aged`, the units of the `tool` check are backdated 30 days before the
+/// build.
+pub fn renamed_dep_aged(label: &str, with_tool: bool, aged: bool) -> Busy {
     let mut rebuild = vec![vec![
         "build".to_string(),
         "-p".to_string(),
@@ -208,6 +232,9 @@ pub fn renamed_dep(label: &str, with_tool: bool) -> Busy {
     if with_tool {
         ws.cargo(&["check", "-p", "tool"]);
         ws.checked = kinds(&ws.target).into_keys().collect();
+        if aged {
+            backdate_all(&ws.target, THIRTY_DAYS);
+        }
     }
     ws.cargo(&["build", "-p", "app"]);
     ws.break_source("liba");
@@ -218,6 +245,12 @@ pub fn renamed_dep(label: &str, with_tool: bool) -> Busy {
 /// Proc-macro `pm` used by bin `b` and lib `o`; built for the host triple and once in release,
 /// then `pm` is broken and `cargo build --target <host> -p o` fails.
 pub fn host_dep(label: &str) -> Busy {
+    host_dep_aged(label, false)
+}
+
+/// As `host_dep`; with `aged`, the release build comes first and is backdated 30 days before the
+/// build for the host triple.
+pub fn host_dep_aged(label: &str, aged: bool) -> Busy {
     let triple = host_triple();
     let ws = workspace(
         label,
@@ -233,8 +266,14 @@ pub fn host_dep(label: &str) -> Busy {
         ]),
         "pm",
     );
-    ws.cargo(&["build", "--workspace", "--target", &triple]);
-    ws.cargo(&["build", "--workspace", "--release"]);
+    if aged {
+        ws.cargo(&["build", "--workspace", "--release"]);
+        backdate_all(&ws.target, THIRTY_DAYS);
+        ws.cargo(&["build", "--workspace", "--target", &triple]);
+    } else {
+        ws.cargo(&["build", "--workspace", "--target", &triple]);
+        ws.cargo(&["build", "--workspace", "--release"]);
+    }
     ws.break_source("pm");
     ws.cargo_fails(&["build", "--target", &triple, "-p", "o"]);
     ws
@@ -576,4 +615,76 @@ fn a_host_dependency_with_nothing_wanted_is_dead() {
     let (live, dead) = decided(&ws, SystemTime::now(), WINDOW);
 
     assert_ignored(&live, &dead, &[&pm]);
+}
+
+/// Restores the source that last compiled, deletes the dead units in a clone, replays the
+/// fixture's commands, and returns the 6 h window's report.
+fn replay(ws: &Busy) -> prove::WindowReport {
+    fs::write(&ws.restore.0, &ws.restore.1).unwrap();
+    let scratch = Scratch::new("busy-prove");
+    let fs_ = platform::current().unwrap().fs;
+    let input = prove::ProveInput {
+        target: ws.target.clone(),
+        checkout: ws.dir.clone(),
+        cmds: ws.rebuild.clone(),
+        windows: vec![WINDOW],
+        now: SystemTime::now(),
+    };
+    let report = prove::prove_with(fs_.as_ref(), &scratch.path, &input).unwrap();
+    println!("{}", report.render());
+    assert_eq!(report.baseline.rebuilt, Vec::<String>::new());
+    report.windows.into_iter().next().unwrap()
+}
+
+fn assert_passed_with_dead_units(window: &prove::WindowReport) {
+    assert_eq!(window.outcome, WindowOutcome::Passed, "{window:#?}");
+    assert!(window.dead_units > 0, "{window:#?}");
+    assert_eq!(window.rebuilt_live, 0, "{window:#?}");
+}
+
+#[test]
+fn deleting_the_dead_units_of_a_failed_build_rebuilds_no_live_unit() {
+    let ws = failed_build_aged("busy-replay-failed", true);
+    reached_not_current(&ws, "l", |_| true);
+
+    assert_passed_with_dead_units(&replay(&ws));
+}
+
+#[test]
+fn deleting_the_dead_units_of_a_build_that_never_started_rebuilds_no_live_unit() {
+    let ws = never_started_aged("busy-replay-never", true);
+    reached_not_current(&ws, "m", |_| true);
+
+    assert_passed_with_dead_units(&replay(&ws));
+}
+
+#[test]
+fn deleting_the_dead_units_beside_a_renamed_dependency_rebuilds_no_live_unit() {
+    let ws = renamed_dep_aged("busy-replay-renamed", true, true);
+    reached_not_current(&ws, "liba", |_| true);
+
+    assert_passed_with_dead_units(&replay(&ws));
+}
+
+#[test]
+fn deleting_the_dead_units_beside_a_host_dependency_rebuilds_no_live_unit() {
+    let ws = host_dep_aged("busy-replay-host", true);
+    let triple = host_triple();
+    host_pm(&ws, &triple);
+
+    assert_passed_with_dead_units(&replay(&ws));
+}
+
+#[test]
+fn a_replay_that_deletes_nothing_is_not_a_pass() {
+    let ws = failed_build("busy-replay-unaged");
+    reached_not_current(&ws, "l", |_| true);
+
+    let window = replay(&ws);
+
+    assert_eq!(window.dead_units, 0, "{window:#?}");
+    assert!(
+        matches!(window.outcome, WindowOutcome::Vacuous(_)),
+        "{window:#?}"
+    );
 }
