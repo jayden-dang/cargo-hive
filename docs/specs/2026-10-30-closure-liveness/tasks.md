@@ -474,9 +474,9 @@ Owner decision 2026-10-31: the proof only needs to compile, so no test or binary
 
 **Depends-on:** Task 10
 
-- [ ] **Step 1: Write the failing tests** in `tests/liveness.rs`: a table of accepted vectors (`["build"]`, `["check","--all-targets"]`, `["doc"]`, `["test","--no-run"]`, `["bench","--no-run","--offline"]`, `["+stable","test","--no-run"]`) and refused vectors (`["run"]`, `["test"]`, `["bench"]`, `["test","--","--nocapture"]`, `["build","--","-v"]`, `["test","--no-run","--","x"]`), each refusal naming the command; the example command lists in the ignored test's docs and `proof-runs.md` still pass `check_command`.
-- [ ] **Step 2: Implement** in `check_command`; update the `ProveInput` doc line (only compile steps of the owner's checkout run).
-- [ ] **Step 3: Verify.** `cargo test --test liveness --test liveness_prove --lib` and the merge gate.
-- [ ] **Step 4: Commit** `fix(liveness): replay only compile-only commands`.
+- [x] **Step 1: Write the failing tests** in `tests/liveness.rs`: a table of accepted vectors (`["build"]`, `["check","--all-targets"]`, `["doc"]`, `["test","--no-run"]`, `["bench","--no-run","--offline"]`, `["+stable","test","--no-run"]`) and refused vectors (`["run"]`, `["test"]`, `["bench"]`, `["test","--","--nocapture"]`, `["build","--","-v"]`, `["test","--no-run","--","x"]`), each refusal naming the command; the example command lists in the ignored test's docs and `proof-runs.md` still pass `check_command`.
+- [x] **Step 2: Implement** in `check_command`; update the `ProveInput` doc line (only compile steps of the owner's checkout run).
+- [x] **Step 3: Verify.** `cargo test --test liveness --test liveness_prove --lib` and the merge gate.
+- [x] **Step 4: Commit** `fix(liveness): replay only compile-only commands`.
 
 _Requirements: LIVE-4.28_
