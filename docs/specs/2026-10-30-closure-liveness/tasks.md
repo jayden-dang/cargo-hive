@@ -14,6 +14,7 @@ Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
+Delivered-by: 6b75d9ca4cfbf21fe7fafd8fa9aa9c4f4a756ae8
 
 **Goal:** Add `cargo_hive::liveness`, a read-only function that says which units of a Cargo target dir are live and which dead units' files may be collected, or why it cannot decide, and prove it with an ignored test that deletes those files in an APFS clone of a real target and replays the owner's commands.
 
