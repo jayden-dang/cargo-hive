@@ -486,6 +486,8 @@ _Requirements: LIVE-4.28_
 
 ## ROAD-5 amendment: decide a busy workspace's target dir
 
+Delivered-by: 999f00c1b930b1c5f20cf7c1aa607b6c2e37df01
+
 Owner decision 2026-10-31 (frame-change, close package `.skills/LIVE/amend-close-package.md`):
 a build that is mid-way or failed keeps its doubt local instead of making the whole target dir
 Undecided, and the proof locks the owner's target only while it decides and takes a snapshot.

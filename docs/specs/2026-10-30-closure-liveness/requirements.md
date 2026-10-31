@@ -1,7 +1,7 @@
 # Requirements: Closure liveness (live and dead units of a Cargo target dir, proven on a copy)
 
 Feature code: LIVE
-Status: In-progress
+Status: Implemented
 Date: 2026-10-30
 
 <!--
@@ -416,7 +416,10 @@ liveness and takes a snapshot, so that I can run it on klynt while `cargo watch`
   units inside it) and no deletion trial completed there. Still open: reclaim and liveness cost at a
   7-day window on a large, active workspace. 2026-10-31 (`proof-runs.md`, unresolved-edges section):
   every unit of klynt was invoked within 7 days, so that window reclaims nothing there even when
-  Decided.
+  Decided. 2026-10-31 (`proof-runs.md`, run 4): on a klynt target whose older history was built and
+  backdated for the test, the 6 h and 1 d windows Passed (13 dead units, 0 live rebuilt, locks held
+  10.9 s); that history was synthetic and had no not-current unit, so a trial on a long-lived, busy
+  target is still open.
 - Replaying from a copy of the checkout at another path (a `git archive` of a klynt commit that
   compiles) reuses the original units' directories and fingerprints — project owner — 2026-10-31 —
   forbid-guess (cấm đoán). Cargo is reported to hash path packages relative to the workspace root;
@@ -424,3 +427,7 @@ liveness and takes a snapshot, so that I can run it on klynt while `cargo watch`
   the klynt checkout at a commit that compiles. Answered 2026-10-31 (design Decision 16): measured on a two-crate
   path workspace, the relocated copy built fresh into a clone of the target with the same
   fingerprint dirs; build scripts that record absolute paths may still rebuild in the warm-up.
+  Contradicted 2026-10-31 (`proof-runs.md`, run 4): on klynt the relocated copy did not reuse the
+  original's units; the warm-up rebuilt 148, third-party crates among them. The cause was not
+  established. No deleted unit then needed a rebuild, so that run did not exercise a rebuild after
+  deletion; the deletion-and-replay case is covered by the fixtures only.
