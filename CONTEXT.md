@@ -70,7 +70,7 @@ Copying new registry units from a live checkout into the store, under a try-lock
 _Avoid_: harvest
 
 **Roots**:
-Units whose `invoked.timestamp` mtime falls inside the GC window, or lies later than now.
+Units whose `invoked.timestamp` mtime falls inside the GC window, or lies later than now. A not-current unit is a root too, dated by the later of its `invoked.timestamp` and its hash file's mtime (the moment Cargo last wanted it).
 
 **Closure liveness**:
 A unit is live if it is reachable from the roots over the fingerprint graph of its whole target dir, edges resolving across every profile dir in it.
@@ -87,6 +87,12 @@ _Avoid_: fingerprint, metadata hash
 **Not-current unit**:
 A unit dir under `.fingerprint/` whose hash file is empty or that never compiled: Cargo empties the hash of every dirty unit when it plans a build, so the dir is mid-rebuild, failed, or never started. Its JSON, when present, is from its last successful build.
 _Avoid_: stale unit, broken unit
+
+**Node**:
+A not-current unit as the liveness graph sees it: it is kept live, never listed dead, and its recorded dependency edges are followed.
+
+**Package id**:
+The identifier Cargo records on a dependency edge in a fingerprint JSON. An edge that matches no current unit is resolved by the not-current units of the package whose id it names; a package id learned under two names resolves nothing.
 
 **Undecided**:
 The liveness verdict for a target dir whose graph cannot prove reachability (a not-current unit with no JSON inside the window, an unresolved edge with no not-current dir of its package, or an unsupported profile); it has no dead units, and each reason names what clears it.
