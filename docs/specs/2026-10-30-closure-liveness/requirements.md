@@ -64,8 +64,11 @@ the fingerprint graph from a unit whose timestamp falls inside the window.
 - **LIVE-1.1** WHEN liveness is computed for a Cargo target dir with a window and a current time
   THE SYSTEM SHALL treat as roots exactly the current units, in every profile dir of that target
   dir, that are inside the window.
-- **LIVE-1.2** IF a current unit has no unit timestamp, or its modification time cannot be read,
-  THEN THE SYSTEM SHALL not treat that unit as a root.
+- ~~**LIVE-1.2**~~ superseded by LIVE-1.11 and LIVE-2.12 (2026-10-31, whole-branch review): a
+  timestamp that exists but cannot be read is doubt, not absence, and doubt must not let a recently
+  built unit be listed as dead.
+- **LIVE-1.11** IF the unit timestamp file of a current unit does not exist THEN THE SYSTEM SHALL
+  not treat that unit as a root.
 - **LIVE-1.3** THE SYSTEM SHALL mark live every current unit reachable from a root over fingerprint
   `deps` edges, each edge resolved by matching the dependency's u64, as little-endian hex, against
   the hash files of the current units of every profile dir of the same Cargo target dir.
@@ -97,9 +100,10 @@ is called dead on incomplete evidence.
   target dir THEN THE SYSTEM SHALL return Undecided for the whole target dir with a reason naming
   the unit directory and the dependency's name, or the dependency's fingerprint when its name
   cannot be read.
-- **LIVE-2.4** WHEN a not-current unit is outside the window, or has no readable unit timestamp,
-  THE SYSTEM SHALL leave it out of the liveness computation and out of every
-  dead unit's file list.
+- ~~**LIVE-2.4**~~ superseded by LIVE-2.13 (2026-10-31): the unreadable case moved to LIVE-2.12.
+- **LIVE-2.13** WHEN a not-current unit is outside the window, or its unit timestamp file does not
+  exist, THE SYSTEM SHALL leave it out of the liveness computation and out of every dead unit's
+  file list.
 - **LIVE-2.5** WHEN the liveness result is Undecided THE SYSTEM SHALL report no dead units.
 - **LIVE-2.6** WHEN the liveness result is Undecided THE SYSTEM SHALL report every reason that
   applies, not only the first found.
@@ -117,6 +121,9 @@ is called dead on incomplete evidence.
   SHALL return Undecided for the whole target dir with a reason naming both unit directories.
 - **LIVE-2.11** IF the Cargo target dir could not be read when it was identified THEN THE SYSTEM
   SHALL return Undecided with a reason naming the target dir and why.
+- **LIVE-2.12** IF the unit timestamp file of a current or not-current unit exists but its
+  modification time cannot be read, or a unit directory's name is not valid UTF-8, THEN THE SYSTEM
+  SHALL return Undecided for the whole target dir with a reason naming that file or directory.
 
 ## 3. List the files of each dead unit
 
@@ -151,10 +158,12 @@ rebuilds and how many bytes the deletion would free, before ROAD-6 deletes anyth
   7 days, with the same current time for all three.
 - ~~**LIVE-4.3**~~ superseded by LIVE-4.21 (2026-10-31, owner amendment after the first klynt run):
   the window clone is now taken from the warmed-up clone, not from the original.
-- **LIVE-4.4** WHEN the proof test replays the commands for a window THE SYSTEM SHALL run each one
-  as an argument vector, without a shell, in `HIVE_PROVE_CHECKOUT` with both `CARGO_TARGET_DIR`
-  and `CARGO_BUILD_BUILD_DIR` set to that window's clone and `--message-format=json` inserted
-  right after the cargo subcommand (the first element that does not start with `+` or `-`).
+- ~~**LIVE-4.4**~~ superseded by LIVE-4.23 (2026-10-31): the replay also carries `--locked`.
+- **LIVE-4.23** WHEN the proof test replays commands (warm-up, baseline or a window) THE SYSTEM
+  SHALL run each one as an argument vector, without a shell, in `HIVE_PROVE_CHECKOUT` with both
+  `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` set to the clone being replayed, with `--locked`
+  (unless `--locked` or `--frozen` is already present) and `--message-format=json` inserted after
+  the cargo subcommand (the first element that does not start with `+` or `-`), before any `--`.
 - **LIVE-4.5** THE SYSTEM SHALL count as rebuilt every unit, in any profile dir of the clone, whose
   directory under `.fingerprint/` is new after the replay or whose unit timestamp's modification
   time changed during the replay.
@@ -205,6 +214,20 @@ rebuilds and how many bytes the deletion would free, before ROAD-6 deletes anyth
 - **LIVE-4.22** WHEN the proof test prints its report THE SYSTEM SHALL include, for the warm-up and
   for the baseline, the number of units that rebuilt, each command's argument vector and exit status,
   and the elapsed time.
+- **LIVE-4.24** IF a command in `HIVE_PROVE_CMDS` is not one of `build`, `check`, `test`, `doc`,
+  `bench` or `run` (long names only), or has any flag other than `+toolchain`, `-q`, `-v`, `--locked`,
+  `--frozen`, `--offline` or `--color <value>` before the subcommand, or has an argument after `--`
+  for `build`, `check` or `doc`, THEN THE SYSTEM SHALL fail the test naming that command.
+- **LIVE-4.25** WHEN the proof test replays commands THE SYSTEM SHALL remove from the child's
+  environment the target-dir, build-dir, artifact-dir, rustc-wrapper, `CARGO_UNSTABLE_*` and
+  `CARGO_ALIAS_*` variables, and IF the checkout's Cargo configuration (the checkout, its ancestors
+  and `$CARGO_HOME`, or `$HOME/.cargo`) contains `include`, `artifact-dir`, `out-dir`, or an
+  `[alias]` entry named like an allowed command, THEN THE SYSTEM SHALL fail the test naming that file.
+- **LIVE-4.26** IF a listing, a tree walk, a config file, a child's output or a child's run time
+  reaches its bound (or a read fails) THEN THE SYSTEM SHALL fail the test naming it, and SHALL NOT
+  continue with a partial result.
+- **LIVE-4.27** IF the warm-up or the baseline did not run THEN THE SYSTEM SHALL print "not run" for
+  it in the report, not a count of zero.
 
 ## 5. Existing commands keep working
 
@@ -249,7 +272,7 @@ Files this feature touches, and what each must keep doing:
   question (below); LIVE-4.9's proof run is where it gets measured, and the number is recorded,
   not guessed.
 - **Security:** None — liveness reads the owner's own target dirs and crosses no trust boundary;
-  the proof deletes only inside its own clone (LIVE-4.3).
+  the proof deletes only inside its own clone (LIVE-4.21).
 - **Reliability:** None — liveness writes nothing (LIVE-1.8). Deleting under the owner's lock with
   liveness rechecked at apply time is ROAD-6's (ARCH-19, ARCH-20).
 - **Accessibility:** None — no user interface; liveness has no CLI surface in this feature.

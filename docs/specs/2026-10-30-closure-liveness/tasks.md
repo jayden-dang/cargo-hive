@@ -181,7 +181,7 @@ Design "Liveness", flow steps 2 to 5 and 9, Decisions 1, 2 and 6. This task ship
 - [x] **Step 3: Verify.** The new tests pass. Run the merge gate.
 - [x] **Step 4: Commit** `feat(liveness): decide which units of a target dir are live from the window and the fingerprint graph`.
 
-_Requirements: LIVE-1.1, LIVE-1.2, LIVE-1.3, LIVE-1.4, LIVE-1.5, LIVE-1.6, LIVE-1.7, LIVE-1.8, LIVE-1.9, LIVE-1.10_
+_Requirements: LIVE-1.1, LIVE-1.3, LIVE-1.4, LIVE-1.5, LIVE-1.6, LIVE-1.7, LIVE-1.8, LIVE-1.9, LIVE-1.10_
 
 ---
 
@@ -215,7 +215,7 @@ Design "Liveness", flow steps 1–3, 5 and 7, Decision 3.
 - [x] **Step 3: Verify** `cargo test --lib liveness::` passes. Run the merge gate.
 - [x] **Step 4: Commit** `feat(liveness): refuse to decide, with every reason, when the graph cannot prove reachability`.
 
-_Requirements: LIVE-2.1, LIVE-2.2, LIVE-2.3, LIVE-2.4, LIVE-2.5, LIVE-2.6, LIVE-2.7, LIVE-2.9, LIVE-2.10, LIVE-2.11_
+_Requirements: LIVE-2.1, LIVE-2.2, LIVE-2.3, LIVE-2.5, LIVE-2.6, LIVE-2.7, LIVE-2.9, LIVE-2.10, LIVE-2.11_
 
 ---
 
@@ -307,7 +307,7 @@ Design "Proof procedure" and Decisions 9 and 10.
   - `pub struct ProveInput { pub target: PathBuf, pub checkout: PathBuf, pub cmds: Vec<Vec<String>>, pub windows: Vec<Duration>, pub now: SystemTime }`
   - `pub fn prove(input: &ProveInput) -> Result<ProveReport, String>`, which calls `prove_with(&*platform::current()?.fs, &Scratch::new("prove"), input)`
   - `pub fn prove_with(fs: &dyn Fs, scratch: &Path, input: &ProveInput) -> Result<ProveReport, String>`, where `Err` is a test-level failure (bad command, lock held, not APFS or not the same volume, original changed)
-  - `pub struct ProveReport { pub baseline_rebuilt: Vec<String>, pub windows: Vec<WindowReport> }`, with `fn all_vacuous(&self) -> bool` and `fn render(&self) -> String` (the test prints it)
+  - `pub struct ProveReport { pub baseline_rebuilt: Vec<String>, pub windows: Vec<WindowReport> }` *(replaced in Task 9 by `warm_up` and `baseline` phase reports)*, with `fn all_vacuous(&self) -> bool` and `fn render(&self) -> String` (the test prints it)
   - `pub enum WindowOutcome { Passed, Vacuous(String), RebuiltLive(Vec<String>) }`
   - `pub struct WindowReport { pub window: Duration, pub outcome: WindowOutcome, pub dead_units: usize, pub dead_bytes: Footprint, pub unmapped: Footprint, pub rebuilt: usize, pub rebuilt_live: usize, pub reasons: Vec<String>, pub commands: Vec<(Vec<String>, i32)> }`
   - pure helpers, all `pub`:
@@ -350,7 +350,7 @@ Design "Proof procedure" and Decisions 9 and 10.
 - [x] **Step 4: Verify** `cargo test --test liveness` passes. Run the merge gate.
 - [x] **Step 5: Commit** `test(liveness): prove on an APFS clone that deleting dead units rebuilds no live unit`.
 
-_Requirements: LIVE-4.2, LIVE-4.4, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16_
+_Requirements: LIVE-4.2, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16_
 
 ---
 
@@ -426,3 +426,30 @@ Owner amendment 2026-10-31, after the first klynt run (see `proof-runs.md`): the
   4. Expect the 6 h and 24 h windows `Passed` with `rebuilt_live == 0`. Record the date, commands, each window's report, the warm-up and baseline reports and the elapsed time in `proof-runs.md`; a `RebuiltLive` result is a stop-and-report. Remove the scratch copy afterwards.
 
 _Requirements: LIVE-4.18, LIVE-4.19, LIVE-4.20, LIVE-4.21, LIVE-4.22_
+
+---
+
+### Task 10: Fix the whole-branch review findings
+
+Owner-visible amendment 2026-10-31 after the whole-branch review (`.skills/LIVE/review-branch-*.md`): requirements LIVE-1.2 and LIVE-2.4 are superseded because an unreadable timestamp is doubt, not absence; the replay guards that four review cycles added are written down as LIVE-4.23 to LIVE-4.27.
+
+**Files:**
+- Modify: `src/liveness.rs` (timestamp errors, non-UTF-8 names, `TimestampUnreadable`)
+- Modify: `src/lib.rs`, `src/gc.rs`, `src/fingerprint.rs` (`#[doc(hidden)]` on items nothing in the binary uses yet)
+- Modify: `tests/common/prove.rs`, `tests/liveness.rs`, `tests/liveness_prove.rs`, `tests/guards.rs` (as the findings list)
+- Test: `src/liveness.rs`, `tests/liveness.rs`
+
+**Reuse:** none — new code (rung 7) for the procedure. It reuses `liveness::liveness`, `gc::measure`, `cargo_target::identify` + `fingerprint::read_profile` (it builds the `TargetDir` by hand, since no function does that for one path), `platform::current()` for `Fs` (`volume`, `try_lock_exclusive`), `serde_json`, the system `cp`, and the tree-walk pattern of `tests/guards.rs`.
+
+**Interfaces:**
+- Consumes: Tasks 3 to 9
+- Produces: `Uncertain::TimestampUnreadable { path, why }`; a non-UTF-8 unit dir name gives `Uncertain::NoUnitHash`; the report prints `not run` for a phase that did not run.
+
+**Depends-on:** Task 9
+
+- [x] **Step 1: Write the failing tests** for each finding (see `.skills/LIVE/branch-fix-report.md` for the mapping).
+- [x] **Step 2: Implement** the fixes.
+- [x] **Step 3: Verify.** `cargo test --lib`, `cargo test --test liveness --test liveness_prove --test guards`, and the merge gate.
+- [x] **Step 4: Commit** with conventional subjects.
+
+_Requirements: LIVE-1.11, LIVE-2.12, LIVE-2.13, LIVE-4.23, LIVE-4.24, LIVE-4.25, LIVE-4.26, LIVE-4.27_
