@@ -1,7 +1,7 @@
 # Requirements: Closure liveness (live and dead units of a Cargo target dir, proven on a copy)
 
 Feature code: LIVE
-Status: Approved
+Status: In-progress
 Date: 2026-10-30
 
 <!--
