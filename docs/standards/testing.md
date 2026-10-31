@@ -39,6 +39,11 @@ None — the 2026-10-28 interview ratified no rule beyond the `test-first` skill
   - it contains `.metadata_never_index`;
   - it is detached on drop;
   - stale `hive-it-*` images and mounts are swept at test start.
+- Exception (approved 2026-10-31 for LIVE-4.18 to LIVE-4.28): the `#[ignore]` test in `tests/liveness_prove.rs` may run compile-only `cargo` commands in a checkout the owner names through `HIVE_PROVE_CHECKOUT`, under these conditions:
+  - it never runs by default, and it has no default target or checkout;
+  - only `build`, `check`, `doc`, `test --no-run` and `bench --no-run` are replayed, so no test or binary of the checkout is executed; the checkout's own `build.rs` and proc-macros run as they do in the owner's own `cargo build`;
+  - every replay uses `--locked` and has `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` set to a clone inside the test's `/private/tmp/hive-it-*` scratch dir;
+  - the original target dir and the checkout's `Cargo.lock` are compared before and after, and any change fails the test.
 
 ## Not a substitute for acceptance
 

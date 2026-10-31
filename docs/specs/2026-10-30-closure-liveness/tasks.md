@@ -34,7 +34,7 @@ The canonical sources (`docs/standards/` is the SSOT). Read them; do not restate
 | `docs/standards/INDEX.md` | `80cd41328c0f7652` |
 | `docs/standards/code.md` (bounds on every walk, read and child process; no new deps; no requirement IDs in code, comments or test names; `//!` module comments) | `afdcc8b89136f573` |
 | `docs/standards/errors-logging.md` | `48f5baac3b52a552` |
-| `docs/standards/testing.md` (merge gate; scratch-only fixtures under `/private/tmp/hive-it-*`) | `77c0f0f348486d9b` |
+| `docs/standards/testing.md` (merge gate; scratch-only fixtures under `/private/tmp/hive-it-*`; exception for the ignored proof test added 2026-10-31) | `4bc4585535454d94` |
 | `docs/architecture/INDEX.md`: this feature relies on ARCH-1, 9, 11, 15, 16, 17, 18, 20 | `8cb275c512d9ab3c` |
 | `docs/specs/2026-10-30-closure-liveness/design.md` (Decisions 1–11) | see git |
 | `.skills/LIVE/close-package.md`, `.skills/LIVE/fresh-build-trace.md`, `.skills/LIVE/design-review.md` | see git |
@@ -452,4 +452,31 @@ Owner-visible amendment 2026-10-31 after the whole-branch review (`.skills/LIVE/
 - [x] **Step 3: Verify.** `cargo test --lib`, `cargo test --test liveness --test liveness_prove --test guards`, and the merge gate.
 - [x] **Step 4: Commit** with conventional subjects.
 
-_Requirements: LIVE-1.11, LIVE-2.12, LIVE-2.13, LIVE-4.23, LIVE-4.24, LIVE-4.25, LIVE-4.26, LIVE-4.27_
+_Requirements: LIVE-1.11, LIVE-2.12, LIVE-2.13, LIVE-4.23, LIVE-4.25, LIVE-4.26, LIVE-4.27_
+
+---
+
+### Task 11: Make the replay compile-only
+
+Owner decision 2026-10-31: the proof only needs to compile, so no test or binary of the owner's checkout may run (LIVE-4.28), and `docs/standards/testing.md` records the narrow exception for the ignored test.
+
+**Files:**
+- Modify: `tests/common/prove.rs` (`check_command`, the allow-list, the `ProveInput` doc line)
+- Modify: `tests/liveness.rs`, `tests/liveness_prove.rs` (refusal tables and the example commands)
+- Modify: `docs/specs/2026-10-30-closure-liveness/proof-runs.md` (the command list)
+- Test: `tests/liveness.rs`
+
+**Reuse:** none — new code (rung 7) for the procedure. It reuses `liveness::liveness`, `gc::measure`, `cargo_target::identify` + `fingerprint::read_profile` (it builds the `TargetDir` by hand, since no function does that for one path), `platform::current()` for `Fs` (`volume`, `try_lock_exclusive`), `serde_json`, the system `cp`, and the tree-walk pattern of `tests/guards.rs`.
+
+**Interfaces:**
+- Consumes: Task 7's `check_command`, `replay_args`
+- Produces: `check_command` accepts exactly `build`, `check`, `doc`, and `test` or `bench` only when `--no-run` is present before any `--`; it refuses `run` and every argument after `--`. `--no-run` is not added for the owner, who must write it.
+
+**Depends-on:** Task 10
+
+- [ ] **Step 1: Write the failing tests** in `tests/liveness.rs`: a table of accepted vectors (`["build"]`, `["check","--all-targets"]`, `["doc"]`, `["test","--no-run"]`, `["bench","--no-run","--offline"]`, `["+stable","test","--no-run"]`) and refused vectors (`["run"]`, `["test"]`, `["bench"]`, `["test","--","--nocapture"]`, `["build","--","-v"]`, `["test","--no-run","--","x"]`), each refusal naming the command; the example command lists in the ignored test's docs and `proof-runs.md` still pass `check_command`.
+- [ ] **Step 2: Implement** in `check_command`; update the `ProveInput` doc line (only compile steps of the owner's checkout run).
+- [ ] **Step 3: Verify.** `cargo test --test liveness --test liveness_prove --lib` and the merge gate.
+- [ ] **Step 4: Commit** `fix(liveness): replay only compile-only commands`.
+
+_Requirements: LIVE-4.28_

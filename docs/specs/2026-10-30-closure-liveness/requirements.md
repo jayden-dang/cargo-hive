@@ -214,10 +214,8 @@ rebuilds and how many bytes the deletion would free, before ROAD-6 deletes anyth
 - **LIVE-4.22** WHEN the proof test prints its report THE SYSTEM SHALL include, for the warm-up and
   for the baseline, the number of units that rebuilt, each command's argument vector and exit status,
   and the elapsed time.
-- **LIVE-4.24** IF a command in `HIVE_PROVE_CMDS` is not one of `build`, `check`, `test`, `doc`,
-  `bench` or `run` (long names only), or has any flag other than `+toolchain`, `-q`, `-v`, `--locked`,
-  `--frozen`, `--offline` or `--color <value>` before the subcommand, or has an argument after `--`
-  for `build`, `check` or `doc`, THEN THE SYSTEM SHALL fail the test naming that command.
+- ~~**LIVE-4.24**~~ superseded by LIVE-4.28 (2026-10-31, owner decision after the whole-branch review):
+  the replay is compile-only, so no test or binary of the checkout runs.
 - **LIVE-4.25** WHEN the proof test replays commands THE SYSTEM SHALL remove from the child's
   environment the target-dir, build-dir, artifact-dir, rustc-wrapper, `CARGO_UNSTABLE_*` and
   `CARGO_ALIAS_*` variables, and IF the checkout's Cargo configuration (the checkout, its ancestors
@@ -297,3 +295,8 @@ Files this feature touches, and what each must keep doing:
 - Closure-scan cost and steady-state reclaim at a 7-day window — project owner — 2026-10-25 —
   forbid-guess (cấm đoán); carried from foundation `requirements.md:154`. Measured by LIVE-4.9 on
   klynt once its target is older than 7 days (oldest `invoked.timestamp` was 2026-10-26 20:14).
+- **LIVE-4.28** IF a command in `HIVE_PROVE_CMDS` is not one of `build`, `check`, `doc`,
+  `test --no-run` or `bench --no-run` (long names only; `test` or `bench` without `--no-run`, and
+  `run`, are refused), or has any flag other than `+toolchain`, `-q`, `-v`, `--locked`, `--frozen`,
+  `--offline` or `--color <value>` before the subcommand, or has an argument after `--`, THEN THE
+  SYSTEM SHALL fail the test naming that command.
