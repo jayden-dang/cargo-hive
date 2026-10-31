@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+const DIR_CAP: usize = 64;
 const TWO_DAYS: Duration = Duration::from_secs(2 * 86_400);
 
 /// A path-only workspace driven by real Cargo into a busy state.
@@ -191,7 +192,7 @@ pub fn renamed_dep(label: &str, with_tool: bool) -> Busy {
             vec!["check".to_string(), "-p".to_string(), "tool".to_string()],
         );
     }
-    let ws = workspace(
+    let mut ws = workspace(
         label,
         &[("liba", "", false)],
         &[
@@ -206,6 +207,7 @@ pub fn renamed_dep(label: &str, with_tool: bool) -> Busy {
     );
     if with_tool {
         ws.cargo(&["check", "-p", "tool"]);
+        ws.checked = kinds(&ws.target).into_keys().collect();
     }
     ws.cargo(&["build", "-p", "app"]);
     ws.break_source("liba");
@@ -262,8 +264,15 @@ fn hash_file(unit: &UnitRef) -> PathBuf {
     let dir = unit.profile.join(".fingerprint").join(&unit.dir_name);
     fs::read_dir(dir)
         .unwrap()
+        .take(DIR_CAP)
         .map(|e| e.unwrap().path())
-        .find(|p| p.extension().is_none() && p.file_name().unwrap() != "invoked.timestamp")
+        .find(|p| {
+            let name = p.file_name().unwrap().to_string_lossy();
+            p.extension().is_none()
+                && name != "invoked.timestamp"
+                && !name.starts_with("dep-")
+                && !name.starts_with("output-")
+        })
         .expect("a hash file")
 }
 
@@ -272,13 +281,7 @@ fn hash_file_mtime(unit: &UnitRef) -> SystemTime {
 }
 
 fn has_empty_hash_file(unit: &UnitRef) -> bool {
-    let dir = unit.profile.join(".fingerprint").join(&unit.dir_name);
-    fs::read_dir(dir).unwrap().any(|e| {
-        let e = e.unwrap();
-        e.file_name() != "invoked.timestamp"
-            && e.path().extension().is_none()
-            && e.metadata().unwrap().len() == 0
-    })
+    fs::metadata(hash_file(unit)).unwrap().len() == 0
 }
 
 /// The one not-current unit of package `name` in the profiles `keep` accepts, proven to be at
@@ -299,6 +302,82 @@ fn decided(ws: &Busy, now: SystemTime, window: Duration) -> (BTreeSet<UnitRef>, 
             dead.into_iter().map(|d| d.unit).collect(),
         ),
         Liveness::Undecided { reasons } => panic!("liveness was undecided: {reasons:#?}"),
+    }
+}
+
+fn edge_packages(ws: &Busy, unit: &UnitRef) -> BTreeSet<u64> {
+    let profile = read_target(&ws.target)
+        .profiles
+        .into_iter()
+        .find(|p| p.path == unit.profile)
+        .expect("the unit's profile");
+    let current = profile
+        .graph
+        .into_iter()
+        .flat_map(|g| g.units)
+        .filter(|u| u.dir_name == unit.dir_name)
+        .flat_map(|u| u.deps);
+    let not_current = profile
+        .not_current_units
+        .into_iter()
+        .filter(|u| u.dir.file_name().is_some_and(|n| *n == *unit.dir_name))
+        .flat_map(|u| u.deps);
+    current.chain(not_current).map(|d| d.package).collect()
+}
+
+/// Asserts the package ids `unit` depends on were all seen on edges of the `teachers`.
+fn assert_learned(ws: &Busy, unit: &UnitRef, teachers: &BTreeSet<UnitRef>) {
+    let wanted = edge_packages(ws, unit);
+    assert!(!wanted.is_empty(), "{unit:?} has no edges");
+    let taught: BTreeSet<u64> = teachers.iter().flat_map(|t| edge_packages(ws, t)).collect();
+    assert!(wanted.is_subset(&taught), "{wanted:?} not in {taught:?}");
+}
+
+/// Backdates every unit timestamp and the hash file of each `aged` unit by two days.
+fn age_out(ws: &Busy, aged: &[&UnitRef]) {
+    backdate_all(&ws.target, TWO_DAYS);
+    for unit in aged {
+        set_mtime(&hash_file(unit), SystemTime::now() - TWO_DAYS);
+    }
+}
+
+fn freshen(unit: &UnitRef, kind: &str) {
+    set_mtime(&timestamp_of(unit, kind), SystemTime::now());
+}
+
+fn assert_split(
+    live: &BTreeSet<UnitRef>,
+    dead: &[UnitRef],
+    expect_live: &[&UnitRef],
+    expect_dead: &[&UnitRef],
+) {
+    for unit in expect_live {
+        assert!(live.contains(*unit), "{unit:?} should be live: {live:#?}");
+        assert!(
+            !dead.contains(*unit),
+            "{unit:?} should not be dead: {dead:#?}"
+        );
+    }
+    for unit in expect_dead {
+        assert!(dead.contains(*unit), "{unit:?} should be dead: {dead:#?}");
+        assert!(
+            !live.contains(*unit),
+            "{unit:?} should not be live: {live:#?}"
+        );
+    }
+}
+
+/// A not-current unit outside the window with nothing wanting it is neither live nor dead.
+fn assert_ignored(live: &BTreeSet<UnitRef>, dead: &[UnitRef], units: &[&UnitRef]) {
+    for unit in units {
+        assert!(
+            !live.contains(*unit),
+            "{unit:?} should not be live: {live:#?}"
+        );
+        assert!(
+            !dead.contains(*unit),
+            "{unit:?} should not be dead: {dead:#?}"
+        );
     }
 }
 
@@ -329,10 +408,37 @@ fn a_failed_build_leaves_the_library_unit_live() {
     let b = current(&ws, "bin", "b", None);
     assert_ne!(check, broken);
 
-    let (live, _) = decided(&ws, SystemTime::now(), WINDOW);
+    let (live, dead) = decided(&ws, SystemTime::now(), WINDOW);
 
-    assert!(live.contains(&broken), "{broken:?} not in {live:#?}");
-    assert!(live.contains(&check) && live.contains(&b), "{live:#?}");
+    assert_split(&live, &dead, &[&broken, &check, &b], &[]);
+}
+
+#[test]
+fn a_failed_build_keeps_the_library_live_through_an_unmatched_edge_alone() {
+    let ws = failed_build("busy-failed-edge");
+    let broken = reached_not_current(&ws, "l", |_| true);
+    let b = current(&ws, "bin", "b", None);
+    let teachers: BTreeSet<UnitRef> = ws.checked.iter().cloned().collect();
+    assert_learned(&ws, &b, &teachers);
+    age_out(&ws, &[&broken]);
+    freshen(&b, "bin");
+
+    let (live, dead) = decided(&ws, SystemTime::now(), WINDOW);
+
+    let check_units: Vec<&UnitRef> = ws.checked.iter().collect();
+    assert_split(&live, &dead, &[&broken, &b], &check_units);
+}
+
+#[test]
+fn a_failed_build_with_nothing_wanted_leaves_the_library_dead() {
+    let ws = failed_build("busy-failed-dead");
+    let broken = reached_not_current(&ws, "l", |_| true);
+    let c = reached_not_current(&ws, "c", |_| true);
+    age_out(&ws, &[&broken, &c]);
+
+    let (live, dead) = decided(&ws, SystemTime::now(), WINDOW);
+
+    assert_ignored(&live, &dead, &[&broken]);
 }
 
 #[test]
@@ -348,14 +454,11 @@ fn a_build_that_never_started_keeps_its_dependencies_live_through_the_old_json()
     assert!(fs::metadata(&stamp).unwrap().modified().unwrap() < old);
     assert!(hash_file_mtime(&m) > old);
 
-    let (live, _) = decided(&ws, SystemTime::now(), WINDOW);
+    let (live, dead) = decided(&ws, SystemTime::now(), WINDOW);
 
-    assert!(live.contains(&m), "{m:?} not in {live:#?}");
-    assert!(live.contains(&k), "the build-mode k is not live: {live:#?}");
-    assert!(
-        !live.contains(&app),
-        "the backdated bin should not be live: {live:#?}"
-    );
+    let check_units: Vec<&UnitRef> = ws.checked.iter().collect();
+    assert_split(&live, &dead, &[&m, &k], &[&app]);
+    assert_split(&live, &dead, &[], &check_units);
 }
 
 #[test]
@@ -364,9 +467,36 @@ fn a_renamed_dependency_resolves_through_a_checked_sibling() {
 
     let liba = reached_not_current(&ws, "liba", |_| true);
 
-    let (live, _) = decided(&ws, SystemTime::now(), WINDOW);
+    let (live, dead) = decided(&ws, SystemTime::now(), WINDOW);
 
-    assert!(live.contains(&liba), "{liba:?} not in {live:#?}");
+    assert_split(&live, &dead, &[&liba], &[]);
+}
+
+#[test]
+fn a_renamed_dependency_stays_live_through_an_unmatched_edge_alone() {
+    let ws = renamed_dep("busy-renamed-edge", true);
+    let liba = reached_not_current(&ws, "liba", |_| true);
+    let app = reached_not_current(&ws, "app", |_| true);
+    let teachers: BTreeSet<UnitRef> = ws.checked.iter().cloned().collect();
+    assert_learned(&ws, &app, &teachers);
+    age_out(&ws, &[&liba]);
+
+    let (live, dead) = decided(&ws, SystemTime::now(), WINDOW);
+
+    let check_units: Vec<&UnitRef> = ws.checked.iter().collect();
+    assert_split(&live, &dead, &[&liba, &app], &check_units);
+}
+
+#[test]
+fn a_renamed_dependency_with_nothing_wanted_is_dead() {
+    let ws = renamed_dep("busy-renamed-dead", true);
+    let liba = reached_not_current(&ws, "liba", |_| true);
+    let app = reached_not_current(&ws, "app", |_| true);
+    age_out(&ws, &[&liba, &app]);
+
+    let (live, dead) = decided(&ws, SystemTime::now(), WINDOW);
+
+    assert_ignored(&live, &dead, &[&liba, &app]);
 }
 
 #[test]
@@ -387,18 +517,63 @@ fn a_renamed_dependency_without_a_taught_package_id_is_unresolved() {
     }
 }
 
+fn host_pm(ws: &Busy, triple: &str) -> UnitRef {
+    reached_not_current(ws, "pm", |p| {
+        !p.to_string_lossy().contains(triple) && p.ends_with("debug")
+    })
+}
+
+fn release_units(ws: &Busy) -> BTreeSet<UnitRef> {
+    kinds(&ws.target)
+        .into_keys()
+        .filter(|u| u.profile.ends_with("release"))
+        .collect()
+}
+
 #[test]
 fn a_host_dependency_not_current_under_a_target_triple_stays_live() {
     let ws = host_dep("busy-host");
     let triple = host_triple();
 
-    let pm = reached_not_current(&ws, "pm", |p| {
-        !p.to_string_lossy().contains(&triple) && p.ends_with("debug")
-    });
+    let pm = host_pm(&ws, &triple);
     let b = current(&ws, "bin", "b", Some(&triple));
 
-    let (live, _) = decided(&ws, SystemTime::now(), WINDOW);
+    let (live, dead) = decided(&ws, SystemTime::now(), WINDOW);
 
-    assert!(live.contains(&pm), "{pm:?} not in {live:#?}");
-    assert!(live.contains(&b), "{b:?} not in {live:#?}");
+    assert_split(&live, &dead, &[&pm, &b], &[]);
+}
+
+#[test]
+fn a_host_dependency_stays_live_through_an_unmatched_edge_alone() {
+    let ws = host_dep("busy-host-edge");
+    let triple = host_triple();
+    let pm = host_pm(&ws, &triple);
+    let b = current(&ws, "bin", "b", Some(&triple));
+    let release = release_units(&ws);
+    let release_pm: Vec<UnitRef> = find(&kinds(&ws.target), "lib", "pm", None)
+        .into_iter()
+        .filter(|u| release.contains(u))
+        .collect();
+    assert!(!release_pm.is_empty());
+    assert_learned(&ws, &b, &release);
+    age_out(&ws, &[&pm]);
+    freshen(&b, "bin");
+
+    let (live, dead) = decided(&ws, SystemTime::now(), WINDOW);
+
+    let release_pm: Vec<&UnitRef> = release_pm.iter().collect();
+    assert_split(&live, &dead, &[&pm, &b], &release_pm);
+}
+
+#[test]
+fn a_host_dependency_with_nothing_wanted_is_dead() {
+    let ws = host_dep("busy-host-dead");
+    let triple = host_triple();
+    let pm = host_pm(&ws, &triple);
+    let o = reached_not_current(&ws, "o", |p| p.to_string_lossy().contains(&triple));
+    age_out(&ws, &[&pm, &o]);
+
+    let (live, dead) = decided(&ws, SystemTime::now(), WINDOW);
+
+    assert_ignored(&live, &dead, &[&pm]);
 }
