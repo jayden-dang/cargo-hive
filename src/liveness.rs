@@ -1,7 +1,9 @@
 //! Which units of a target dir are live, and which are dead. Read-only: it reads `.fingerprint/`
-//! reports and `invoked.timestamp` mtimes through `Fs`, runs no process and writes nothing. A
-//! unit is live when it was invoked inside the window or a live unit depends on it, across every
-//! supported profile dir of the target. Anything it cannot decide is reported, never guessed.
+//! reports and the mtimes of `invoked.timestamp` and of not-current units' hash files through
+//! `Fs`, runs no process and writes nothing. A unit is live when it was invoked inside the window
+//! or a live unit depends on it, across every supported profile dir of the target; an edge no
+//! current unit matches keeps the not-current units of its package. Anything it cannot decide is
+//! reported, never guessed.
 
 use crate::cargo_target::TargetDir;
 use crate::fingerprint::{self, le_hex, DepEdge, Format, Unit};
@@ -71,7 +73,7 @@ impl Uncertain {
                 "Cargo builds the never compiled unit or abandons it, or its timestamp ages out of the window"
             }
             Uncertain::Unresolved { .. } => {
-                "Cargo rebuilds the unit or the dependency it names, or the unit is removed"
+                "Cargo builds the dependency it names, or the depending unit is no longer live"
             }
             Uncertain::ListingFailed { .. } => "the directory is readable and within the entry cap",
             Uncertain::NoUnitHash { .. } => "the unit dir carries a 16-hex unit hash or is removed",
@@ -345,8 +347,41 @@ enum Walk {
     Node(usize),
 }
 
+/// The package name a unit dir stands for: the part before the last `-`, with `-` read as `_`.
+fn package_name(dir_name: &str) -> Option<String> {
+    dir_name
+        .rsplit_once('-')
+        .map(|(name, _)| name.replace('-', "_"))
+}
+
+/// Package id to the names of the current units its edges matched.
+fn learn_packages(
+    units: &[ProfileUnit],
+    nodes: &[NotCurrentNode],
+    index: &HashMap<&str, Vec<usize>>,
+) -> BTreeMap<u64, BTreeSet<String>> {
+    let mut learned: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+    let edges = units
+        .iter()
+        .flat_map(|(_, unit)| unit.deps.iter())
+        .chain(nodes.iter().flat_map(|node| node.deps.iter()));
+    for edge in edges {
+        for &hit in index
+            .get(le_hex(edge.fingerprint).as_str())
+            .into_iter()
+            .flatten()
+        {
+            if let Some(name) = package_name(&units[hit].1.dir_name) {
+                learned.entry(edge.package).or_default().insert(name);
+            }
+        }
+    }
+    learned
+}
+
 /// Marks units invoked inside the window and not-current units wanted inside it live, then
-/// everything they depend on.
+/// everything they depend on. An edge no current unit matches keeps the not-current units of its
+/// package, when the package is known.
 fn mark_live(
     fs: &dyn Fs,
     units: &[ProfileUnit],
@@ -379,34 +414,66 @@ fn mark_live(
             queue.push(Walk::Node(i));
         }
     }
+    let learned = learn_packages(units, nodes, index);
+    let mut nodes_of: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, node) in nodes.iter().enumerate() {
+        if let Some(name) = package_name(node.dir_name) {
+            nodes_of.entry(name).or_default().push(i);
+        }
+    }
     let mut cursor = 0;
     while cursor < queue.len() {
         let walk = queue[cursor];
         cursor += 1;
-        let (from, deps, stem) = match walk {
+        let (profile, dir_name, deps, stem) = match walk {
             Walk::Unit(i) => (
-                unit_ref(&units[i]),
+                units[i].0,
+                units[i].1.dir_name.as_str(),
                 units[i].1.deps.as_slice(),
                 units[i].1.stem.as_str(),
             ),
-            Walk::Node(i) => (nodes[i].unit_ref(), nodes[i].deps, nodes[i].stem),
+            Walk::Node(i) => (
+                nodes[i].profile,
+                nodes[i].dir_name,
+                nodes[i].deps,
+                nodes[i].stem,
+            ),
         };
         for &dep in deps {
-            match index.get(le_hex(dep.fingerprint).as_str()) {
+            if let Some(hits) = index.get(le_hex(dep.fingerprint).as_str()) {
+                for &hit in hits {
+                    if !live[hit] {
+                        live[hit] = true;
+                        queue.push(Walk::Unit(hit));
+                    }
+                }
+                continue;
+            }
+            let kept = match learned
+                .get(&dep.package)
+                .map(|names| names.iter().collect::<Vec<_>>())
+            {
+                Some(names) if names.len() == 1 => nodes_of.get(names[0]),
+                _ => None,
+            };
+            match kept {
                 Some(hits) => {
                     for &hit in hits {
-                        if !live[hit] {
-                            live[hit] = true;
-                            queue.push(Walk::Unit(hit));
+                        if !node_live[hit] {
+                            node_live[hit] = true;
+                            queue.push(Walk::Node(hit));
                         }
                     }
                 }
                 None => {
-                    let fp_dir = fingerprint_dir(&from.profile, &from.dir_name);
+                    let fp_dir = fingerprint_dir(profile, dir_name);
                     reasons.push(Uncertain::Unresolved {
                         dependency: fingerprint::dep_name(&fp_dir, stem, dep.fingerprint)
                             .unwrap_or_else(|| le_hex(dep.fingerprint)),
-                        unit: from.clone(),
+                        unit: UnitRef {
+                            profile: profile.to_path_buf(),
+                            dir_name: dir_name.to_string(),
+                        },
                     });
                 }
             }
@@ -646,12 +713,25 @@ mod tests {
         deps: &[(&str, u64)],
         age: Option<Duration>,
     ) {
+        let edges: Vec<(&str, u64, u64)> = deps.iter().map(|&(n, h)| (n, 1, h)).collect();
+        write_unit_edges(profile, name, stem, fp, &edges, age);
+    }
+
+    /// Like `write_unit`, with each dependency as (name, package id, fingerprint).
+    fn write_unit_edges(
+        profile: &Path,
+        name: &str,
+        stem: &str,
+        fp: u64,
+        deps: &[(&str, u64, u64)],
+        age: Option<Duration>,
+    ) {
         let dir = profile.join(".fingerprint").join(name);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(stem), le_hex(fp)).unwrap();
         let deps: Vec<String> = deps
             .iter()
-            .map(|(n, h)| format!("[1,\"{n}\",false,{h}]"))
+            .map(|(n, p, h)| format!("[{p},\"{n}\",false,{h}]"))
             .collect();
         fs::write(
             dir.join(format!("{stem}.json")),
@@ -930,6 +1010,23 @@ mod tests {
         hash_age: Duration,
     ) {
         write_unit(profile, name, stem, fp, deps, age);
+        empty_hash(profile, name, stem, hash_age);
+    }
+
+    /// A not-current unit that depends on `deps` as (name, package id, fingerprint).
+    fn emptied_hash_edges(
+        profile: &Path,
+        name: &str,
+        stem: &str,
+        deps: &[(&str, u64, u64)],
+        age: Option<Duration>,
+        hash_age: Duration,
+    ) {
+        write_unit_edges(profile, name, stem, 1, deps, age);
+        empty_hash(profile, name, stem, hash_age);
+    }
+
+    fn empty_hash(profile: &Path, name: &str, stem: &str, hash_age: Duration) {
         let hash = profile.join(".fingerprint").join(name).join(stem);
         fs::write(&hash, "").unwrap();
         fs::File::options()
@@ -1106,6 +1203,159 @@ mod tests {
             &reasons[..],
             [Uncertain::Unresolved { dependency, .. }] if dependency == "ghost"
         ));
+    }
+
+    const LIBA_1: &str = "liba-aaaaaaaaaaaaaaa1";
+    const LIBA_2: &str = "liba-aaaaaaaaaaaaaaa2";
+    const LIBB_1: &str = "libb-bbbbbbbbbbbbbbb1";
+    const PACKAGE: u64 = 7;
+
+    /// A live unit `A` whose edge (package 7, fingerprint 999) matches nothing, a live unit `D`
+    /// whose edge (package 7) matches the current `liba`, and that current `liba`.
+    fn unmatched_edge_of_a_learned_package(p: &Path) {
+        write_unit_edges(p, A, "bin-a", 101, &[("liba", PACKAGE, 999)], Some(HOUR));
+        write_unit_edges(p, D, "bin-d", 104, &[("liba", PACKAGE, 201)], Some(HOUR));
+        write_unit(p, LIBA_1, "lib-liba", 201, &[], Some(30 * DAY));
+    }
+
+    #[test]
+    fn an_unmatched_edge_keeps_the_not_current_unit_of_its_package_and_what_it_wanted() {
+        let s = Scratch::new("pkg-keep");
+        let p = s.0.join("debug");
+        unmatched_edge_of_a_learned_package(&p);
+        write_unit(&p, C, "lib-c", 103, &[], Some(30 * DAY));
+        write_unit(&p, B, "lib-b", 102, &[], Some(30 * DAY));
+        emptied_hash_edges(
+            &p,
+            LIBA_2,
+            "lib-liba",
+            &[("c", 1, 103)],
+            Some(30 * DAY),
+            30 * DAY,
+        );
+        let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        let mut got = names(&live);
+        got.sort();
+        assert_eq!(got, [A, C, D, LIBA_1, LIBA_2]);
+        let dead: Vec<&str> = dead.iter().map(|d| d.unit.dir_name.as_str()).collect();
+        assert_eq!(dead, [B]);
+    }
+
+    #[test]
+    fn the_not_current_unit_of_the_package_may_sit_in_another_profile_dir() {
+        let s = Scratch::new("pkg-cross");
+        let host = s.0.join("debug");
+        let cross = s.0.join("aarch64-apple-darwin").join("debug");
+        unmatched_edge_of_a_learned_package(&cross);
+        emptied_hash(&host, LIBA_2, "lib-liba", Some(30 * DAY), 30 * DAY);
+        let (live, _) = decided(decide(&target_of(&s.0, &[&host, &cross]), 6 * HOUR));
+        assert!(live
+            .iter()
+            .any(|u| u.dir_name == LIBA_2 && u.profile == host));
+    }
+
+    #[test]
+    fn package_names_compare_with_dashes_and_underscores_equal() {
+        let s = Scratch::new("pkg-dash");
+        let p = s.0.join("debug");
+        write_unit_edges(&p, A, "bin-a", 101, &[("m", PACKAGE, 999)], Some(HOUR));
+        write_unit_edges(&p, D, "bin-d", 104, &[("m", PACKAGE, 201)], Some(HOUR));
+        write_unit(
+            &p,
+            "my-lib-aaaaaaaaaaaaaaa1",
+            "lib-my-lib",
+            201,
+            &[],
+            Some(30 * DAY),
+        );
+        emptied_hash(
+            &p,
+            "my_lib-aaaaaaaaaaaaaaa2",
+            "lib-my_lib",
+            Some(30 * DAY),
+            30 * DAY,
+        );
+        let (live, _) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert!(names(&live).contains(&"my_lib-aaaaaaaaaaaaaaa2"));
+    }
+
+    #[test]
+    fn a_package_no_edge_ever_matched_is_unresolved_whatever_the_crate_name() {
+        let s = Scratch::new("pkg-unlearned");
+        let p = s.0.join("debug");
+        write_unit_edges(&p, A, "bin-a", 101, &[("liba", PACKAGE, 999)], Some(HOUR));
+        emptied_hash(&p, LIBA_2, "lib-liba", Some(30 * DAY), 30 * DAY);
+        let reasons = undecided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert!(matches!(
+            &reasons[..],
+            [Uncertain::Unresolved { dependency, .. }] if dependency == "liba"
+        ));
+    }
+
+    #[test]
+    fn a_package_learned_under_two_names_is_unresolved() {
+        let s = Scratch::new("pkg-two-names");
+        let p = s.0.join("debug");
+        unmatched_edge_of_a_learned_package(&p);
+        write_unit_edges(&p, C, "bin-c", 103, &[("libb", PACKAGE, 202)], Some(HOUR));
+        write_unit(&p, LIBB_1, "lib-libb", 202, &[], Some(30 * DAY));
+        emptied_hash(&p, LIBA_2, "lib-liba", Some(30 * DAY), 30 * DAY);
+        let reasons = undecided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert!(matches!(&reasons[..], [Uncertain::Unresolved { .. }]));
+    }
+
+    #[test]
+    fn a_learned_package_with_no_not_current_unit_is_unresolved_as_before() {
+        let s = Scratch::new("pkg-none");
+        let p = s.0.join("debug");
+        unmatched_edge_of_a_learned_package(&p);
+        let reasons = undecided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        let fp_dir = p.join(".fingerprint").join(A);
+        assert_eq!(
+            reasons[0].to_string(),
+            format!(
+                "{}: dependency `liba` matches no unit of the target",
+                fp_dir.display()
+            )
+        );
+        assert_eq!(reasons.len(), 1);
+    }
+
+    #[test]
+    fn a_not_current_dir_without_a_dash_is_neither_a_candidate_nor_a_reason() {
+        let s = Scratch::new("pkg-nodash");
+        let p = s.0.join("debug");
+        unmatched_edge_of_a_learned_package(&p);
+        emptied_hash(&p, "liba", "lib-liba", Some(30 * DAY), 30 * DAY);
+        let reasons = undecided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert!(matches!(&reasons[..], [Uncertain::Unresolved { .. }]));
+    }
+
+    #[test]
+    fn an_unresolved_reason_clears_when_cargo_builds_the_dependency_or_the_unit_stops_being_live() {
+        let reason = Uncertain::Unresolved {
+            unit: UnitRef {
+                profile: PathBuf::from("/t/debug"),
+                dir_name: A.to_string(),
+            },
+            dependency: "liba".into(),
+        };
+        let text = reason.clears_when();
+        assert!(text.contains("builds the dependency"), "{text}");
+        assert!(text.contains("no longer live"), "{text}");
+    }
+
+    #[test]
+    fn marking_a_package_s_not_current_units_does_not_depend_on_directory_order() {
+        let s = Scratch::new("pkg-order");
+        let p = s.0.join("debug");
+        unmatched_edge_of_a_learned_package(&p);
+        emptied_hash(&p, LIBA_2, "lib-liba", Some(30 * DAY), 30 * DAY);
+        let target = target_of(&s.0, &[&p]);
+        let plain = decide(&target, 6 * HOUR);
+        let shuffled = liveness(&FakeFs::new(Listing::Reversed), &target, now(), 6 * HOUR);
+        assert_eq!(plain, shuffled);
+        assert!(matches!(plain, Liveness::Decided { .. }));
     }
 
     #[test]
