@@ -157,6 +157,11 @@ owner works, so the lock now covers only deciding and one snapshot clone.
     leftovers of old failures, and their JSON edges are followed; an unmatched edge there with no
     not-current unit of its package makes the whole target dir Undecided again. That costs reclaim,
     not safety; measured on klynt on 2026-10-31, no such edge occurred (0 of 1,094 edges at 3 d).
+    *Known limit* (plan review, 2026-10-31): a package id is learned only from an edge that matches a
+    current unit, so a package whose every unit is not current (a library built in one mode only,
+    then broken) cannot be learned, and its unmatched edges make the target dir Undecided. On klynt
+    every package had another current unit (check, test or release mode); the fixtures build one
+    on purpose.
 15. **(amendment) The proof locks only while it decides and takes a snapshot.** Under the locks it
     refuses symlinked dirs (the existing walk, kept for that check only), decides and measures every
     window, and clones the original once as the snapshot; then it releases the locks and prints how
