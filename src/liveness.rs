@@ -377,6 +377,14 @@ fn learn_packages(
     learned
 }
 
+/// Marks `flags[i]` and queues `walk`, unless `i` was already marked.
+fn enqueue(flags: &mut [bool], queue: &mut Vec<Walk>, i: usize, walk: Walk) {
+    if !flags[i] {
+        flags[i] = true;
+        queue.push(walk);
+    }
+}
+
 /// Marks units invoked inside the window and not-current units wanted inside it live, then
 /// everything they depend on. An edge no current unit matches keeps the not-current units of its
 /// package, when the package is known.
@@ -395,10 +403,7 @@ fn mark_live(
     for (i, (profile, unit)) in units.iter().enumerate() {
         let stamp = unit_timestamp(profile, &unit.dir_name, &unit.kind);
         match invoked_in_window(fs, &stamp, now, window) {
-            Ok(true) => {
-                live[i] = true;
-                queue.push(Walk::Unit(i));
-            }
+            Ok(true) => enqueue(&mut live, &mut queue, i, Walk::Unit(i)),
             Ok(false) => {}
             Err(reason) => reasons.push(reason),
         }
@@ -408,8 +413,7 @@ fn mark_live(
             .last_wanted(fs, reasons)
             .is_some_and(|time| in_window(time, now, window))
         {
-            node_live[i] = true;
-            queue.push(Walk::Node(i));
+            enqueue(&mut node_live, &mut queue, i, Walk::Node(i));
         }
     }
     let learned = learn_packages(units, nodes, index);
@@ -440,27 +444,21 @@ fn mark_live(
         for &dep in deps {
             if let Some(hits) = index.get(le_hex(dep.fingerprint).as_str()) {
                 for &hit in hits {
-                    if !live[hit] {
-                        live[hit] = true;
-                        queue.push(Walk::Unit(hit));
-                    }
+                    enqueue(&mut live, &mut queue, hit, Walk::Unit(hit));
                 }
                 continue;
             }
-            let kept = match learned
-                .get(&dep.package)
-                .map(|names| names.iter().collect::<Vec<_>>())
-            {
-                Some(names) if names.len() == 1 => nodes_of.get(names[0]),
-                _ => None,
-            };
+            let kept = learned.get(&dep.package).and_then(|names| {
+                let mut names = names.iter();
+                match (names.next(), names.next()) {
+                    (Some(name), None) => nodes_of.get(name),
+                    _ => None,
+                }
+            });
             match kept {
                 Some(hits) => {
                     for &hit in hits {
-                        if !node_live[hit] {
-                            node_live[hit] = true;
-                            queue.push(Walk::Node(hit));
-                        }
+                        enqueue(&mut node_live, &mut queue, hit, Walk::Node(hit));
                     }
                 }
                 None => {
