@@ -1,6 +1,6 @@
 # Closure liveness: proof runs on a real target
 
-Status: runs 2 and 3 passed (2026-10-31, cargo-hive's own target). Run 1 on klynt was vacuous.
+Status: runs 2 and 3 passed (2026-10-31, cargo-hive's own target). Run 1 on klynt was vacuous. Run 4 passed on klynt with the short lock, on a target whose history was built for the test.
 
 ## Command (klynt, nothing building in it)
 
@@ -169,7 +169,9 @@ What this establishes:
 - **Not-current dirs last for days.** About 224 dirs were not current; 2 had error output. 138 of
   them carried the same invocation minute, 2026-10-29 10:39, two days earlier. They clear only when
   Cargo rebuilds that exact unit or they age out of the window. Why Cargo leaves a whole batch
-  behind was not checked in Cargo's source.
+  behind (cargo 1.97.1, `src/cargo/core/compiler/fingerprint/mod.rs`): Cargo prepares every unit of a
+  build before compiling any, and truncates the hash file of each dirty unit at that point, so an
+  interrupted or failed build leaves every dirty unit, started or not, with an empty hash file.
 - **klynt is never quiet.** Waiting for a quiet moment is not a way to reach Decided there.
 - **The 7-day window reclaims nothing on klynt even if Decided**: every unit, current or not, was
   invoked inside the last 7 days.
@@ -190,3 +192,43 @@ same with every dir of the package kept:
 Allocated bytes count clone-shared blocks in full; run 1 reported 25.06 GB of which 11.35 GB was
 shared, so the volume would regain noticeably less. In this snapshot no unresolved edge lacked a
 not-current dir of its package; a rule still has to say what happens then.
+
+### Run 4 — 2026-10-31 19:23 to 19:31 (+07), 469 s, klynt at `ef3e544dc`, the short lock (`live-amend` at `e395739`)
+
+Target: `~/Developer/klynt/klynt/target` (15 GB, `debug` only). Checkout: `git archive ef3e544dc`
+extracted to `~/Library/Caches/klynt-replay-ef3e544dc` (removed afterwards). Commands: `build`,
+`check --all-targets`, `test --no-run`, each with `--offline` and `SQLX_OFFLINE=true`; the proof added
+`--locked` and `--message-format=json`. Nothing was building in klynt during the run.
+
+**The target's history is synthetic.** klynt had no target when this run was prepared, so one was
+built for it: klynt `c91e88d312` (100 commits before `ef3e544dc`) was built with the same three
+commands into this target dir, every file in the target was then given an mtime three days earlier
+(`touch`), and `ef3e544dc` was built on top. The old build's workspace units (a different checkout
+path, so different hashes) and the dependency versions the lockfile has since dropped are the dead
+units. This is not the history a developer's target grows. It shows the procedure and the rule on a
+large real target; it does not show how a long-lived dev target behaves.
+
+**Outcome: test passed.**
+
+| Phase / window | Outcome | Rebuilt | Rebuilt live | Dead units | Dead files (original, before any clone) |
+|---|---|---|---|---|---|
+| Locks held | 10.9 s (snapshot clone included) | n/a | n/a | n/a | n/a |
+| Warm-up | 3 commands exit 0, 411 s | 148 (workspace crates at the new path, and what depends on them) | n/a | n/a | n/a |
+| Baseline | 3 commands exit 0, 8 s | 0 | n/a | n/a | n/a |
+| 6 h | Passed | 0 | **0** | 13 | 0.64 GB freed, 0.37 GB still shared |
+| 1 d | Passed | 0 | **0** | 13 | 0.64 GB freed, 0.37 GB still shared |
+| 7 d | Vacuous: no dead unit lists a file to delete | 0 | 0 | 0 | 0 |
+
+Incremental and profile-root files, not collected by this feature: 8.18 GB freed, 2.44 GB still shared.
+
+What the run shows:
+- **The target was held for 10.9 s**, not the 3 h 42 min of run 1: the locks cover deciding, measuring
+  and the snapshot clone only; the warm-up and the replays ran on clones.
+- **Liveness was Decided** because this target had no not-current unit (no build was interrupted or
+  failed in it), so this run does not exercise the busy-workspace rule on klynt. That rule is covered
+  by the fixtures of `tests/liveness_busy.rs`; a run on a target that is mid-build is still open.
+- **Nothing live rebuilt**, and no dead unit rebuilt either: the 13 dead units are not needed by the
+  replayed commands. The 7 d window is vacuous because the oldest units are 3 days old.
+
+Limits: one run, synthetic history, `debug` profile only, and only the replayed commands. A passed
+window covers only those.
