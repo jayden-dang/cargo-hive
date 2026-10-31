@@ -1,7 +1,7 @@
 # Requirements: Closure liveness (live and dead units of a Cargo target dir, proven on a copy)
 
 Feature code: LIVE
-Status: Implemented
+Status: Approved
 Date: 2026-10-30
 
 <!--
@@ -30,6 +30,9 @@ Sources:
 - `.skills/LIVE/fresh-build-trace.md`: what fully fresh commands write, cross-profile edges under
   `--target`, artifact names per unit, and the D5 deletion premise (measured 2026-10-30).
 - `SPIKES.md` §8, §9; `.skills/CORE/close-package.md` (A1, D3, D4, D5); ADR-0001.
+- ROAD-5 amendment (2026-10-31): `.skills/LIVE/amend-close-package.md` (confirmed),
+  `.skills/LIVE/cargo-notcurrent-research.md` (Cargo 0.98.0 source), `proof-runs.md` section
+  "Unresolved edges on klynt — 2026-10-31", probe source `.skills/LIVE/probe-unresolved/`.
 
 Terms used as `CONTEXT.md` defines them: Cargo target dir, Profile dir, Unit, Roots, Closure
 liveness, Dead unit, Undecided, Vacuous, Fingerprint format signature. Further terms used below:
@@ -52,6 +55,17 @@ liveness, Dead unit, Undecided, Vacuous, Fingerprint format signature. Further t
   `.fingerprint/`. Reading it is the only access liveness makes to `build/`.
 - **Window:** a duration; a unit is inside the window when its unit timestamp's modification time
   is at or after `now − window`, or later than `now`.
+- **Hash file time** (amendment): the modification time of a not-current unit's emptied hash file
+  (`.fingerprint/<dir>/<stem>`). Cargo empties the hash of every dirty unit when it plans a build,
+  so this is when a command last wanted the unit, even if its compile never started.
+- **Last-wanted time** (amendment): for a not-current unit, the later of its unit timestamp's and
+  its hash file's modification times, among those that exist.
+- **Edge package** (amendment): for a `deps` edge that matches no current unit, the package
+  name read from the directory names (the part before the last `-`) of the current units that
+  other edges carrying the same package id (the first u64 of the `deps` entry) match, in any
+  profile dir; when no such edge exists, the edge's crate name. Names compare with `-` and `_`
+  treated as equal. The edge package cannot be determined when those directory names disagree. A
+  unit directory whose name has no `-` belongs to no package.
 - **Liveness result:** for one Cargo target dir, either *Decided* (live units and dead units) or
   *Undecided* (one or more reasons).
 
@@ -61,9 +75,18 @@ liveness, Dead unit, Undecided, Vacuous, Fingerprint format signature. Further t
 which are dead, so that a later plan can delete dead units without touching a unit reachable over
 the fingerprint graph from a unit whose timestamp falls inside the window.
 
-- **LIVE-1.1** WHEN liveness is computed for a Cargo target dir with a window and a current time
-  THE SYSTEM SHALL treat as roots exactly the current units, in every profile dir of that target
-  dir, that are inside the window.
+- ~~**LIVE-1.1**~~ superseded by LIVE-1.12 (2026-10-31, ROAD-5 amendment): a not-current unit a
+  command wanted inside the window is a root too.
+- **LIVE-1.12** WHEN liveness is computed for a Cargo target dir with a window and a current time
+  THE SYSTEM SHALL treat as roots exactly the current units that are inside the window and the
+  not-current units with a fingerprint JSON whose last-wanted time is inside the window, in every
+  profile dir of that target dir (a not-current unit with neither file: LIVE-2.17).
+- **LIVE-1.13** WHEN a not-current unit with a fingerprint JSON is live THE SYSTEM SHALL follow the
+  `deps` edges of that JSON as it follows a current unit's (the JSON passes the fingerprint format
+  signature; one that does not makes its profile dir unsupported, LIVE-2.1).
+- **LIVE-1.14** WHEN an edge from a live unit matches no current unit in any profile dir of the
+  Cargo target dir THE SYSTEM SHALL mark live every not-current unit, in any profile dir of that
+  target dir, whose directory name before the last `-` equals the edge package.
 - ~~**LIVE-1.2**~~ superseded by LIVE-1.11 and LIVE-2.12 (2026-10-31, whole-branch review): a
   timestamp that exists but cannot be read is doubt, not absence, and doubt must not let a recently
   built unit be listed as dead.
@@ -94,24 +117,35 @@ is called dead on incomplete evidence.
 
 - **LIVE-2.1** IF a profile dir of the Cargo target dir is unsupported (CORE-4.14) THEN THE SYSTEM
   SHALL return Undecided for the whole target dir with a reason naming that profile dir.
-- **LIVE-2.2** IF a not-current unit of the Cargo target dir is inside the window THEN THE SYSTEM
-  SHALL return Undecided for the whole target dir with a reason naming that unit directory.
-- **LIVE-2.3** IF an edge from a live unit matches no current unit in any profile dir of the Cargo
-  target dir THEN THE SYSTEM SHALL return Undecided for the whole target dir with a reason naming
-  the unit directory and the dependency's name, or the dependency's fingerprint when its name
-  cannot be read.
+- ~~**LIVE-2.2**~~ superseded by LIVE-2.14 (2026-10-31, ROAD-5 amendment): a not-current unit with
+  a JSON is a local root (LIVE-1.12), not a reason to decide nothing.
+- ~~**LIVE-2.3**~~ superseded by LIVE-2.15 (2026-10-31, ROAD-5 amendment): an unmatched edge first
+  keeps the not-current units of its package (LIVE-1.14).
+- **LIVE-2.14** IF a not-current unit without a fingerprint JSON has its last-wanted time inside the
+  window THEN THE SYSTEM SHALL return Undecided for the whole target dir with a reason naming that
+  unit directory.
+- **LIVE-2.15** IF an edge from a live unit matches no current unit in any profile dir of the Cargo
+  target dir, and its edge package cannot be determined or no not-current unit of that package
+  exists in any profile dir, THEN THE SYSTEM SHALL return Undecided for the whole target dir with a
+  reason naming the unit directory and the dependency's name, or the dependency's fingerprint when
+  its name cannot be read.
 - ~~**LIVE-2.4**~~ superseded by LIVE-2.13 (2026-10-31): the unreadable case moved to LIVE-2.12.
-- **LIVE-2.13** WHEN a not-current unit is outside the window, or its unit timestamp file does not
-  exist, THE SYSTEM SHALL leave it out of the liveness computation and out of every dead unit's
-  file list.
+- ~~**LIVE-2.13**~~ superseded by LIVE-2.17 (2026-10-31, ROAD-5 amendment): the window is measured
+  by the last-wanted time, and an unmatched edge can still make such a unit live.
+- **LIVE-2.17** WHEN a not-current unit's last-wanted time is outside the window, or neither its
+  unit timestamp nor its hash file exists, THE SYSTEM SHALL not treat it as a root, SHALL not
+  return Undecided because of it, and SHALL leave it out of every dead unit's file list.
 - **LIVE-2.5** WHEN the liveness result is Undecided THE SYSTEM SHALL report no dead units.
 - **LIVE-2.6** WHEN the liveness result is Undecided THE SYSTEM SHALL report every reason that
   applies, not only the first found.
-- **LIVE-2.7** THE SYSTEM SHALL state, with each Undecided reason, the condition that clears it:
-  the profile dir becoming supported (LIVE-2.1), the unit compiling or its unit timestamp leaving
-  the window (LIVE-2.2), the depending unit no longer being live (LIVE-2.3), the directory
-  becoming listable (LIVE-2.8), the unit directory being renamed or removed by Cargo (LIVE-2.9,
-  LIVE-2.10), or the target dir becoming readable (LIVE-2.11).
+- ~~**LIVE-2.7**~~ superseded by LIVE-2.16 (2026-10-31, ROAD-5 amendment): the reasons of
+  LIVE-2.14, LIVE-2.15 and LIVE-2.18 clear on different conditions.
+- **LIVE-2.16** THE SYSTEM SHALL state, with each Undecided reason, the condition that clears it:
+  the profile dir becoming supported (LIVE-2.1), the unit compiling or its last-wanted time leaving
+  the window (LIVE-2.14), Cargo building the dependency or the depending unit no longer being live
+  (LIVE-2.15), the directory becoming listable (LIVE-2.8), the unit directory being renamed or
+  removed by Cargo (LIVE-2.9, LIVE-2.10), the target dir becoming readable (LIVE-2.11), or the file
+  becoming readable (LIVE-2.12, LIVE-2.18).
 - **LIVE-2.8** IF the `deps/` or `examples/` directory of a profile dir holding a dead unit exists
   but cannot be listed in full THEN THE SYSTEM SHALL return Undecided for the whole target dir with
   a reason naming that directory.
@@ -124,6 +158,9 @@ is called dead on incomplete evidence.
 - **LIVE-2.12** IF the unit timestamp file of a current or not-current unit exists but its
   modification time cannot be read, or a unit directory's name is not valid UTF-8, THEN THE SYSTEM
   SHALL return Undecided for the whole target dir with a reason naming that file or directory.
+- **LIVE-2.18** IF the hash file of a not-current unit exists but its modification time cannot be
+  read THEN THE SYSTEM SHALL return Undecided for the whole target dir with a reason naming that
+  file.
 
 ## 3. List the files of each dead unit
 
@@ -185,23 +222,18 @@ rebuilds and how many bytes the deletion would free, before ROAD-6 deletes anyth
   SYSTEM SHALL fail the test naming that command.
 - ~~**LIVE-4.12**~~ superseded by LIVE-4.20 (2026-10-31): the clone is compared with the warmed-up
   clone it was taken from, because the warm-up legitimately rebuilds units.
-- **LIVE-4.13** IF any entry of the original Cargo target dir, or the checkout's `Cargo.lock`, is
-  created, removed, or has its modification time or size changed between the start and the end of
-  the proof test THEN THE SYSTEM SHALL fail the test naming the first such entries.
+- ~~**LIVE-4.13**~~ superseded by LIVE-8.5 (2026-10-31, ROAD-5 amendment): the original is
+  unlocked during the replays, so the owner's own builds may change it.
 - **LIVE-4.14** WHEN the proof test prints a window's report THE SYSTEM SHALL include each replayed
   command's exact argument vector and exit status.
-- **LIVE-4.15** WHILE the proof test runs THE SYSTEM SHALL hold, taken without waiting, the build
-  lock (`.cargo-build-lock`) of every profile dir of the original Cargo target dir; IF one is held
-  by another process THEN THE SYSTEM SHALL fail the test naming that profile dir.
+- ~~**LIVE-4.15**~~ superseded by LIVE-8.1 to LIVE-8.3 (2026-10-31, ROAD-5 amendment): holding
+  klynt's locks for a multi-hour run stops the owner's builds.
 - **LIVE-4.16** IF the volume holding the original Cargo target dir cannot clone files THEN THE
   SYSTEM SHALL fail the test before copying anything.
 - ~~**LIVE-4.17**~~ superseded by LIVE-4.18 and LIVE-4.19 (2026-10-31): a baseline on a target the
   commands had never built rebuilt hundreds of units and made every window Vacuous (first klynt run).
-- **LIVE-4.18** WHEN the proof test starts replaying THE SYSTEM SHALL first replay the commands
-  once in a clone of the original Cargo target dir, with nothing deleted, as a warm-up, and SHALL
-  keep that warmed-up clone as the source of every later clone; IF a warm-up command exits non-zero
-  or emits no `compiler-artifact` message THEN THE SYSTEM SHALL report every window as Vacuous with
-  the reason.
+- ~~**LIVE-4.18**~~ superseded by LIVE-8.4 (2026-10-31, ROAD-5 amendment): the warm-up starts from
+  the snapshot, not from the original.
 - **LIVE-4.19** WHEN the warm-up has finished THE SYSTEM SHALL replay the commands once more in a
   fresh clone of the warmed-up clone, with nothing deleted, as a baseline; IF any unit rebuilds in
   that baseline THEN THE SYSTEM SHALL report every window as Vacuous, naming the rebuilt units.
@@ -248,6 +280,14 @@ Files this feature touches, and what each must keep doing:
 - `src/lib.rs` (a new module line), `src/liveness.rs` (new), `tests/liveness.rs` (new),
   `tests/liveness_prove.rs` (new), `tests/common/mod.rs` (new helpers): no behavior to guard.
 
+ROAD-5 amendment (2026-10-31), files it touches:
+- `src/fingerprint.rs` (reading the `deps` tuple and the not-current unit's JSON and hash file
+  time) — LIVE-5.1, LIVE-5.2, LIVE-5.3.
+- `src/explain.rs` (reads `NotCurrentUnit` for failed units) — LIVE-5.3.
+- `src/liveness.rs` — LIVE-5.8.
+- `tests/common/prove.rs`, `tests/liveness.rs`, `tests/liveness_prove.rs`, new fixture tests:
+  test code, no behavior to guard beyond story 4's remaining criteria.
+
 - **LIVE-5.1** (guard) WHEN status reports a profile dir's unit edges THE SYSTEM SHALL CONTINUE TO
   count them resolved, unresolved and ambiguous within that profile dir alone (CORE-4.8).
 - **LIVE-5.2** (guard) WHEN a profile dir holds a not-current unit THE SYSTEM SHALL CONTINUE TO
@@ -264,6 +304,13 @@ Files this feature touches, and what each must keep doing:
   write `snapshot.json` with only its `metadata` and `unsupported_profiles` fields.
 - **LIVE-5.7** (guard) WHEN the crate is packaged THE SYSTEM SHALL CONTINUE TO include only the
   paths listed in `Cargo.toml`'s `include`, so no file under `tests/` ships.
+- **LIVE-5.8** (guard) WHEN liveness is computed for a Cargo target dir with no not-current unit
+  THE SYSTEM SHALL CONTINUE TO return the same live units, dead units and their files, and the same
+  Undecided reasons, as before the ROAD-5 amendment; only the text stating what clears a reason
+  may change (LIVE-2.16).
+- **LIVE-5.9** (guard) WHEN status counts a profile dir's unit edges THE SYSTEM SHALL CONTINUE TO
+  count only the edges of current units, leaving every not-current unit's `deps` out (CORE-4.8,
+  CORE-4.16).
 
 ## 6. Quality attributes
 
@@ -280,6 +327,58 @@ Files this feature touches, and what each must keep doing:
   liveness rechecked at apply time is ROAD-6's (ARCH-19, ARCH-20).
 - **Accessibility:** None — no user interface; liveness has no CLI surface in this feature.
 
+## 7. Decide a busy workspace's target dir (ROAD-5 amendment, 2026-10-31)
+
+**Story:** As the owner, I want tests that build small real Cargo workspaces into the states a busy
+workspace leaves, decide liveness on them, delete what is listed in a clone and rebuild, so that I
+see the doubt of a failed or interrupted build kept local and no live unit rebuilt.
+
+The fixtures produce each state with real `cargo` builds on the toolchain the suite runs with
+(rustc and cargo 1.97.1 at the time of writing); a fixture that does not reach its state fails
+its test, it never passes vacuously.
+
+- **LIVE-7.1** WHEN a library's last build failed after a binary depending on it was built by
+  another command THE SYSTEM SHALL return Decided for that Cargo target dir, with the library's
+  not-current unit live.
+- **LIVE-7.2** WHEN a build stopped before a planned unit's compile started, so that only the
+  unit's hash file time is inside the window, THE SYSTEM SHALL treat that not-current unit as a
+  root.
+- **LIVE-7.3** WHEN a live unit's unmatched edge names a dependency renamed through `package =`, and
+  another edge with the same package id matches a current unit of that package, THE SYSTEM SHALL
+  mark that package's not-current units live.
+- **LIVE-7.4** IF a live unit's unmatched edge names a dependency renamed through `package =` and no
+  edge with the same package id matches a current unit THEN THE SYSTEM SHALL return Undecided for
+  the whole target dir (LIVE-2.15).
+- **LIVE-7.5** WHEN a target dir built with `--target` holds a live unit whose unmatched edge names a
+  not-current unit in the host profile dir THE SYSTEM SHALL mark that not-current unit live.
+- **LIVE-7.6** WHEN, for each workspace of LIVE-7.1 to LIVE-7.5 that is Decided, the listed files are
+  deleted in a clone and the workspace's commands are replayed with each compile error the fixture
+  introduced removed (the source restored to the version that last compiled),
+  THE SYSTEM SHALL fail the test if any unit that was live rebuilt, counting rebuilds as LIVE-4.5
+  does, after a warm-up and a baseline as in LIVE-8.4 and LIVE-4.19.
+
+## 8. Prove on klynt without stopping its builds (ROAD-5 amendment, 2026-10-31)
+
+**Story:** As the owner, I want the proof test to lock my real target dir only while it decides
+liveness and takes a snapshot, so that I can run it on klynt while `cargo watch` keeps building.
+
+- **LIVE-8.1** WHEN the proof test starts THE SYSTEM SHALL take, without waiting, the build lock
+  (`.cargo-build-lock`) of every profile dir of the original Cargo target dir; IF one is held by
+  another process THEN THE SYSTEM SHALL fail the test naming that profile dir.
+- **LIVE-8.2** WHILE it holds those locks THE SYSTEM SHALL compute every window's liveness result
+  and dry-run measurement on the original (LIVE-4.2, LIVE-4.9), then take one APFS clone of the
+  original as the snapshot.
+- **LIVE-8.3** WHEN the snapshot exists THE SYSTEM SHALL release every lock before the first
+  replay, and SHALL print how long the locks were held.
+- **LIVE-8.4** WHEN the proof test starts replaying THE SYSTEM SHALL first replay the commands once
+  in a clone of the snapshot, with nothing deleted, as a warm-up, and SHALL keep that warmed-up
+  clone as the source of every later clone; IF a warm-up command exits non-zero or emits no
+  `compiler-artifact` message THEN THE SYSTEM SHALL report every window as Vacuous with the reason.
+- **LIVE-8.5** IF a file that a window listed for deletion is missing from the original at the end
+  of the proof test, or the checkout's `Cargo.lock` changed during it, THEN THE SYSTEM SHALL fail the
+  test naming them.
+- **LIVE-8.6** THE SYSTEM SHALL never delete or modify anything in the original or in the snapshot.
+
 ## Out of Scope
 
 - Deleting anything outside the proof's clone: plan files, apply, apply-time recheck, and the
@@ -289,8 +388,16 @@ Files this feature touches, and what each must keep doing:
 - Closing the window gap: a command that stays fully fresh for the whole window leaves no disk trace
   for `check`, `clippy` or `test` (`fresh-build-trace.md`), and A1/ARCH-1 forbid a wrapper, daemon,
   shim or hook. Its units may be collected and rebuild when needed again (GOAL-1 rewording).
-- A heuristic to decide around a not-current unit or an unresolved edge (for example, protecting
-  the newest sibling variant).
+- ~~A heuristic to decide around a not-current unit or an unresolved edge~~ — reversed by the
+  ROAD-5 amendment (2026-10-31, owner): the rule is LIVE-1.12 to LIVE-1.14 and LIVE-2.15, keeping
+  the not-current units of the edge's package. Protecting every unit of a package, or the newest
+  sibling variant, stays out.
+- Protecting dependencies that the next build of a not-current unit needs but its last JSON does
+  not record (for example after a `Cargo.toml` edit): such units may be collected and rebuild when
+  that build runs. Accepted 2026-10-31, the same class as the window gap; the proof reports
+  collected units that rebuild (LIVE-4.9).
+- Changing the default window (LIVE-1.6), and the Undecided reasons of LIVE-2.1 and LIVE-2.8 to
+  LIVE-2.12, which still decide nothing for the whole target dir.
 - Mapping `incremental/` dirs to units, and deleting profile-root uplifted copies or their `.d`.
 - `build/`, and units of a never-collected kind.
 - Store liveness (`last_live_at`, ROAD-8, ROAD-10).
@@ -303,4 +410,11 @@ Files this feature touches, and what each must keep doing:
   measured (294 and 133 dead units, 0.98 and 0.41 GB freed, 0 live units rebuilt) and the 7 d window
   was vacuous because no unit was old enough; on klynt the 7 d window is Undecided (169 not-current
   units inside it) and no deletion trial completed there. Still open: reclaim and liveness cost at a
-  7-day window on a large, active workspace.
+  7-day window on a large, active workspace. 2026-10-31 (`proof-runs.md`, unresolved-edges section):
+  every unit of klynt was invoked within 7 days, so that window reclaims nothing there even when
+  Decided.
+- Replaying from a copy of the checkout at another path (a `git archive` of a klynt commit that
+  compiles) reuses the original units' directories and fingerprints — project owner — 2026-10-31 —
+  forbid-guess (cấm đoán). Cargo is reported to hash path packages relative to the workspace root;
+  not verified. Design verifies it before the klynt run; if it does not hold, the replay runs in
+  the klynt checkout at a commit that compiles.

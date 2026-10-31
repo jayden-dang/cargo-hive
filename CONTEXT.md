@@ -84,8 +84,12 @@ _Avoid_: garbage unit, stale unit, orphan unit
 The 16 lowercase hex characters after the last `-` of a unit's directory name under `.fingerprint/`; it names the unit's files in `deps/` and `examples/`, and is not the fingerprint stored in its hash file.
 _Avoid_: fingerprint, metadata hash
 
+**Not-current unit**:
+A unit dir under `.fingerprint/` whose hash file is empty or that never compiled: Cargo empties the hash of every dirty unit when it plans a build, so the dir is mid-rebuild, failed, or never started. Its JSON, when present, is from its last successful build.
+_Avoid_: stale unit, broken unit
+
 **Undecided**:
-The liveness verdict for a target dir whose graph cannot prove reachability (a not-current unit inside the window, an unresolved edge from a live unit, or an unsupported profile); it has no dead units, and each reason names what clears it.
+The liveness verdict for a target dir whose graph cannot prove reachability (a not-current unit with no JSON inside the window, an unresolved edge with no not-current dir of its package, or an unsupported profile); it has no dead units, and each reason names what clears it.
 _Avoid_: unknown, partial
 
 **Vacuous**:
