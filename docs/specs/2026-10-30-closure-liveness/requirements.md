@@ -64,8 +64,11 @@ the fingerprint graph from a unit whose timestamp falls inside the window.
 - **LIVE-1.1** WHEN liveness is computed for a Cargo target dir with a window and a current time
   THE SYSTEM SHALL treat as roots exactly the current units, in every profile dir of that target
   dir, that are inside the window.
-- **LIVE-1.2** IF a current unit has no unit timestamp, or its modification time cannot be read,
-  THEN THE SYSTEM SHALL not treat that unit as a root.
+- ~~**LIVE-1.2**~~ superseded by LIVE-1.11 and LIVE-2.12 (2026-10-31, whole-branch review): a
+  timestamp that exists but cannot be read is doubt, not absence, and doubt must not let a recently
+  built unit be listed as dead.
+- **LIVE-1.11** IF the unit timestamp file of a current unit does not exist THEN THE SYSTEM SHALL
+  not treat that unit as a root.
 - **LIVE-1.3** THE SYSTEM SHALL mark live every current unit reachable from a root over fingerprint
   `deps` edges, each edge resolved by matching the dependency's u64, as little-endian hex, against
   the hash files of the current units of every profile dir of the same Cargo target dir.
@@ -97,9 +100,10 @@ is called dead on incomplete evidence.
   target dir THEN THE SYSTEM SHALL return Undecided for the whole target dir with a reason naming
   the unit directory and the dependency's name, or the dependency's fingerprint when its name
   cannot be read.
-- **LIVE-2.4** WHEN a not-current unit is outside the window, or has no readable unit timestamp,
-  THE SYSTEM SHALL leave it out of the liveness computation and out of every
-  dead unit's file list.
+- ~~**LIVE-2.4**~~ superseded by LIVE-2.13 (2026-10-31): the unreadable case moved to LIVE-2.12.
+- **LIVE-2.13** WHEN a not-current unit is outside the window, or its unit timestamp file does not
+  exist, THE SYSTEM SHALL leave it out of the liveness computation and out of every dead unit's
+  file list.
 - **LIVE-2.5** WHEN the liveness result is Undecided THE SYSTEM SHALL report no dead units.
 - **LIVE-2.6** WHEN the liveness result is Undecided THE SYSTEM SHALL report every reason that
   applies, not only the first found.
@@ -117,6 +121,9 @@ is called dead on incomplete evidence.
   SHALL return Undecided for the whole target dir with a reason naming both unit directories.
 - **LIVE-2.11** IF the Cargo target dir could not be read when it was identified THEN THE SYSTEM
   SHALL return Undecided with a reason naming the target dir and why.
+- **LIVE-2.12** IF the unit timestamp file of a current or not-current unit exists but its
+  modification time cannot be read, or a unit directory's name is not valid UTF-8, THEN THE SYSTEM
+  SHALL return Undecided for the whole target dir with a reason naming that file or directory.
 
 ## 3. List the files of each dead unit
 
@@ -149,13 +156,14 @@ rebuilds and how many bytes the deletion would free, before ROAD-6 deletes anyth
 - **LIVE-4.2** WHEN the proof test runs THE SYSTEM SHALL compute the liveness result and the dead
   units' files on the original Cargo target dir, once for each window of 6 hours, 24 hours and
   7 days, with the same current time for all three.
-- **LIVE-4.3** WHEN a window's liveness result is Decided with at least one dead unit THE SYSTEM
-  SHALL delete exactly that window's listed files in a fresh APFS clone of the Cargo target dir,
-  and SHALL NOT delete or modify anything in the original.
-- **LIVE-4.4** WHEN the proof test replays the commands for a window THE SYSTEM SHALL run each one
-  as an argument vector, without a shell, in `HIVE_PROVE_CHECKOUT` with both `CARGO_TARGET_DIR`
-  and `CARGO_BUILD_BUILD_DIR` set to that window's clone and `--message-format=json` inserted
-  right after the cargo subcommand (the first element that does not start with `+` or `-`).
+- ~~**LIVE-4.3**~~ superseded by LIVE-4.21 (2026-10-31, owner amendment after the first klynt run):
+  the window clone is now taken from the warmed-up clone, not from the original.
+- ~~**LIVE-4.4**~~ superseded by LIVE-4.23 (2026-10-31): the replay also carries `--locked`.
+- **LIVE-4.23** WHEN the proof test replays commands (warm-up, baseline or a window) THE SYSTEM
+  SHALL run each one as an argument vector, without a shell, in `HIVE_PROVE_CHECKOUT` with both
+  `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` set to the clone being replayed, with `--locked`
+  (unless `--locked` or `--frozen` is already present) and `--message-format=json` inserted after
+  the cargo subcommand (the first element that does not start with `+` or `-`), before any `--`.
 - **LIVE-4.5** THE SYSTEM SHALL count as rebuilt every unit, in any profile dir of the clone, whose
   directory under `.fingerprint/` is new after the replay or whose unit timestamp's modification
   time changed during the replay.
@@ -175,9 +183,8 @@ rebuilds and how many bytes the deletion would free, before ROAD-6 deletes anyth
 - **LIVE-4.11** IF a command in `HIVE_PROVE_CMDS` has no cargo subcommand, or carries
   `--message-format`, `--target-dir` or `--artifact-dir` in any form before a `--`, THEN THE
   SYSTEM SHALL fail the test naming that command.
-- **LIVE-4.12** IF, before a window's replay, any unit timestamp's modification time in the clone
-  differs from the same file's in the original THEN THE SYSTEM SHALL report that window as Vacuous
-  with the reason.
+- ~~**LIVE-4.12**~~ superseded by LIVE-4.20 (2026-10-31): the clone is compared with the warmed-up
+  clone it was taken from, because the warm-up legitimately rebuilds units.
 - **LIVE-4.13** IF any entry of the original Cargo target dir, or the checkout's `Cargo.lock`, is
   created, removed, or has its modification time or size changed between the start and the end of
   the proof test THEN THE SYSTEM SHALL fail the test naming the first such entries.
@@ -188,9 +195,42 @@ rebuilds and how many bytes the deletion would free, before ROAD-6 deletes anyth
   by another process THEN THE SYSTEM SHALL fail the test naming that profile dir.
 - **LIVE-4.16** IF the volume holding the original Cargo target dir cannot clone files THEN THE
   SYSTEM SHALL fail the test before copying anything.
-- **LIVE-4.17** WHEN the proof test starts replaying THE SYSTEM SHALL first replay the commands
-  once on a clone with nothing deleted; IF any unit rebuilds in that baseline THEN THE SYSTEM SHALL
-  report every window as Vacuous, naming the rebuilt units.
+- ~~**LIVE-4.17**~~ superseded by LIVE-4.18 and LIVE-4.19 (2026-10-31): a baseline on a target the
+  commands had never built rebuilt hundreds of units and made every window Vacuous (first klynt run).
+- **LIVE-4.18** WHEN the proof test starts replaying THE SYSTEM SHALL first replay the commands
+  once in a clone of the original Cargo target dir, with nothing deleted, as a warm-up, and SHALL
+  keep that warmed-up clone as the source of every later clone; IF a warm-up command exits non-zero
+  or emits no `compiler-artifact` message THEN THE SYSTEM SHALL report every window as Vacuous with
+  the reason.
+- **LIVE-4.19** WHEN the warm-up has finished THE SYSTEM SHALL replay the commands once more in a
+  fresh clone of the warmed-up clone, with nothing deleted, as a baseline; IF any unit rebuilds in
+  that baseline THEN THE SYSTEM SHALL report every window as Vacuous, naming the rebuilt units.
+- **LIVE-4.20** IF, before a window's replay, any unit timestamp's modification time in the window's
+  clone differs from the same file's in the warmed-up clone it was taken from THEN THE SYSTEM SHALL
+  report that window as Vacuous with the reason.
+- **LIVE-4.21** WHEN a window's liveness result is Decided with at least one dead unit THE SYSTEM
+  SHALL delete exactly that window's listed files in a fresh APFS clone of the warmed-up clone, and
+  SHALL NOT delete or modify anything in the original or in the warmed-up clone.
+- **LIVE-4.22** WHEN the proof test prints its report THE SYSTEM SHALL include, for the warm-up and
+  for the baseline, the number of units that rebuilt, each command's argument vector and exit status,
+  and the elapsed time.
+- ~~**LIVE-4.24**~~ superseded by LIVE-4.28 (2026-10-31, owner decision after the whole-branch review):
+  the replay is compile-only, so no test or binary of the checkout runs.
+- **LIVE-4.25** WHEN the proof test replays commands THE SYSTEM SHALL remove from the child's
+  environment the target-dir, build-dir, artifact-dir, rustc-wrapper, `CARGO_UNSTABLE_*` and
+  `CARGO_ALIAS_*` variables, and IF the checkout's Cargo configuration (the checkout, its ancestors
+  and `$CARGO_HOME`, or `$HOME/.cargo`) contains `include`, `artifact-dir`, `out-dir`, or an
+  `[alias]` entry named like an allowed command, THEN THE SYSTEM SHALL fail the test naming that file.
+- **LIVE-4.26** IF a listing, a tree walk, a config file, a child's output or a child's run time
+  reaches its bound (or a read fails) THEN THE SYSTEM SHALL fail the test naming it, and SHALL NOT
+  continue with a partial result.
+- **LIVE-4.27** IF the warm-up or the baseline did not run THEN THE SYSTEM SHALL print "not run" for
+  it in the report, not a count of zero.
+- **LIVE-4.28** IF a command in `HIVE_PROVE_CMDS` is not one of `build`, `check`, `doc`,
+  `test --no-run` or `bench --no-run` (long names only; `test` or `bench` without `--no-run`, and
+  `run`, are refused), or has any flag other than `+toolchain`, `-q`, `-v`, `--locked`, `--frozen`,
+  `--offline` or `--color <value>` before the subcommand, or has an argument after `--`, THEN THE
+  SYSTEM SHALL fail the test naming that command.
 
 ## 5. Existing commands keep working
 
@@ -235,7 +275,7 @@ Files this feature touches, and what each must keep doing:
   question (below); LIVE-4.9's proof run is where it gets measured, and the number is recorded,
   not guessed.
 - **Security:** None — liveness reads the owner's own target dirs and crosses no trust boundary;
-  the proof deletes only inside its own clone (LIVE-4.3).
+  the proof deletes only inside its own clone (LIVE-4.21).
 - **Reliability:** None — liveness writes nothing (LIVE-1.8). Deleting under the owner's lock with
   liveness rechecked at apply time is ROAD-6's (ARCH-19, ARCH-20).
 - **Accessibility:** None — no user interface; liveness has no CLI surface in this feature.
@@ -258,5 +298,9 @@ Files this feature touches, and what each must keep doing:
 ## Open Questions
 
 - Closure-scan cost and steady-state reclaim at a 7-day window — project owner — 2026-10-25 —
-  forbid-guess (cấm đoán); carried from foundation `requirements.md:154`. Measured by LIVE-4.9 on
-  klynt once its target is older than 7 days (oldest `invoked.timestamp` was 2026-10-26 20:14).
+  forbid-guess (cấm đoán); carried from foundation `requirements.md:154`. Partly answered on
+  2026-10-31 (`proof-runs.md`): on cargo-hive's own 1.7 GB target the 6 h and 1 d windows were
+  measured (294 and 133 dead units, 0.98 and 0.41 GB freed, 0 live units rebuilt) and the 7 d window
+  was vacuous because no unit was old enough; on klynt the 7 d window is Undecided (169 not-current
+  units inside it) and no deletion trial completed there. Still open: reclaim and liveness cost at a
+  7-day window on a large, active workspace.

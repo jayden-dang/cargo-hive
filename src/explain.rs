@@ -306,15 +306,10 @@ fn directory_crate<'a>(dir_name: &'a str, hash_hex: &str) -> &'a str {
     {
         return head;
     }
-    match directory_suffix(dir_name) {
+    match crate::fingerprint::unit_hash(dir_name) {
         Some(suffix) => &dir_name[..dir_name.len() - suffix.len() - 1],
         None => dir_name,
     }
-}
-
-fn directory_suffix(dir_name: &str) -> Option<&str> {
-    let (_, tail) = dir_name.rsplit_once('-')?;
-    is_lower_hex_16(tail).then_some(tail)
 }
 
 fn crate_and_kind(stem: &str) -> (String, String) {
@@ -329,7 +324,7 @@ fn crate_and_kind(stem: &str) -> (String, String) {
 }
 
 fn unit_mode(dir_name: &str, hash_hex: &str, deps: &ModeIndex) -> Mode {
-    let hash = directory_suffix(dir_name).unwrap_or(hash_hex);
+    let hash = crate::fingerprint::unit_hash(dir_name).unwrap_or(hash_hex);
     match deps.get(hash) {
         Some(&(true, _)) => Mode::Build,
         Some(&(false, true)) => Mode::Check,
@@ -609,17 +604,10 @@ fn failed_crate(item: &NotCurrentInput) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    match name.rsplit_once('-') {
-        Some((head, tail)) if is_lower_hex_16(tail) => head.to_string(),
-        _ => name,
+    match crate::fingerprint::unit_hash(&name) {
+        Some(hash) => name[..name.len() - hash.len() - 1].to_string(),
+        None => name,
     }
-}
-
-fn is_lower_hex_16(text: &str) -> bool {
-    text.len() == 16
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn failed_kind(item: &NotCurrentInput) -> String {
@@ -878,7 +866,7 @@ fn read_output(path: &Path) -> Result<String, String> {
 }
 
 fn invoked_mtime(dir: &Path) -> Option<SystemTime> {
-    std::fs::metadata(dir.join("invoked.timestamp"))
+    std::fs::metadata(dir.join(crate::fingerprint::INVOKED_TIMESTAMP))
         .and_then(|meta| meta.modified())
         .ok()
 }

@@ -10,6 +10,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// The file Cargo touches when it starts compiling a unit.
+pub(crate) const INVOKED_TIMESTAMP: &str = "invoked.timestamp";
+
 const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
 
 pub const KEYS: [&str; 11] = [
@@ -129,7 +132,8 @@ pub fn le_hex(value: u64) -> String {
         .collect()
 }
 
-pub(crate) fn kind_of(stem: &str) -> String {
+#[doc(hidden)]
+pub fn kind_of(stem: &str) -> String {
     KINDS
         .iter()
         .find(|k| stem == **k || stem.starts_with(&format!("{k}-")))
@@ -142,6 +146,29 @@ fn is_hash(bytes: &[u8]) -> bool {
         && bytes
             .iter()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+}
+
+/// The `<hash>` of a `<name>-<hash>` unit dir name, when it is exactly 16 lowercase hex digits.
+pub fn unit_hash(dir_name: &str) -> Option<&str> {
+    let (_, tail) = dir_name.rsplit_once('-')?;
+    is_hash(tail.as_bytes()).then_some(tail)
+}
+
+/// The crate name of dependency `dep` in the unit's fingerprint report, when it can be read.
+#[doc(hidden)]
+pub fn dep_name(fingerprint_dir: &Path, stem: &str, dep: u64) -> Option<String> {
+    let mut file = fs::File::open(fingerprint_dir.join(format!("{stem}.json"))).ok()?;
+    let bytes = read_capped(&mut file).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    value["deps"]
+        .as_array()?
+        .iter()
+        .find_map(|d| match d.as_array().map(Vec::as_slice) {
+            Some([_, name, _, hash]) if hash.as_u64() == Some(dep) => {
+                name.as_str().map(String::from)
+            }
+            _ => None,
+        })
 }
 
 fn check_types(obj: &Map<String, Value>) -> Result<Vec<u64>, String> {
@@ -340,11 +367,11 @@ pub fn error_code(line: &str) -> Option<String> {
 /// The dir Cargo leaves for a unit whose first compile failed: its start stamp and its cached
 /// compiler messages, with no fingerprint written yet.
 fn never_compiled(names: &[String]) -> bool {
-    names.iter().any(|n| n == "invoked.timestamp")
+    names.iter().any(|n| n == INVOKED_TIMESTAMP)
         && names.iter().any(|n| n.starts_with("output-"))
         && names
             .iter()
-            .all(|n| n == "invoked.timestamp" || n.starts_with("output-"))
+            .all(|n| n == INVOKED_TIMESTAMP || n.starts_with("output-"))
 }
 
 pub fn read_profile(profile_dir: &Path) -> ProfileReport {
@@ -521,6 +548,45 @@ mod tests {
             "{{\"rustc\":11722972603611519644,\"features\":\"[]\",\"declared_features\":\"[]\",\"target\":1,\"profile\":2,\"path\":3,\"deps\":[{}],\"local\":[],\"rustflags\":[],\"config\":4,\"compile_kind\":0}}",
             deps.join(",")
         )
+    }
+
+    fn unit_json_named(deps: &[(u64, &str)]) -> String {
+        let deps: Vec<String> = deps
+            .iter()
+            .map(|(d, name)| format!("[1,\"{name}\",false,{d}]"))
+            .collect();
+        format!(
+            "{{\"rustc\":11722972603611519644,\"features\":\"[]\",\"declared_features\":\"[]\",\"target\":1,\"profile\":2,\"path\":3,\"deps\":[{}],\"local\":[],\"rustflags\":[],\"config\":4,\"compile_kind\":0}}",
+            deps.join(",")
+        )
+    }
+
+    #[test]
+    fn the_unit_hash_is_the_sixteen_hex_tail_of_the_dir_name() {
+        assert_eq!(unit_hash("dep-4360aef667e9273e"), Some("4360aef667e9273e"));
+        assert_eq!(
+            unit_hash("build_script_build-9a4d89fe046fe1ba"),
+            Some("9a4d89fe046fe1ba")
+        );
+        assert_eq!(unit_hash("dep-4360AEF667E9273E"), None);
+        assert_eq!(unit_hash("dep-4360aef667e9273"), None);
+        assert_eq!(unit_hash("nodash"), None);
+    }
+
+    #[test]
+    fn a_dependency_name_is_read_back_from_the_unit_json() {
+        let p = scratch();
+        let dir = p.join(".fingerprint").join("dep-0000000000000001");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("lib-q.json"),
+            unit_json_named(&[(7, "alpha"), (9, "beta")]),
+        )
+        .unwrap();
+        assert_eq!(dep_name(&dir, "lib-q", 9), Some("beta".to_string()));
+        assert_eq!(dep_name(&dir, "lib-q", 7), Some("alpha".to_string()));
+        assert_eq!(dep_name(&dir, "lib-q", 8), None);
+        assert_eq!(dep_name(&dir, "lib-missing", 7), None);
     }
 
     fn unit_json_with(deps: &[u64], features: &str, declared: &str) -> String {

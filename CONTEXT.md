@@ -77,15 +77,19 @@ A unit is live if it is reachable from the roots over the fingerprint graph of i
 _Avoid_: reachability GC, mark phase
 
 **Dead unit**:
-A unit in a Decided target dir that is not live, and whose hash-keyed `deps/` and `examples/` files plus fingerprint dir may be collected. Build-script, run-build-script and doc units are never dead units.
+A unit in a Decided target dir that is not live, and whose hash-keyed `deps/` and `examples/` files plus fingerprint dir may be collected. Build-script, run-build-script, doc and `other`-kind units are never dead units.
 _Avoid_: garbage unit, stale unit, orphan unit
+
+**Unit hash**:
+The 16 lowercase hex characters after the last `-` of a unit's directory name under `.fingerprint/`; it names the unit's files in `deps/` and `examples/`, and is not the fingerprint stored in its hash file.
+_Avoid_: fingerprint, metadata hash
 
 **Undecided**:
 The liveness verdict for a target dir whose graph cannot prove reachability (a not-current unit inside the window, an unresolved edge from a live unit, or an unsupported profile); it has no dead units, and each reason names what clears it.
 _Avoid_: unknown, partial
 
 **Vacuous**:
-The outcome of a liveness proof run that could not have caught a fault (empty dead set, or a verify command that failed or built nothing); never counted as a pass.
+The outcome of a liveness proof window that could not have caught a fault (an Undecided result, no dead file to delete, a warm-up or baseline that failed or rebuilt units, a failed or silent replay, or a clone that differs from its source); never counted as a pass.
 _Avoid_: skipped, trivially passing
 
 **Auto tier**:

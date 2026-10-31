@@ -343,3 +343,5 @@ pub fn wait_within(mut child: Child, limit: Duration) -> Output {
     }
     child.wait_with_output().unwrap()
 }
+
+pub mod prove;

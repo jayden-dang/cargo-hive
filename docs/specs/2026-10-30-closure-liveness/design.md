@@ -87,9 +87,14 @@ the narrowest way to reach it from `tests/`.
 10. **The clone is APFS `cp -c -R -p`, preflighted and checked, not trusted.** `Fs::volume` must
     report `apfs`, or the test fails before copying (LIVE-4.16): on another file system `cp -c`
     silently does a full copy. The proof holds every profile's `.cargo-build-lock` for its whole
-    run, so a background `cargo watch` cannot change the original (LIVE-4.15). It compares unit
-    timestamps in the clone with the original (LIVE-4.12), and runs a baseline replay on an
-    undeleted clone, so an environment difference is never blamed on a deletion (LIVE-4.17).
+    run, so a background `cargo watch` cannot change the original (LIVE-4.15). It warms the
+    target up first: one replay in a clone of the original builds whatever the owner's commands
+    need but the target never had, and that warmed-up clone becomes the source of every later
+    clone (LIVE-4.18, LIVE-4.21). A baseline replay on a fresh clone of it must then rebuild
+    nothing, so an environment difference is never blamed on a deletion (LIVE-4.19). Each window
+    clone's unit timestamps are compared with the warmed-up clone's (LIVE-4.20). The first klynt run
+    showed why: a baseline on the original rebuilt hundreds of units the commands had never built,
+    and the run took 3 h 42 min before every window came out Vacuous.
     Cargo's freshness does not depend on inodes, and `-p` kept every mtime at nanosecond
     resolution on klynt, measured in the review.
 11. **No new dependency.** Mtimes are planted with std `File::set_modified` (already used in
@@ -107,7 +112,7 @@ reverse (no wrapper, GOAL-1's wording) are recorded in ARCH-1 and the confirmed 
 - **New:** LIVE-2.8 (listing failure), LIVE-2.9 (no unit hash), LIVE-2.10 (duplicate unit hash),
   LIVE-2.11 (unreadable target dir), LIVE-3.5 (an entry carrying another unit's hash),
   LIVE-3.6 (no artifacts, no files), LIVE-4.15 (hold the build locks), LIVE-4.16 (APFS
-  preflight), LIVE-4.17 (baseline replay).
+  preflight), LIVE-4.17 (baseline replay; superseded 2026-10-31 by LIVE-4.18 to LIVE-4.22).
 - **Retired:** LIVE-3.4, superseded by LIVE-3.6 because it contradicts ARCH-18.
 
 ## Architecture
@@ -118,7 +123,7 @@ deep modules — an interface much simpler than what it hides.
 
 ### Liveness (`src/liveness.rs`, new)
 
-Satisfies: LIVE-1.1, LIVE-1.2, LIVE-1.3, LIVE-1.4, LIVE-1.5, LIVE-1.6, LIVE-1.7, LIVE-1.8, LIVE-1.9, LIVE-1.10, LIVE-2.1, LIVE-2.2, LIVE-2.3, LIVE-2.4, LIVE-2.5, LIVE-2.6, LIVE-2.7, LIVE-2.8, LIVE-2.9, LIVE-2.10, LIVE-2.11, LIVE-3.1, LIVE-3.2, LIVE-3.3, LIVE-3.5, LIVE-3.6
+Satisfies: LIVE-1.1, LIVE-1.11, LIVE-1.3, LIVE-1.4, LIVE-1.5, LIVE-1.6, LIVE-1.7, LIVE-1.8, LIVE-1.9, LIVE-1.10, LIVE-2.1, LIVE-2.2, LIVE-2.3, LIVE-2.12, LIVE-2.13, LIVE-2.5, LIVE-2.6, LIVE-2.7, LIVE-2.8, LIVE-2.9, LIVE-2.10, LIVE-2.11, LIVE-3.1, LIVE-3.2, LIVE-3.3, LIVE-3.5, LIVE-3.6
 Reuse: none — new code (rung 7). Nothing computes reachability or lists files per unit. The inputs come from rung 2: `TargetDir`/`ProfileReport`/`Unit`/`NotCurrentUnit`, `fingerprint::{le_hex, kind_of, unit_hash, dep_name}`, `Fs::{mtime, read_dir_bounded}`, and `gc::DEPS_CAP` as the listing cap.
 Respects: ARCH-1, ARCH-9, ARCH-15, ARCH-16, ARCH-17, ARCH-18, ARCH-20
 Interface:
@@ -145,8 +150,8 @@ Flow for one `TargetDir`. Every step adds to one reason list, and nothing return
    unit hash → `DuplicateUnitHash` (LIVE-2.10).
 3. Each not-current unit: its timestamp path is `build/<dir>/` when `kind_of(stem)` is
    `run-build-script`, else the fingerprint dir. Inside the window → `NotCurrentInWindow`
-   (LIVE-2.2). Outside, or unreadable → ignored (LIVE-2.4).
-4. Roots (LIVE-1.1, LIVE-1.2): current units whose timestamp (same path rule) is in the window.
+   (LIVE-2.2). Outside, or a timestamp file that does not exist → ignored (LIVE-2.13). A timestamp that exists but cannot be read → `TimestampUnreadable` (LIVE-2.12).
+4. Roots (LIVE-1.1, LIVE-1.11): current units whose timestamp (same path rule) is in the window.
    Missing or unreadable means not a root.
 5. Traverse breadth-first from the roots over `le_hex(dep)` lookups (LIVE-1.3, LIVE-1.4). A lookup
    with no match from a live unit → `Unresolved`, with the name from `dep_name` or the
@@ -203,7 +208,7 @@ Locality: `run.rs` (extract `scan`, add `measure`) and `gc.rs` (one re-export li
 
 ### Proof procedure (`tests/common/prove.rs`, `tests/liveness_prove.rs`, new test code)
 
-Satisfies: LIVE-4.1, LIVE-4.2, LIVE-4.3, LIVE-4.4, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.12, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16, LIVE-4.17
+Satisfies: LIVE-4.1, LIVE-4.2, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16, LIVE-4.18, LIVE-4.19, LIVE-4.20, LIVE-4.21, LIVE-4.22, LIVE-4.23, LIVE-4.25, LIVE-4.26, LIVE-4.27, LIVE-4.28
 Reuse: none — new code (rung 7) for the procedure. It reuses `liveness::liveness`, `gc::measure`, `cargo_target::identify` + `fingerprint::read_profile` (it builds the `TargetDir` by hand, since no function does that for one path), `platform::current()` for `Fs` (`volume`, `try_lock_exclusive`), `serde_json`, the system `cp`, and the tree-walk pattern of `tests/guards.rs`.
 Respects: ARCH-17 (it runs cargo only to verify, after liveness has decided, never as an input to it)
 Interface:
@@ -212,7 +217,7 @@ pub struct ProveInput { target: PathBuf, checkout: PathBuf, cmds: Vec<Vec<String
                         windows: Vec<Duration>, now: SystemTime }
 pub fn prove(input: &ProveInput) -> Result<ProveReport, String>;  // Err = test-level failure
 pub fn prove_with(fs: &dyn Fs, scratch: &Path, input: &ProveInput) -> Result<ProveReport, String>;
-pub struct ProveReport { baseline_rebuilt: Vec<String>, windows: Vec<WindowReport>,
+pub struct ProveReport { warm_up: PhaseReport, baseline: PhaseReport, windows: Vec<WindowReport>,
                          original_changed: Vec<PathBuf> }
 pub enum WindowOutcome { Passed, Vacuous(String), RebuiltLive(Vec<String>) }
 pub struct WindowReport { window, outcome, dead_units, dead_bytes: Footprint, unmapped: Footprint,
@@ -240,11 +245,16 @@ Order of one run:
 4. **Decide and measure every window before any clone (LIVE-4.2, LIVE-4.9).** For 6 h, 24 h and
    7 d with one `now`: compute liveness, then `gc::measure` over the dead units' files and,
    separately, over every profile's `incremental/` and direct child files.
-5. **Baseline (LIVE-4.17).** Clone with `cp -c -R -p`, replay, record the rebuilt units, then
-   remove the clone. If any unit rebuilt, every window is Vacuous, naming them.
-6. **Each window with dead units (LIVE-4.3 to LIVE-4.7, LIVE-4.12).**
-   - Clone, then compare every unit timestamp in the clone with the original. Any difference makes
-     the window Vacuous.
+5. **Warm-up and baseline (LIVE-4.18, LIVE-4.19, LIVE-4.22).**
+   - Warm-up: clone the original with `cp -c -R -p` into a warmed-up clone and replay the commands
+     there once. A non-zero exit or no `compiler-artifact` line makes every window Vacuous. Keep
+     the warmed-up clone until the end, and record its unit timestamps.
+   - Baseline: clone the warmed-up clone, replay once more, and record the rebuilt units, then
+     remove that clone. If any unit rebuilt, every window is Vacuous, naming them.
+   - Print the warm-up's and the baseline's rebuilt counts, argv, exit status and elapsed time.
+6. **Each window with dead units (LIVE-4.5 to LIVE-4.7, LIVE-4.20, LIVE-4.21, LIVE-4.23).**
+   - Clone the warmed-up clone, then compare every unit timestamp in the clone with the
+     warmed-up clone's. Any difference makes the window Vacuous.
    - Delete exactly the listed files, rebased onto the clone.
    - Record the clone's unit timestamps and fingerprint dirs, after the deletion and before the
      replay.
@@ -263,8 +273,9 @@ Order of one run:
    `--ignored --nocapture`), stating that a Passed window covers only the replayed commands.
 
 Notes: the proof needs an old-layout target, because a build dir split from the target dir is
-Unsupported and therefore Undecided. On klynt, one clone took 84 s and its removal 30 s, so four
-clones (baseline plus three windows) take about 8 minutes.
+Unsupported and therefore Undecided. On klynt, one clone took 84 s and its removal 30 s. The
+dominant cost is the warm-up compile, which is paid once; later clones are cheap because APFS
+clones share blocks, and the original is never replayed into.
 
 ### Fixture coverage (`tests/liveness.rs`, new test code)
 
@@ -298,12 +309,12 @@ New seams: `liveness::liveness` and `prove` (the test-side procedure). `gc::meas
 
 | Seam | Kind | Covers |
 |---|---|---|
-| `liveness::liveness` on synthetic fingerprint dirs (`src/liveness.rs` tests) | unit | LIVE-1.2, LIVE-1.4, LIVE-1.5, LIVE-1.6, LIVE-1.8, LIVE-1.9, LIVE-1.10, LIVE-2.1, LIVE-2.2, LIVE-2.3, LIVE-2.4, LIVE-2.5, LIVE-2.6, LIVE-2.7, LIVE-2.8, LIVE-2.9, LIVE-2.10, LIVE-2.11, LIVE-3.2, LIVE-3.3, LIVE-3.5, LIVE-3.6 |
+| `liveness::liveness` on synthetic fingerprint dirs (`src/liveness.rs` tests) | unit | LIVE-1.11, LIVE-1.4, LIVE-1.5, LIVE-1.6, LIVE-1.8, LIVE-1.9, LIVE-1.10, LIVE-2.1, LIVE-2.2, LIVE-2.3, LIVE-2.12, LIVE-2.13, LIVE-2.5, LIVE-2.6, LIVE-2.7, LIVE-2.8, LIVE-2.9, LIVE-2.10, LIVE-2.11, LIVE-3.2, LIVE-3.3, LIVE-3.5, LIVE-3.6 |
 | `liveness::liveness` on real Cargo builds (`tests/liveness.rs`) | integration | LIVE-1.1, LIVE-1.3, LIVE-3.1 |
 | Source guard: `src/liveness.rs` uses no process-spawning API (`tests/guards.rs`, existing) | integration | LIVE-1.7 |
 | `fingerprint::{unit_hash, dep_name}` (`src/fingerprint.rs` tests) | unit | LIVE-2.3, LIVE-2.9 (name rules) |
 | `gc::measure` and the file-root `scan` (`src/gc/run.rs` tests with the existing `Rec` fake) | unit | LIVE-4.9 (byte accounting) |
-| `prove` / `prove_with` and its pure helpers on a fixture crate (`tests/liveness.rs`) | integration | LIVE-4.2, LIVE-4.3, LIVE-4.4, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.12, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16, LIVE-4.17 |
+| `prove` / `prove_with` and its pure helpers on a fixture crate (`tests/liveness.rs`) | integration | LIVE-4.2, LIVE-4.18, LIVE-4.19, LIVE-4.21, LIVE-4.22, LIVE-4.23, LIVE-4.25, LIVE-4.26, LIVE-4.27, LIVE-4.28, LIVE-4.5, LIVE-4.6, LIVE-4.7, LIVE-4.8, LIVE-4.9, LIVE-4.10, LIVE-4.11, LIVE-4.20, LIVE-4.13, LIVE-4.14, LIVE-4.15, LIVE-4.16 |
 | `tests/liveness_prove.rs` (`missing_vars` in CI; the `#[ignore]` env-driven run) | integration | LIVE-4.1 |
 | `read_profile` per-profile edge counts and not-current handling (`src/fingerprint.rs` tests at :598, :848-1019, existing) | unit | LIVE-5.1, LIVE-5.2 |
 | `cargo hive status` snapshot keys (`tests/liveness.rs`, new assertion) | integration | LIVE-5.6 |
@@ -317,9 +328,16 @@ New seams: `liveness::liveness` and `prove` (the test-side procedure). `gc::meas
 Every live requirement ID appears in exactly one `Satisfies:` line:
 - LIVE-1.1 to LIVE-1.10, LIVE-2.1 to LIVE-2.11, LIVE-3.1 to LIVE-3.3, LIVE-3.5 and LIVE-3.6 →
   Liveness.
-- LIVE-4.1 to LIVE-4.17 → Proof procedure.
+- LIVE-4.1 to LIVE-4.28 (except the superseded 4.3, 4.4, 4.12, 4.17 and 4.24) → Proof procedure.
 - Deliberately unmapped:
   - LIVE-3.4 is retired (struck through).
   - LIVE-5.1 to LIVE-5.7 are guards, held by the `Surface:` dispositions (fingerprint, gc) and the
     existing seams in the table.
   - LIVE-6 (NFR) has no IDed criteria; all four attributes are `None` with reasons.
+
+## Amendments after the first klynt run and the whole-branch review (2026-10-31)
+
+- Warm-up and baseline replaced the single baseline (LIVE-4.18 to LIVE-4.22).
+- An unreadable timestamp is now doubt: `Uncertain::TimestampUnreadable` (LIVE-2.12). A non-UTF-8 unit dir name is `NoUnitHash`.
+- The replay guards added during review are written down as LIVE-4.23 to LIVE-4.27: `--locked`, the six-command allow-list, flag and `--` refusals, the config scan, the environment scrub, bounds that fail instead of skipping, and `not run` in the report.
+- The deliberately `#[doc(hidden)]` public items (`liveness`, `gc::measure`, `Footprint`, `dep_name`) have no consumer in the binary yet; ROAD-6 will use them.
