@@ -124,11 +124,12 @@ impl fmt::Display for Uncertain {
                 write!(f, "{}: target dir unreadable: {why}", target.display())
             }
             Uncertain::TimestampUnreadable { path, why } => {
-                write!(
-                    f,
-                    "{}: file that dates the unit's last invocation unreadable: {why}",
-                    path.display()
-                )
+                let what = if path.file_name() == Some(fingerprint::INVOKED_TIMESTAMP.as_ref()) {
+                    "invocation timestamp"
+                } else {
+                    "file that dates the unit's last invocation"
+                };
+                write!(f, "{}: {what} unreadable: {why}", path.display())
             }
         }
     }
@@ -1878,6 +1879,20 @@ mod tests {
                 "{kind:?}: {reasons:?}"
             );
         }
+        let reasons = undecided(liveness(
+            &mtime_fails_with(io::ErrorKind::PermissionDenied),
+            &target,
+            now(),
+            6 * HOUR,
+        ));
+        let stamp = unit_timestamp(&p, A, "lib");
+        assert!(
+            reasons[0]
+                .to_string()
+                .starts_with(&format!("{}: invocation timestamp unreadable: ", stamp.display())),
+            "{}",
+            reasons[0]
+        );
     }
 
     #[test]
