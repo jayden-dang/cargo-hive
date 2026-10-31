@@ -1777,6 +1777,23 @@ fn a_compiler_artifact_line_that_cannot_be_checked_fails_naming_the_line() {
 }
 
 #[test]
+fn compiler_artifact_lines_are_counted_whatever_their_key_order() {
+    let s = Scratch::new("count-artifacts-reordered");
+    let file = s.path.join("out");
+    fs::write(
+        &file,
+        concat!(
+            "{\"reason\":\"compiler-artifact\",\"filenames\":[],\"executable\":null}\n",
+            "{\"package_id\":\"a\",\"reason\":\"compiler-artifact\",\"filenames\":[]}\n",
+            "{\"filenames\":[],\"executable\":null,\"reason\":\"compiler-artifact\"}\n",
+            "{\"reason\":\"build-finished\",\"success\":true}\nnoise\n"
+        ),
+    )
+    .unwrap();
+    assert_eq!(prove::count_artifacts(&file, 4096), Ok(3));
+}
+
+#[test]
 fn a_compiler_artifact_with_reordered_keys_is_still_checked() {
     let s = Scratch::new("prove-artifacts-reordered");
     let clone = s.path.join("clone-w0");

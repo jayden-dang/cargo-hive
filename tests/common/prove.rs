@@ -428,46 +428,11 @@ pub fn outcome(rebuilt_live: &[String], vacuous: Option<String>) -> WindowOutcom
     }
 }
 
-pub fn count_artifacts(path: &Path, cap: u64) -> Result<usize, String> {
-    let size = fs::metadata(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?
-        .len();
-    if size > cap {
-        return Err(format!(
-            "{}: output is {size} bytes, over the {cap} byte cap",
-            path.display()
-        ));
-    }
-    let mut reader = BufReader::new(fs::File::open(path).map_err(|e| e.to_string())?);
-    let mut line = Vec::new();
-    let mut count = 0;
-    loop {
-        line.clear();
-        if reader
-            .read_until(b'\n', &mut line)
-            .map_err(|e| e.to_string())?
-            == 0
-        {
-            return Ok(count);
-        }
-        if line.starts_with(br#"{"reason":"compiler-artifact""#) {
-            count += 1;
-        }
-    }
-}
-
-/// Every file a `compiler-artifact` message of `stdout` names (`filenames` and `executable`) must be an absolute path with no `..` that lies under `clone` (as given or canonical). Each line is parsed as JSON whatever its key order; a line that is not JSON is skipped unless it mentions `compiler-artifact`. A compiler-artifact message whose `filenames` or `executable` is missing or of the wrong type, and the first file outside the clone, are errors naming the line or the file.
-pub fn check_artifact_paths(stdout: &Path, clone: &Path) -> Result<(), String> {
-    let roots: Vec<PathBuf> = [Some(clone.to_path_buf()), clone.canonicalize().ok()]
-        .into_iter()
-        .flatten()
-        .collect();
-    let inside = |file: &str| {
-        let path = Path::new(file);
-        path.is_absolute()
-            && !path.components().any(|c| matches!(c, Component::ParentDir))
-            && roots.iter().any(|root| path.starts_with(root))
-    };
+/// Calls `each(line number, line text, message)` for every `compiler-artifact` message of `stdout`, whatever its key order. A line that is not JSON is skipped unless it mentions `compiler-artifact`, which is an error naming the line.
+fn for_each_artifact(
+    stdout: &Path,
+    mut each: impl FnMut(usize, &str, &serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
     let mut reader =
         BufReader::new(fs::File::open(stdout).map_err(|e| format!("{}: {e}", stdout.display()))?);
     let mut line = Vec::new();
@@ -484,20 +449,59 @@ pub fn check_artifact_paths(stdout: &Path, clone: &Path) -> Result<(), String> {
         number += 1;
         let text = String::from_utf8_lossy(&line);
         let text = text.trim_end();
+        let message = match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(message) => message,
+            Err(e) if text.contains("compiler-artifact") => {
+                return Err(format!(
+                    "{} line {number}: cannot check the compiler-artifact message ({e}): {text}",
+                    stdout.display()
+                ))
+            }
+            Err(_) => continue,
+        };
+        if message["reason"].as_str() == Some("compiler-artifact") {
+            each(number, text, &message)?;
+        }
+    }
+}
+
+pub fn count_artifacts(path: &Path, cap: u64) -> Result<usize, String> {
+    let size = fs::metadata(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len();
+    if size > cap {
+        return Err(format!(
+            "{}: output is {size} bytes, over the {cap} byte cap",
+            path.display()
+        ));
+    }
+    let mut count = 0;
+    for_each_artifact(path, |_, _, _| {
+        count += 1;
+        Ok(())
+    })?;
+    Ok(count)
+}
+
+/// Every file a `compiler-artifact` message of `stdout` names (`filenames` and `executable`) must be an absolute path with no `..` that lies under `clone` (as given or canonical). A compiler-artifact message whose `filenames` or `executable` is missing or of the wrong type, and the first file outside the clone, are errors naming the line or the file.
+pub fn check_artifact_paths(stdout: &Path, clone: &Path) -> Result<(), String> {
+    let roots: Vec<PathBuf> = [Some(clone.to_path_buf()), clone.canonicalize().ok()]
+        .into_iter()
+        .flatten()
+        .collect();
+    let inside = |file: &str| {
+        let path = Path::new(file);
+        path.is_absolute()
+            && !path.components().any(|c| matches!(c, Component::ParentDir))
+            && roots.iter().any(|root| path.starts_with(root))
+    };
+    for_each_artifact(stdout, |number, text, message| {
         let unreadable = |why: &str| {
             format!(
                 "{} line {number}: cannot check the compiler-artifact message ({why}): {text}",
                 stdout.display()
             )
         };
-        let message = match serde_json::from_str::<serde_json::Value>(text) {
-            Ok(message) => message,
-            Err(e) if text.contains("compiler-artifact") => return Err(unreadable(&e.to_string())),
-            Err(_) => continue,
-        };
-        if message["reason"].as_str() != Some("compiler-artifact") {
-            continue;
-        }
         let mut files: Vec<&serde_json::Value> = Vec::new();
         match message["filenames"].as_array() {
             Some(names) => files.extend(names),
@@ -519,7 +523,8 @@ pub fn check_artifact_paths(stdout: &Path, clone: &Path) -> Result<(), String> {
                 ));
             }
         }
-    }
+        Ok(())
+    })
 }
 
 pub fn run_logged(
