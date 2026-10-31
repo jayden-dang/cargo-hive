@@ -646,9 +646,9 @@ change.
 
 **Depends-on:** Task 12
 
-- [ ] **Step 1: Move** the helpers unchanged except `cargo`'s parameters; every test in `tests/liveness.rs` compiles against the moved helpers.
-- [ ] **Step 2: Verify.** `cargo test --test liveness` passes with the same test count as before the move; the merge gate.
-- [ ] **Step 3: Commit** `refactor(tests): share the real-cargo fixture helpers`.
+- [x] **Step 1: Move** the helpers unchanged except `cargo`'s parameters; every test in `tests/liveness.rs` compiles against the moved helpers.
+- [x] **Step 2: Verify.** `cargo test --test liveness` passes with the same test count as before the move; the merge gate.
+- [x] **Step 3: Commit** `refactor(tests): share the real-cargo fixture helpers`.
 
 _Requirements: LIVE-5.8_
 
