@@ -1208,6 +1208,7 @@ mod tests {
 
     const LIBA_1: &str = "liba-aaaaaaaaaaaaaaa1";
     const LIBA_2: &str = "liba-aaaaaaaaaaaaaaa2";
+    const LIBA_3: &str = "liba-aaaaaaaaaaaaaaa3";
     const LIBB_1: &str = "libb-bbbbbbbbbbbbbbb1";
     const PACKAGE: u64 = 7;
 
@@ -1352,11 +1353,22 @@ mod tests {
         let p = s.0.join("debug");
         unmatched_edge_of_a_learned_package(&p);
         emptied_hash(&p, LIBA_2, "lib-liba", Some(30 * DAY), 30 * DAY);
+        emptied_hash(&p, LIBA_3, "lib-liba", Some(30 * DAY), 30 * DAY);
         let target = target_of(&s.0, &[&p]);
         let plain = decide(&target, 6 * HOUR);
-        let shuffled = liveness(&FakeFs::new(Listing::Reversed), &target, now(), 6 * HOUR);
+        let mut reversed = target.clone();
+        for profile in &mut reversed.profiles {
+            assert_eq!(profile.not_current_units.len(), 2);
+            profile.not_current_units.reverse();
+        }
+        assert_ne!(
+            target.profiles[0].not_current_units, reversed.profiles[0].not_current_units,
+            "the two orders must differ for the comparison to mean anything"
+        );
+        let shuffled = decide(&reversed, 6 * HOUR);
         assert_eq!(plain, shuffled);
-        assert!(matches!(plain, Liveness::Decided { .. }));
+        let (live, _) = decided(plain);
+        assert_eq!(names(&live), [A, D, LIBA_1, LIBA_2, LIBA_3]);
     }
 
     #[test]
