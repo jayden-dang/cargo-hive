@@ -4,7 +4,7 @@
 //! supported profile dir of the target. Anything it cannot decide is reported, never guessed.
 
 use crate::cargo_target::TargetDir;
-use crate::fingerprint::{self, le_hex, Format, Unit};
+use crate::fingerprint::{self, le_hex, DepEdge, Format, Unit};
 use crate::gc::DEPS_CAP;
 use crate::platform::Fs;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -68,7 +68,7 @@ impl Uncertain {
                 "the profile dir uses a layout hive reads, or the profile dir is removed"
             }
             Uncertain::NotCurrentInWindow { .. } => {
-                "Cargo finishes or abandons that rebuild and its timestamp ages out of the window"
+                "Cargo builds the never compiled unit or abandons it, or its timestamp ages out of the window"
             }
             Uncertain::Unresolved { .. } => {
                 "Cargo rebuilds the unit or the dependency it names, or the unit is removed"
@@ -80,7 +80,7 @@ impl Uncertain {
             }
             Uncertain::TargetUnreadable { .. } => "the target dir is readable",
             Uncertain::TimestampUnreadable { .. } => {
-                "the timestamp file is readable, or the unit is removed"
+                "the file is readable, or the unit is removed"
             }
         }
     }
@@ -94,7 +94,7 @@ impl fmt::Display for Uncertain {
             }
             Uncertain::NotCurrentInWindow { dir } => write!(
                 f,
-                "{}: unit is mid-rebuild or failed, invoked inside the window",
+                "{}: unit never compiled, invoked inside the window",
                 dir.display()
             ),
             Uncertain::Unresolved { unit, dependency } => write!(
@@ -124,7 +124,7 @@ impl fmt::Display for Uncertain {
             Uncertain::TimestampUnreadable { path, why } => {
                 write!(
                     f,
-                    "{}: invocation timestamp unreadable: {why}",
+                    "{}: file that dates the unit's last invocation unreadable: {why}",
                     path.display()
                 )
             }
@@ -149,21 +149,60 @@ fn in_window(mtime: SystemTime, now: SystemTime, window: Duration) -> bool {
     now.checked_sub(window).is_none_or(|cutoff| mtime >= cutoff)
 }
 
-/// Whether the unit was invoked inside the window. A timestamp that does not exist means it was
-/// never invoked; any other read error leaves the question open, so the caller must not delete.
+/// The mtime of a file that dates a unit's invocation. A file that does not exist dates nothing;
+/// any other read error leaves the question open, so the caller must not delete.
+fn file_time(fs: &dyn Fs, path: &Path) -> Result<Option<SystemTime>, Uncertain> {
+    match fs.mtime(path) {
+        Ok(mtime) => Ok(Some(mtime)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Uncertain::TimestampUnreadable {
+            path: path.to_path_buf(),
+            why: e.to_string(),
+        }),
+    }
+}
+
+/// Whether the unit was invoked inside the window.
 fn invoked_in_window(
     fs: &dyn Fs,
     timestamp: &Path,
     now: SystemTime,
     window: Duration,
 ) -> Result<bool, Uncertain> {
-    match fs.mtime(timestamp) {
-        Ok(mtime) => Ok(in_window(mtime, now, window)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(Uncertain::TimestampUnreadable {
-            path: timestamp.to_path_buf(),
-            why: e.to_string(),
-        }),
+    Ok(file_time(fs, timestamp)?.is_some_and(|mtime| in_window(mtime, now, window)))
+}
+
+/// A not-current unit with a fingerprint report: it keeps what it last wanted alive while a
+/// command wanted it inside the window.
+struct NotCurrentNode<'a> {
+    profile: &'a Path,
+    dir_name: &'a str,
+    stem: &'a str,
+    deps: &'a [DepEdge],
+}
+
+impl NotCurrentNode<'_> {
+    fn unit_ref(&self) -> UnitRef {
+        UnitRef {
+            profile: self.profile.to_path_buf(),
+            dir_name: self.dir_name.to_string(),
+        }
+    }
+
+    /// The later of the unit timestamp's and the emptied hash file's mtimes. Both files are read
+    /// even when the first fails, so every unreadable one is reported.
+    fn last_wanted(&self, fs: &dyn Fs, reasons: &mut Vec<Uncertain>) -> Option<SystemTime> {
+        let kind = fingerprint::kind_of(self.stem);
+        let stamp = unit_timestamp(self.profile, self.dir_name, &kind);
+        let hash = fingerprint_dir(self.profile, self.dir_name).join(self.stem);
+        let mut latest = None;
+        for path in [stamp, hash] {
+            match file_time(fs, &path) {
+                Ok(time) => latest = latest.max(time),
+                Err(reason) => reasons.push(reason),
+            }
+        }
+        latest
     }
 }
 
@@ -177,9 +216,10 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
         });
     }
 
-    let (units, not_current_hashes) = collect_units(fs, target, now, window, &mut reasons);
+    let (units, nodes, not_current_hashes) = collect_units(fs, target, now, window, &mut reasons);
     let index = index_units(&units, &mut reasons);
-    let live = mark_live(fs, &units, &index, now, window, &mut reasons);
+    let marked = mark_live(fs, &units, &nodes, &index, now, window, &mut reasons);
+    let live = marked.units;
     let dead_idx = dead_indices(&units, &live);
     let listings = list_dead_files(fs, &units, &dead_idx, &mut reasons);
 
@@ -189,21 +229,37 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
         return Liveness::Undecided { reasons };
     }
 
-    assemble(&units, &not_current_hashes, &live, &dead_idx, &listings)
+    assemble(
+        &units,
+        &nodes,
+        &marked.nodes,
+        &not_current_hashes,
+        &live,
+        &dead_idx,
+        &listings,
+    )
 }
 
 type ProfileUnit<'a> = (&'a Path, &'a Unit);
 
-/// Walks every profile: reports unsupported profiles and mid-rebuild units, and gathers the units
-/// of the supported ones plus the hashes of the not-current unit dirs.
+type Collected<'a> = (
+    Vec<ProfileUnit<'a>>,
+    Vec<NotCurrentNode<'a>>,
+    Vec<(&'a Path, &'a str)>,
+);
+
+/// Walks every profile: reports unsupported profiles and never-compiled units, and gathers the
+/// units of the supported ones, the not-current units with a report, and the hashes of all
+/// not-current unit dirs.
 fn collect_units<'a>(
     fs: &dyn Fs,
     target: &'a TargetDir,
     now: SystemTime,
     window: Duration,
     reasons: &mut Vec<Uncertain>,
-) -> (Vec<ProfileUnit<'a>>, Vec<(&'a Path, &'a str)>) {
+) -> Collected<'a> {
     let mut units: Vec<ProfileUnit> = Vec::new();
+    let mut nodes: Vec<NotCurrentNode> = Vec::new();
     let mut not_current_hashes: Vec<(&Path, &str)> = Vec::new();
     for profile in &target.profiles {
         if let Format::Unsupported(why) = &profile.format {
@@ -220,14 +276,19 @@ fn collect_units<'a>(
                 });
                 continue;
             };
-            let kind = nc
-                .stem
-                .as_deref()
-                .map_or_else(|| "other".to_string(), fingerprint::kind_of);
             if let Some(hash) = fingerprint::unit_hash(dir_name) {
                 not_current_hashes.push((profile.path.as_path(), hash));
             }
-            let stamp = unit_timestamp(&profile.path, dir_name, &kind);
+            if let Some(stem) = nc.stem.as_deref() {
+                nodes.push(NotCurrentNode {
+                    profile: profile.path.as_path(),
+                    dir_name,
+                    stem,
+                    deps: &nc.deps,
+                });
+                continue;
+            }
+            let stamp = unit_timestamp(&profile.path, dir_name, "other");
             match invoked_in_window(fs, &stamp, now, window) {
                 Ok(true) => reasons.push(Uncertain::NotCurrentInWindow {
                     dir: nc.dir.clone(),
@@ -240,7 +301,7 @@ fn collect_units<'a>(
             units.extend(graph.units.iter().map(|u| (profile.path.as_path(), u)));
         }
     }
-    (units, not_current_hashes)
+    (units, nodes, not_current_hashes)
 }
 
 /// Indexes units by their report hash, and reports dirs without a unit hash or sharing one.
@@ -271,54 +332,90 @@ fn index_units<'a>(
     index
 }
 
-/// Marks units invoked inside the window live, then everything they depend on.
+/// Which units and not-current nodes are live.
+struct Marked {
+    units: Vec<bool>,
+    nodes: Vec<bool>,
+}
+
+/// A unit or not-current node queued for traversal.
+#[derive(Clone, Copy)]
+enum Walk {
+    Unit(usize),
+    Node(usize),
+}
+
+/// Marks units invoked inside the window and not-current units wanted inside it live, then
+/// everything they depend on.
 fn mark_live(
     fs: &dyn Fs,
     units: &[ProfileUnit],
+    nodes: &[NotCurrentNode],
     index: &HashMap<&str, Vec<usize>>,
     now: SystemTime,
     window: Duration,
     reasons: &mut Vec<Uncertain>,
-) -> Vec<bool> {
+) -> Marked {
     let mut live = vec![false; units.len()];
-    let mut queue: Vec<usize> = Vec::new();
+    let mut node_live = vec![false; nodes.len()];
+    let mut queue: Vec<Walk> = Vec::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
         let stamp = unit_timestamp(profile, &unit.dir_name, &unit.kind);
         match invoked_in_window(fs, &stamp, now, window) {
             Ok(true) => {
                 live[i] = true;
-                queue.push(i);
+                queue.push(Walk::Unit(i));
             }
             Ok(false) => {}
             Err(reason) => reasons.push(reason),
         }
     }
+    for (i, node) in nodes.iter().enumerate() {
+        if node
+            .last_wanted(fs, reasons)
+            .is_some_and(|time| in_window(time, now, window))
+        {
+            node_live[i] = true;
+            queue.push(Walk::Node(i));
+        }
+    }
     let mut cursor = 0;
     while cursor < queue.len() {
-        let (profile, unit) = units[queue[cursor]];
+        let walk = queue[cursor];
         cursor += 1;
-        for &dep in &unit.deps {
+        let (from, deps, stem) = match walk {
+            Walk::Unit(i) => (
+                unit_ref(&units[i]),
+                units[i].1.deps.as_slice(),
+                units[i].1.stem.as_str(),
+            ),
+            Walk::Node(i) => (nodes[i].unit_ref(), nodes[i].deps, nodes[i].stem),
+        };
+        for &dep in deps {
             match index.get(le_hex(dep.fingerprint).as_str()) {
                 Some(hits) => {
                     for &hit in hits {
                         if !live[hit] {
                             live[hit] = true;
-                            queue.push(hit);
+                            queue.push(Walk::Unit(hit));
                         }
                     }
                 }
                 None => {
-                    let fp_dir = fingerprint_dir(profile, &unit.dir_name);
+                    let fp_dir = fingerprint_dir(&from.profile, &from.dir_name);
                     reasons.push(Uncertain::Unresolved {
-                        unit: unit_ref(&(profile, unit)),
-                        dependency: fingerprint::dep_name(&fp_dir, &unit.stem, dep.fingerprint)
+                        dependency: fingerprint::dep_name(&fp_dir, stem, dep.fingerprint)
                             .unwrap_or_else(|| le_hex(dep.fingerprint)),
+                        unit: from.clone(),
                     });
                 }
             }
         }
     }
-    live
+    Marked {
+        units: live,
+        nodes: node_live,
+    }
 }
 
 /// Indices of units that are not live, are collectable and carry a unit hash.
@@ -368,6 +465,8 @@ fn list_dead_files<'a>(
 /// Builds the decided result: the live units, and per dead unit the files only it owns.
 fn assemble(
     units: &[ProfileUnit],
+    nodes: &[NotCurrentNode],
+    node_live: &[bool],
     not_current_hashes: &[(&Path, &str)],
     live: &[bool],
     dead_idx: &[usize],
@@ -391,6 +490,13 @@ fn assemble(
         .zip(live)
         .filter(|(_, &is_live)| is_live)
         .map(|(entry, _)| unit_ref(entry))
+        .chain(
+            nodes
+                .iter()
+                .zip(node_live)
+                .filter(|(_, &is_live)| is_live)
+                .map(|(node, _)| node.unit_ref()),
+        )
         .collect();
 
     let mut dead_by_hash: HashMap<&Path, HashMap<&str, Vec<usize>>> = HashMap::new();
@@ -803,9 +909,35 @@ mod tests {
         touch(&dir.join("invoked.timestamp"), age);
     }
 
-    fn emptied_hash(profile: &Path, name: &str, stem: &str, age: Option<Duration>) {
-        write_unit(profile, name, stem, 1, &[], age);
-        fs::write(profile.join(".fingerprint").join(name).join(stem), "").unwrap();
+    /// A unit Cargo is rebuilding: its hash file is emptied and last written `hash_age` ago.
+    fn emptied_hash(
+        profile: &Path,
+        name: &str,
+        stem: &str,
+        age: Option<Duration>,
+        hash_age: Duration,
+    ) {
+        emptied_hash_wanting(profile, name, stem, 1, &[], age, hash_age);
+    }
+
+    fn emptied_hash_wanting(
+        profile: &Path,
+        name: &str,
+        stem: &str,
+        fp: u64,
+        deps: &[(&str, u64)],
+        age: Option<Duration>,
+        hash_age: Duration,
+    ) {
+        write_unit(profile, name, stem, fp, deps, age);
+        let hash = profile.join(".fingerprint").join(name).join(stem);
+        fs::write(&hash, "").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&hash)
+            .unwrap()
+            .set_modified(now() - hash_age)
+            .unwrap();
     }
 
     #[test]
@@ -823,43 +955,157 @@ mod tests {
     }
 
     #[test]
-    fn a_not_current_unit_inside_the_window_makes_the_target_undecided() {
-        type Make = fn(&Path, &str);
-        let cases: [(&str, Make); 3] = [
-            ("never compiled", |p, n| never_compiled(p, n, HOUR)),
-            ("emptied hash", |p, n| {
-                emptied_hash(p, n, "lib-x", Some(HOUR))
-            }),
-            ("run build script", |p, n| {
-                emptied_hash(p, n, "run-build-script-build-script-build", Some(HOUR))
-            }),
-        ];
-        for (label, make) in cases {
-            let s = Scratch::new("nc-in");
-            let p = s.0.join("debug");
-            write_unit(&p, B, "lib-b", 102, &[], Some(30 * DAY));
-            make(&p, A);
-            let reasons = undecided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
-            let dir = p.join(".fingerprint").join(A);
-            assert!(
-                matches!(&reasons[..], [Uncertain::NotCurrentInWindow { dir: d }] if *d == dir),
-                "{label}: {reasons:?}"
-            );
-        }
+    fn a_never_compiled_unit_invoked_inside_the_window_makes_the_target_undecided() {
+        let s = Scratch::new("nc-in");
+        let p = s.0.join("debug");
+        write_unit(&p, B, "lib-b", 102, &[], Some(30 * DAY));
+        never_compiled(&p, A, HOUR);
+        let reasons = undecided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        let dir = p.join(".fingerprint").join(A);
+        assert_eq!(reasons, [Uncertain::NotCurrentInWindow { dir }]);
+        assert!(reasons[0].to_string().contains("never compiled"));
+        assert!(reasons[0].clears_when().contains("never compiled"));
     }
 
     #[test]
-    fn a_not_current_unit_outside_the_window_or_without_a_timestamp_is_ignored() {
-        let s = Scratch::new("nc-out");
+    fn a_never_compiled_unit_invoked_outside_the_window_is_ignored() {
+        let s = Scratch::new("nc-out-never");
         let p = s.0.join("debug");
         write_unit(&p, D, "lib-d", 104, &[], Some(30 * DAY));
         never_compiled(&p, A, 30 * DAY);
-        emptied_hash(&p, B, "lib-b", None);
-        emptied_hash(&p, C, "run-build-script-build-script-build", Some(30 * DAY));
+        let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert!(live.is_empty());
+        assert_eq!(dead.len(), 1);
+    }
+
+    #[test]
+    fn a_not_current_unit_is_ignored_when_both_of_its_files_are_older_than_the_window() {
+        let s = Scratch::new("nc-out");
+        let p = s.0.join("debug");
+        write_unit(&p, D, "lib-d", 104, &[], Some(30 * DAY));
+        emptied_hash(&p, B, "lib-b", Some(2 * DAY), 2 * DAY);
+        emptied_hash(
+            &p,
+            C,
+            "run-build-script-build-script-build",
+            Some(30 * DAY),
+            30 * DAY,
+        );
         let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
         assert!(live.is_empty());
         let dead: Vec<&str> = dead.iter().map(|d| d.unit.dir_name.as_str()).collect();
         assert_eq!(dead, [D]);
+    }
+
+    #[test]
+    fn a_not_current_unit_with_an_old_stamp_and_a_fresh_hash_file_is_a_root_that_keeps_its_dependency(
+    ) {
+        let s = Scratch::new("nc-root-hash");
+        let p = s.0.join("debug");
+        write_unit(&p, C, "lib-c", 103, &[], Some(30 * DAY));
+        write_unit(&p, D, "lib-d", 104, &[], Some(30 * DAY));
+        emptied_hash_wanting(&p, A, "lib-a", 101, &[("c", 103)], Some(2 * DAY), HOUR);
+        let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert_eq!(names(&live), [A, C]);
+        let dead: Vec<&str> = dead.iter().map(|d| d.unit.dir_name.as_str()).collect();
+        assert_eq!(dead, [D]);
+    }
+
+    #[test]
+    fn a_not_current_unit_with_a_fresh_stamp_and_an_old_hash_file_is_a_root() {
+        let s = Scratch::new("nc-root-stamp");
+        let p = s.0.join("debug");
+        write_unit(&p, C, "lib-c", 103, &[], Some(30 * DAY));
+        emptied_hash_wanting(&p, A, "lib-a", 101, &[("c", 103)], Some(HOUR), 2 * DAY);
+        let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert_eq!(names(&live), [A, C]);
+        assert!(dead.is_empty());
+    }
+
+    #[test]
+    fn a_run_build_script_not_current_unit_is_timed_by_its_build_dir_and_its_hash_file() {
+        let s = Scratch::new("nc-root-rbs");
+        let p = s.0.join("debug");
+        let stem = "run-build-script-build-script-build";
+        emptied_hash(&p, A, stem, Some(2 * DAY), HOUR);
+        let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert_eq!(names(&live), [A]);
+        assert!(dead.is_empty());
+    }
+
+    #[test]
+    fn a_not_current_unit_outside_the_window_still_keeps_entries_out_of_dead_units_files() {
+        let s = Scratch::new("nc-keeps");
+        let p = s.0.join("debug");
+        write_unit(&p, D, "lib-d", 104, &[], Some(30 * DAY));
+        emptied_hash(&p, B, "lib-b", Some(2 * DAY), 2 * DAY);
+        plant(&p, "deps", &format!("dep-{HASH_D}.o"));
+        plant(&p, "deps", &format!("dep-2222222222222222.cgu-{HASH_D}.o"));
+        let dead = dead_of(decide(&target_of(&s.0, &[&p]), 6 * HOUR), D);
+        assert_eq!(
+            dead.files,
+            [
+                p.join(".fingerprint").join(D),
+                p.join("deps").join(format!("dep-{HASH_D}.o"))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_not_current_unit_with_no_readable_file_time_is_not_a_root_and_gives_no_reason() {
+        let s = Scratch::new("nc-both-missing");
+        let p = s.0.join("debug");
+        emptied_hash(&p, A, "lib-a", Some(HOUR), HOUR);
+        let target = target_of(&s.0, &[&p]);
+        fs::remove_file(p.join(".fingerprint").join(A).join("lib-a")).unwrap();
+        let fake = mtime_fails_with(io::ErrorKind::NotFound);
+        let (live, dead) = decided(liveness(&fake, &target, now(), 6 * HOUR));
+        assert!(live.is_empty());
+        assert!(dead.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_hash_file_time_of_a_not_current_unit_makes_the_target_undecided() {
+        let s = Scratch::new("nc-hash-denied");
+        let p = s.0.join("debug");
+        emptied_hash(&p, A, "lib-a", Some(30 * DAY), 30 * DAY);
+        let hash = p.join(".fingerprint").join(A).join("lib-a");
+        let target = target_of(&s.0, &[&p]);
+        let fake = FakeFs::new(Listing::MtimeFailsAt(
+            io::ErrorKind::PermissionDenied,
+            hash.clone(),
+        ));
+        let reasons = undecided(liveness(&fake, &target, now(), 6 * HOUR));
+        assert!(
+            matches!(&reasons[..], [Uncertain::TimestampUnreadable { path, .. }] if *path == hash),
+            "{reasons:?}"
+        );
+        assert!(reasons[0].to_string().contains("file"));
+        assert!(reasons[0].clears_when().contains("file"));
+    }
+
+    #[test]
+    fn a_not_current_unit_is_never_dead() {
+        let s = Scratch::new("nc-never-dead");
+        let p = s.0.join("debug");
+        emptied_hash(&p, A, "lib-a", Some(30 * DAY), 30 * DAY);
+        emptied_hash(&p, B, "lib-b", Some(HOUR), HOUR);
+        never_compiled(&p, C, 30 * DAY);
+        let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert_eq!(names(&live), [B]);
+        assert!(dead.is_empty());
+    }
+
+    #[test]
+    fn an_edge_of_a_not_current_root_that_no_unit_provides_is_unresolved() {
+        let s = Scratch::new("nc-unres");
+        let p = s.0.join("debug");
+        emptied_hash_wanting(&p, A, "lib-a", 101, &[("ghost", 999)], Some(HOUR), HOUR);
+        let reasons = undecided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
+        assert!(matches!(
+            &reasons[..],
+            [Uncertain::Unresolved { dependency, .. }] if dependency == "ghost"
+        ));
     }
 
     #[test]
@@ -1045,6 +1291,7 @@ mod tests {
         Reversed,
         FailOn(&'static str),
         MtimeFails(io::ErrorKind),
+        MtimeFailsAt(io::ErrorKind, PathBuf),
     }
 
     struct FakeFs {
@@ -1082,6 +1329,9 @@ mod tests {
         fn mtime(&self, path: &Path) -> io::Result<SystemTime> {
             match self.listing {
                 Listing::MtimeFails(kind) if path.ends_with("invoked.timestamp") => {
+                    Err(io::Error::new(kind, "injected"))
+                }
+                Listing::MtimeFailsAt(kind, ref only) if path == only => {
                     Err(io::Error::new(kind, "injected"))
                 }
                 _ => self.real.mtime(path),
