@@ -866,7 +866,7 @@ fn read_output(path: &Path) -> Result<String, String> {
 }
 
 fn invoked_mtime(dir: &Path) -> Option<SystemTime> {
-    std::fs::metadata(dir.join("invoked.timestamp"))
+    std::fs::metadata(dir.join(crate::fingerprint::INVOKED_TIMESTAMP))
         .and_then(|meta| meta.modified())
         .ok()
 }

@@ -140,7 +140,10 @@ pub fn unit_timestamp(profile: &Path, dir_name: &str, kind: &str) -> PathBuf {
     } else {
         ".fingerprint"
     };
-    profile.join(base).join(dir_name).join("invoked.timestamp")
+    profile
+        .join(base)
+        .join(dir_name)
+        .join(fingerprint::INVOKED_TIMESTAMP)
 }
 
 fn in_window(mtime: SystemTime, now: SystemTime, window: Duration) -> bool {

@@ -10,6 +10,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// The file Cargo touches when it starts compiling a unit.
+pub(crate) const INVOKED_TIMESTAMP: &str = "invoked.timestamp";
+
 const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
 
 pub const KEYS: [&str; 11] = [
@@ -145,11 +148,13 @@ fn is_hash(bytes: &[u8]) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
 }
 
+/// The `<hash>` of a `<name>-<hash>` unit dir name, when it is exactly 16 lowercase hex digits.
 pub fn unit_hash(dir_name: &str) -> Option<&str> {
     let (_, tail) = dir_name.rsplit_once('-')?;
     is_hash(tail.as_bytes()).then_some(tail)
 }
 
+/// The crate name of dependency `dep` in the unit's fingerprint report, when it can be read.
 #[doc(hidden)]
 pub fn dep_name(fingerprint_dir: &Path, stem: &str, dep: u64) -> Option<String> {
     let mut file = fs::File::open(fingerprint_dir.join(format!("{stem}.json"))).ok()?;
@@ -362,11 +367,11 @@ pub fn error_code(line: &str) -> Option<String> {
 /// The dir Cargo leaves for a unit whose first compile failed: its start stamp and its cached
 /// compiler messages, with no fingerprint written yet.
 fn never_compiled(names: &[String]) -> bool {
-    names.iter().any(|n| n == "invoked.timestamp")
+    names.iter().any(|n| n == INVOKED_TIMESTAMP)
         && names.iter().any(|n| n.starts_with("output-"))
         && names
             .iter()
-            .all(|n| n == "invoked.timestamp" || n.starts_with("output-"))
+            .all(|n| n == INVOKED_TIMESTAMP || n.starts_with("output-"))
 }
 
 pub fn read_profile(profile_dir: &Path) -> ProfileReport {
