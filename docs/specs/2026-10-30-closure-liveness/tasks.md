@@ -548,10 +548,10 @@ JSON left beside an emptied hash; status must not change.
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests** in `src/fingerprint.rs`: a unit whose JSON has `deps` `[[11, "a", false, 7], [12, "b", false, 9]]` reads back as `[DepEdge { package: 11, fingerprint: 7 }, DepEdge { package: 12, fingerprint: 9 }]`; a unit with an emptied hash file lists the same edges in its `NotCurrentUnit.deps`; a never-compiled dir has empty `deps`; the per-profile `EdgeCounts` of an existing edge-count fixture are unchanged and count no not-current unit's edges. Run `cargo test --lib fingerprint::`; expect compile errors (`DepEdge` not found).
-- [ ] **Step 2: Implement** the type change and update every literal listed in Files.
-- [ ] **Step 3: Verify.** `cargo test --lib`, `cargo test --test status_targets --test explain --test liveness` pass with no expected-value edits. Run the merge gate.
-- [ ] **Step 4: Commit** `refactor(fingerprint): keep each edge's package id and a not-current unit's edges`.
+- [x] **Step 1: Write the failing tests** in `src/fingerprint.rs`: a unit whose JSON has `deps` `[[11, "a", false, 7], [12, "b", false, 9]]` reads back as `[DepEdge { package: 11, fingerprint: 7 }, DepEdge { package: 12, fingerprint: 9 }]`; a unit with an emptied hash file lists the same edges in its `NotCurrentUnit.deps`; a never-compiled dir has empty `deps`; the per-profile `EdgeCounts` of an existing edge-count fixture are unchanged and count no not-current unit's edges. Run `cargo test --lib fingerprint::`; expect compile errors (`DepEdge` not found).
+- [x] **Step 2: Implement** the type change and update every literal listed in Files.
+- [x] **Step 3: Verify.** `cargo test --lib`, `cargo test --test status_targets --test explain --test liveness` pass with no expected-value edits. Run the merge gate.
+- [x] **Step 4: Commit** `refactor(fingerprint): keep each edge's package id and a not-current unit's edges`.
 
 _Requirements: LIVE-5.1, LIVE-5.2, LIVE-5.3, LIVE-5.9_
 
