@@ -705,7 +705,7 @@ Design Decision 15 and the Proof "Order amendment".
 
 **Depends-on:** Task 15
 
-- [ ] **Step 1: Write the failing tests** on the existing proof fixture:
+- [x] **Step 1: Write the failing tests** on the existing proof fixture:
   - the profile locks are free while the warm-up runs: the recording cloner, on the label `warm-up`, takes each profile's lock in-process with `try_lock_exclusive` and succeeds; `lock_held` is printed and shorter than the whole run;
   - a lock held by another process fails the test naming the profile dir (that the locks are taken before `read_profile` reads anything is checked by review: `read_profile` reads through `std::fs`, outside the `Fs` seam);
   - the recording cloner sees the snapshot cloned from the original, and the warm-up cloned from the snapshot, never from the original;
@@ -716,9 +716,9 @@ Design Decision 15 and the Proof "Order amendment".
   - nothing in the original or the snapshot is deleted or modified: every deletion lands in a window clone (the recording cloner's destinations), and the original's listed files and `Cargo.lock` are intact at the end.
 
   Run `cargo test --test liveness`; expect failures.
-- [ ] **Step 2: Implement** the new order, the checks, and remove the tree comparison.
-- [ ] **Step 3: Verify.** `cargo test --test liveness --test liveness_prove`; the merge gate.
-- [ ] **Step 4: Commit** `fix(liveness): lock the target only while deciding and taking a snapshot`.
+- [x] **Step 2: Implement** the new order, the checks, and remove the tree comparison.
+- [x] **Step 3: Verify.** `cargo test --test liveness --test liveness_prove`; the merge gate.
+- [x] **Step 4: Commit** `fix(liveness): lock the target only while deciding and taking a snapshot`.
 
 _Requirements: LIVE-8.1, LIVE-8.2, LIVE-8.3, LIVE-8.4, LIVE-8.5, LIVE-8.6, LIVE-8.7_
 
