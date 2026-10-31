@@ -588,9 +588,6 @@ fn assemble(
     let mut dead_units: BTreeMap<UnitRef, Vec<PathBuf>> = BTreeMap::new();
     for &i in dead_idx {
         let (profile, unit) = units[i];
-        if fingerprint::unit_hash(&unit.dir_name).is_none() {
-            continue;
-        }
         let mut files = Vec::new();
         if let Some(matching) = claimed.remove(&i) {
             files.push(fingerprint_dir(profile, &unit.dir_name));
