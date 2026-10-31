@@ -607,7 +607,7 @@ Design Decision 14 and the Liveness "Flow amendment" steps 4'' and 5'.
 
 **Depends-on:** Task 13
 
-- [ ] **Step 1: Write the failing tests** (synthetic dirs; each package id is a chosen u64):
+- [x] **Step 1: Write the failing tests** (synthetic dirs; each package id is a chosen u64):
   - a live unit's unmatched edge with package id P, where another unit's matching edge with id P points at `liba-<h1>`, marks the not-current `liba-<h2>` live and follows its JSON; the result is Decided;
   - the not-current candidate sits in another profile dir of the target and is still found;
   - `my-lib` and `my_lib` compare equal;
@@ -619,9 +619,9 @@ Design Decision 14 and the Liveness "Flow amendment" steps 4'' and 5'.
   - two runs over shuffled directory order give equal results.
 
   Run `cargo test --lib liveness::`; expect failures (today every unmatched edge from a live unit is `Unresolved`).
-- [ ] **Step 2: Implement** the learning map and the unmatched-edge branch; keep the map unused when the edge matches.
-- [ ] **Step 3: Verify.** `cargo test --lib`, `cargo test --test liveness`, the merge gate.
-- [ ] **Step 4: Commit** `feat(liveness): keep the not-current units of an unmatched edge's package`.
+- [x] **Step 2: Implement** the learning map and the unmatched-edge branch; keep the map unused when the edge matches.
+- [x] **Step 3: Verify.** `cargo test --lib`, `cargo test --test liveness`, the merge gate.
+- [x] **Step 4: Commit** `feat(liveness): keep the not-current units of an unmatched edge's package`.
 
 _Requirements: LIVE-1.14, LIVE-2.15, LIVE-2.16, LIVE-1.9_
 
