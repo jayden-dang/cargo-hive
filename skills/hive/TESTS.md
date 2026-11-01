@@ -129,6 +129,18 @@ Both agents, with no tools, were given hive's name and description plus `rust-fm
 
 `ls -lR ~/.hive | shasum` gave `042250fe16baf5d1e9e1fae4126659f204aa20bb` again, after both the first runs and the reruns: unchanged. No run changed the skill text.
 
+## Plan flow — gc --plan
+
+No agent run covers this command. The 2026-10-30 runs predate the plan tier, so this entry is taken from the skill text, as the contract entries are. An agent whose request needs closure deletion or an orphan target, not only superseded sessions, plans first and deletes nothing in that step.
+
+Expected command, with `--json` and the repo path: `cargo hive gc --plan /path/to/repo --json`. The receipt's plan ids are per class, and `undecided` targets are reported. The agent does not apply a plan here, does not delete those paths by hand, and does not approve.
+
+## Plan flow — apply
+
+No agent run covers this command either; the entry is taken from the skill text. The agent applies one stored plan.
+
+Expected command, with `--json` and one plan id: `cargo hive apply plan-id --json`. The agent applies only a `secondary` plan and reports the rest. `needs-human` or exit 3 is reported to the owner; the agent does not approve. After `refused`, the agent plans again and does not reuse an id that is already consumed. `partial` is not an error; the agent checks its reason.
+
 ## Install — Claude Code
 
 Run on 2026-10-30 from a clean `git clone --branch skill` of this repo at `/private/tmp/hive-skill-install-20261030/clone`, with `CLAUDE_CONFIG_DIR=/private/tmp/hive-skill-install-20261030/claude` so the real `~/.claude` was never written. These are the CLI forms of `/plugin marketplace add` and `/plugin install`. The outputs below are concatenated in command order.
