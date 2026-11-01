@@ -389,3 +389,172 @@ fn applying_two_targets_records_each_targets_counts_and_the_plan_totals() {
         shared
     );
 }
+
+fn refused(p: &Planned, id: &str, reason: &str) {
+    let before = (tree(&p.main_target()), tree(&p.worktree_target()));
+    let (out, r) = p.hive.json(&["apply", id]);
+    assert_eq!(out.status.code(), Some(1), "{r}");
+    assert_eq!(r["plans"][0]["outcome"], "refused");
+    assert_eq!(r["plans"][0]["reason"], reason, "{r}");
+    assert_eq!(
+        (tree(&p.main_target()), tree(&p.worktree_target())),
+        before,
+        "a refused plan deleted something"
+    );
+    let (_, again) = p.hive.json(&["apply", id]);
+    assert_eq!(
+        again["plans"][0]["reason"], "already_consumed",
+        "a refused plan stays consumed"
+    );
+}
+
+#[test]
+fn a_planned_unit_that_a_command_made_live_again_refuses_the_whole_plan() {
+    let p = Planned::new("stale-live");
+    let hash = p.dead_unit_hash(&p.worktree_target());
+    let id = Planned::id_of(&p.plan(), "secondary");
+    p.revive(&p.worktree_target(), &hash);
+    refused(&p, &id, "stale_item");
+}
+
+#[test]
+fn a_planned_path_that_vanished_refuses_the_plan() {
+    let p = Planned::new("stale-entry");
+    let hash = p.dead_unit_hash(&p.worktree_target());
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let deps = p.worktree_target().join("debug/deps");
+    let victim = std::fs::read_dir(&deps)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|f| f.to_str().unwrap().contains(&hash) && f.extension().is_some_and(|e| e == "rlib"))
+        .unwrap();
+    std::fs::remove_file(&victim).unwrap();
+    refused(&p, &id, "entry_changed");
+}
+
+#[test]
+fn a_unit_that_became_dead_after_the_plan_is_left_alone() {
+    let p = Planned::new("stale-newly-dead");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    common::cargo_fixture::backdate_all(
+        &p.worktree_target(),
+        std::time::Duration::from_secs(10 * 86_400),
+    );
+    let manifest = p.worktree.join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest)
+        .unwrap()
+        .replace("0.1.1", "0.1.2");
+    std::fs::write(&manifest, text).unwrap();
+    p.hive.build_crate(&p.worktree, None);
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    assert_eq!(r["plans"][0]["outcome"], "applied");
+}
+
+#[test]
+fn a_changed_class_refuses_the_plan() {
+    let p = Planned::new("stale-class");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    // with no secondary roots the worktree is no longer a secondary checkout
+    p.hive.config(r#"{"secondary_roots": []}"#);
+    refused(&p, &id, "class_changed");
+}
+
+#[test]
+fn a_changed_owner_refuses_the_plan() {
+    let p = Planned::new("stale-owner");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    // the main checkout now builds into the worktree's target dir, and a protected owner wins
+    std::fs::create_dir_all(p.main.join(".cargo")).unwrap();
+    std::fs::write(
+        p.main.join(".cargo/config.toml"),
+        format!(
+            "[build]\ntarget-dir = \"{}\"\n",
+            p.worktree_target().display()
+        ),
+    )
+    .unwrap();
+    refused(&p, &id, "owner_changed");
+}
+
+#[test]
+fn a_profile_with_an_unknown_fingerprint_format_refuses_the_plan() {
+    let p = Planned::new("stale-format");
+    let hash = p.dead_unit_hash(&p.worktree_target());
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let unit = p
+        .worktree_target()
+        .join(format!("debug/.fingerprint/fixture-{hash}"));
+    for entry in std::fs::read_dir(&unit).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "json") {
+            std::fs::write(&path, r#"{"unexpected": true}"#).unwrap();
+        }
+    }
+    refused(&p, &id, "unsupported_format");
+}
+
+#[test]
+fn a_target_that_became_undecided_after_the_plan_refuses_it_with_undecided() {
+    let p = Planned::new("stale-undecided");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let unit = p
+        .worktree_target()
+        .join("debug/.fingerprint/zz-0123456789abcdef");
+    std::fs::create_dir_all(&unit).unwrap();
+    std::fs::write(unit.join("invoked.timestamp"), b"").unwrap();
+    std::fs::write(unit.join("output-lib-zz"), b"").unwrap();
+    refused(&p, &id, "undecided");
+}
+
+#[test]
+fn a_workspace_that_no_longer_resolves_refuses_the_plan_as_ownership_unresolved() {
+    let p = Planned::new("stale-unresolved");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    std::fs::write(p.worktree.join("Cargo.toml"), "this is not a manifest").unwrap();
+    refused(&p, &id, "ownership_unresolved");
+}
+
+#[test]
+fn a_plan_edited_to_name_a_file_outside_its_target_is_refused_and_the_file_survives() {
+    let p = Planned::new("stale-outside");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let outside = p.scratch.path.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let keep = outside.join("keep");
+    std::fs::write(&keep, b"mine").unwrap();
+    let md = std::fs::metadata(&keep).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    let mut stored = p.plans_json();
+    for plan in stored["plans"].as_array_mut().unwrap() {
+        if plan["id"] == id.as_str() {
+            let e = &mut plan["targets"][0]["entries"][0];
+            e["path"] = serde_json::json!(keep.to_str().unwrap());
+            e["kind"] = serde_json::json!("file");
+            e["dev"] = serde_json::json!(md.dev());
+            e["ino"] = serde_json::json!(md.ino());
+        }
+    }
+    std::fs::write(p.hive.home.path.join("plans.json"), stored.to_string()).unwrap();
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(1), "{r}");
+    assert_eq!(r["plans"][0]["outcome"], "refused");
+    assert!(keep.exists(), "a path outside the target was deleted");
+}
+
+#[test]
+fn every_target_is_checked_before_any_is_deleted() {
+    let p = Planned::with_worktrees("stale-two-targets", 2);
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let second = p.more_worktrees[0].join("target");
+    let hash = p.dead_unit_hash(&second);
+    p.revive(&second, &hash);
+    let first_before = tree(&p.worktree_target());
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(1), "{r}");
+    assert_eq!(
+        tree(&p.worktree_target()),
+        first_before,
+        "the first target was deleted although the second was stale"
+    );
+}

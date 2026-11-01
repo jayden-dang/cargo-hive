@@ -10,11 +10,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::cargo_target::{self, Owner, TargetDir};
 use crate::cli::cross_check_notes;
 use crate::discover::{self, Snapshot};
-use crate::fingerprint::read_profile;
+use crate::fingerprint::{read_profile, Format, ProfileReport};
 use crate::gc::{self, Bytes, Ledger};
 use crate::liveness::{self, Liveness};
-use crate::plan_tier::build::{class_of_target, TargetClass};
-use crate::plan_tier::guard::{check_entry, Expect};
+use crate::plan_tier::build::{class_label, class_of_target, TargetClass};
+use crate::plan_tier::guard::{check_entry, Deleted as EntryMismatch, Expect};
 use crate::plan_tier::locks::{self, Acquired, Locked, Reason};
 use crate::plan_tier::record::{
     self, kind_of, BytesRec, Lookup, Plan, PlanClass, PlannedEntry, PlannedTarget, Taken,
@@ -136,7 +136,7 @@ pub fn apply(
         };
     let resolved = match resolve(ctx, &plan, cancel) {
         Ok(resolved) => resolved,
-        Err(reason) => return Ok(refused(&plan.id, plan.class, reason, target_paths(&plan))),
+        Err(refusal) => return Ok(refuse(&plan, refusal, BTreeMap::new())),
     };
     Ok(execute(ctx, plan, &resolved, cancel))
 }
@@ -163,19 +163,8 @@ pub fn execute(
             }
         }
     }
-    if !recheck(ctx, &plan, resolved, &locked) {
-        return Applied {
-            outcome: Outcome::Refused,
-            reason: Some("stale_item".to_string()),
-            class: plan.class,
-            id: plan.id.clone(),
-            targets: target_paths(&plan),
-            counts: count_map(0, 0, &skips, None),
-            bytes: None,
-            notes: Vec::new(),
-            unmeasured: Vec::new(),
-            findings: Vec::new(),
-        };
+    if let Some(refusal) = recheck(ctx, &plan, resolved, &locked) {
+        return refuse(&plan, refusal, count_map(0, 0, &skips, None));
     }
     let locked_paths: Vec<PathBuf> = locked
         .iter()
@@ -285,11 +274,18 @@ pub fn execute(
     }
 }
 
+struct Refusal {
+    reason: &'static str,
+    target: PathBuf,
+    path: Option<PathBuf>,
+    details: Vec<String>,
+}
+
 fn resolve(
     ctx: &Ctx,
     plan: &Plan,
     cancel: &(dyn Fn() -> bool + Sync),
-) -> Result<Vec<ResolvedTarget>, &'static str> {
+) -> Result<Vec<ResolvedTarget>, Refusal> {
     let mut checkouts = Vec::new();
     for repo in ctx.repos {
         let (rows, _) = discover::checkouts(repo, ctx.mains, ctx.cfg);
@@ -297,32 +293,90 @@ fn resolve(
     }
     let mut snapshot = Snapshot::default();
     let scan = discover::targets(&checkouts, ctx.cfg, true, &mut snapshot, cancel);
-    let mut resolved = Vec::new();
-    for target in &plan.targets {
+    let mut planned: Vec<&PlannedTarget> = plan.targets.iter().collect();
+    planned.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut located = Vec::new();
+    for target in &planned {
         let Some(found) = scan.targets.iter().find(|cand| cand.path == target.path) else {
-            return Err("owner_changed");
+            return Err(ownership_unresolved(target, "the target was not resolved"));
         };
-        let class = match class_of_target(&found.owner, &checkouts) {
-            TargetClass::Class(class) => class,
-            TargetClass::Unresolved => return Err("owner_changed"),
+        if let Owner::Unresolved { reason } = &found.owner {
+            return Err(ownership_unresolved(target, reason));
+        }
+        if let TargetClass::Unresolved = class_of_target(&found.owner, &checkouts) {
+            return Err(ownership_unresolved(
+                target,
+                "ownership could not be resolved",
+            ));
+        }
+        located.push((*target, found));
+    }
+    for (target, found) in &located {
+        let owner = owned_checkout(&found.owner);
+        if owner != target.owner {
+            let recorded = path_or_none(target.owner.as_deref());
+            let now = path_or_none(owner.as_deref());
+            return Err(Refusal {
+                reason: "owner_changed",
+                target: target.path.clone(),
+                path: None,
+                details: vec![format!("owner is {now} and the plan recorded {recorded}")],
+            });
+        }
+    }
+    let mut resolved = Vec::new();
+    for (target, found) in located {
+        let TargetClass::Class(class) = class_of_target(&found.owner, &checkouts) else {
+            return Err(ownership_unresolved(
+                target,
+                "ownership could not be resolved",
+            ));
         };
         if class != plan.class {
-            return Err("owner_changed");
-        }
-        let owner = match &found.owner {
-            Owner::Owned { checkout } => Some(checkout.clone()),
-            Owner::Unresolved { .. } | Owner::OrphanCandidate { .. } => None,
-        };
-        if owner != target.owner {
-            return Err("owner_changed");
+            return Err(Refusal {
+                reason: "class_changed",
+                target: target.path.clone(),
+                path: None,
+                details: vec![format!(
+                    "class is {} and the plan recorded {}",
+                    class_label(class),
+                    class_label(plan.class)
+                )],
+            });
         }
         resolved.push(ResolvedTarget {
             path: found.path.clone(),
-            owner,
+            owner: owned_checkout(&found.owner),
             class,
         });
     }
     Ok(resolved)
+}
+
+fn owned_checkout(owner: &Owner) -> Option<PathBuf> {
+    match owner {
+        Owner::Owned { checkout } => Some(checkout.clone()),
+        Owner::Unresolved { .. } | Owner::OrphanCandidate { .. } => None,
+    }
+}
+
+fn path_or_none(path: Option<&Path>) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn ownership_unresolved(target: &PlannedTarget, detail: &str) -> Refusal {
+    Refusal {
+        reason: "ownership_unresolved",
+        target: target.path.clone(),
+        path: None,
+        details: vec![detail.to_string()],
+    }
+}
+
+struct Loaded<'a> {
+    target: &'a PlannedTarget,
+    reports: Vec<ProfileReport>,
 }
 
 fn recheck(
@@ -330,67 +384,161 @@ fn recheck(
     plan: &Plan,
     resolved: &[ResolvedTarget],
     locked: &[(&PlannedTarget, Locked)],
-) -> bool {
+) -> Option<Refusal> {
     let window = Duration::from_secs(plan.window_days.saturating_mul(86_400));
     let now = SystemTime::now();
+    let mut loaded = Vec::new();
     for (target, _) in locked {
-        let Some(Ok(profiles)) = cargo_target::identify(&target.path) else {
-            return false;
-        };
-        let reports: Vec<_> = profiles
-            .iter()
-            .map(|(path, _)| read_profile(path))
-            .collect();
-        let owner = match resolved
-            .iter()
-            .find(|item| item.path == target.path)
-            .and_then(|item| item.owner.clone())
-            .or_else(|| target.owner.clone())
-        {
-            Some(checkout) => Owner::Owned { checkout },
-            None => Owner::OrphanCandidate {
-                owned_under_caller_env: None,
-            },
-        };
-        let dir = TargetDir {
-            path: target.path.clone(),
-            owner,
-            profiles: reports,
-            size: None,
-            unreadable: None,
-        };
-        let dead = match liveness::liveness(ctx.fs, &dir, now, window) {
-            Liveness::Decided { dead, .. } => dead,
-            Liveness::Undecided { .. } => return false,
-        };
-        let dead_paths: HashSet<&Path> = dead
-            .iter()
-            .flat_map(|unit| unit.files.iter().map(PathBuf::as_path))
-            .collect();
-        for entry in &target.entries {
-            if !dead_paths.contains(entry.path.as_path()) {
-                return false;
-            }
-            let Some(kind) = kind_of(&entry.kind) else {
-                return false;
-            };
-            if check_entry(
-                ctx.fs,
-                &target.path,
-                &entry.path,
-                Expect::Entry {
-                    kind,
-                    dev: entry.dev,
-                    ino: entry.ino,
-                },
-            )
-            .is_err()
-            {
-                return false;
+        match load_target(target) {
+            Ok(item) => loaded.push(item),
+            Err(refusal) => return Some(refusal),
+        }
+    }
+    for item in &loaded {
+        for entry in &item.target.entries {
+            if let Some(refusal) = entry_refusal(ctx, item.target, entry) {
+                return Some(refusal);
             }
         }
     }
-    true
+    let mut decided = Vec::new();
+    for item in loaded {
+        let dead = match dead_paths(ctx, resolved, item.target, item.reports, now, window) {
+            Ok(dead) => dead,
+            Err(refusal) => return Some(refusal),
+        };
+        decided.push((item.target, dead));
+    }
+    for (target, dead_paths) in decided {
+        for entry in &target.entries {
+            if !dead_paths.contains(entry.path.as_path()) {
+                return Some(Refusal {
+                    reason: "stale_item",
+                    target: target.path.clone(),
+                    path: Some(entry.path.clone()),
+                    details: vec!["the planned path is no longer dead".to_string()],
+                });
+            }
+        }
+    }
+    None
+}
+
+fn load_target(target: &PlannedTarget) -> Result<Loaded<'_>, Refusal> {
+    let profiles = match cargo_target::identify(&target.path) {
+        Some(Ok(profiles)) => profiles,
+        Some(Err(why)) => {
+            return Err(Refusal {
+                reason: "unsupported_format",
+                target: target.path.clone(),
+                path: Some(target.path.clone()),
+                details: vec![why],
+            });
+        }
+        None => {
+            return Err(Refusal {
+                reason: "unsupported_format",
+                target: target.path.clone(),
+                path: Some(target.path.clone()),
+                details: vec!["the target has no readable profile set".to_string()],
+            });
+        }
+    };
+    let reports: Vec<_> = profiles
+        .iter()
+        .map(|(path, _)| read_profile(path))
+        .collect();
+    for report in &reports {
+        if let Format::Unsupported(why) = &report.format {
+            return Err(Refusal {
+                reason: "unsupported_format",
+                target: target.path.clone(),
+                path: Some(report.path.clone()),
+                details: vec![why.clone()],
+            });
+        }
+    }
+    Ok(Loaded { target, reports })
+}
+
+fn dead_paths(
+    ctx: &Ctx,
+    resolved: &[ResolvedTarget],
+    target: &PlannedTarget,
+    reports: Vec<ProfileReport>,
+    now: SystemTime,
+    window: Duration,
+) -> Result<HashSet<PathBuf>, Refusal> {
+    let owner = match resolved
+        .iter()
+        .find(|row| row.path == target.path)
+        .and_then(|row| row.owner.clone())
+        .or_else(|| target.owner.clone())
+    {
+        Some(checkout) => Owner::Owned { checkout },
+        None => Owner::OrphanCandidate {
+            owned_under_caller_env: None,
+        },
+    };
+    let dir = TargetDir {
+        path: target.path.clone(),
+        owner,
+        profiles: reports,
+        size: None,
+        unreadable: None,
+    };
+    match liveness::liveness(ctx.fs, &dir, now, window) {
+        Liveness::Decided { dead, .. } => Ok(dead
+            .iter()
+            .flat_map(|unit| unit.files.iter().cloned())
+            .collect()),
+        Liveness::Undecided { reasons } => {
+            let details = if reasons.is_empty() {
+                vec!["the target could not be decided".to_string()]
+            } else {
+                reasons.iter().map(ToString::to_string).collect()
+            };
+            Err(Refusal {
+                reason: "undecided",
+                target: target.path.clone(),
+                path: None,
+                details,
+            })
+        }
+    }
+}
+
+fn entry_refusal(ctx: &Ctx, target: &PlannedTarget, entry: &PlannedEntry) -> Option<Refusal> {
+    let Some(kind) = kind_of(&entry.kind) else {
+        return Some(Refusal {
+            reason: "entry_changed",
+            target: target.path.clone(),
+            path: Some(entry.path.clone()),
+            details: vec!["the plan records an unknown entry kind".to_string()],
+        });
+    };
+    let mismatch = check_entry(
+        ctx.fs,
+        &target.path,
+        &entry.path,
+        Expect::Entry {
+            kind,
+            dev: entry.dev,
+            ino: entry.ino,
+        },
+    )
+    .err()?;
+    Some(Refusal {
+        reason: "entry_changed",
+        target: target.path.clone(),
+        path: Some(entry.path.clone()),
+        details: vec![match mismatch {
+            EntryMismatch::Missing => "the planned entry is missing".to_string(),
+            EntryMismatch::Changed => "the planned entry changed".to_string(),
+            EntryMismatch::Outside => "the planned entry is outside the target".to_string(),
+            EntryMismatch::Removed => "the planned entry was removed".to_string(),
+        }],
+    })
 }
 
 enum Deleted {
@@ -530,6 +678,47 @@ fn target_paths(plan: &Plan) -> Vec<PathBuf> {
         .iter()
         .map(|target| target.path.clone())
         .collect()
+}
+
+fn refuse(plan: &Plan, refusal: Refusal, counts: BTreeMap<String, u64>) -> Applied {
+    let findings = refusal_findings(&refusal);
+    Applied {
+        outcome: Outcome::Refused,
+        reason: Some(refusal.reason.to_string()),
+        class: plan.class,
+        id: plan.id.clone(),
+        targets: target_paths(plan),
+        counts,
+        bytes: None,
+        notes: Vec::new(),
+        unmeasured: Vec::new(),
+        findings,
+    }
+}
+
+fn refusal_findings(refusal: &Refusal) -> Vec<(String, Option<PathBuf>, String)> {
+    let kind = refusal.reason.to_string();
+    if refusal.reason == "undecided" {
+        return refusal
+            .details
+            .iter()
+            .map(|detail| (kind.clone(), Some(refusal.target.clone()), detail.clone()))
+            .collect();
+    }
+    let path = refusal
+        .path
+        .clone()
+        .unwrap_or_else(|| refusal.target.clone());
+    let detail = if refusal.path.is_none() {
+        refusal.details.join("; ")
+    } else {
+        format!(
+            "{}: {}",
+            refusal.target.display(),
+            refusal.details.join("; ")
+        )
+    };
+    vec![(kind, Some(path), detail)]
 }
 
 fn refused(id: &str, class: PlanClass, reason: &str, targets: Vec<PathBuf>) -> Applied {
