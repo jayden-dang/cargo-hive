@@ -723,6 +723,25 @@ fn put_counts(b: &mut ReceiptBuilder, suffix: &str, c: &crate::gc::Counts) {
     }
 }
 
+pub(crate) fn cross_check_notes(
+    before: &std::collections::BTreeMap<String, (std::path::PathBuf, u64)>,
+    after: &std::collections::BTreeMap<String, (std::path::PathBuf, u64)>,
+    touched: &std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    for container in touched {
+        if let (Some((mount, was)), Some((_, now))) = (before.get(container), after.get(container))
+        {
+            let change = i128::from(*now) - i128::from(*was);
+            notes.push(format!(
+                "cross-check, not a count: available bytes in APFS container {container} (mounted at {}) changed by {change:+} during this run",
+                mount.display()
+            ));
+        }
+    }
+    notes
+}
+
 fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: OutputArgs) -> i32 {
     use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
     use crate::doctor::{self, Capabilities, Capability};
@@ -811,7 +830,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
     let report = gc::run(&*platform.fs, &scan.targets, &scope, &opts, &cancelled);
     if !dry_run {
         let after = volumes(&*platform.fs);
-        let deleted_on: BTreeSet<String> = report
+        let touched: BTreeSet<String> = report
             .per_target
             .iter()
             .filter(|(_, c)| {
@@ -819,16 +838,8 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             })
             .filter_map(|(p, _)| platform.fs.volume(p).ok().map(|v| v.container))
             .collect();
-        for container in &deleted_on {
-            if let (Some((mount, was)), Some((_, now))) =
-                (before.get(container), after.get(container))
-            {
-                let change = i128::from(*now) - i128::from(*was);
-                b.note(format!(
-                    "cross-check, not a count: available bytes in APFS container {container} (mounted at {}) changed by {change:+} during this run",
-                    mount.display()
-                ));
-            }
+        for note in cross_check_notes(&before, &after, &touched) {
+            b.note(note);
         }
     }
     put_counts(&mut b, "", &report.totals);

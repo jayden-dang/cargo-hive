@@ -2,9 +2,11 @@
 //! lock, re-check under the lock, measure, remove the dir, remove the lock file, release. A
 //! plan made from a stale listing therefore never deletes what replaced its entry.
 
+use super::account::RemoveFailed;
 use super::is_temp_entry;
 use super::ledger::{Bytes, Ledger};
 use super::plan::{self, Action};
+use super::remove_counted;
 use crate::cargo_target::TargetDir;
 use crate::discover::Scope;
 use crate::fingerprint::Format;
@@ -354,28 +356,24 @@ impl Runner<'_> {
     /// Measures `path` for the ledger, then removes it (a dry run only measures). True when
     /// the entry is, or in a dry run would be, gone. A vanished entry counts nothing.
     fn remove_measured(&mut self, target: &Path, path: &Path) -> bool {
-        let files = match scan(self.fs, path, self.opts.account_bytes) {
-            Ok(None) => return false,
-            Ok(Some(files)) => files,
-            Err(why) => {
+        match remove_counted(
+            self.fs,
+            &mut self.ledger,
+            target,
+            path,
+            self.opts.account_bytes,
+            self.opts.dry_run,
+        ) {
+            Ok(removed) => removed.existed,
+            Err(RemoveFailed::Scan(why)) => {
                 self.skip(path, why);
-                return false;
+                false
             }
-        };
-        if !self.opts.dry_run {
-            match self.fs.remove_tree(path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return false,
-                Err(e) => {
-                    self.skip(path, format!("could not remove it: {e}"));
-                    self.ledger
-                        .unmeasured(path.to_path_buf(), format!("removal failed part-way: {e}"));
-                    return false;
-                }
+            Err(RemoveFailed::Remove(error)) => {
+                self.skip(path, format!("could not remove it: {error}"));
+                false
             }
         }
-        record(&mut self.ledger, target, files);
-        true
     }
 }
 
@@ -441,7 +439,7 @@ pub fn measure(fs: &dyn Fs, target: &Path, paths: &[PathBuf], account_bytes: boo
     }
 }
 
-fn record(ledger: &mut Ledger, target: &Path, files: Scanned) {
+pub(super) fn record(ledger: &mut Ledger, target: &Path, files: Scanned) {
     for (file, measured) in files {
         match measured {
             Ok((stat, sharing)) => ledger.file(target, &stat, sharing.as_ref()),
@@ -452,7 +450,11 @@ fn record(ledger: &mut Ledger, target: &Path, files: Scanned) {
 
 /// The regular files under `root`, without following links and at most `MAX_DEPTH` deep.
 /// `Ok(None)` means the root vanished between listing and measure.
-fn scan(fs: &dyn Fs, root: &Path, account_bytes: bool) -> Result<Option<Scanned>, String> {
+pub(super) fn scan(
+    fs: &dyn Fs,
+    root: &Path,
+    account_bytes: bool,
+) -> Result<Option<Scanned>, String> {
     let mut files = Vec::new();
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
@@ -822,6 +824,7 @@ mod tests {
             rec.about(&[&old, &old_lock]),
             vec![
                 format!("lock {old_lock}"),
+                format!("stat {old}"),
                 format!("stat {old}"),
                 format!("remove_tree {old}"),
                 format!("remove_file {old_lock}"),
