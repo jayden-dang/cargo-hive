@@ -584,6 +584,11 @@ fn skill_documents_every_shipped_command() {
             dry_run: false,
             plan: false,
         },
+        Parsed::Apply,
+        Parsed::Gc {
+            dry_run: false,
+            plan: true,
+        },
         Parsed::Explain,
     ] {
         assert!(
@@ -591,6 +596,18 @@ fn skill_documents_every_shipped_command() {
             "the skill documents no command line for {want:?}"
         );
     }
+}
+
+#[test]
+fn the_skill_teaches_the_plan_flow_and_its_exit_code() {
+    let body = skill_body();
+    for needle in ["needs-human", "exit 3", "plan again", "already consumed"] {
+        assert!(body.contains(needle), "SKILL.md lacks {needle}");
+    }
+    assert!(
+        !body.contains("not available yet"),
+        "the plan tier is available now"
+    );
 }
 
 const QUOTE_LEAD: &str = "The skill says: \"";
