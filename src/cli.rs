@@ -54,6 +54,13 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// Delete the dead units recorded in one stored plan
+    Apply {
+        /// Id of the plan to apply
+        id: String,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// Report copies of one crate, feature splits, and units whose last compile failed
     Explain {
         /// Registered repos to explain; none means every registered repo
@@ -96,6 +103,8 @@ pub struct OutputArgs {
     #[arg(long)]
     pub json: bool,
 }
+
+pub const EXIT_NEEDS_HUMAN: i32 = 3;
 
 /// `cargo hive …` runs `cargo-hive hive …`; drop that inserted word.
 fn strip_cargo_subcommand(mut args: Vec<OsString>) -> Vec<OsString> {
@@ -155,6 +164,7 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
                 gc_cmd(&state, &repos, dry_run, out)
             }
         }
+        Command::Apply { id, out } => apply_cmd(&state, &id, out),
         Command::Explain { repos, top, out } => explain_cmd(&state, &repos, top, out),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
         Command::TryLock { .. } => unreachable!("handled before the state root is opened"),
@@ -912,6 +922,103 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
         b.finding("error", None, "gc was cancelled");
         return emit(state, out, b.finish(), &human, 130);
     }
+    emit(state, out, b.finish(), &human, code)
+}
+
+fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
+    use crate::doctor::{self, Capabilities, Capability};
+    use crate::plan_tier::apply::{self, Authorization};
+    use crate::plan_tier::build;
+    use crate::plan_tier::Ctx;
+    use crate::receipt::Outcome;
+    if let Err(e) = doctor::install_signal_handlers() {
+        return emit_failure(
+            state,
+            out,
+            "apply",
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
+    }
+    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let loaded = (|| -> Result<_, StateError> {
+        Ok((
+            state.read::<Registry>(registry::FILE)?,
+            state.config()?,
+            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+        ))
+    })();
+    let (reg, cfg, caps) = match loaded {
+        Ok(v) => v,
+        Err(e) => return emit_failure(state, out, "apply", &e.to_string(), 1),
+    };
+    let Ok(platform) = platform::current() else {
+        eprintln!("{MACOS_ONLY_MESSAGE}");
+        return 2;
+    };
+    let mut b = Receipt::new("apply", Scope::default());
+    let release = doctor::resolve_toolchain(state.root())
+        .ok()
+        .map(|t| t.release);
+    b.toolchain(release.clone());
+    for cap in [Capability::FingerprintReading, Capability::Deletion] {
+        if let Err(refusal) = doctor::require(&caps, cap, release.as_deref()) {
+            b.finding("refusal", None, refusal.to_string());
+            return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
+        }
+    }
+    let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
+    let ctx = Ctx {
+        state,
+        fs: &*platform.fs,
+        cfg: &cfg,
+        now: std::time::SystemTime::now(),
+        account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
+        repos: &reg.repos,
+        mains: &registered_mains,
+    };
+    let applied = match apply::apply(&ctx, id, Authorization::Secondary, &cancelled) {
+        Ok(applied) => applied,
+        Err(e) => {
+            b.finding("error", None, e.to_string());
+            return emit(state, out, b.finish(), &format!("{e}\n"), 1);
+        }
+    };
+    let word = match applied.outcome {
+        Outcome::Applied => "applied",
+        Outcome::Partial => "partial",
+        Outcome::Refused => "refused",
+        Outcome::NeedsHuman => "needs-human",
+    };
+    let human = format!(
+        "{}  {}  {word}\n",
+        applied.id,
+        build::class_label(applied.class)
+    );
+    let paths = applied.counts.get("paths_deleted").copied().unwrap_or(0);
+    for note in &applied.notes {
+        b.note(note.clone());
+    }
+    for item in &applied.unmeasured {
+        b.unmeasured(&item.field, item.reason.clone());
+    }
+    for (kind, path, detail) in &applied.findings {
+        b.finding(kind, path.clone(), detail.clone());
+    }
+    b.plan_tier(PlanTierBody {
+        plans: vec![PlanRecord {
+            id: applied.id,
+            class: build::class_label(applied.class).to_string(),
+            outcome: Some(applied.outcome),
+            reason: applied.reason,
+            targets: applied.targets,
+            paths,
+            counts: applied.counts,
+        }],
+        undecided: Vec::new(),
+        nothing_to_do: Vec::new(),
+    });
+    let code = i32::from(applied.outcome == Outcome::Refused);
     emit(state, out, b.finish(), &human, code)
 }
 

@@ -416,6 +416,7 @@ enum Parsed {
     RepoList,
     Status,
     Gc { dry_run: bool, plan: bool },
+    Apply,
     Explain,
 }
 
@@ -440,6 +441,7 @@ fn parse(words: &[String]) -> Result<Parsed, String> {
         },
         Command::Status { .. } => Ok(Parsed::Status),
         Command::Gc { dry_run, plan, .. } => Ok(Parsed::Gc { dry_run, plan }),
+        Command::Apply { .. } => Ok(Parsed::Apply),
         Command::Explain { .. } => Ok(Parsed::Explain),
         Command::HoldLock { .. } | Command::TryLock { .. } => {
             Err("the internal lock subcommands are not part of the skill".to_string())

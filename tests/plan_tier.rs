@@ -1,7 +1,9 @@
 //! One target is locked through Cargo's lock files, or skipped when a lock is not sound.
 #![cfg(target_os = "macos")]
 mod common;
+use cargo_hive::plan_tier::apply::{apply, Authorization};
 use cargo_hive::plan_tier::locks::{acquire, Acquired, Reason};
+use cargo_hive::receipt::Outcome;
 use common::plan_fixture::Planned;
 use common::recording_fs::Recording;
 
@@ -125,4 +127,62 @@ fn a_profile_dir_that_appears_after_the_locks_are_taken_skips_the_target() {
     let rec = Recording::over_real().create_dir_after_lock(new_dir);
     let reason = skipped(acquire(rec.fs().as_ref(), &p.worktree_target(), false));
     assert_eq!(reason, Reason::ProfileSet);
+}
+
+#[test]
+fn locks_are_all_held_before_the_first_removal_and_each_unit_is_removed_dot_d_first_fingerprint_last(
+) {
+    let p = Planned::new("apply-order");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let rec = Recording::over_real();
+    let lib = p.library_ctx_with(rec.fs());
+    let done = apply(&lib.ctx(), &id, Authorization::Secondary, &|| false).unwrap();
+    assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.findings);
+    let log = rec.log();
+    let last_lock = log.iter().rposition(|l| l.starts_with("lock ")).unwrap();
+    let first_remove = log.iter().position(|l| l.starts_with("remove ")).unwrap();
+    assert!(last_lock < first_remove, "{log:?}");
+    let removes: Vec<&String> = log.iter().filter(|l| l.starts_with("remove ")).collect();
+    let last_d = removes
+        .iter()
+        .rposition(|l| l.ends_with(".d"))
+        .expect("a .d file is removed");
+    let first_other = removes
+        .iter()
+        .position(|l| !l.ends_with(".d") && !l.contains("/.fingerprint/"))
+        .expect("an artifact other than .d is removed");
+    assert!(
+        last_d < first_other,
+        "every .d goes before any other artifact: {removes:?}"
+    );
+    let fingerprint = removes
+        .iter()
+        .position(|l| l.contains("/.fingerprint/"))
+        .expect("the fingerprint dir is removed");
+    assert_eq!(
+        fingerprint,
+        removes.len() - 1,
+        "the fingerprint directory goes last: {removes:?}"
+    );
+    let first_unit_read = log
+        .iter()
+        .position(|l| {
+            l.starts_with("read ") && (l.contains("/.fingerprint/") || l.contains("/deps/"))
+        })
+        .expect("liveness reads unit files through the Fs");
+    assert!(
+        last_lock < first_unit_read,
+        "a unit file was read before every lock was held: {log:?}"
+    );
+}
+
+#[test]
+fn applying_ownership_is_resolved_without_touching_the_snapshot_cache() {
+    let p = Planned::new("apply-snapshot");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let snap = p.hive.home.path.join("snapshot.json");
+    let before = std::fs::read(&snap).ok();
+    let lib = p.library_ctx();
+    apply(&lib.ctx(), &id, Authorization::Secondary, &|| false).unwrap();
+    assert_eq!(std::fs::read(&snap).ok(), before);
 }

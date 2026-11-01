@@ -11,6 +11,7 @@ mod run;
 
 pub use crate::discover::Scope;
 pub(crate) use account::remove_counted;
+pub(crate) use ledger::Ledger;
 pub use ledger::{Bytes, UNMEASURED_CAP};
 pub use plan::{is_temp_entry, MIN_AGE};
 pub use run::{measure, run, Counts, Footprint, GcReport, RunOpts, Skip, CRATE_DIR_CAP, DEPS_CAP};

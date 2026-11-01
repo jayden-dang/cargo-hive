@@ -1,6 +1,6 @@
 //! `gc --plan` stores one plan per checkout class and deletes nothing in the checkout.
-//! These tests drive the hive binary against a scratch home and read the receipt.
-//! A plan is stored here and is not applied.
+//! `apply` deletes the dead files of a secondary plan. These tests drive the hive binary
+//! against a scratch home and read the receipt.
 
 #![cfg(target_os = "macos")]
 mod common;
@@ -214,4 +214,132 @@ fn a_dead_unit_that_owns_no_artifact_is_never_planned_for_its_lone_fingerprint_d
     let r = p.plan_for(&[p.worktree.to_str().unwrap()]);
     assert!(r["plans"].as_array().unwrap().is_empty(), "{r}");
     assert_eq!(r["nothing_to_do"].as_array().unwrap().len(), 1, "{r}");
+}
+
+fn removed_count(
+    before: &std::collections::BTreeMap<std::path::PathBuf, (u64, std::time::SystemTime)>,
+    after: &std::collections::BTreeMap<std::path::PathBuf, (u64, std::time::SystemTime)>,
+) -> usize {
+    before.keys().filter(|k| !after.contains_key(*k)).count()
+}
+
+#[test]
+fn applying_a_secondary_plan_removes_its_dead_files_and_the_next_build_rebuilds_nothing_live() {
+    let p = Planned::new("apply-secondary");
+    let planned = p.plan();
+    let id = Planned::id_of(&planned, "secondary");
+    let listed = planned["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["class"] == "secondary")
+        .unwrap()["paths"]
+        .as_u64()
+        .unwrap() as usize;
+    let main_before = tree(&p.main_target());
+    let wt_before = tree(&p.worktree_target());
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    let plan = &r["plans"][0];
+    assert_eq!(plan["outcome"], "applied");
+    assert_eq!(
+        plan["counts"]["paths_deleted"].as_u64().unwrap() as usize,
+        listed
+    );
+    assert!(plan["counts"]["freed_bytes"].as_u64().is_some());
+    assert_eq!(
+        tree(&p.main_target()),
+        main_before,
+        "the protected target must not change"
+    );
+    let wt_after = tree(&p.worktree_target());
+    assert!(removed_count(&wt_before, &wt_after) >= listed);
+    p.hive.build_crate(&p.worktree, None);
+    assert_eq!(
+        tree(&p.worktree_target()).len(),
+        wt_after.len(),
+        "the next build rebuilt something"
+    );
+}
+
+#[test]
+fn only_the_dead_units_files_are_removed_and_incremental_and_live_files_stay() {
+    let p = Planned::new("apply-only-dead");
+    let hash = p.dead_unit_hash(&p.worktree_target());
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let before = tree(&p.worktree_target());
+    assert_eq!(p.hive.json(&["apply", &id]).0.status.code(), Some(0));
+    let after = tree(&p.worktree_target());
+    for gone in before.keys().filter(|k| !after.contains_key(*k)) {
+        let s = gone.to_str().unwrap();
+        assert!(
+            s.contains(&hash),
+            "{s} is not a file of the dead unit {hash}"
+        );
+        assert!(!s.contains("/incremental/"), "{s}");
+    }
+    for (path, meta) in &after {
+        if std::fs::symlink_metadata(path).unwrap().is_dir() {
+            continue;
+        }
+        assert_eq!(before.get(path), Some(meta), "{} changed", path.display());
+    }
+}
+
+#[test]
+fn an_applied_plan_cannot_be_applied_again() {
+    let p = Planned::new("apply-once");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    assert_eq!(p.hive.json(&["apply", &id]).0.status.code(), Some(0));
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(r["plans"][0]["outcome"], "refused");
+    assert_eq!(r["plans"][0]["reason"], "already_consumed");
+}
+
+#[test]
+fn a_target_whose_build_lock_is_held_is_skipped_and_nothing_in_it_is_deleted() {
+    let p = Planned::new("apply-held");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let lock = p.worktree_target().join("debug/.cargo-build-lock");
+    let mut holder = p.hive.hold_lock_child("flock", &lock);
+    let before = tree(&p.worktree_target());
+    let (out, r) = p.hive.json(&["apply", &id]);
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    let plan = &r["plans"][0];
+    assert_eq!(plan["outcome"], "partial");
+    assert_eq!(plan["reason"], "all_targets_skipped");
+    assert_eq!(plan["counts"]["targets_skipped_held"], 1);
+    assert_eq!(tree(&p.worktree_target()), before);
+}
+
+#[test]
+fn apply_takes_exactly_one_id_and_refuses_an_unknown_one() {
+    let p = Planned::new("apply-ids");
+    assert!(!p.hive.run(&["apply"]).status.success());
+    assert!(!p.hive.run(&["apply", "a", "b"]).status.success());
+    let (out, r) = p.hive.json(&["apply", "0123456789abcdef"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(r["plans"][0]["reason"], "unknown_plan");
+}
+
+#[test]
+fn apply_refuses_without_the_deletion_capability_and_leaves_the_plan_unconsumed() {
+    let p = Planned::new("apply-capability");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    write_caps(&p, serde_json::json!({"deletion": ["d"]}));
+    assert_eq!(p.hive.json(&["apply", &id]).0.status.code(), Some(1));
+    p.hive.write_ready_capabilities();
+    assert_eq!(p.hive.json(&["apply", &id]).0.status.code(), Some(0));
+}
+
+#[test]
+fn a_non_secondary_plan_is_not_applied_until_the_needs_human_task() {
+    let p = Planned::new("apply-unsupported");
+    let id = Planned::id_of(&p.plan(), "protected");
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(r["plans"][0]["reason"], "unsupported_class");
 }

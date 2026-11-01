@@ -10,6 +10,7 @@ use crate::platform::Fs;
 use crate::registry::Repo;
 use crate::state::{Config, State};
 
+pub mod apply;
 pub mod build;
 pub mod guard;
 pub mod locks;

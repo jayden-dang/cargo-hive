@@ -8,6 +8,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use cargo_hive::plan_tier::Ctx;
+use cargo_hive::platform::Fs;
+use cargo_hive::registry::{Registry, FILE as REGISTRY_FILE};
+use cargo_hive::state::{Config, State};
+
 /// A registered main checkout and linked worktrees under `/private/tmp` (a default
 /// secondary root, so hive classes the worktrees Secondary and the main Protected; never
 /// set `secondary_roots` in tests that rely on this). Each checkout has a built target whose
@@ -153,12 +158,53 @@ impl Planned {
             .unwrap()
     }
 
+    /// The hive state, registry and filesystem an in-process apply reads.
+    pub fn library_ctx(&self) -> LibCtx {
+        self.library_ctx_with(cargo_hive::platform::current().unwrap().fs)
+    }
+
+    pub fn library_ctx_with(&self, fs: Box<dyn Fs>) -> LibCtx {
+        let state = State::open_at(self.hive.home.path.clone()).unwrap();
+        let cfg = state.config().unwrap();
+        let reg: Registry = state.read(REGISTRY_FILE).unwrap();
+        let mains: Vec<PathBuf> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
+        LibCtx {
+            state,
+            cfg,
+            repos: reg.repos,
+            mains,
+            fs,
+        }
+    }
+
     /// Makes the dead unit `hash` of `target` live again by touching its stamp.
     pub fn revive(&self, target: &Path, hash: &str) {
         let stamp = target.join(format!(
             "debug/.fingerprint/fixture-{hash}/invoked.timestamp"
         ));
         set_mtime(&stamp, SystemTime::now());
+    }
+}
+
+pub struct LibCtx {
+    pub state: State,
+    pub cfg: Config,
+    pub repos: Vec<cargo_hive::registry::Repo>,
+    pub mains: Vec<PathBuf>,
+    pub fs: Box<dyn Fs>,
+}
+
+impl LibCtx {
+    pub fn ctx(&self) -> Ctx<'_> {
+        Ctx {
+            state: &self.state,
+            fs: self.fs.as_ref(),
+            cfg: &self.cfg,
+            now: SystemTime::now(),
+            account_bytes: true,
+            repos: &self.repos,
+            mains: &self.mains,
+        }
     }
 }
 
