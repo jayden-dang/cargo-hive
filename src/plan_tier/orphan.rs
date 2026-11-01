@@ -14,8 +14,14 @@ use crate::plan_tier::record::{kind_of, BytesRec, PlannedTarget};
 use crate::plan_tier::Ctx;
 use crate::platform::{EntryKind, Fs};
 
+pub struct Counted {
+    pub bytes: BytesRec,
+    pub unmeasured: Vec<(PathBuf, String)>,
+    pub unmeasured_more: u64,
+}
+
 pub enum Removal {
-    Removed(BytesRec),
+    Removed(Counted),
     Skipped(String),
     Refused(String),
 }
@@ -80,9 +86,13 @@ pub fn remove(
     ) {
         Ok(removed) if removed.existed => {
             let tally = ledger.finish();
-            Removal::Removed(BytesRec {
-                freed: tally.total.freed,
-                still_shared: tally.total.still_shared,
+            Removal::Removed(Counted {
+                bytes: BytesRec {
+                    freed: tally.total.freed,
+                    still_shared: tally.total.still_shared,
+                },
+                unmeasured: tally.unmeasured,
+                unmeasured_more: tally.unmeasured_more,
             })
         }
         Ok(_) => Removal::Refused("entry_changed".to_string()),

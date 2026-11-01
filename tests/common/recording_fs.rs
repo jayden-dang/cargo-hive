@@ -19,6 +19,7 @@ struct Opts {
     create_dir_after_lock: Vec<PathBuf>,
     /// After this many successful removes, later removes fail. `Some(0)` fails the first.
     fail_removes_after: Option<u64>,
+    fail_sharing: HashSet<PathBuf>,
 }
 
 struct State {
@@ -82,6 +83,17 @@ impl Recording {
             .unwrap()
             .create_dir_after_lock
             .push(dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// `sharing` of `path` fails. A stat of that path still succeeds.
+    pub fn fail_sharing(self, path: impl AsRef<Path>) -> Recording {
+        self.state
+            .opts
+            .lock()
+            .unwrap()
+            .fail_sharing
+            .insert(path.as_ref().to_path_buf());
         self
     }
 
@@ -164,6 +176,9 @@ impl Fs for Recording {
     }
 
     fn sharing(&self, path: &Path) -> io::Result<platform::Sharing> {
+        if self.state.opts.lock().unwrap().fail_sharing.contains(path) {
+            return Err(io::Error::other("sharing attributes could not be read"));
+        }
         self.state.fs.sharing(path)
     }
 

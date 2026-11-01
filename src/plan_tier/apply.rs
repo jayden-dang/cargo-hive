@@ -195,6 +195,7 @@ fn apply_orphan(
     let mut deleted_by_target: BTreeMap<PathBuf, u64> = BTreeMap::new();
     let mut per_target: BTreeMap<PathBuf, Bytes> = BTreeMap::new();
     let mut unmeasured = Vec::new();
+    let mut unmeasured_more = 0u64;
     let mut findings = Vec::new();
     let mut touched = BTreeSet::new();
     let mut cancelled = false;
@@ -205,19 +206,28 @@ fn apply_orphan(
             break;
         }
         match orphan::remove(ctx, target, approval, cancel) {
-            Removal::Removed(bytes) => {
+            Removal::Removed(counted) => {
                 paths_deleted += 1;
                 applied_targets += 1;
-                freed.freed = freed.freed.saturating_add(bytes.freed);
-                freed.still_shared = freed.still_shared.saturating_add(bytes.still_shared);
+                freed.freed = freed.freed.saturating_add(counted.bytes.freed);
+                freed.still_shared = freed
+                    .still_shared
+                    .saturating_add(counted.bytes.still_shared);
                 deleted_by_target.insert(target.path.clone(), 1);
                 per_target.insert(
                     target.path.clone(),
                     Bytes {
-                        freed: bytes.freed,
-                        still_shared: bytes.still_shared,
+                        freed: counted.bytes.freed,
+                        still_shared: counted.bytes.still_shared,
                     },
                 );
+                for (path, why) in counted.unmeasured {
+                    unmeasured.push(Unmeasured {
+                        field: path.display().to_string(),
+                        reason: why,
+                    });
+                }
+                unmeasured_more = unmeasured_more.saturating_add(counted.unmeasured_more);
                 if let Ok(volume) = ctx.fs.volume(&target.path) {
                     touched.insert(volume.container);
                 }
@@ -263,7 +273,17 @@ fn apply_orphan(
     };
     let bytes = (ctx.account_bytes && outcome == Outcome::Applied).then_some(freed);
     if !ctx.account_bytes && outcome != Outcome::Refused {
-        unmeasured.extend(unmeasured_accounting());
+        let gaps = std::mem::take(&mut unmeasured);
+        unmeasured = unmeasured_accounting();
+        unmeasured.extend(gaps);
+    }
+    if unmeasured_more > 0 {
+        unmeasured.push(Unmeasured {
+            field: "unmeasured_paths".to_string(),
+            reason: format!(
+                "{unmeasured_more} more paths could not be measured and are not listed"
+            ),
+        });
     }
     Applied {
         outcome,

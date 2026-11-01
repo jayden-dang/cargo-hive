@@ -355,6 +355,33 @@ fn an_approved_orphan_plan_removes_the_whole_target_dir_after_taking_every_lock(
 }
 
 #[test]
+fn a_file_whose_sharing_cannot_be_read_is_named_after_the_orphan_is_removed() {
+    let (p, orphan) = Planned::with_orphan("orphan-unmeasured");
+    let missed = orphan.join("debug/deps/missed.rlib");
+    std::fs::write(&missed, b"xxxx").unwrap();
+    let missed = missed.canonicalize().unwrap();
+    let id = p.orphan_plan_id(&orphan);
+    let rec = Recording::over_real().fail_sharing(&missed);
+    let lib = p.library_ctx_with(rec.fs());
+    let done = apply(
+        &lib.ctx(),
+        &id,
+        Authorization::Approved(approval_for_tests(&id)),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.findings);
+    assert!(!orphan.exists(), "the directory is still removed");
+    assert!(
+        done.unmeasured
+            .iter()
+            .any(|row| row.field == missed.display().to_string()),
+        "the unreadable file is named: {:?}",
+        done.unmeasured
+    );
+}
+
+#[test]
 fn a_held_lock_skips_the_orphan_removal_and_deletes_nothing() {
     let (p, orphan) = Planned::with_orphan("orphan-held");
     let id = p.orphan_plan_id(&orphan);
