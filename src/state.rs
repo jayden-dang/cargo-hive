@@ -158,6 +158,7 @@ pub const CONFIG_FILE: &str = "config.json";
 struct ConfigFile {
     secondary_roots: Option<Vec<PathBuf>>,
     cache_roots: Option<Vec<PathBuf>>,
+    gc_window_days: Option<u64>,
 }
 
 /// Effective configuration: a key set in `config.json` replaces its default list.
@@ -165,6 +166,33 @@ struct ConfigFile {
 pub struct Config {
     pub secondary_roots: Vec<PathBuf>,
     pub cache_roots: Vec<PathBuf>,
+    pub gc_window_days: Option<u64>,
+}
+
+#[derive(Debug)]
+pub struct WindowError(pub u64);
+
+impl fmt::Display for WindowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "gc_window_days is {}, not a whole number of days from 1 to 365; set it within that range in config.json",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for WindowError {}
+
+pub fn window_days(raw: Option<u64>) -> Result<u64, WindowError> {
+    let Some(days) = raw else {
+        return Ok(7);
+    };
+    if (1..=365).contains(&days) {
+        Ok(days)
+    } else {
+        Err(WindowError(days))
+    }
 }
 
 impl State {
@@ -198,6 +226,7 @@ impl State {
         Ok(Config {
             secondary_roots: dedup(secondary),
             cache_roots: dedup(cache),
+            gc_window_days: file.gc_window_days,
         })
     }
 }
@@ -332,6 +361,34 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("hive-state-{label}-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn the_window_defaults_to_seven_days_and_accepts_one_to_365() {
+        assert_eq!(window_days(None).unwrap(), 7);
+        assert_eq!(window_days(Some(1)).unwrap(), 1);
+        assert_eq!(window_days(Some(365)).unwrap(), 365);
+        for bad in [0u64, 366, 10_000] {
+            assert!(window_days(Some(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn config_reads_the_window_key_and_still_refuses_unknown_keys() {
+        let root = scratch("window-key");
+        let state = State::open_at(root.clone()).unwrap();
+        std::fs::write(root.join("config.json"), r#"{"gc_window_days": 30}"#).unwrap();
+        assert_eq!(state.config().unwrap().gc_window_days, Some(30));
+        std::fs::write(root.join("config.json"), r#"{"gc_window": 30}"#).unwrap();
+        assert!(state.config().is_err());
+    }
+
+    #[test]
+    fn an_out_of_range_window_does_not_fail_config_for_commands_that_ignore_it() {
+        let root = scratch("window-ignored");
+        let state = State::open_at(root.clone()).unwrap();
+        std::fs::write(root.join("config.json"), r#"{"gc_window_days": 0}"#).unwrap();
+        assert!(state.config().is_ok());
     }
 
     #[test]
