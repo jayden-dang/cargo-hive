@@ -14,8 +14,14 @@ use cargo_hive::cargo_target::{self, Owner, TargetDir};
 use cargo_hive::fingerprint;
 use cargo_hive::gc::{measure, Footprint};
 use cargo_hive::liveness::{liveness, unit_timestamp, Liveness};
+use cargo_hive::plan_tier::apply::{self, ResolvedTarget};
+use cargo_hive::plan_tier::build::{self, TargetPlan};
 use cargo_hive::plan_tier::guard::{delete_checked, Deleted, Expect};
+use cargo_hive::plan_tier::record::{Plan, PlanClass};
+use cargo_hive::plan_tier::Ctx;
 use cargo_hive::platform::{self, EntryKind, Fs, TryLock};
+use cargo_hive::receipt::Outcome;
+use cargo_hive::state::State;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
@@ -898,6 +904,118 @@ fn rebase(path: &Path, target: &Path, clone: &Path) -> Result<PathBuf, String> {
     Ok(clone.join(rel))
 }
 
+#[derive(Debug)]
+pub struct ExecuteTrial {
+    pub deleted_files: usize,
+    pub rebuilt_live_units: usize,
+}
+
+/// Deletes the clone's dead units through `execute`, then replays the fixture's
+/// feature build. No dead file is a vacuous trial: nothing is deleted or rebuilt.
+pub fn trial_through_execute(fx: &super::cargo_fixture::Fixture) -> Result<ExecuteTrial, String> {
+    let platform = platform::current().map_err(|_| platform::MACOS_ONLY_MESSAGE.to_string())?;
+    let fs = platform.fs.as_ref();
+    let scratch = super::Scratch::new("execute-trial");
+    let clone = clone_target(fs, &scratch.path, "target", &fx.target, &cp_clone)?;
+    let target = read_target(&clone.path)?;
+    let now = SystemTime::now();
+    let window = super::cargo_fixture::WINDOW;
+    let state = State::open_at(scratch.path.join("state")).map_err(|err| err.to_string())?;
+    let cfg = state.config().map_err(|err| err.to_string())?;
+    let repos = Vec::new();
+    let mains = Vec::new();
+    let ctx = Ctx {
+        state: &state,
+        fs,
+        cfg: &cfg,
+        now,
+        account_bytes: false,
+        repos: &repos,
+        mains: &mains,
+    };
+    let verdict = liveness(fs, &target, now, window);
+    let (live, has_dead_file) = match &verdict {
+        Liveness::Decided { live, dead } => {
+            let mut keys = BTreeSet::new();
+            for unit in live {
+                keys.insert((rel(&unit.profile, &target.path), unit.dir_name.clone()));
+            }
+            let has_dead_file = dead.iter().any(|unit| !unit.files.is_empty());
+            (keys, has_dead_file)
+        }
+        Liveness::Undecided { reasons } => {
+            let text: Vec<String> = reasons.iter().map(ToString::to_string).collect();
+            return Err(format!("liveness is undecided ({})", text.join("; ")));
+        }
+    };
+    if !has_dead_file {
+        return Ok(ExecuteTrial {
+            deleted_files: 0,
+            rebuilt_live_units: 0,
+        });
+    }
+    let planned = match build::plan_for_target(&ctx, &target, window) {
+        TargetPlan::Planned(built) => built.target,
+        TargetPlan::NothingToDo => {
+            return Ok(ExecuteTrial {
+                deleted_files: 0,
+                rebuilt_live_units: 0,
+            });
+        }
+        TargetPlan::Undecided(reasons) => {
+            let text: Vec<String> = reasons.iter().map(ToString::to_string).collect();
+            return Err(format!("liveness is undecided ({})", text.join("; ")));
+        }
+        TargetPlan::Unreadable(rows) => {
+            let text: Vec<String> = rows
+                .iter()
+                .map(|(path, err)| format!("{}: {err}", path.display()))
+                .collect();
+            return Err(format!(
+                "could not stat a dead unit's file: {}",
+                text.join("; ")
+            ));
+        }
+    };
+    // execute rechecks liveness in whole days. One day covers the six-hour
+    // window, and units dead for longer than a day stay dead.
+    let window_days = window.as_secs().div_ceil(86_400);
+    let made_at = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let plan = Plan::single(PlanClass::Secondary, planned, window_days, made_at);
+    let resolved = [ResolvedTarget {
+        path: clone.path.clone(),
+        owner: Some(fx.app.clone()),
+        class: PlanClass::Secondary,
+    }];
+    let applied = apply::execute(&ctx, plan, &resolved, &|| false);
+    if applied.outcome != Outcome::Applied {
+        return Err(format!(
+            "execute finished as {:?} ({:?}); findings: {:?}",
+            applied.outcome, applied.reason, applied.findings
+        ));
+    }
+    let deleted_files = applied.counts.get("paths_deleted").copied().unwrap_or(0) as usize;
+    let before = stamps_of(fs, &clone.path)?;
+    if !super::cargo_fixture::cargo_in(
+        &fx.app,
+        &clone.path,
+        &fx.logs,
+        &["build", "--features", "f"],
+    ) {
+        let err = fs::read_to_string(fx.logs.join("stderr")).unwrap_or_default();
+        return Err(format!("replay failed: {err}"));
+    }
+    let after = stamps_of(fs, &clone.path)?;
+    let rebuilt_units = rebuilt(&before, &after);
+    Ok(ExecuteTrial {
+        deleted_files,
+        rebuilt_live_units: rebuilt_live(&rebuilt_units, &live).len(),
+    })
+}
+
 pub fn delete_in_clone(
     fs: &dyn Fs,
     files: &[PathBuf],
@@ -986,6 +1104,12 @@ pub fn prove_with_cloner(
     for profile in &profile_dirs {
         match fs.try_lock_exclusive(&profile.join(".cargo-build-lock")) {
             TryLock::Acquired(guard) => locks.push(guard),
+            TryLock::Gone if profile.join(".fingerprint").is_dir() => {
+                return Err(format!(
+                    "{}: no build lock file; cannot prove the target idle",
+                    profile.display()
+                ))
+            }
             TryLock::Gone => {}
             TryLock::Held => {
                 return Err(format!(
