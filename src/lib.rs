@@ -9,6 +9,7 @@ pub mod gc;
 pub mod git;
 #[doc(hidden)]
 pub mod liveness;
+pub mod plan_tier;
 pub mod platform;
 pub mod receipt;
 pub mod registry;

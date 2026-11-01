@@ -14,6 +14,7 @@ use cargo_hive::cargo_target::{self, Owner, TargetDir};
 use cargo_hive::fingerprint;
 use cargo_hive::gc::{measure, Footprint};
 use cargo_hive::liveness::{liveness, unit_timestamp, Liveness};
+use cargo_hive::plan_tier::guard::{delete_checked, Deleted, Expect};
 use cargo_hive::platform::{self, EntryKind, Fs, TryLock};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -903,34 +904,20 @@ pub fn delete_in_clone(
     target: &Path,
     clone: &Path,
 ) -> Result<(), String> {
-    let clone_real = clone
+    clone
         .canonicalize()
         .map_err(|e| format!("{}: {e}", clone.display()))?;
     for file in files {
         let path = rebase(file, target, clone)?;
-        if let Some(parent) = path.parent() {
-            match parent.canonicalize() {
-                Ok(real) if real.starts_with(&clone_real) => {}
-                Ok(real) => {
-                    return Err(format!(
-                        "{} reaches {} through a link, outside the clone",
-                        path.display(),
-                        real.display()
-                    ))
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(format!("cannot resolve {}: {e}", parent.display())),
+        match delete_checked(fs, clone, &path, Expect::Any) {
+            Deleted::Removed | Deleted::Missing => {}
+            Deleted::Outside => {
+                return Err(format!(
+                    "{} reaches outside the clone through a link",
+                    path.display()
+                ));
             }
-        }
-        let removed = match fs.entry_stat(&path) {
-            Ok(stat) if stat.kind == EntryKind::Dir => fs.remove_tree(&path),
-            Ok(_) => fs.remove_file(&path),
-            Err(e) => Err(e),
-        };
-        match removed {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("cannot delete {}: {e}", path.display())),
+            Deleted::Changed => return Err(format!("cannot delete {}", path.display())),
         }
     }
     Ok(())
