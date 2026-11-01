@@ -984,6 +984,7 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
             return emit(state, out, b.finish(), &format!("{e}\n"), 1);
         }
     };
+    let code = apply::exit_code(&applied);
     let word = match applied.outcome {
         Outcome::Applied => "applied",
         Outcome::Partial => "partial",
@@ -1023,11 +1024,6 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
         undecided: Vec::new(),
         nothing_to_do: Vec::new(),
     });
-    let code = match applied.outcome {
-        Outcome::NeedsHuman => EXIT_NEEDS_HUMAN,
-        Outcome::Refused => 1,
-        Outcome::Applied | Outcome::Partial => 0,
-    };
     emit(state, out, b.finish(), &human, code)
 }
 

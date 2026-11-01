@@ -197,3 +197,98 @@ fn applying_ownership_is_resolved_without_touching_the_snapshot_cache() {
     apply(&lib.ctx(), &id, Authorization::Secondary, &|| false).unwrap();
     assert_eq!(std::fs::read(&snap).ok(), before);
 }
+
+#[test]
+fn stopping_after_any_one_deletion_leaves_a_target_cargo_can_build() {
+    let probe = Planned::new("prefix-probe");
+    let r = probe
+        .hive
+        .json(&["apply", &Planned::id_of(&probe.plan(), "secondary")])
+        .1;
+    let steps = r["plans"][0]["counts"]["paths_deleted"].as_u64().unwrap() as usize;
+    assert!(
+        steps >= 2,
+        "a unit needs at least two deletions to have a prefix"
+    );
+    for stop_after in 0..steps {
+        let p = Planned::new(&format!("prefix-{stop_after}"));
+        let id = Planned::id_of(&p.plan(), "secondary");
+        let rec = Recording::over_real().fail_removes_after(stop_after);
+        let lib = p.library_ctx_with(rec.fs());
+        let done = apply(&lib.ctx(), &id, Authorization::Secondary, &|| false).unwrap();
+        assert_eq!(done.outcome, Outcome::Partial, "stop {stop_after}");
+        assert!(
+            done.findings.iter().any(|f| f.0 == "plan.delete_failed"),
+            "{:?}",
+            done.findings
+        );
+        p.hive.build_crate(&p.worktree, None);
+        let rest: u64 = p.plan()["plans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| x["class"] == "secondary")
+            .map(|x| x["paths"].as_u64().unwrap())
+            .sum();
+        assert!(
+            rest > 0 || stop_after + 1 == steps,
+            "what a stop left behind is planned again (stop {stop_after})"
+        );
+    }
+}
+
+#[test]
+fn a_cancel_between_units_keeps_the_first_unit_gone_and_the_second_intact_and_the_rest_can_be_planned_again(
+) {
+    use cargo_hive::plan_tier::apply::{execute, ResolvedTarget};
+    use cargo_hive::plan_tier::record::PlanClass;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let p = Planned::with_dead_units("cancel-between", 2);
+    let lib = p.library_ctx();
+    let ctx = lib.ctx();
+    let made = cargo_hive::plan_tier::build::make(&ctx, &[], &|| false).unwrap();
+    let plan = made
+        .plans
+        .into_iter()
+        .find(|x| x.class == PlanClass::Secondary)
+        .unwrap();
+    let resolved = vec![ResolvedTarget {
+        path: plan.targets[0].path.clone(),
+        owner: plan.targets[0].owner.clone(),
+        class: PlanClass::Secondary,
+    }];
+    let before = common::plan_fixture::tree(&p.worktree_target());
+    let polls = AtomicUsize::new(0);
+    let done = execute(&ctx, plan, &resolved, &|| {
+        polls.fetch_add(1, Ordering::SeqCst) >= 1
+    });
+    assert_eq!(
+        (done.outcome, done.reason.as_deref()),
+        (Outcome::Partial, Some("cancelled"))
+    );
+    let after = common::plan_fixture::tree(&p.worktree_target());
+    let gone: Vec<_> = before.keys().filter(|k| !after.contains_key(*k)).collect();
+    let hashes: std::collections::BTreeSet<&str> = gone
+        .iter()
+        .filter_map(|k| k.to_str())
+        .flat_map(|s| {
+            s.match_indices('-').filter_map(move |(at, _)| {
+                let tail = &s[at + 1..];
+                let hash = tail.get(..16)?;
+                let rest = &tail[16..];
+                let boundary = rest.is_empty() || rest.starts_with('.') || rest.starts_with('/');
+                (boundary
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+                .then_some(hash)
+            })
+        })
+        .collect();
+    assert_eq!(hashes.len(), 1, "exactly the first unit is gone: {gone:?}");
+    let again = cargo_hive::plan_tier::build::make(&ctx, &[], &|| false).unwrap();
+    assert!(
+        again.plans.iter().any(|x| x.class == PlanClass::Secondary),
+        "the second unit can be planned again"
+    );
+}

@@ -4,6 +4,7 @@
 
 #![cfg(target_os = "macos")]
 mod common;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 
 use common::plan_fixture::{tree, Planned};
@@ -589,6 +590,74 @@ fn a_plan_edited_to_name_a_file_outside_its_target_is_refused_and_the_file_survi
     assert_eq!(out.status.code(), Some(1), "{r}");
     assert_eq!(r["plans"][0]["outcome"], "refused");
     assert!(keep.exists(), "a path outside the target was deleted");
+}
+
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn a_sigint_during_apply_exits_130_logs_a_receipt_and_leaves_the_plan_consumed() {
+    let p = Planned::new("apply-sigint");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let bin = p.scratch.path.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let sentinel = p.scratch.path.join("cargo.pid");
+    std::fs::write(
+        bin.join("cargo"),
+        "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$HIVE_CARGO_SENTINEL\"\nsleep 300\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("cargo"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let child = p
+        .hive
+        .command(&["apply", &id, "--json"])
+        .env("PATH", &path)
+        .env("HIVE_CARGO_SENTINEL", &sentinel)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let hive_pid = child.id();
+    let started = std::time::Instant::now();
+    loop {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "cargo metadata never wrote its pid"
+        );
+        if std::fs::read_to_string(&sentinel).is_ok_and(|t| t.trim().parse::<u32>().is_ok()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(pid_alive(hive_pid), "apply should be running before SIGINT");
+    assert!(std::process::Command::new("kill")
+        .args(["-INT", &hive_pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let out = common::wait_within(child, std::time::Duration::from_secs(30));
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
+    let logged = std::fs::read_dir(p.hive.home.path.join("receipts"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            std::fs::read_to_string(e.path())
+                .unwrap_or_default()
+                .contains("\"command\":\"apply\"")
+        });
+    assert!(logged, "a cancelled apply appends a receipt");
+    let (again, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(again.status.code(), Some(1));
+    assert_eq!(r["plans"][0]["reason"], "already_consumed");
 }
 
 #[test]

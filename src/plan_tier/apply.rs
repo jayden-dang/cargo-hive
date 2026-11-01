@@ -129,11 +129,33 @@ pub fn apply(
                 ))
             }
         };
+    if cancel() {
+        return Ok(cancelled_before_delete(&plan));
+    }
     let resolved = match resolve(ctx, &plan, cancel) {
         Ok(resolved) => resolved,
-        Err(refusal) => return Ok(refuse(&plan, refusal, BTreeMap::new())),
+        Err(ResolveStop::Cancelled) => return Ok(cancelled_before_delete(&plan)),
+        Err(ResolveStop::Refusal(refusal)) => return Ok(refuse(&plan, refusal, BTreeMap::new())),
     };
     Ok(execute(ctx, plan, &resolved, cancel))
+}
+
+pub(crate) fn exit_code(applied: &Applied) -> i32 {
+    if applied.outcome == Outcome::NeedsHuman {
+        return crate::cli::EXIT_NEEDS_HUMAN;
+    }
+    if applied.reason.as_deref() == Some("cancelled") {
+        return 130;
+    }
+    if applied.outcome == Outcome::Refused
+        || applied
+            .findings
+            .iter()
+            .any(|(kind, _, _)| kind == "plan.delete_failed")
+    {
+        return 1;
+    }
+    0
 }
 
 #[doc(hidden)]
@@ -143,7 +165,6 @@ pub fn execute(
     resolved: &[ResolvedTarget],
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Applied {
-    let _ = cancel;
     let mut order: Vec<&PlannedTarget> = plan.targets.iter().collect();
     order.sort_by(|left, right| left.path.cmp(&right.path));
     let mut skips = skip_counts();
@@ -171,38 +192,52 @@ pub fn execute(
     let mut deleted_by_target: BTreeMap<PathBuf, u64> = BTreeMap::new();
     let mut applied_targets = 0u64;
     let mut failed = false;
+    let mut cancelled = false;
     let mut findings = Vec::new();
     let mut touched = BTreeSet::new();
     for (target, _) in &locked {
         let mut deleted_here = 0u64;
         let mut target_failed = false;
-        for entry in removal_order(&target.entries) {
-            match delete_entry(ctx, &mut ledger, &target.path, entry) {
-                Deleted::Removed => {
-                    paths_deleted += 1;
-                    deleted_here += 1;
+        for unit in removal_order(&target.entries) {
+            if cancel() {
+                cancelled = true;
+                break;
+            }
+            let mut unit_failed = false;
+            for entry in unit {
+                match delete_entry(ctx, &mut ledger, &target.path, entry) {
+                    Deleted::Removed => {
+                        paths_deleted += 1;
+                        deleted_here += 1;
+                    }
+                    Deleted::Absent => {}
+                    Deleted::Failed(why) => {
+                        findings.push((
+                            "plan.delete_failed".to_string(),
+                            Some(entry.path.clone()),
+                            why,
+                        ));
+                        unit_failed = true;
+                        target_failed = true;
+                        failed = true;
+                    }
                 }
-                Deleted::Absent => {}
-                Deleted::Failed(why) => {
-                    findings.push((
-                        "plan.delete_failed".to_string(),
-                        Some(entry.path.clone()),
-                        why,
-                    ));
-                    target_failed = true;
-                    failed = true;
-                    break;
-                }
+            }
+            if unit_failed {
+                break;
             }
         }
         deleted_by_target.insert(target.path.clone(), deleted_here);
-        if !target_failed {
+        if !target_failed && !cancelled {
             applied_targets += 1;
         }
         if deleted_here > 0 {
             if let Ok(volume) = ctx.fs.volume(&target.path) {
                 touched.insert(volume.container);
             }
+        }
+        if cancelled {
+            break;
         }
     }
     let after = volumes(ctx.fs, &locked_paths);
@@ -233,7 +268,9 @@ pub fn execute(
         });
     }
     let total = plan.targets.len() as u64;
-    let (outcome, reason) = if failed || applied_targets != total {
+    let (outcome, reason) = if cancelled {
+        (Outcome::Partial, Some("cancelled".to_string()))
+    } else if failed || applied_targets != total {
         let reason = if failed {
             Some("delete failed".to_string())
         } else if applied_targets == 0 {
@@ -276,11 +313,16 @@ struct Refusal {
     details: Vec<String>,
 }
 
+enum ResolveStop {
+    Refusal(Refusal),
+    Cancelled,
+}
+
 fn resolve(
     ctx: &Ctx,
     plan: &Plan,
     cancel: &(dyn Fn() -> bool + Sync),
-) -> Result<Vec<ResolvedTarget>, Refusal> {
+) -> Result<Vec<ResolvedTarget>, ResolveStop> {
     let mut checkouts = Vec::new();
     for repo in ctx.repos {
         let (rows, _) = discover::checkouts(repo, ctx.mains, ctx.cfg);
@@ -288,21 +330,27 @@ fn resolve(
     }
     let mut snapshot = Snapshot::default();
     let scan = discover::targets(&checkouts, ctx.cfg, true, &mut snapshot, cancel);
+    if cancel() {
+        return Err(ResolveStop::Cancelled);
+    }
     let mut planned: Vec<&PlannedTarget> = plan.targets.iter().collect();
     planned.sort_by(|left, right| left.path.cmp(&right.path));
     let mut located = Vec::new();
     for target in &planned {
         let Some(found) = scan.targets.iter().find(|cand| cand.path == target.path) else {
-            return Err(ownership_unresolved(target, "the target was not resolved"));
+            return Err(ResolveStop::Refusal(ownership_unresolved(
+                target,
+                "the target was not resolved",
+            )));
         };
         if let Owner::Unresolved { reason } = &found.owner {
-            return Err(ownership_unresolved(target, reason));
+            return Err(ResolveStop::Refusal(ownership_unresolved(target, reason)));
         }
         if let TargetClass::Unresolved = class_of_target(&found.owner, &checkouts) {
-            return Err(ownership_unresolved(
+            return Err(ResolveStop::Refusal(ownership_unresolved(
                 target,
                 "ownership could not be resolved",
-            ));
+            )));
         }
         located.push((*target, found));
     }
@@ -311,24 +359,24 @@ fn resolve(
         if owner != target.owner {
             let recorded = path_or_none(target.owner.as_deref());
             let now = path_or_none(owner.as_deref());
-            return Err(Refusal {
+            return Err(ResolveStop::Refusal(Refusal {
                 reason: "owner_changed",
                 target: target.path.clone(),
                 path: None,
                 details: vec![format!("owner is {now} and the plan recorded {recorded}")],
-            });
+            }));
         }
     }
     let mut resolved = Vec::new();
     for (target, found) in located {
         let TargetClass::Class(class) = class_of_target(&found.owner, &checkouts) else {
-            return Err(ownership_unresolved(
+            return Err(ResolveStop::Refusal(ownership_unresolved(
                 target,
                 "ownership could not be resolved",
-            ));
+            )));
         };
         if class != plan.class {
-            return Err(Refusal {
+            return Err(ResolveStop::Refusal(Refusal {
                 reason: "class_changed",
                 target: target.path.clone(),
                 path: None,
@@ -337,7 +385,7 @@ fn resolve(
                     class_label(class),
                     class_label(plan.class)
                 )],
-            });
+            }));
         }
         resolved.push(ResolvedTarget {
             path: found.path.clone(),
@@ -578,7 +626,7 @@ fn delete_entry(ctx: &Ctx, ledger: &mut Ledger, target: &Path, entry: &PlannedEn
     }
 }
 
-fn removal_order(entries: &[PlannedEntry]) -> Vec<&PlannedEntry> {
+fn removal_order(entries: &[PlannedEntry]) -> Vec<Vec<&PlannedEntry>> {
     let mut units = Vec::new();
     for entry in entries {
         if !units.iter().any(|unit: &String| unit == &entry.unit) {
@@ -602,16 +650,33 @@ fn removal_order(entries: &[PlannedEntry]) -> Vec<&PlannedEntry> {
         if deps.is_empty() && others.is_empty() {
             continue;
         }
+        let mut group = Vec::new();
         if deps.is_empty() {
-            ordered.extend(prints);
-            ordered.extend(others);
+            group.extend(prints);
+            group.extend(others);
         } else {
-            ordered.extend(deps);
-            ordered.extend(others);
-            ordered.extend(prints);
+            group.extend(deps);
+            group.extend(others);
+            group.extend(prints);
         }
+        ordered.push(group);
     }
     ordered
+}
+
+fn cancelled_before_delete(plan: &Plan) -> Applied {
+    Applied {
+        outcome: Outcome::Partial,
+        reason: Some("cancelled".to_string()),
+        class: plan.class,
+        id: plan.id.clone(),
+        targets: target_paths(plan),
+        counts: count_map(0, 0, &skip_counts(), None),
+        bytes: None,
+        notes: Vec::new(),
+        unmeasured: Vec::new(),
+        findings: Vec::new(),
+    }
 }
 
 fn is_dep_info(entry: &PlannedEntry) -> bool {
@@ -801,5 +866,65 @@ fn record_target_counts(
                 bytes.still_shared,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod exit_code_tests {
+    use super::*;
+
+    fn sample(outcome: Outcome, reason: Option<&str>, finding: Option<&str>) -> Applied {
+        Applied {
+            outcome,
+            reason: reason.map(str::to_string),
+            class: PlanClass::Secondary,
+            id: "plan".to_string(),
+            targets: Vec::new(),
+            counts: BTreeMap::new(),
+            bytes: None,
+            notes: Vec::new(),
+            unmeasured: Vec::new(),
+            findings: finding
+                .map(|kind| vec![(kind.to_string(), None, "stopped".to_string())])
+                .unwrap_or_default(),
+        }
+    }
+
+    #[test]
+    fn each_outcome_keeps_its_exit_and_a_failed_delete_is_not_a_skip() {
+        assert_eq!(exit_code(&sample(Outcome::Applied, None, None)), 0);
+        assert_eq!(exit_code(&sample(Outcome::NeedsHuman, None, None)), 3);
+        assert_eq!(
+            exit_code(&sample(Outcome::Refused, Some("unknown_plan"), None)),
+            1
+        );
+        assert_eq!(
+            exit_code(&sample(Outcome::Partial, Some("cancelled"), None)),
+            130
+        );
+        assert_eq!(
+            exit_code(&sample(
+                Outcome::Partial,
+                Some("delete failed"),
+                Some("plan.delete_failed")
+            )),
+            1
+        );
+        assert_eq!(
+            exit_code(&sample(Outcome::Partial, Some("skipped"), None)),
+            0
+        );
+        assert_eq!(
+            exit_code(&sample(Outcome::Partial, Some("all_targets_skipped"), None)),
+            0
+        );
+        assert_eq!(
+            exit_code(&sample(
+                Outcome::Partial,
+                Some("cancelled"),
+                Some("plan.delete_failed")
+            )),
+            130
+        );
     }
 }
