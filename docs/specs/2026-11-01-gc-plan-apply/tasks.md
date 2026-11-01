@@ -675,7 +675,7 @@ _Requirements: GCPLAN-6.1, GCPLAN-9.2, GCPLAN-9.3_
 
 **Depends-on:** Task 2, Task 4, Task 5, Task 6
 
-- [ ] **Step 1: Write the fixture and the failing tests**
+- [x] **Step 1: Write the fixture and the failing tests**
 
 `tests/common/plan_fixture.rs`:
 
@@ -994,17 +994,17 @@ fn a_dead_unit_that_owns_no_artifact_is_never_planned_for_its_lone_fingerprint_d
 
 Run: `cargo test --test plan_apply` — expect: failure, `error: unexpected argument '--plan'`.
 
-- [ ] **Step 2: Implement `class_of_target`, `Ctx` and `plan_for_target`**
+- [x] **Step 2: Implement `class_of_target`, `Ctx` and `plan_for_target`**
 
 In `src/plan_tier/mod.rs` add `Ctx`. In `src/plan_tier/build.rs`: `class_of_target(owner, checkouts)` — `Owner::Owned { checkout }` → the `Checkout` whose `path == checkout`: `Class::Secondary` → `Class(Secondary)`; `Class::Protected` or not found (ARCH-7) → `Class(Protected)`; `Owner::OrphanCandidate` → `Class(Orphan)`; `Owner::Unresolved` → `Unresolved` (the `protected_owner` rule is already applied by `discover::targets` when it sets the owner). Unit-test the five cases in `build.rs` with hand-made `Owner` and `Checkout` values. `plan_for_target(ctx, target, window)` runs `liveness`: `Undecided` → `TargetPlan::Undecided(reasons)`; `Decided` with no listed path → `NothingToDo`; else a `PlannedTarget` with one `PlannedEntry` per path of `DeadUnit.files` in order (skipping a path an earlier unit already listed), `fs.entry_stat` kind/dev/ino, `unit = "<profile dir relative to the target>/<unit dir name>"`, and `planned` bytes from `gc::measure(fs, &target.path, &paths, ctx.account_bytes)` when `account_bytes`. `Plan::single` builds a one-target plan with a fresh id.
 
-- [ ] **Step 3: Implement `make` and the CLI**
+- [x] **Step 3: Implement `make` and the CLI**
 
 `make`: for every registered repo `discover::checkouts` (destructure the `(checkouts, faults)` tuple), then `discover::targets(&checkouts, cfg, true, &mut Snapshot::default(), cancel)`, then keep only targets inside `scope_repos` (all when empty) via `Scope::from_paths`. Validate the window with `state::window_days(cfg.gc_window_days)`; an error becomes `MakeError::Window`, which the CLI turns into a refusal finding and exit 1. For each target: `class_of_target`; `Unresolved` → a finding, no plan; `plan_for_target`; group the `Planned` targets by class into one `Plan` each (`Plan::single` for the first target of a class, then push the rest and sum `planned`). `Orphan` targets are skipped with a finding until Task 14. Add `Command::Gc { plan }` with `#[arg(long, conflicts_with = "dry_run")]`; `plan_cmd` (new, in `src/cli.rs`) reuses the load closure of `gc_cmd`, `doctor::require(.., FingerprintReading, ..)` only, `select`, `live_checkouts`, `emit`; it calls `make`, `record::insert`, builds the `PlanTierBody` (a `PlanRecord` per plan with `outcome: None`, `targets`, `paths`, and planned `freed_bytes`/`deleted_bytes_still_shared` counts when measured), calls `b.plan_tier(body)` and exits 0. `gc` without `--plan` keeps its exact path. Update `tests/skill.rs`: `Parsed::Gc { dry_run: bool, plan: bool }` and `parse` (the existing `want` entries become `Parsed::Gc { dry_run: _, plan: false }`; Task 16 adds the `plan: true` entry when it documents the command).
 
 Add to `CONTEXT.md` the terms Plan (a one-use stored record of the paths one `apply` may delete in the targets of one class), Plan class and Outcome, in the file's existing format.
 
-- [ ] **Step 4: Run and commit**
+- [x] **Step 4: Run and commit**
 
 Run: `cargo test` — expect: pass.
 
