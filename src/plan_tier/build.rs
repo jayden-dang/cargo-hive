@@ -1,5 +1,6 @@
 //! Builds one plan per checkout class from ownership and a liveness verdict.
 //! Planning records paths in hive's state and writes nothing in a checkout.
+//! A listed path whose stat fails is recorded and is not an entry, and that target is not nothing to do.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -25,10 +26,16 @@ pub enum TargetClass {
     Unresolved,
 }
 
+pub struct BuiltTarget {
+    pub target: PlannedTarget,
+    pub stat_failures: Vec<(PathBuf, String)>,
+}
+
 pub enum TargetPlan {
-    Planned(PlannedTarget),
+    Planned(BuiltTarget),
     NothingToDo,
     Undecided(Vec<Uncertain>),
+    Unreadable(Vec<(PathBuf, String)>),
 }
 
 pub struct Made {
@@ -85,14 +92,19 @@ pub fn plan_for_target(ctx: &Ctx, target: &TargetDir, window: Duration) -> Targe
     let mut seen = HashSet::new();
     let mut paths = Vec::new();
     let mut entries = Vec::new();
+    let mut unread = Vec::new();
     for unit in dead {
         let label = unit_label(&target.path, &unit.unit);
         for path in unit.files {
             if !seen.insert(path.clone()) {
                 continue;
             }
-            let Ok(stat) = ctx.fs.entry_stat(&path) else {
-                continue;
+            let stat = match ctx.fs.entry_stat(&path) {
+                Ok(stat) => stat,
+                Err(err) => {
+                    unread.push((path, err.to_string()));
+                    continue;
+                }
             };
             paths.push(path.clone());
             entries.push(PlannedEntry {
@@ -105,7 +117,10 @@ pub fn plan_for_target(ctx: &Ctx, target: &TargetDir, window: Duration) -> Targe
         }
     }
     if entries.is_empty() {
-        return TargetPlan::NothingToDo;
+        if unread.is_empty() {
+            return TargetPlan::NothingToDo;
+        }
+        return TargetPlan::Unreadable(unread);
     }
     let owner = match &target.owner {
         Owner::Owned { checkout } => Some(checkout.clone()),
@@ -118,12 +133,15 @@ pub fn plan_for_target(ctx: &Ctx, target: &TargetDir, window: Duration) -> Targe
             still_shared: foot.bytes.still_shared,
         }
     });
-    TargetPlan::Planned(PlannedTarget {
-        path: target.path.clone(),
-        owner,
-        planned,
-        entries,
-        orphan: None,
+    TargetPlan::Planned(BuiltTarget {
+        target: PlannedTarget {
+            path: target.path.clone(),
+            owner,
+            planned,
+            entries,
+            orphan: None,
+        },
+        stat_failures: unread,
     })
 }
 
@@ -232,7 +250,10 @@ pub fn make(
                         .collect(),
                 }),
                 TargetPlan::NothingToDo => nothing_to_do.push(target.path.clone()),
-                TargetPlan::Planned(planned) => {
+                TargetPlan::Unreadable(failed) => record_stat_failures(&mut findings, failed),
+                TargetPlan::Planned(built) => {
+                    record_stat_failures(&mut findings, built.stat_failures);
+                    let planned = built.target;
                     let slot = class_index(class);
                     if let Some(plan) = buckets[slot].as_mut() {
                         add_target(plan, planned);
@@ -262,6 +283,15 @@ pub fn make(
         unmeasured,
         findings,
     })
+}
+
+fn record_stat_failures(
+    findings: &mut Vec<(String, Option<PathBuf>, String)>,
+    failed: Vec<(PathBuf, String)>,
+) {
+    for (path, detail) in failed {
+        findings.push(("plan.unreadable".to_string(), Some(path), detail));
+    }
 }
 
 fn class_index(class: PlanClass) -> usize {
@@ -452,5 +482,223 @@ mod tests {
             reason: "cargo metadata failed".to_string(),
         };
         assert_eq!(class_of_target(&owner, &[]), TargetClass::Unresolved);
+    }
+
+    #[cfg(target_os = "macos")]
+    struct FailStat {
+        inner: Box<dyn crate::platform::Fs>,
+        deny: fn(&Path) -> bool,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl crate::platform::Fs for FailStat {
+        fn temp_dir(
+            &self,
+            parent: &Path,
+            prefix: &str,
+        ) -> std::io::Result<crate::platform::TempDir> {
+            self.inner.temp_dir(parent, prefix)
+        }
+        fn write_file(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.inner.write_file(path, bytes)
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            self.inner.read(path)
+        }
+        fn hardlink(&self, src: &Path, dst: &Path) -> std::io::Result<()> {
+            self.inner.hardlink(src, dst)
+        }
+        fn set_mtime(&self, path: &Path, t: SystemTime) -> std::io::Result<()> {
+            self.inner.set_mtime(path, t)
+        }
+        fn mtime(&self, path: &Path) -> std::io::Result<SystemTime> {
+            self.inner.mtime(path)
+        }
+        fn inode(&self, path: &Path) -> std::io::Result<u64> {
+            self.inner.inode(path)
+        }
+        fn clone_file(&self, src: &Path, dst: &Path) -> std::io::Result<()> {
+            self.inner.clone_file(src, dst)
+        }
+        fn sharing(&self, path: &Path) -> std::io::Result<crate::platform::Sharing> {
+            self.inner.sharing(path)
+        }
+        fn compress(&self, path: &Path) -> crate::platform::CompressOutcome {
+            self.inner.compress(path)
+        }
+        fn hold_lock(
+            &self,
+            kind: crate::platform::LockKind,
+            path: &Path,
+        ) -> std::io::Result<crate::platform::LockHolder> {
+            self.inner.hold_lock(kind, path)
+        }
+        fn try_lock_exclusive(&self, path: &Path) -> crate::platform::TryLock {
+            self.inner.try_lock_exclusive(path)
+        }
+        fn try_lock_elsewhere(
+            &self,
+            kind: crate::platform::LockKind,
+            path: &Path,
+        ) -> std::io::Result<crate::platform::LockState> {
+            self.inner.try_lock_elsewhere(kind, path)
+        }
+        fn entry_stat(&self, path: &Path) -> std::io::Result<crate::platform::EntryStat> {
+            if (self.deny)(path) {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("injected stat failure for {}", path.display()),
+                ))
+            } else {
+                self.inner.entry_stat(path)
+            }
+        }
+        fn read_dir_bounded(
+            &self,
+            dir: &Path,
+            cap: usize,
+        ) -> std::io::Result<Vec<(String, crate::platform::EntryKind)>> {
+            self.inner.read_dir_bounded(dir, cap)
+        }
+        fn remove_tree(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.remove_tree(path)
+        }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
+        }
+        fn volume(&self, path: &Path) -> std::io::Result<crate::platform::VolumeInfo> {
+            self.inner.volume(path)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    struct ScratchDir(PathBuf);
+
+    #[cfg(target_os = "macos")]
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn planted_dead_unit(label: &str) -> (ScratchDir, TargetDir, PathBuf) {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = PathBuf::from(format!(
+            "/private/tmp/hive-it-statfail-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let profile = root.join("debug");
+        let unit = "fixture-4444444444444444";
+        let unit_dir = profile.join(".fingerprint").join(unit);
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        std::fs::write(unit_dir.join("lib-fixture"), "0000000000000068").unwrap();
+        std::fs::write(
+            unit_dir.join("lib-fixture.json"),
+            r#"{"rustc":1,"features":"[]","declared_features":"[]","target":2,"profile":3,"path":4,"deps":[],"local":[],"rustflags":[],"config":5,"compile_kind":0}"#,
+        )
+        .unwrap();
+        let stamp = unit_dir.join("invoked.timestamp");
+        std::fs::write(&stamp, b"").unwrap();
+        std::fs::File::open(&stamp)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(30 * 86_400))
+            .unwrap();
+        let artifact = profile
+            .join("deps")
+            .join("libfixture-4444444444444444.rlib");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, b"artifact").unwrap();
+        let target = TargetDir {
+            path: root.clone(),
+            owner: Owner::Owned {
+                checkout: root.clone(),
+            },
+            profiles: vec![crate::fingerprint::read_profile(&profile)],
+            size: None,
+            unreadable: None,
+        };
+        (ScratchDir(root), target, artifact)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn plan_with(target: &TargetDir, deny: fn(&Path) -> bool) -> TargetPlan {
+        let state = crate::state::State::open_at(target.path.join("home")).unwrap();
+        let cfg = crate::state::Config {
+            secondary_roots: Vec::new(),
+            cache_roots: Vec::new(),
+            gc_window_days: None,
+        };
+        let fs = FailStat {
+            inner: crate::platform::current().unwrap().fs,
+            deny,
+        };
+        let ctx = Ctx {
+            state: &state,
+            fs: &fs,
+            cfg: &cfg,
+            now: SystemTime::now(),
+            account_bytes: false,
+            repos: &[],
+            mains: &[],
+        };
+        plan_for_target(&ctx, target, Duration::from_secs(7 * 86_400))
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_listed_path_whose_stat_fails_is_not_nothing_to_do() {
+        let (_scratch, target, artifact) = planted_dead_unit("all");
+        let plan = plan_with(&target, |_| true);
+        let TargetPlan::Unreadable(failed) = plan else {
+            panic!("a listed path whose stat failed was reported as nothing to do");
+        };
+        assert!(
+            failed.iter().any(|(path, _)| path == &artifact),
+            "the artifact whose stat failed was not recorded: {failed:?}"
+        );
+        assert!(
+            failed
+                .iter()
+                .any(|(path, _)| path.ends_with(".fingerprint/fixture-4444444444444444")),
+            "the fingerprint dir whose stat failed was not recorded: {failed:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_listed_path_whose_stat_fails_is_recorded_beside_the_entries_that_stat() {
+        let (_scratch, target, artifact) = planted_dead_unit("one");
+        let plan = plan_with(&target, |path| {
+            path.extension().is_some_and(|ext| ext == "rlib")
+        });
+        let TargetPlan::Planned(built) = plan else {
+            panic!("a target with a path that stat'd was not planned");
+        };
+        assert!(built
+            .target
+            .entries
+            .iter()
+            .all(|entry| entry.path != artifact));
+        assert!(
+            built.target.entries.iter().any(|entry| entry
+                .path
+                .ends_with(".fingerprint/fixture-4444444444444444")),
+            "{:?}",
+            built.target.entries
+        );
+        assert!(
+            built
+                .stat_failures
+                .iter()
+                .any(|(path, _)| path == &artifact),
+            "the artifact whose stat failed was not recorded: {:?}",
+            built.stat_failures
+        );
     }
 }

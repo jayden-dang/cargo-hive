@@ -1,3 +1,7 @@
+//! `gc --plan` stores one plan per checkout class and deletes nothing in the checkout.
+//! These tests drive the hive binary against a scratch home and read the receipt.
+//! A plan is stored here and is not applied.
+
 #![cfg(target_os = "macos")]
 mod common;
 use common::plan_fixture::{tree, Planned};
@@ -198,7 +202,10 @@ fn without_the_accounting_capability_plans_are_made_and_the_bytes_are_unmeasured
 fn a_dead_unit_that_owns_no_artifact_is_never_planned_for_its_lone_fingerprint_dir() {
     let p = Planned::new("plan-no-artifact");
     let hash = p.dead_unit_hash(&p.worktree_target());
+    let mut seen = 0usize;
     for e in std::fs::read_dir(p.worktree_target().join("debug/deps")).unwrap() {
+        seen += 1;
+        assert!(seen < 100_000, "walk bound hit");
         let path = e.unwrap().path();
         if path.to_str().unwrap().contains(&hash) {
             std::fs::remove_file(path).unwrap();

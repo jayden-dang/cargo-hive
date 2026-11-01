@@ -1,3 +1,7 @@
+//! A registered main checkout and linked worktrees under `/private/tmp`, each with a target
+//! whose earlier builds are older than the window. `Planned` runs `gc --plan` and reads the
+//! receipt. Directory listings stop at a fixed bound.
+
 use super::cargo_fixture::{backdate_all, set_mtime};
 use super::{git, init_repo, register, Hive, Scratch};
 use std::collections::BTreeMap;
