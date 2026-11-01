@@ -51,6 +51,19 @@ impl std::error::Error for ApplyError {
 #[derive(Debug)]
 pub enum Authorization {
     Secondary,
+    Approved(Approval),
+}
+
+#[derive(Debug)]
+pub struct Approval {
+    plan_id: String,
+}
+
+#[doc(hidden)]
+pub fn approval_for_tests(plan_id: &str) -> Approval {
+    Approval {
+        plan_id: plan_id.to_owned(),
+    }
 }
 
 #[derive(Debug)]
@@ -103,7 +116,15 @@ pub fn apply(
         Authorization::Secondary if plan.class != PlanClass::Secondary => {
             return Ok(needs_human(plan));
         }
-        Authorization::Secondary => {}
+        Authorization::Approved(approval) if approval.plan_id != id => {
+            return Ok(refused(
+                id,
+                plan.class,
+                "approval_mismatch",
+                target_paths(&plan),
+            ));
+        }
+        Authorization::Secondary | Authorization::Approved(_) => {}
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

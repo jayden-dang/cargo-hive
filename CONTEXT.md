@@ -126,3 +126,7 @@ _Avoid_: report, summary
 
 **needs-human**:
 The status `apply` returns for a protected plan. Only `cargo hive approve <id>` opens the owner-authentication dialog.
+
+**Approval value**:
+The value that lets `apply` delete a protected or orphan plan whose id it names. The command line cannot construct one.
+_Avoid_: flag, environment variable, `--yes`

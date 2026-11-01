@@ -1,7 +1,7 @@
 //! One target is locked through Cargo's lock files, or skipped when a lock is not sound.
 #![cfg(target_os = "macos")]
 mod common;
-use cargo_hive::plan_tier::apply::{apply, Authorization};
+use cargo_hive::plan_tier::apply::{apply, approval_for_tests, Authorization};
 use cargo_hive::plan_tier::locks::{acquire, Acquired, Reason};
 use cargo_hive::receipt::Outcome;
 use common::plan_fixture::Planned;
@@ -291,4 +291,30 @@ fn a_cancel_between_units_keeps_the_first_unit_gone_and_the_second_intact_and_th
         again.plans.iter().any(|x| x.class == PlanClass::Secondary),
         "the second unit can be planned again"
     );
+}
+
+#[test]
+fn an_approved_protected_plan_is_deleted_by_the_same_steps_as_a_secondary_one() {
+    let p = Planned::new("approved-protected");
+    let id = Planned::id_of(&p.plan(), "protected");
+    let before = common::plan_fixture::tree(&p.main_target());
+    let lib = p.library_ctx();
+    let wrong = apply(
+        &lib.ctx(),
+        &id,
+        Authorization::Approved(approval_for_tests("0000000000000000")),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(wrong.reason.as_deref(), Some("approval_mismatch"));
+    assert_eq!(common::plan_fixture::tree(&p.main_target()), before);
+    let done = apply(
+        &lib.ctx(),
+        &id,
+        Authorization::Approved(approval_for_tests(&id)),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.findings);
+    assert!(common::plan_fixture::tree(&p.main_target()).len() < before.len());
 }
