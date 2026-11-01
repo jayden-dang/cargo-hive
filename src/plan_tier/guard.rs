@@ -1,9 +1,10 @@
 //! Accepts one path for removal inside a root, then deletes it by kind.
-//! `check_entry` never removes anything. A directory is removed as a tree; a file or
-//! symbolic link is unlinked. The link itself is removed, not the path it names.
+//! `check_entry` never removes anything. A `.` or `..` component is outside the root.
+//! A directory is removed as a tree; a file or symbolic link is unlinked. The link
+//! itself is removed, not the path it names.
 
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::platform::{EntryKind, EntryStat, Fs};
 
@@ -26,6 +27,9 @@ pub fn check_entry(
     path: &Path,
     expect: Expect,
 ) -> Result<EntryStat, Deleted> {
+    if steps_through_dot(path) {
+        return Err(Deleted::Outside);
+    }
     let parent = canonical_parent(path)?;
     let root = root.canonicalize().map_err(|_| Deleted::Outside)?;
     if !parent.starts_with(root) {
@@ -62,6 +66,16 @@ pub fn delete_checked(fs: &dyn Fs, root: &Path, path: &Path, expect: Expect) -> 
         Err(e) if e.kind() == ErrorKind::NotFound => Deleted::Missing,
         Err(_) => Deleted::Changed,
     }
+}
+
+fn steps_through_dot(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+        || path
+            .as_os_str()
+            .as_encoded_bytes()
+            .split(|b| *b == b'/')
+            .any(|part| part == b".")
 }
 
 fn canonical_parent(path: &Path) -> Result<PathBuf, Deleted> {
@@ -179,6 +193,36 @@ mod tests {
             check_entry(fs, &t, &t, Expect::Any).unwrap_err(),
             Deleted::Outside
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn refuses_dot_and_dot_dot_and_leaves_a_sibling_of_the_root() {
+        let p = platform::current().unwrap();
+        let fs: &dyn Fs = p.fs.as_ref();
+        let d = root("guard-dots");
+        let t = d.join("target");
+        std::fs::create_dir_all(t.join("child")).unwrap();
+        let sibling = d.join("sibling");
+        std::fs::write(&sibling, b"x").unwrap();
+        assert_eq!(
+            check_entry(fs, &t, &t.join("child/.."), Expect::Any),
+            Err(Deleted::Outside)
+        );
+        assert_eq!(
+            check_entry(fs, &t, &t.join("child/../.."), Expect::Any),
+            Err(Deleted::Outside)
+        );
+        let through_dot = PathBuf::from(format!("{}/child/.", t.display()));
+        assert_eq!(
+            check_entry(fs, &t, &through_dot, Expect::Any),
+            Err(Deleted::Outside)
+        );
+        assert_eq!(
+            delete_checked(fs, &t, &t.join("child/../.."), Expect::Any),
+            Deleted::Outside
+        );
+        assert!(sibling.exists(), "a sibling of the root must survive");
         let _ = std::fs::remove_dir_all(&d);
     }
 }
