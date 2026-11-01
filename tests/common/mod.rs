@@ -365,3 +365,4 @@ pub fn wait_within(mut child: Child, limit: Duration) -> Output {
 pub mod cargo_fixture;
 pub mod plan_fixture;
 pub mod prove;
+pub mod recording_fs;

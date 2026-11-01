@@ -12,6 +12,7 @@ use crate::state::{Config, State};
 
 pub mod build;
 pub mod guard;
+pub mod locks;
 pub mod record;
 
 pub struct Ctx<'a> {
