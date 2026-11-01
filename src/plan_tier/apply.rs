@@ -80,9 +80,6 @@ pub fn apply(
     auth: Authorization,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Applied, ApplyError> {
-    match auth {
-        Authorization::Secondary => {}
-    }
     let plan = match record::get(ctx.state, id).map_err(ApplyError::State)? {
         Lookup::Unknown => {
             return Ok(refused(
@@ -102,13 +99,11 @@ pub fn apply(
         }
         Lookup::Live(plan) => plan,
     };
-    if plan.class != PlanClass::Secondary {
-        return Ok(refused(
-            &plan.id,
-            plan.class,
-            "unsupported_class",
-            target_paths(&plan),
-        ));
+    match auth {
+        Authorization::Secondary if plan.class != PlanClass::Secondary => {
+            return Ok(needs_human(plan));
+        }
+        Authorization::Secondary => {}
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -719,6 +714,36 @@ fn refusal_findings(refusal: &Refusal) -> Vec<(String, Option<PathBuf>, String)>
         )
     };
     vec![(kind, Some(path), detail)]
+}
+
+fn needs_human(plan: Plan) -> Applied {
+    let paths = plan
+        .targets
+        .iter()
+        .map(|target| target.entries.len() as u64)
+        .sum();
+    let mut counts = BTreeMap::new();
+    counts.insert("paths".to_string(), paths);
+    if let Some(planned) = plan.planned {
+        counts.insert("freed_bytes".to_string(), planned.freed);
+        counts.insert(
+            "deleted_bytes_still_shared".to_string(),
+            planned.still_shared,
+        );
+    }
+    let targets = target_paths(&plan);
+    Applied {
+        outcome: Outcome::NeedsHuman,
+        reason: None,
+        class: plan.class,
+        id: plan.id,
+        targets,
+        counts,
+        bytes: plan.planned,
+        notes: Vec::new(),
+        unmeasured: Vec::new(),
+        findings: Vec::new(),
+    }
 }
 
 fn refused(id: &str, class: PlanClass, reason: &str, targets: Vec<PathBuf>) -> Applied {

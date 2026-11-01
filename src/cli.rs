@@ -995,7 +995,12 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
         applied.id,
         build::class_label(applied.class)
     );
-    let paths = applied.counts.get("paths_deleted").copied().unwrap_or(0);
+    let paths = applied
+        .counts
+        .get("paths")
+        .or_else(|| applied.counts.get("paths_deleted"))
+        .copied()
+        .unwrap_or(0);
     for note in &applied.notes {
         b.note(note.clone());
     }
@@ -1018,7 +1023,11 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
         undecided: Vec::new(),
         nothing_to_do: Vec::new(),
     });
-    let code = i32::from(applied.outcome == Outcome::Refused);
+    let code = match applied.outcome {
+        Outcome::NeedsHuman => EXIT_NEEDS_HUMAN,
+        Outcome::Refused => 1,
+        Outcome::Applied | Outcome::Partial => 0,
+    };
     emit(state, out, b.finish(), &human, code)
 }
 

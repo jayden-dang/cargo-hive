@@ -4,6 +4,8 @@
 
 #![cfg(target_os = "macos")]
 mod common;
+use std::process::Stdio;
+
 use common::plan_fixture::{tree, Planned};
 use common::{init_repo, register, Hive, Scratch};
 
@@ -336,12 +338,59 @@ fn apply_refuses_without_the_deletion_capability_and_leaves_the_plan_unconsumed(
 }
 
 #[test]
-fn a_non_secondary_plan_is_not_applied_until_the_needs_human_task() {
-    let p = Planned::new("apply-unsupported");
+fn a_protected_plan_returns_needs_human_with_what_would_be_approved_and_stays_unconsumed() {
+    let p = Planned::new("needs-human");
     let id = Planned::id_of(&p.plan(), "protected");
-    let (out, r) = p.hive.json(&["apply", &id]);
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(r["plans"][0]["reason"], "unsupported_class");
+    let before = tree(&p.main_target());
+    for _ in 0..2 {
+        let (out, r) = p.hive.json(&["apply", &id]);
+        assert_eq!(out.status.code(), Some(3), "{r}");
+        let plan = &r["plans"][0];
+        assert_eq!(plan["outcome"], "needs-human");
+        assert_eq!(plan["class"], "protected");
+        assert_eq!(plan["id"], id.as_str());
+        assert!(plan["paths"].as_u64().unwrap() > 0);
+        assert_eq!(plan["targets"].as_array().unwrap().len(), 1);
+        assert!(
+            plan["counts"]["freed_bytes"].as_u64().is_some(),
+            "planned bytes are reported: {plan}"
+        );
+        assert_eq!(tree(&p.main_target()), before);
+    }
+}
+
+#[test]
+fn apply_has_no_option_or_environment_variable_that_deletes_for_a_protected_plan() {
+    let p = Planned::new("no-bypass");
+    let id = Planned::id_of(&p.plan(), "protected");
+    for extra in [vec!["--yes"], vec!["--force"], vec!["--approve"]] {
+        let mut args = vec!["apply", id.as_str()];
+        args.extend(extra);
+        assert!(!p.hive.run(&args).status.success());
+    }
+    let out = p
+        .hive
+        .command(&["apply", &id])
+        .env("HIVE_APPROVE", "1")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+}
+
+#[test]
+fn apply_never_blocks_on_an_owner_authentication_prompt() {
+    let p = Planned::new("no-dialog");
+    let id = Planned::id_of(&p.plan(), "protected");
+    let child = p
+        .hive
+        .command(&["apply", &id, "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = common::wait_within(child, std::time::Duration::from_secs(60));
+    assert_eq!(out.status.code(), Some(3));
 }
 
 #[test]
