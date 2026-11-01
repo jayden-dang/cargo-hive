@@ -144,3 +144,31 @@ fn the_lock_commands_never_create_hive_state() {
     assert!(!hive.home.path.exists());
     std::fs::create_dir_all(&hive.home.path).unwrap(); // so the scratch drop has a dir to clean
 }
+
+#[test]
+fn an_acquired_lock_reports_the_identity_of_the_file_it_opened() {
+    let s = Scratch::new("lock-identity");
+    let path = s.path.join(".cargo-build-lock");
+    std::fs::write(&path, b"").unwrap();
+    let fs = apfs();
+    let stat = fs.entry_stat(&path).unwrap();
+    match fs.try_lock_exclusive(&path) {
+        TryLock::Acquired(held) => assert_eq!(held.identity(), Some((stat.dev, stat.ino))),
+        other => panic!("expected Acquired, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_lock_whose_file_was_replaced_after_it_was_opened_reports_a_different_identity() {
+    let s = Scratch::new("lock-replaced");
+    let path = s.path.join(".cargo-build-lock");
+    std::fs::write(&path, b"").unwrap();
+    let fs = apfs();
+    let TryLock::Acquired(held) = fs.try_lock_exclusive(&path) else {
+        panic!("not acquired")
+    };
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, b"").unwrap();
+    let now = fs.entry_stat(&path).unwrap();
+    assert_ne!(held.identity(), Some((now.dev, now.ino)));
+}

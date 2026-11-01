@@ -207,13 +207,26 @@ impl Drop for LockHolder {
 /// A lock this process holds. Dropping it releases the lock.
 pub struct HeldLock {
     release: Option<Box<dyn FnOnce() + Send>>,
+    identity: Option<(u64, u64)>,
 }
 
 impl HeldLock {
     pub fn new(release: impl FnOnce() + Send + 'static) -> HeldLock {
         HeldLock {
             release: Some(Box::new(release)),
+            identity: None,
         }
+    }
+
+    pub fn with_identity(dev: u64, ino: u64, release: impl FnOnce() + Send + 'static) -> HeldLock {
+        HeldLock {
+            release: Some(Box::new(release)),
+            identity: Some((dev, ino)),
+        }
+    }
+
+    pub fn identity(&self) -> Option<(u64, u64)> {
+        self.identity
     }
 }
 

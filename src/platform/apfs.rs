@@ -206,13 +206,13 @@ impl Fs for Apfs {
         }
         // SAFETY: `fd` was just opened by this process and nothing else owns it.
         let file = unsafe { fs::File::from_raw_fd(fd) };
-        match file.metadata() {
-            Ok(m) if m.file_type().is_file() => {}
+        let m = match file.metadata() {
+            Ok(m) if m.file_type().is_file() => m,
             Ok(_) => {
                 return TryLock::Unopenable(io::Error::other("the lock path is not a regular file"))
             }
             Err(e) => return TryLock::Unopenable(e),
-        }
+        };
         // SAFETY: `file` owns a valid descriptor for the call.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let err = io::Error::last_os_error();
@@ -222,7 +222,9 @@ impl Fs for Apfs {
                 TryLock::Unlockable(err)
             };
         }
-        TryLock::Acquired(HeldLock::new(move || drop(file)))
+        TryLock::Acquired(HeldLock::with_identity(m.dev(), m.ino(), move || {
+            drop(file)
+        }))
     }
 
     fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState> {
