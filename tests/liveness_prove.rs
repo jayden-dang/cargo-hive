@@ -100,6 +100,16 @@ fn deleting_dead_units_rebuilds_no_live_unit_on_a_real_target() {
                 units.join(", ")
             );
         }
+        if matches!(
+            &window.outcome,
+            WindowOutcome::Vacuous(why) if why.contains("no dead unit lists a file to delete")
+        ) {
+            assert_eq!(
+                (window.rebuilt, window.rebuilt_live),
+                (0, 0),
+                "a window with no dead file deletes and rebuilds nothing: {window:?}"
+            );
+        }
     }
     assert!(
         !report.all_vacuous(),
