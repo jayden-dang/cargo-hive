@@ -382,6 +382,55 @@ fn a_file_whose_sharing_cannot_be_read_is_named_after_the_orphan_is_removed() {
 }
 
 #[test]
+fn a_later_refusal_keeps_the_measured_bytes_of_the_orphan_already_removed() {
+    let (p, first) = Planned::with_orphan("orphan-partial-bytes");
+    let later = first.parent().unwrap().join("later-target");
+    let copied = std::process::Command::new("cp")
+        .args([
+            "-R",
+            &first.display().to_string(),
+            &later.display().to_string(),
+        ])
+        .status()
+        .unwrap();
+    assert!(copied.success(), "the second orphan target was not copied");
+    let id = p.orphan_plan_id(&first);
+    std::fs::create_dir_all(later.join("release/.fingerprint")).unwrap();
+    std::fs::write(later.join("release/.cargo-build-lock"), b"").unwrap();
+    let done = apply(
+        &p.library_ctx().ctx(),
+        &id,
+        Authorization::Approved(approval_for_tests(&id)),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(done.targets.len(), 2, "one plan holds both orphan targets");
+    assert_eq!(
+        done.outcome,
+        Outcome::Partial,
+        "{:?} {:?}",
+        done.reason,
+        done.findings
+    );
+    assert!(!first.exists(), "the first target was already removed");
+    assert!(later.exists(), "the refused target stays");
+    let bytes = done
+        .bytes
+        .expect("measured totals stay after a later refusal");
+    assert!(
+        bytes.freed + bytes.still_shared > 0,
+        "the proceeded removal measured some bytes"
+    );
+    assert!(done.counts.contains_key("freed_bytes"), "{:?}", done.counts);
+    let per_target = format!("freed_bytes:{}", first.display());
+    assert!(
+        done.counts.contains_key(&per_target),
+        "per-target bytes stay: {:?}",
+        done.counts.keys()
+    );
+}
+
+#[test]
 fn a_held_lock_skips_the_orphan_removal_and_deletes_nothing() {
     let (p, orphan) = Planned::with_orphan("orphan-held");
     let id = p.orphan_plan_id(&orphan);

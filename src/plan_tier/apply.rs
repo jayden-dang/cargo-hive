@@ -260,7 +260,11 @@ fn apply_orphan(
     let (outcome, reason) = if cancelled {
         (Outcome::Partial, Some("cancelled".to_string()))
     } else if let Some(reason) = &refusal {
-        (Outcome::Refused, Some(reason.clone()))
+        if paths_deleted > 0 {
+            (Outcome::Partial, Some(reason.clone()))
+        } else {
+            (Outcome::Refused, Some(reason.clone()))
+        }
     } else if applied_targets != total {
         let why = if applied_targets == 0 {
             "all_targets_skipped"
@@ -271,7 +275,8 @@ fn apply_orphan(
     } else {
         (Outcome::Applied, None)
     };
-    let bytes = (ctx.account_bytes && outcome == Outcome::Applied).then_some(freed);
+    let publish_bytes = ctx.account_bytes && (outcome == Outcome::Applied || paths_deleted > 0);
+    let bytes = publish_bytes.then_some(freed);
     if !ctx.account_bytes && outcome != Outcome::Refused {
         let gaps = std::mem::take(&mut unmeasured);
         unmeasured = unmeasured_accounting();
@@ -298,7 +303,7 @@ fn apply_orphan(
                 &plan.targets,
                 &deleted_by_target,
                 &per_target,
-                ctx.account_bytes && outcome == Outcome::Applied,
+                publish_bytes,
             );
             counts
         },
