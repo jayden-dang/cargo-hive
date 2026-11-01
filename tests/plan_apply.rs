@@ -689,3 +689,152 @@ fn every_target_is_checked_before_any_is_deleted() {
         "the first target was deleted although the second was stale"
     );
 }
+
+#[test]
+fn an_unowned_target_dir_becomes_one_whole_directory_entry_in_an_orphan_plan() {
+    let (p, orphan) = Planned::with_orphan("orphan-plan");
+    let before = tree(&orphan);
+    let id = p.orphan_plan_id(&orphan);
+    let stored = p.plans_json();
+    let plan = stored["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == id.as_str())
+        .unwrap();
+    assert_eq!(plan["class"], "orphan");
+    let target = &plan["targets"][0];
+    assert_eq!(
+        target["entries"].as_array().unwrap().len(),
+        1,
+        "the target dir itself and nothing inside it"
+    );
+    assert_eq!(
+        target["entries"][0]["path"].as_str().unwrap(),
+        orphan.canonicalize().unwrap().to_str().unwrap()
+    );
+    let dirs = target["orphan"]["dirs"].as_array().unwrap();
+    assert!(
+        dirs.iter().any(|d| d.as_str().unwrap().ends_with("/debug")),
+        "{target}"
+    );
+    for key in ["root_kind", "root_dev", "root_ino"] {
+        assert!(!target["orphan"][key].is_null(), "{key}");
+    }
+    assert_eq!(tree(&orphan), before);
+}
+
+#[test]
+fn no_other_class_plans_the_removal_of_a_whole_target_dir() {
+    let (p, orphan) = Planned::with_orphan("orphan-only");
+    p.orphan_plan_id(&orphan);
+    let r = p.plan();
+    for other in r["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|x| x["class"] != "orphan")
+    {
+        assert!(
+            !other["targets"].to_string().contains("gone-repo-target"),
+            "{other}"
+        );
+    }
+}
+
+#[test]
+fn an_orphan_plan_ends_at_needs_human() {
+    let (p, orphan) = Planned::with_orphan("orphan-human");
+    let id = p.orphan_plan_id(&orphan);
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(3), "{r}");
+    assert!(orphan.exists());
+}
+
+#[test]
+fn a_target_owned_by_a_repo_outside_the_named_scope_is_not_an_orphan() {
+    let p = Planned::new("orphan-scope");
+    // repo B (a second registered repo) is configured to build into a directory inside A's tree
+    let b_dir = p.scratch.path.join("b");
+    let b = init_repo(&b_dir, "");
+    register(&p.hive, &b);
+    let shared = p.main.join("shared-target");
+    std::fs::create_dir_all(b.join(".cargo")).unwrap();
+    std::fs::write(
+        b.join(".cargo/config.toml"),
+        format!("[build]\ntarget-dir = \"{}\"\n", shared.display()),
+    )
+    .unwrap();
+    p.hive.build_crate(&b, None);
+    let r = p.plan_for(&[p.main.to_str().unwrap()]); // only A is named
+    assert!(
+        r["plans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["class"] != "orphan"),
+        "{r}"
+    );
+    let shared_c = shared.canonicalize().unwrap();
+    let listed = r["plans"].as_array().unwrap().iter().any(|x| {
+        x["targets"]
+            .to_string()
+            .contains(shared_c.to_str().unwrap())
+    });
+    assert!(
+        listed
+            || r["nothing_to_do"]
+                .to_string()
+                .contains(shared_c.to_str().unwrap()),
+        "the shared target is owned by B and planned or nothing-to-do, not orphan: {r}"
+    );
+}
+
+#[test]
+fn an_orphan_is_not_planned_while_a_registered_workspace_does_not_resolve() {
+    let (p, orphan) = Planned::with_orphan("orphan-unresolved");
+    std::fs::write(p.worktree.join("Cargo.toml"), "this is not a manifest").unwrap();
+    p.hive.config(&format!(
+        r#"{{"cache_roots": ["{}"]}}"#,
+        orphan.parent().unwrap().display()
+    ));
+    let r = p.plan();
+    assert!(
+        r["plans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["class"] != "orphan"),
+        "an unresolved workspace means ownership is unknown: {r}"
+    );
+}
+
+#[test]
+fn an_orphan_owned_under_the_callers_environment_is_planned_with_a_note() {
+    let (p, orphan) = Planned::with_orphan("orphan-caller-env");
+    p.hive.config(&format!(
+        r#"{{"cache_roots": ["{}"]}}"#,
+        orphan.parent().unwrap().display()
+    ));
+    let (out, r) = p.hive.json_env(
+        &["gc", "--plan"],
+        &[("CARGO_TARGET_DIR", orphan.to_str().unwrap())],
+    );
+    assert!(out.status.success());
+    assert!(
+        r["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "plan.caller_env"),
+        "{r}"
+    );
+    assert!(
+        r["plans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["class"] == "orphan"),
+        "{r}"
+    );
+}

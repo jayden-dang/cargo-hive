@@ -177,6 +177,38 @@ impl Planned {
         }
     }
 
+    /// A built target dir no registered checkout owns, inside the default cache root
+    /// (`Hive::config` defaults `cache_roots` to `<home>/no-cache`). The throwaway repo is never registered.
+    pub fn with_orphan(label: &str) -> (Planned, PathBuf) {
+        let p = Planned::new(label);
+        let gone = init_repo(&p.scratch.path.join("gone-repo"), "");
+        let orphan = p.hive.home.path.join("no-cache/gone-repo-target");
+        std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        p.hive.build_crate(&gone, Some(&orphan));
+        let orphan = orphan.canonicalize().unwrap();
+        (p, orphan)
+    }
+
+    /// Runs `gc --plan` over every registered repo (`Hive::config` overwrites config.json) and returns the one orphan plan's id.
+    pub fn orphan_plan_id(&self, orphan: &Path) -> String {
+        self.hive.config(&format!(
+            r#"{{"cache_roots": ["{}"]}}"#,
+            orphan.parent().unwrap().display()
+        ));
+        let r = self.plan();
+        assert_eq!(
+            r["plans"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|x| x["class"] == "orphan")
+                .count(),
+            1,
+            "{r}"
+        );
+        Planned::id_of(&r, "orphan")
+    }
+
     /// Makes the dead unit `hash` of `target` live again by touching its stamp.
     pub fn revive(&self, target: &Path, hash: &str) {
         let stamp = target.join(format!(

@@ -1,4 +1,5 @@
 //! Builds one plan per checkout class from ownership and a liveness verdict.
+//! An orphan target is one entry for the directory itself, not the files inside it.
 //! Planning records paths in hive's state and writes nothing in a checkout.
 //! A listed path whose stat fails is recorded and is not an entry, and that target is not nothing to do.
 
@@ -14,7 +15,7 @@ use crate::discover::{self, Checkout, Scope, Snapshot};
 use crate::gc;
 use crate::liveness::{self, Liveness, Uncertain, UnitRef};
 use crate::plan_tier::record::{
-    kind_name, BytesRec, Plan, PlanClass, PlanState, PlannedEntry, PlannedTarget,
+    kind_name, BytesRec, OrphanScope, Plan, PlanClass, PlanState, PlannedEntry, PlannedTarget,
 };
 use crate::plan_tier::Ctx;
 use crate::receipt::{ReasonRecord, UndecidedRecord, Unmeasured};
@@ -210,6 +211,7 @@ pub fn make(
     let mut buckets: [Option<Plan>; 3] = [None, None, None];
     let mut undecided = Vec::new();
     let mut nothing_to_do = Vec::new();
+    let mut measure_gaps = Vec::new();
     for target in &scan.targets {
         if cancel() {
             return Err(MakeError::Cancelled);
@@ -232,11 +234,16 @@ pub fn make(
                 ));
             }
             TargetClass::Class(PlanClass::Orphan) => {
-                findings.push((
-                    "plan.skipped".to_string(),
-                    Some(target.path.clone()),
-                    "an orphan target is not planned yet".to_string(),
-                ));
+                if let Some(planned) = plan_orphan(ctx, target, &mut findings, &mut measure_gaps) {
+                    store_target(
+                        &mut buckets,
+                        PlanClass::Orphan,
+                        planned,
+                        &recorded,
+                        days,
+                        now,
+                    );
+                }
             }
             TargetClass::Class(class) => match plan_for_target(ctx, target, window) {
                 TargetPlan::Undecided(reasons) => undecided.push(UndecidedRecord {
@@ -253,21 +260,13 @@ pub fn make(
                 TargetPlan::Unreadable(failed) => record_stat_failures(&mut findings, failed),
                 TargetPlan::Planned(built) => {
                     record_stat_failures(&mut findings, built.stat_failures);
-                    let planned = built.target;
-                    let slot = class_index(class);
-                    if let Some(plan) = buckets[slot].as_mut() {
-                        add_target(plan, planned);
-                    } else {
-                        let mut plan = Plan::single(class, planned, days, now);
-                        plan.scope_repos.clone_from(&recorded);
-                        buckets[slot] = Some(plan);
-                    }
+                    store_target(&mut buckets, class, built.target, &recorded, days, now);
                 }
             },
         }
     }
     let plans: Vec<Plan> = buckets.into_iter().flatten().collect();
-    let mut unmeasured = Vec::new();
+    let mut unmeasured = measure_gaps;
     if !ctx.account_bytes && !plans.is_empty() {
         for field in ["freed_bytes", "deleted_bytes_still_shared"] {
             unmeasured.push(Unmeasured {
@@ -283,6 +282,118 @@ pub fn make(
         unmeasured,
         findings,
     })
+}
+
+fn plan_orphan(
+    ctx: &Ctx,
+    target: &TargetDir,
+    findings: &mut Vec<(String, Option<PathBuf>, String)>,
+    unmeasured: &mut Vec<Unmeasured>,
+) -> Option<PlannedTarget> {
+    if let Owner::OrphanCandidate {
+        owned_under_caller_env: Some(var),
+    } = &target.owner
+    {
+        findings.push((
+            "plan.caller_env".to_string(),
+            Some(target.path.clone()),
+            var.clone(),
+        ));
+    }
+    let stat = match ctx.fs.entry_stat(&target.path) {
+        Ok(stat) => stat,
+        Err(err) => {
+            findings.push((
+                "plan.unreadable".to_string(),
+                Some(target.path.clone()),
+                err.to_string(),
+            ));
+            return None;
+        }
+    };
+    let kind = kind_name(stat.kind).to_string();
+    let dirs = match crate::cargo_target::identify(&target.path) {
+        Some(Ok(found)) => found.into_iter().map(|(dir, _)| dir).collect(),
+        Some(Err(why)) => {
+            findings.push((
+                "plan.unreadable".to_string(),
+                Some(target.path.clone()),
+                why,
+            ));
+            return None;
+        }
+        None => {
+            findings.push((
+                "plan.unreadable".to_string(),
+                Some(target.path.clone()),
+                format!("{} is no longer a Cargo target dir", target.path.display()),
+            ));
+            return None;
+        }
+    };
+    Some(PlannedTarget {
+        path: target.path.clone(),
+        owner: None,
+        planned: measured_orphan(ctx, target, unmeasured),
+        entries: vec![PlannedEntry {
+            path: target.path.clone(),
+            unit: target.path.display().to_string(),
+            kind: kind.clone(),
+            dev: stat.dev,
+            ino: stat.ino,
+        }],
+        orphan: Some(OrphanScope {
+            root_kind: kind,
+            root_dev: stat.dev,
+            root_ino: stat.ino,
+            dirs,
+        }),
+    })
+}
+
+fn measured_orphan(
+    ctx: &Ctx,
+    target: &TargetDir,
+    unmeasured: &mut Vec<Unmeasured>,
+) -> Option<BytesRec> {
+    if !ctx.account_bytes {
+        return None;
+    }
+    let paths = [target.path.clone()];
+    let foot = gc::measure(ctx.fs, &target.path, &paths, true);
+    if foot.unmeasured == 0 {
+        return Some(BytesRec {
+            freed: foot.bytes.freed,
+            still_shared: foot.bytes.still_shared,
+        });
+    }
+    // A cap and a failed stat share this count, and the walk's own reason is not returned.
+    unmeasured.push(Unmeasured {
+        field: target.path.display().to_string(),
+        reason: format!(
+            "measure could not account every byte ({n} unmeasured)",
+            n = foot.unmeasured
+        ),
+    });
+    None
+}
+
+fn store_target(
+    buckets: &mut [Option<Plan>; 3],
+    class: PlanClass,
+    planned: PlannedTarget,
+    recorded: &[PathBuf],
+    days: u64,
+    now: u64,
+) {
+    let slot = class_index(class);
+    if let Some(plan) = buckets[slot].as_mut() {
+        add_target(plan, planned);
+    } else {
+        let mut plan = Plan::single(class, planned, days, now);
+        plan.scope_repos = recorded.to_vec();
+        buckets[slot] = Some(plan);
+    }
 }
 
 fn record_stat_failures(
