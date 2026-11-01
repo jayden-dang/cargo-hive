@@ -459,7 +459,7 @@ _Requirements: GCPLAN-1.8, GCPLAN-1.9, GCPLAN-9.7_
 
 **Depends-on:** Task 3
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[cfg(test)]
@@ -559,13 +559,13 @@ mod tests {
 
 Run: `cargo test -p cargo-hive record::` — expect: compile error, `plan_tier::record` not found.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `plans.json` is `{ "plans": [Plan, ...] }` with a `Default` wrapper type; read and write it only through `Tx` inside `State::locked_or_cancelled(cancel, ...)`. `insert`: prune first, refuse a duplicate id with `StateError::Malformed { file: "plans.json".into(), detail }`, then append. `consume`: in one locked section find the plan; `Live` → replace `targets` with an empty vec, set `state = Consumed { at: now }`, write, return `Taken::Plan(copy_before_stripping)`; `Consumed` → `AlreadyConsumed`; missing → `Unknown`. `prune(now)`: drop any entry with `made_at` older than 30 days; then keep only the newest 256 consumed tombstones; never drop a `Live` plan younger than 30 days. `new_id` mixes its three inputs (FNV-1a over their bytes) into 16 hex characters; callers retry with a new counter if `insert` reports a duplicate.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "plan_tier: store plans in state and consume each once"`
 
