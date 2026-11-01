@@ -593,13 +593,15 @@ fn a_plan_edited_to_name_a_file_outside_its_target_is_refused_and_the_file_survi
 }
 
 fn pid_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
+    let child = std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .spawn()
+        .unwrap();
+    common::wait_within(child, std::time::Duration::from_secs(30))
+        .status
+        .success()
 }
 
 #[test]
@@ -639,21 +641,32 @@ fn a_sigint_during_apply_exits_130_logs_a_receipt_and_leaves_the_plan_consumed()
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert!(pid_alive(hive_pid), "apply should be running before SIGINT");
-    assert!(std::process::Command::new("kill")
+    let killer = std::process::Command::new("kill")
         .args(["-INT", &hive_pid.to_string()])
-        .status()
-        .unwrap()
-        .success());
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(
+        common::wait_within(killer, std::time::Duration::from_secs(30))
+            .status
+            .success()
+    );
     let out = common::wait_within(child, std::time::Duration::from_secs(30));
     assert_eq!(out.status.code(), Some(130), "{out:?}");
-    let logged = std::fs::read_dir(p.hive.home.path.join("receipts"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .any(|e| {
-            std::fs::read_to_string(e.path())
-                .unwrap_or_default()
-                .contains("\"command\":\"apply\"")
-        });
+    let mut seen = 0usize;
+    let mut logged = false;
+    for entry in std::fs::read_dir(p.hive.home.path.join("receipts")).unwrap() {
+        seen += 1;
+        assert!(seen < 100_000, "walk bound hit");
+        let path = entry.unwrap().path();
+        if std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("\"command\":\"apply\"")
+        {
+            logged = true;
+        }
+    }
     assert!(logged, "a cancelled apply appends a receipt");
     let (again, r) = p.hive.json(&["apply", &id]);
     assert_eq!(again.status.code(), Some(1));
