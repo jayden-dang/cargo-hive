@@ -1606,7 +1606,7 @@ _Requirements: GCPLAN-4.1, GCPLAN-4.2, GCPLAN-4.3, GCPLAN-4.4, GCPLAN-6.3, GCPLA
 
 **Depends-on:** Task 11
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tests/plan_tier.rs`:
 
@@ -1703,13 +1703,13 @@ fn a_sigint_during_apply_exits_130_logs_a_receipt_and_leaves_the_plan_consumed()
 
 Run: `cargo test --test plan_tier --test plan_apply` — expect: failure, no `fail_removes_after`, then outcomes not `Partial`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 Poll `cancel` after `consume`, again immediately after `discover::targets` returns (before any `Unresolved` owner is turned into `ownership_unresolved`), and between units in Phase B; on true release the locks and return `Ok(Applied { outcome: Partial, reason: Some("cancelled"), .. })`. `apply_cmd` passes 130 to `emit` for it, because `emit` returns whatever code it is given, and still logs the receipt. Add `pub(crate) fn exit_code(a: &Applied) -> i32` in `apply.rs`: 3 for `NeedsHuman`; 130 for reason `cancelled`; 1 for `Refused` and for `Partial` with a `plan.delete_failed` finding; 0 otherwise; `apply_cmd` calls it, and a unit test covers the four outcomes with and without a delete failure, a cancel and a skip. A `Missing`, `Changed` or `Outside` from `check_entry` or a `RemoveFailed` in Phase B stops that target at the end of its current unit, adds a `plan.delete_failed` finding with the path and reason, continues with the next target, and the command exits 1 with outcome `partial`. Add `fail_removes_after` to the recording wrapper.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "apply: stop between units on cancel and fail closed on a deletion error"`
 
@@ -2022,7 +2022,7 @@ _Requirements: GCPLAN-5.7, GCPLAN-5.8, GCPLAN-5.9, GCPLAN-5.10_
 
 **Depends-on:** Task 11
 
-- [ ] **Step 1: Write the failing test** — extend `tests/skill.rs`
+- [x] **Step 1: Write the failing test** — extend `tests/skill.rs`
 
 Add `Parsed::Apply` and `Parsed::Gc { dry_run: false, plan: true }` to the expected set in `skill_documents_every_shipped_command` (the `want` list of `Parsed` values near the end of that test) and add:
 
@@ -2039,13 +2039,13 @@ fn the_skill_teaches_the_plan_flow_and_its_exit_code() {
 
 Run: `cargo test --test skill` — expect: failure, the documented commands do not cover `apply`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 In `SKILL.md`: replace the sentence ending "…is not available yet" (line 24) with the flow, using fenced command lines only (the drift scanner rejects CLI mentions outside command lines): `cargo hive gc --plan <repo-path> --json` returns plan ids per class and `undecided` targets; `cargo hive apply <plan-id> --json` applies one plan. State in prose: an agent applies only `secondary` plans; `needs-human` or exit 3 means report it to the owner and never try to approve a plan yourself; after `refused` plan again and never reuse a consumed id (already consumed); `partial` is not an error, check its reason. Update the Exit codes sentence (line 59) with 3. Keep the body within its 150-line budget. Add the two eval entries to `skills/hive/eval.json` in the existing entry form, each with a `derived_from` naming a new `## ` heading added to `skills/hive/TESTS.md`.
 
 Run: `cargo test --test skill` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "skill: teach gc --plan, apply and the needs-human hand-off"`
 
