@@ -105,7 +105,7 @@ Retrieval (manual approximation of `load-subgraph`'s `blast_radius` and `cluster
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in `tests/platform_locks.rs`
+- [x] **Step 1: Write the failing test** in `tests/platform_locks.rs`
 
 ```rust
 #[test]
@@ -139,13 +139,13 @@ fn a_lock_whose_file_was_replaced_after_it_was_opened_reports_a_different_identi
 
 Run: `cargo test --test platform_locks identity` — expect: compile error, no method `identity` on `HeldLock`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 In `src/platform/mod.rs` give `HeldLock` an `identity: Option<(u64, u64)>` field that `HeldLock::new` sets to `None`; add `pub fn with_identity(dev: u64, ino: u64, release: impl FnOnce() + Send + 'static) -> HeldLock` and `pub fn identity(&self) -> Option<(u64, u64)>`. In `Apfs::try_lock_exclusive` (`src/platform/apfs.rs`, where the opened file's metadata `m` is already read for the regular-file check) return `TryLock::Acquired(HeldLock::with_identity(m.dev(), m.ino(), move || drop(file)))` (bind `m` outside the `match file.metadata()` arm so it is in scope here) using `std::os::unix::fs::MetadataExt`, without a second `metadata()` call. Leave the `HeldLock::new` calls in `src/doctor.rs` and `src/gc/run.rs` untouched.
 
 Run: `cargo test --test platform_locks` — expect: pass, existing lock tests still pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "platform: a held lock reports the identity of the file it opened"`
 
@@ -170,7 +170,7 @@ _Requirements: GCPLAN-2.4_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in `src/gc/account.rs`
+- [x] **Step 1: Write the failing test** in `src/gc/account.rs`
 
 ```rust
 #[cfg(all(test, target_os = "macos"))]
@@ -249,13 +249,13 @@ mod tests {
 
 Run: `cargo test -p cargo-hive account` — expect: compile error, module `account` not found.
 
-- [ ] **Step 2: Implement `remove_counted`**
+- [x] **Step 2: Implement `remove_counted`**
 
 For `EntryKind::File` or `Symlink` roots: `entry_stat` once, record that single file into the ledger as `record` does for a scanned file, then `fs.remove_file` (skipped when `dry_run`). For `Dir`: reuse the existing `scan(fs, root, account_bytes)` and `record(ledger, target, files)` free functions (make `scan` and `record` `pub(super)`), then `fs.remove_tree` (skipped when `dry_run`). Keep exactly the error handling of `Runner::remove_measured` (`src/gc/run.rs`): a scan error is `RemoveFailed::Scan`, a removal error is `RemoveFailed::Remove` after `ledger.unmeasured(..)` for a part-way removal, `NotFound` counts nothing. Make `Runner::remove_measured` a thin wrapper that maps the result onto its existing `skip(..)` calls and `bool`, with byte-identical counts, findings and `unmeasured`. Move the volume cross-check block of `gc_cmd` into `cross_check_notes` with the same text: `cross-check, not a count: available bytes in APFS container {c} (mounted at {m}) changed by {change:+} during this run`.
 
 Run: `cargo test` — expect: pass, including all of `tests/gc.rs` unchanged (dry-run parity included).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "gc: extract the counted delete and the volume cross-check for reuse"`
 
@@ -280,7 +280,7 @@ _Requirements: GCPLAN-9.1_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in `src/plan_tier/guard.rs`
+- [x] **Step 1: Write the failing test** in `src/plan_tier/guard.rs`
 
 ```rust
 #[cfg(all(test, target_os = "macos"))]
@@ -364,17 +364,17 @@ mod tests {
 
 Run: `cargo test -p cargo-hive guard` — expect: compile error, module `plan_tier::guard` not found.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `check_entry`: canonicalize the path's parent with `std::fs::canonicalize` (an `ErrorKind::NotFound` → `Err(Missing)`, any other error → `Err(Outside)`); require the canonical parent to start with the canonicalized `root`, else `Err(Outside)`; `entry_stat(path)` (lstat) — not found → `Err(Missing)`; with `Expect::Entry`, any difference in kind, device or inode → `Err(Changed)`; an `Other` kind → `Err(Changed)`; else `Ok(stat)`. `delete_checked`: `check_entry`, then `Dir` → `fs.remove_tree`, `File`/`Symlink` → `fs.remove_file`; a removal error → `Missing` when its kind is `NotFound`, else `Changed`; `Removed` otherwise. Nothing follows a link. Give `src/plan_tier/mod.rs` a `//!` header saying what the module is.
 
-- [ ] **Step 3: Move the proof's guard onto it**
+- [x] **Step 3: Move the proof's guard onto it**
 
 In `tests/common/prove.rs` change `delete_in_clone` to call `cargo_hive::plan_tier::guard::delete_checked(fs, clone_root, path, Expect::Any)` for each file, treating `Missing` as it does today, and mapping `Outside` to `format!("{} reaches outside the clone through a link", path.display())` and `Changed` to `format!("cannot delete {}", path.display())` — the substrings `tests/liveness.rs` asserts for `debug/deps` and the cannot-delete case must still match.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 `git commit -m "plan_tier: a path guard that checks an entry and deletes by kind inside one target dir"`
 
@@ -396,7 +396,7 @@ _Requirements: GCPLAN-8.1_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in the existing `#[cfg(test)]` module of `src/state.rs`, which has `fn scratch(label) -> PathBuf` (returns an uncreated path under the OS temp dir)
+- [x] **Step 1: Write the failing test** in the existing `#[cfg(test)]` module of `src/state.rs`, which has `fn scratch(label) -> PathBuf` (returns an uncreated path under the OS temp dir)
 
 ```rust
 #[test]
@@ -430,13 +430,13 @@ fn an_out_of_range_window_does_not_fail_config_for_commands_that_ignore_it() {
 
 Run: `cargo test -p cargo-hive state::` — expect: compile error, no field `gc_window_days`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 Add `gc_window_days: Option<u64>` to `ConfigFile` (still `deny_unknown_fields`) and to `Config`, copied through `State::config()` without validation. Add `window_days` and `WindowError`.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "state: a gc_window_days config key, validated where plans use it"`
 
@@ -587,7 +587,7 @@ _Requirements: GCPLAN-1.7, GCPLAN-1.14, GCPLAN-2.11, GCPLAN-3.7, GCPLAN-3.9, GCP
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -641,13 +641,13 @@ fn a_populated_plan_tier_receipt_names_no_time_or_estimate() {
 
 Run: `cargo test -p cargo-hive receipt::` — expect: compile error, no `plan_tier` on `ReceiptBuilder`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 Add the three optional fields to `Receipt` (initialised to `None` in `with_os`) and the types above. `plan_tier` sets `schema = 3` and `Some(...)` on all three fields, so an empty body still prints `"plans": []`. Do not touch `SCHEMA` (`2`); update its doc comment to say plan and apply receipts are version 3. `tests/receipts.rs` is not edited.
 
 Run: `cargo test` — expect: pass, including the unchanged `tests/receipts.rs`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "receipt: schema 3 body for plan and apply, schema 2 elsewhere"`
 
