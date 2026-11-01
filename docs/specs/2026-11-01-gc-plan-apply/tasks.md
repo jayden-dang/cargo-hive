@@ -1354,7 +1354,7 @@ _Requirements: GCPLAN-2.1, GCPLAN-2.5, GCPLAN-2.6, GCPLAN-2.7, GCPLAN-2.8, GCPLA
 
 **Depends-on:** Task 9
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 fn refused(p: &Planned, id: &str, reason: &str) {
@@ -1499,13 +1499,13 @@ fn every_target_is_checked_before_any_is_deleted() {
 
 Run: `cargo test --test plan_apply stale` — expect: failures with `stale_item`/`owner_changed` where another reason is named (Task 9 returns coarse reasons).
 
-- [ ] **Step 2: Implement the distinct refusals**
+- [x] **Step 2: Implement the distinct refusals**
 
 Phase A returns, for the first failing check across all targets in sorted order, a typed `Refusal { reason, target, path }`, checking in this order: `Owner::Unresolved` or a resolution failure → `ownership_unresolved`; owner path differs → `owner_changed`; class differs → `class_changed`; a profile whose `Format` is unsupported → `unsupported_format`; for each planned path a `check_entry` failure (missing, other kind, device or inode, or `Outside`) → `entry_changed`; `Undecided` (carry its reasons into a finding) → `undecided`; a planned path not in the recomputed dead set → `stale_item`. Release every lock, delete nothing, report the target and first path in a finding. The plan stays consumed.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "apply: refuse a stale plan whole, with a reason per cause"`
 
