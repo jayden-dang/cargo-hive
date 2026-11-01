@@ -24,6 +24,7 @@ pub enum Removal {
     Removed(Counted),
     Skipped(String),
     Refused(String),
+    Failed(String),
 }
 
 pub fn remove(
@@ -96,7 +97,7 @@ pub fn remove(
             })
         }
         Ok(_) => Removal::Refused("entry_changed".to_string()),
-        Err(err) => Removal::Refused(measure_or_remove(err)),
+        Err(err) => removal_error(err),
     };
     drop(locked);
     removal
@@ -203,10 +204,10 @@ fn guard_reason(reason: Deleted) -> String {
     }
 }
 
-fn measure_or_remove(err: crate::gc::account::RemoveFailed) -> String {
+fn removal_error(err: crate::gc::account::RemoveFailed) -> Removal {
     use crate::gc::account::RemoveFailed;
-    match &err {
-        RemoveFailed::Scan(why) => format!("could not measure: {why}"),
-        RemoveFailed::Remove(_) => err.to_string(),
+    match err {
+        RemoveFailed::Scan(why) => Removal::Refused(format!("could not measure: {why}")),
+        RemoveFailed::Remove(error) => Removal::Failed(format!("could not remove it: {error}")),
     }
 }

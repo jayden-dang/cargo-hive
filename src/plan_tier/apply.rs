@@ -252,6 +252,15 @@ fn apply_orphan(
                 refusal = Some(reason);
                 break;
             }
+            Removal::Failed(detail) => {
+                findings.push((
+                    "plan.delete_failed".to_string(),
+                    Some(target.path.clone()),
+                    detail,
+                ));
+                refusal = Some("delete failed".to_string());
+                break;
+            }
         }
     }
     let after = volumes(ctx.fs, &paths);

@@ -385,15 +385,22 @@ fn a_file_whose_sharing_cannot_be_read_is_named_after_the_orphan_is_removed() {
 fn a_later_refusal_keeps_the_measured_bytes_of_the_orphan_already_removed() {
     let (p, first) = Planned::with_orphan("orphan-partial-bytes");
     let later = first.parent().unwrap().join("later-target");
-    let copied = std::process::Command::new("cp")
+    let child = std::process::Command::new("cp")
         .args([
             "-R",
             &first.display().to_string(),
             &later.display().to_string(),
         ])
-        .status()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .unwrap();
-    assert!(copied.success(), "the second orphan target was not copied");
+    let copied = common::wait_within(child, std::time::Duration::from_secs(30));
+    assert!(
+        copied.status.success(),
+        "the second orphan target was not copied"
+    );
     let id = p.orphan_plan_id(&first);
     std::fs::create_dir_all(later.join("release/.fingerprint")).unwrap();
     std::fs::write(later.join("release/.cargo-build-lock"), b"").unwrap();
@@ -428,6 +435,75 @@ fn a_later_refusal_keeps_the_measured_bytes_of_the_orphan_already_removed() {
         "per-target bytes stay: {:?}",
         done.counts.keys()
     );
+}
+
+#[test]
+fn a_later_delete_failure_names_delete_failed_and_keeps_measured_bytes() {
+    let (p, first) = Planned::with_orphan("orphan-delete-failed");
+    let later = first.parent().unwrap().join("later-target");
+    assert!(
+        first < later,
+        "the first target is removed before the one that fails"
+    );
+    let child = std::process::Command::new("cp")
+        .args([
+            "-R",
+            &first.display().to_string(),
+            &later.display().to_string(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let copied = common::wait_within(child, std::time::Duration::from_secs(30));
+    assert!(
+        copied.status.success(),
+        "the second orphan target was not copied"
+    );
+    let id = p.orphan_plan_id(&first);
+    let rec = Recording::over_real().fail_removes_after(1);
+    let lib = p.library_ctx_with(rec.fs());
+    let done = apply(
+        &lib.ctx(),
+        &id,
+        Authorization::Approved(approval_for_tests(&id)),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(done.targets.len(), 2, "one plan holds both orphan targets");
+    assert_eq!(
+        done.outcome,
+        Outcome::Partial,
+        "{:?} {:?}",
+        done.reason,
+        done.findings
+    );
+    assert_eq!(done.reason.as_deref(), Some("delete failed"));
+    assert!(
+        done.findings
+            .iter()
+            .any(|(kind, path, _)| kind == "plan.delete_failed" && path.as_ref() == Some(&later)),
+        "{:?}",
+        done.findings
+    );
+    assert!(
+        done.findings
+            .iter()
+            .all(|(kind, _, _)| !kind.starts_with("could not measure:")),
+        "a remove error is not a measure refusal: {:?}",
+        done.findings
+    );
+    assert!(!first.exists(), "the first target was already removed");
+    assert!(later.exists(), "the failed target stays");
+    let bytes = done
+        .bytes
+        .expect("measured totals stay after a later delete failure");
+    assert!(
+        bytes.freed + bytes.still_shared > 0,
+        "the proceeded removal measured some bytes"
+    );
+    assert!(done.counts.contains_key("freed_bytes"), "{:?}", done.counts);
 }
 
 #[test]
