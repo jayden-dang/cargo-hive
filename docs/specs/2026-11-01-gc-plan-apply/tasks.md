@@ -1032,7 +1032,7 @@ _Requirements: GCPLAN-1.1, GCPLAN-1.2, GCPLAN-1.3, GCPLAN-1.4, GCPLAN-1.5, GCPLA
 
 **Depends-on:** Task 1, Task 3, Task 7
 
-- [ ] **Step 1: Write the recording wrapper and the failing tests**
+- [x] **Step 1: Write the recording wrapper and the failing tests**
 
 `tests/common/recording_fs.rs`: `Recording` implements `cargo_hive::platform::Fs` by delegating every method to `platform::current().unwrap().fs` — model it on `Volumes` in `tests/liveness.rs` — behind an `Arc<Mutex<Vec<String>>>` log. `try_lock_exclusive(path)` logs `lock <path>` and applies the options for that path: `unlockable` returns `TryLock::Unlockable(io::Error::other("flock unsupported"))`; `no_identity` returns `TryLock::Acquired(HeldLock::new(|| {}))` after really locking; `replace_after_lock` locks, then deletes and recreates the file; `create_dir_after_lock` locks, then creates the directory. `remove_tree`/`remove_file` log `remove <path>` and delegate.
 
@@ -1130,7 +1130,7 @@ fn a_profile_dir_that_appears_after_the_locks_are_taken_skips_the_target() {
 
 Run: `cargo test --test plan_tier` — expect: compile error, module `plan_tier::locks` not found.
 
-- [ ] **Step 2: Implement `acquire`**
+- [x] **Step 2: Implement `acquire`**
 
 `cargo_target::identify(target)` returns `Option<Result<Vec<(PathBuf, Layout)>, String>>`; `None` or `Err` → `Skipped(Missing)`. For each returned profile and triple directory, candidates are `.cargo-build-lock`, `.cargo-lock` and, when `lists_examples`, `.cargo-artifact-lock`, keeping those that `entry_stat` finds. A directory with a `.fingerprint` child and no candidate → `Skipped(Missing)`. `try_lock_exclusive` each: `Held` → `Held`, `Unopenable` → `Unopenable`, `Unlockable` → `Unlockable`, `Gone` → `Missing`; `Acquired(h)` → compare `h.identity()` with `entry_stat(path)` (`None`, an error or a mismatch → `Missing`); on any skip drop every lock taken. Once all are held, `identify` again; a different set of directories → `Skipped(ProfileSet)`. Return `Locked { profiles, held }`.
 
@@ -1138,7 +1138,7 @@ In `docs/specs/2026-10-30-closure-liveness/design.md` lines 352-353 replace the 
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "plan_tier: take every Cargo lock of one target, and skip when any is not sound"`
 
