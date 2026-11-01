@@ -343,3 +343,49 @@ fn a_non_secondary_plan_is_not_applied_until_the_needs_human_task() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(r["plans"][0]["reason"], "unsupported_class");
 }
+
+#[test]
+fn applying_two_targets_records_each_targets_counts_and_the_plan_totals() {
+    let p = Planned::with_worktrees("apply-per-target", 2);
+    let planned = p.plan();
+    let secondary = planned["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["class"] == "secondary")
+        .unwrap();
+    assert_eq!(secondary["targets"].as_array().unwrap().len(), 2);
+    let id = Planned::id_of(&planned, "secondary");
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    let plan = &r["plans"][0];
+    let counts = &plan["counts"];
+    let mut paths = 0u64;
+    let mut freed = 0u64;
+    let mut shared = 0u64;
+    for target in plan["targets"].as_array().unwrap() {
+        let path = target.as_str().unwrap();
+        let paths_key = format!("paths_deleted:{path}");
+        let freed_key = format!("freed_bytes:{path}");
+        let shared_key = format!("deleted_bytes_still_shared:{path}");
+        let deleted = counts[paths_key.as_str()]
+            .as_u64()
+            .unwrap_or_else(|| panic!("missing {paths_key} in {counts}"));
+        let freed_here = counts[freed_key.as_str()]
+            .as_u64()
+            .unwrap_or_else(|| panic!("missing {freed_key} in {counts}"));
+        let shared_here = counts[shared_key.as_str()]
+            .as_u64()
+            .unwrap_or_else(|| panic!("missing {shared_key} in {counts}"));
+        assert!(deleted > 0, "{path} deleted nothing");
+        paths += deleted;
+        freed += freed_here;
+        shared += shared_here;
+    }
+    assert_eq!(counts["paths_deleted"].as_u64().unwrap(), paths);
+    assert_eq!(counts["freed_bytes"].as_u64().unwrap(), freed);
+    assert_eq!(
+        counts["deleted_bytes_still_shared"].as_u64().unwrap(),
+        shared
+    );
+}

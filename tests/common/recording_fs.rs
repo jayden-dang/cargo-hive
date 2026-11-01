@@ -17,12 +17,15 @@ struct Opts {
     no_identity: HashSet<PathBuf>,
     replace_after_lock: HashSet<PathBuf>,
     create_dir_after_lock: Vec<PathBuf>,
+    /// After this many successful removes, later removes fail. `Some(0)` fails the first.
+    fail_removes_after: Option<u64>,
 }
 
 struct State {
     fs: Box<dyn Fs>,
     log: Arc<Mutex<Vec<String>>>,
     opts: Mutex<Opts>,
+    removes: Mutex<u64>,
 }
 
 #[derive(Clone)]
@@ -37,6 +40,7 @@ impl Recording {
                 fs: platform::current().unwrap().fs,
                 log: Arc::new(Mutex::new(Vec::new())),
                 opts: Mutex::new(Opts::default()),
+                removes: Mutex::new(0),
             }),
         }
     }
@@ -79,6 +83,26 @@ impl Recording {
             .create_dir_after_lock
             .push(dir.as_ref().to_path_buf());
         self
+    }
+
+    /// The first `n` removes succeed. Every later `remove_file` or `remove_tree` returns an error.
+    pub fn fail_removes_after(self, n: usize) -> Recording {
+        self.state.opts.lock().unwrap().fail_removes_after = Some(n as u64);
+        self
+    }
+
+    fn refuse_remove(&self) -> bool {
+        let after = self.state.opts.lock().unwrap().fail_removes_after;
+        let Some(after) = after else {
+            return false;
+        };
+        let mut seen = self.state.removes.lock().unwrap();
+        if *seen >= after {
+            true
+        } else {
+            *seen += 1;
+            false
+        }
     }
 
     pub fn fs(&self) -> Box<dyn Fs> {
@@ -199,11 +223,17 @@ impl Fs for Recording {
 
     fn remove_tree(&self, path: &Path) -> io::Result<()> {
         self.push(format!("remove {}", path.display()));
+        if self.refuse_remove() {
+            return Err(io::Error::other("simulated stop"));
+        }
         self.state.fs.remove_tree(path)
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         self.push(format!("remove {}", path.display()));
+        if self.refuse_remove() {
+            return Err(io::Error::other("simulated stop"));
+        }
         self.state.fs.remove_file(path)
     }
 

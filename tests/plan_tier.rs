@@ -177,6 +177,17 @@ fn locks_are_all_held_before_the_first_removal_and_each_unit_is_removed_dot_d_fi
 }
 
 #[test]
+fn a_removal_failure_is_partial_and_names_delete_failed() {
+    let p = Planned::new("apply-delete-failed");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let rec = Recording::over_real().fail_removes_after(0);
+    let lib = p.library_ctx_with(rec.fs());
+    let done = apply(&lib.ctx(), &id, Authorization::Secondary, &|| false).unwrap();
+    assert_eq!(done.outcome, Outcome::Partial);
+    assert_eq!(done.reason.as_deref(), Some("delete failed"));
+}
+
+#[test]
 fn applying_ownership_is_resolved_without_touching_the_snapshot_cache() {
     let p = Planned::new("apply-snapshot");
     let id = Planned::id_of(&p.plan(), "secondary");

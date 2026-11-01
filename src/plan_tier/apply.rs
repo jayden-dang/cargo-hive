@@ -11,7 +11,7 @@ use crate::cargo_target::{self, Owner, TargetDir};
 use crate::cli::cross_check_notes;
 use crate::discover::{self, Snapshot};
 use crate::fingerprint::read_profile;
-use crate::gc::{self, Ledger};
+use crate::gc::{self, Bytes, Ledger};
 use crate::liveness::{self, Liveness};
 use crate::plan_tier::build::{class_of_target, TargetClass};
 use crate::plan_tier::guard::{check_entry, Expect};
@@ -184,6 +184,7 @@ pub fn execute(
     let before = volumes(ctx.fs, &locked_paths);
     let mut ledger = Ledger::new();
     let mut paths_deleted = 0u64;
+    let mut deleted_by_target: BTreeMap<PathBuf, u64> = BTreeMap::new();
     let mut applied_targets = 0u64;
     let mut failed = false;
     let mut findings = Vec::new();
@@ -210,6 +211,7 @@ pub fn execute(
                 }
             }
         }
+        deleted_by_target.insert(target.path.clone(), deleted_here);
         if !target_failed {
             applied_targets += 1;
         }
@@ -248,12 +250,12 @@ pub fn execute(
     }
     let total = plan.targets.len() as u64;
     let (outcome, reason) = if failed || applied_targets != total {
-        let reason = if !failed && applied_targets == 0 {
+        let reason = if failed {
+            Some("delete failed".to_string())
+        } else if applied_targets == 0 {
             Some("all_targets_skipped".to_string())
-        } else if !failed {
-            Some("skipped".to_string())
         } else {
-            None
+            Some("skipped".to_string())
         };
         (Outcome::Partial, reason)
     } else {
@@ -265,7 +267,17 @@ pub fn execute(
         class: plan.class,
         id: plan.id.clone(),
         targets: target_paths(&plan),
-        counts: count_map(paths_deleted, applied_targets, &skips, bytes),
+        counts: {
+            let mut counts = count_map(paths_deleted, applied_targets, &skips, bytes);
+            record_target_counts(
+                &mut counts,
+                &plan.targets,
+                &deleted_by_target,
+                &tally.per_target,
+                ctx.account_bytes,
+            );
+            counts
+        },
         bytes,
         notes,
         unmeasured,
@@ -552,4 +564,28 @@ fn count_map(
         counts.insert("deleted_bytes_still_shared".to_string(), bytes.still_shared);
     }
     counts
+}
+
+fn record_target_counts(
+    counts: &mut BTreeMap<String, u64>,
+    targets: &[PlannedTarget],
+    deleted_by_target: &BTreeMap<PathBuf, u64>,
+    per_target: &BTreeMap<PathBuf, Bytes>,
+    account_bytes: bool,
+) {
+    for target in targets {
+        let label = target.path.display().to_string();
+        counts.insert(
+            format!("paths_deleted:{label}"),
+            deleted_by_target.get(&target.path).copied().unwrap_or(0),
+        );
+        if account_bytes {
+            let bytes = per_target.get(&target.path).copied().unwrap_or_default();
+            counts.insert(format!("freed_bytes:{label}"), bytes.freed);
+            counts.insert(
+                format!("deleted_bytes_still_shared:{label}"),
+                bytes.still_shared,
+            );
+        }
+    }
 }
