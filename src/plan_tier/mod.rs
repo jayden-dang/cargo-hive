@@ -4,3 +4,4 @@
 //! link from pointing that removal outside the root.
 
 pub mod guard;
+pub mod record;
