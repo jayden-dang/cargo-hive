@@ -122,10 +122,7 @@ pub fn insert(
         let mut file = read(tx)?;
         prune(&mut file.plans, now);
         if let Some(id) = duplicate_id(&file.plans, &plans) {
-            return Err(StateError::Malformed {
-                file: PLANS_FILE.into(),
-                detail: format!("duplicate plan id {id}"),
-            });
+            return Err(StateError::DuplicatePlan { id: id.to_string() });
         }
         file.plans.extend(plans);
         tx.write(PLANS_FILE, &file)
@@ -392,13 +389,25 @@ mod tests {
             100,
         )
         .unwrap();
+        let before = std::fs::read_to_string(s.root().join("plans.json")).unwrap();
         let r = insert(
             &s,
             &|| false,
             vec![plan("aaaaaaaaaaaaaaaa", PlanClass::Secondary, 100)],
             100,
         );
-        assert!(matches!(r, Err(StateError::Malformed { .. })));
+        let err = r.unwrap_err();
+        assert!(matches!(
+            err,
+            StateError::DuplicatePlan { ref id } if id == "aaaaaaaaaaaaaaaa"
+        ));
+        let text = err.to_string();
+        assert!(text.contains("aaaaaaaaaaaaaaaa"), "{text}");
+        assert!(text.contains("retry") && text.contains("counter"), "{text}");
+        assert_eq!(
+            std::fs::read_to_string(s.root().join("plans.json")).unwrap(),
+            before
+        );
     }
 
     #[test]

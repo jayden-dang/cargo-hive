@@ -23,6 +23,9 @@ pub enum StateError {
     NoHome,
     /// The caller cancelled while another process held the state lock.
     Cancelled,
+    DuplicatePlan {
+        id: String,
+    },
 }
 
 impl fmt::Display for StateError {
@@ -41,6 +44,12 @@ impl fmt::Display for StateError {
                 write!(
                     f,
                     "cancelled while another hive process held the state lock"
+                )
+            }
+            StateError::DuplicatePlan { id } => {
+                write!(
+                    f,
+                    "plan id {id} is already stored; retry with a new counter"
                 )
             }
         }
