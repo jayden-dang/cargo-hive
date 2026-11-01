@@ -1732,7 +1732,7 @@ _Requirements: GCPLAN-6.8, GCPLAN-8.3, GCPLAN-8.5_
 
 **Depends-on:** Task 12
 
-- [ ] **Step 1: Write the failing test** in `tests/plan_tier.rs`
+- [x] **Step 1: Write the failing test** in `tests/plan_tier.rs`
 
 ```rust
 use cargo_hive::plan_tier::apply::approval_for_tests;
@@ -1754,13 +1754,13 @@ fn an_approved_protected_plan_is_deleted_by_the_same_steps_as_a_secondary_one() 
 
 Run: `cargo test --test plan_tier approved` — expect: compile error, no `approval_for_tests`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `Approval` has a private field and no `pub` constructor besides the `#[doc(hidden)]` test function. In `apply`, `Authorization::Approved(a)` skips the needs-human return only for a `Protected` or `Orphan` plan whose id equals `a.plan_id`; a different id returns `Refused("approval_mismatch")` before consuming. The CLI still passes only `Authorization::Secondary`. Add the term Approval value to `CONTEXT.md`.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "plan_tier: protected plans delete only behind an approval value"`
 
@@ -1783,7 +1783,7 @@ _Requirements: GCPLAN-4.5_
 
 **Depends-on:** Task 7, Task 12 (Task 12 also edits `tests/plan_apply.rs`; Task 11's needs-human return for the `Orphan` class is already in place)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/common/plan_fixture.rs` (inside `impl Planned`; imports `init_repo` and `Path` are already there):
 
@@ -1888,13 +1888,13 @@ fn an_orphan_owned_under_the_callers_environment_is_planned_with_a_note() {
 
 Run: `cargo test --test plan_apply orphan` — expect: failure, no `orphan` plan.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 In `make`, for `TargetClass::Class(PlanClass::Orphan)` add a `PlannedTarget` whose `entries` holds one `PlannedEntry` for the target dir (`fs.entry_stat`, `unit` = the target path) and whose `orphan` is `OrphanScope { root_kind, root_dev, root_ino, dirs }`, `dirs` being the profile and triple dirs from `cargo_target::identify`. Planned bytes come from `gc::measure(.., &[target.path], ..)`; hitting its cap becomes an `Unmeasured`. Add a finding `plan.caller_env` with the variable name when the owner is `OrphanCandidate { owned_under_caller_env: Some(_) }`. Remove the "skipped with a finding" branch of Task 7. `apply` already returns `needs-human` for the `Orphan` class (Task 11).
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "gc: --plan proposes unowned target dirs as one orphan entry"`
 
@@ -2068,7 +2068,7 @@ _Requirements: GCPLAN-7.1, GCPLAN-7.2, GCPLAN-7.3, GCPLAN-7.4, GCPLAN-7.5, GCPLA
 
 **Depends-on:** Task 7, Task 12
 
-- [ ] **Step 1: Write the failing test** in `tests/liveness.rs`
+- [x] **Step 1: Write the failing test** in `tests/liveness.rs`
 
 ```rust
 #[test]
@@ -2085,7 +2085,7 @@ fn deleting_through_execute_on_a_fixture_clone_rebuilds_no_live_unit() {
 
 Run: `cargo test --test liveness execute_trial` — expect: compile error, no `trial_through_execute`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `trial_through_execute` copies the fixture target with `cp -c -R -p` (the proof's existing clone helper), builds a `TargetDir` of the clone with `read_target`, makes a one-target plan with `plan_for_target` (`cargo_fixture::WINDOW`) and `Plan::single(PlanClass::Secondary, ..)`, resolves it as a `ResolvedTarget` for the clone, calls `execute` with the real `Apfs` and a `Ctx` over a scratch `State`, then replays compile-only exactly as the existing trial does (`cargo_in(&fx.app, &clone, &fx.logs, ..)`) and counts rebuilt units that were live (`prove::rebuilt_live`). Point `tests/liveness_prove.rs` (ignored, real target) at it too, keeping the trial's vacuity checks (no dead file → vacuous).
 
@@ -2093,7 +2093,7 @@ In `tests/common/prove.rs` change the `TryLock::Gone => {}` arm (line 1002) to `
 
 Run: `cargo test` — expect: pass; `cargo test --test liveness_prove -- --ignored` runs on the owner's real target when present (owner present).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "tests: run the deletion trial through execute"`
 
