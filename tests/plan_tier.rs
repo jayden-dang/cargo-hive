@@ -318,3 +318,122 @@ fn an_approved_protected_plan_is_deleted_by_the_same_steps_as_a_secondary_one() 
     assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.findings);
     assert!(common::plan_fixture::tree(&p.main_target()).len() < before.len());
 }
+
+#[test]
+fn an_approved_orphan_plan_removes_the_whole_target_dir_after_taking_every_lock() {
+    let (p, orphan) = Planned::with_orphan("orphan-remove");
+    let outside_link_target = p.scratch.path.join("link-target");
+    std::fs::write(&outside_link_target, b"keep").unwrap();
+    std::os::unix::fs::symlink(&outside_link_target, orphan.join("debug/link-out")).unwrap();
+    let id = p.orphan_plan_id(&orphan);
+    let rec = Recording::over_real();
+    let lib = p.library_ctx_with(rec.fs());
+    let done = apply(
+        &lib.ctx(),
+        &id,
+        Authorization::Approved(approval_for_tests(&id)),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.findings);
+    assert!(!orphan.exists());
+    assert!(
+        outside_link_target.exists(),
+        "a symlink inside the orphan must not be followed"
+    );
+    assert!(
+        done.bytes.is_some(),
+        "freed and still-shared bytes are reported"
+    );
+    let log = rec.log();
+    let last_lock = log.iter().rposition(|e| e.starts_with("lock ")).unwrap();
+    let first_remove = log.iter().position(|e| e.starts_with("remove ")).unwrap();
+    assert!(
+        last_lock < first_remove,
+        "every lock is held before the removal: {log:?}"
+    );
+}
+
+#[test]
+fn a_held_lock_skips_the_orphan_removal_and_deletes_nothing() {
+    let (p, orphan) = Planned::with_orphan("orphan-held");
+    let id = p.orphan_plan_id(&orphan);
+    let mut holder = p
+        .hive
+        .hold_lock_child("flock", &orphan.join("debug/.cargo-build-lock"));
+    let before = common::plan_fixture::tree(&orphan);
+    let done = apply(
+        &p.library_ctx().ctx(),
+        &id,
+        Authorization::Approved(approval_for_tests(&id)),
+        &|| false,
+    )
+    .unwrap();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert_ne!(done.outcome, Outcome::Applied);
+    assert_eq!(common::plan_fixture::tree(&orphan), before);
+}
+
+#[test]
+fn a_profile_dir_that_appeared_after_the_plan_refuses_the_removal() {
+    let (p, orphan) = Planned::with_orphan("orphan-relist");
+    let id = p.orphan_plan_id(&orphan);
+    std::fs::create_dir_all(orphan.join("release/.fingerprint")).unwrap();
+    std::fs::write(orphan.join("release/.cargo-build-lock"), b"").unwrap();
+    let done = apply(
+        &p.library_ctx().ctx(),
+        &id,
+        Authorization::Approved(approval_for_tests(&id)),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(done.outcome, Outcome::Refused);
+    assert!(orphan.exists());
+}
+
+#[test]
+fn a_target_dir_whose_identity_changed_after_the_plan_is_not_removed() {
+    let (p, orphan) = Planned::with_orphan("orphan-identity");
+    let id = p.orphan_plan_id(&orphan);
+    let moved = orphan.with_file_name("moved-aside");
+    std::fs::rename(&orphan, &moved).unwrap();
+    std::fs::create_dir_all(orphan.join("debug/.fingerprint")).unwrap();
+    std::fs::write(orphan.join("debug/.cargo-build-lock"), b"").unwrap();
+    std::fs::write(
+        orphan.join("CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55",
+    )
+    .unwrap();
+    let done = apply(
+        &p.library_ctx().ctx(),
+        &id,
+        Authorization::Approved(approval_for_tests(&id)),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(done.outcome, Outcome::Refused);
+    assert!(orphan.exists());
+}
+
+#[test]
+fn a_target_dir_that_gained_an_owner_after_the_plan_is_not_removed() {
+    let (p, orphan) = Planned::with_orphan("orphan-owned");
+    let id = p.orphan_plan_id(&orphan);
+    // a registered checkout is now configured to build into that target dir
+    std::fs::create_dir_all(p.worktree.join(".cargo")).unwrap();
+    std::fs::write(
+        p.worktree.join(".cargo/config.toml"),
+        format!("[build]\ntarget-dir = \"{}\"\n", orphan.display()),
+    )
+    .unwrap();
+    let done = apply(
+        &p.library_ctx().ctx(),
+        &id,
+        Authorization::Approved(approval_for_tests(&id)),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(done.outcome, Outcome::Refused);
+    assert!(orphan.exists());
+}

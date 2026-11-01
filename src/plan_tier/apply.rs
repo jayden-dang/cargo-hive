@@ -16,6 +16,7 @@ use crate::liveness::{self, Liveness};
 use crate::plan_tier::build::{class_label, class_of_target, TargetClass};
 use crate::plan_tier::guard::{check_entry, Deleted as EntryMismatch, Expect};
 use crate::plan_tier::locks::{self, Acquired, Locked, Reason};
+use crate::plan_tier::orphan::{self, Removal};
 use crate::plan_tier::record::{
     self, kind_of, BytesRec, Lookup, Plan, PlanClass, PlannedEntry, PlannedTarget, Taken,
 };
@@ -57,6 +58,12 @@ pub enum Authorization {
 #[derive(Debug)]
 pub struct Approval {
     plan_id: String,
+}
+
+impl Approval {
+    pub(crate) fn plan_id(&self) -> &str {
+        &self.plan_id
+    }
 }
 
 #[doc(hidden)]
@@ -112,7 +119,7 @@ pub fn apply(
         }
         Lookup::Live(plan) => plan,
     };
-    match auth {
+    let approved = match auth {
         Authorization::Secondary if plan.class != PlanClass::Secondary => {
             return Ok(needs_human(plan));
         }
@@ -124,8 +131,9 @@ pub fn apply(
                 target_paths(&plan),
             ));
         }
-        Authorization::Secondary | Authorization::Approved(_) => {}
-    }
+        Authorization::Approved(approval) => Some(approval),
+        Authorization::Secondary => None,
+    };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -153,12 +161,136 @@ pub fn apply(
     if cancel() {
         return Ok(cancelled_before_delete(&plan));
     }
+    if plan.class == PlanClass::Orphan {
+        let Some(approval) = &approved else {
+            return Ok(needs_human(plan));
+        };
+        return Ok(apply_orphan(ctx, &plan, approval, cancel));
+    }
     let resolved = match resolve(ctx, &plan, cancel) {
         Ok(resolved) => resolved,
         Err(ResolveStop::Cancelled) => return Ok(cancelled_before_delete(&plan)),
         Err(ResolveStop::Refusal(refusal)) => return Ok(refuse(&plan, refusal, BTreeMap::new())),
     };
     Ok(execute(ctx, plan, &resolved, cancel))
+}
+
+fn apply_orphan(
+    ctx: &Ctx,
+    plan: &Plan,
+    approval: &Approval,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Applied {
+    let mut order: Vec<&PlannedTarget> = plan.targets.iter().collect();
+    order.sort_by(|left, right| left.path.cmp(&right.path));
+    let paths: Vec<PathBuf> = order.iter().map(|target| target.path.clone()).collect();
+    let before = volumes(ctx.fs, &paths);
+    let mut skips = skip_counts();
+    let mut freed = BytesRec {
+        freed: 0,
+        still_shared: 0,
+    };
+    let mut paths_deleted = 0u64;
+    let mut applied_targets = 0u64;
+    let mut deleted_by_target: BTreeMap<PathBuf, u64> = BTreeMap::new();
+    let mut per_target: BTreeMap<PathBuf, Bytes> = BTreeMap::new();
+    let mut unmeasured = Vec::new();
+    let mut findings = Vec::new();
+    let mut touched = BTreeSet::new();
+    let mut cancelled = false;
+    let mut refusal: Option<String> = None;
+    for target in order {
+        if cancel() {
+            cancelled = true;
+            break;
+        }
+        match orphan::remove(ctx, target, approval, cancel) {
+            Removal::Removed(bytes) => {
+                paths_deleted += 1;
+                applied_targets += 1;
+                freed.freed = freed.freed.saturating_add(bytes.freed);
+                freed.still_shared = freed.still_shared.saturating_add(bytes.still_shared);
+                deleted_by_target.insert(target.path.clone(), 1);
+                per_target.insert(
+                    target.path.clone(),
+                    Bytes {
+                        freed: bytes.freed,
+                        still_shared: bytes.still_shared,
+                    },
+                );
+                if let Ok(volume) = ctx.fs.volume(&target.path) {
+                    touched.insert(volume.container);
+                }
+            }
+            Removal::Skipped(reason) if reason == "cancelled" => {
+                cancelled = true;
+                break;
+            }
+            Removal::Skipped(reason) => {
+                if let Some(count) = skips.get_mut(reason.as_str()) {
+                    *count += 1;
+                }
+            }
+            Removal::Refused(reason) => {
+                if measure_gap(&reason) {
+                    unmeasured.push(Unmeasured {
+                        field: target.path.display().to_string(),
+                        reason: reason.clone(),
+                    });
+                }
+                findings.push((reason.clone(), Some(target.path.clone()), reason.clone()));
+                refusal = Some(reason);
+                break;
+            }
+        }
+    }
+    let after = volumes(ctx.fs, &paths);
+    let notes = cross_check_notes(&before, &after, &touched);
+    let total = plan.targets.len() as u64;
+    let (outcome, reason) = if cancelled {
+        (Outcome::Partial, Some("cancelled".to_string()))
+    } else if let Some(reason) = &refusal {
+        (Outcome::Refused, Some(reason.clone()))
+    } else if applied_targets != total {
+        let why = if applied_targets == 0 {
+            "all_targets_skipped"
+        } else {
+            "skipped"
+        };
+        (Outcome::Partial, Some(why.to_string()))
+    } else {
+        (Outcome::Applied, None)
+    };
+    let bytes = (ctx.account_bytes && outcome == Outcome::Applied).then_some(freed);
+    if !ctx.account_bytes && outcome != Outcome::Refused {
+        unmeasured.extend(unmeasured_accounting());
+    }
+    Applied {
+        outcome,
+        reason,
+        class: plan.class,
+        id: plan.id.clone(),
+        targets: target_paths(plan),
+        counts: {
+            let mut counts = count_map(paths_deleted, applied_targets, &skips, bytes);
+            record_target_counts(
+                &mut counts,
+                &plan.targets,
+                &deleted_by_target,
+                &per_target,
+                ctx.account_bytes && outcome == Outcome::Applied,
+            );
+            counts
+        },
+        bytes,
+        notes,
+        unmeasured,
+        findings,
+    }
+}
+
+fn measure_gap(reason: &str) -> bool {
+    reason.starts_with("could not measure:")
 }
 
 pub(crate) fn exit_code(applied: &Applied) -> i32 {

@@ -14,6 +14,7 @@ pub mod apply;
 pub mod build;
 pub mod guard;
 pub mod locks;
+pub mod orphan;
 pub mod record;
 
 pub struct Ctx<'a> {
