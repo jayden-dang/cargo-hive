@@ -1529,7 +1529,7 @@ _Requirements: GCPLAN-3.1, GCPLAN-3.2, GCPLAN-3.3, GCPLAN-3.4, GCPLAN-3.5, GCPLA
 
 **Depends-on:** Task 10
 
-- [ ] **Step 1: Write the failing tests** — first delete `a_non_secondary_plan_is_not_applied_until_the_needs_human_task` from `tests/plan_apply.rs`
+- [x] **Step 1: Write the failing tests** — first delete `a_non_secondary_plan_is_not_applied_until_the_needs_human_task` from `tests/plan_apply.rs`
 
 ```rust
 #[test]
@@ -1576,13 +1576,13 @@ fn apply_never_blocks_on_an_owner_authentication_prompt() {
 
 Run: `cargo test --test plan_apply needs_human` — expect: failure, exit code is 1, not 3.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 At step (1) of `apply`, a `Live` plan whose class is not `Secondary` and under `Authorization::Secondary` (the only value until Task 13) returns `Applied { outcome: NeedsHuman, id, class, targets, bytes: plan.planned, counts: { paths, freed_bytes, deleted_bytes_still_shared when present } }` before `record::consume` and before any lock or `cargo metadata` call. `apply_cmd` returns `EXIT_NEEDS_HUMAN` (3) for it; an unlogged receipt still forces 1 (`emit`). Remove the `unsupported_class` refusal. `apply` takes no option other than `--json`, so no clap change. In `docs/standards/errors-logging.md`, in the exit-code row, add `3 needs-human (apply only)`.
 
 Run: `cargo test` — expect: pass, including the unchanged `tests/receipts.rs`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "apply: protected plans return needs-human, exit 3, and stay unconsumed"`
 
