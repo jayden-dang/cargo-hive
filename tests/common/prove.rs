@@ -2,8 +2,9 @@
 //! dead, replays the owner's cargo commands and reports whether any live unit was rebuilt.
 //! Order of a run: lock every profile's build lock; decide and measure every window on the original;
 //! clone it once as the snapshot; release the locks; replay a warm-up in a clone of the snapshot and
-//! then each window in a clone of the warmed-up clone; finally check that every file a window listed
-//! is still in the original and that the checkout's `Cargo.lock` is unchanged.
+//! then, for each window, delete that window's dead files through `execute` on a clone of the
+//! warmed-up clone and replay the owner's commands there; finally check that every file a window
+//! listed is still in the original and that the checkout's `Cargo.lock` is unchanged.
 //! Contract: every replay is pointed at a clone, never at the original, and every deletion lands in
 //! a clone; the end-of-run check proves only that the listed files still exist and that `Cargo.lock`
 //! is unchanged, not that nothing else in the original changed; every `compiler-artifact` a replay
@@ -17,7 +18,7 @@ use cargo_hive::liveness::{liveness, unit_timestamp, Liveness};
 use cargo_hive::plan_tier::apply::{self, ResolvedTarget};
 use cargo_hive::plan_tier::build::{self, TargetPlan};
 use cargo_hive::plan_tier::guard::{delete_checked, Deleted, Expect};
-use cargo_hive::plan_tier::record::{Plan, PlanClass};
+use cargo_hive::plan_tier::record::{kind_name, Plan, PlanClass, PlannedEntry, PlannedTarget};
 use cargo_hive::plan_tier::Ctx;
 use cargo_hive::platform::{self, EntryKind, Fs, TryLock};
 use cargo_hive::receipt::Outcome;
@@ -1016,6 +1017,97 @@ pub fn trial_through_execute(fx: &super::cargo_fixture::Fixture) -> Result<Execu
     })
 }
 
+/// Deletes one window's dead files on the owner's clone through `execute`.
+/// The caller's replay is what runs the owner's command list. A file that is
+/// already gone is skipped, matching a missing entry. No remaining file means
+/// there is nothing to plan.
+fn delete_window_through_execute(
+    fs: &dyn Fs,
+    files: &[PathBuf],
+    input: &ProveInput,
+    clone: &Path,
+    scratch: &Path,
+) -> Result<(), String> {
+    let mut entries = Vec::new();
+    for file in files {
+        let path = rebase(file, &input.target, clone)?;
+        let stat = match fs.entry_stat(&path) {
+            Ok(stat) => stat,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(format!("{}: {err}", path.display())),
+        };
+        if stat.kind == EntryKind::Other {
+            return Err(format!("cannot delete {}", path.display()));
+        }
+        entries.push(PlannedEntry {
+            path,
+            // One label, so a fingerprint directory is removed with the artifacts
+            // instead of being skipped as a fingerprint-only group.
+            unit: "window".to_string(),
+            kind: kind_name(stat.kind).to_string(),
+            dev: stat.dev,
+            ino: stat.ino,
+        });
+    }
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let now = SystemTime::now();
+    let made_at = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let planned = PlannedTarget {
+        path: clone.to_path_buf(),
+        owner: Some(input.checkout.clone()),
+        planned: None,
+        entries,
+        orphan: None,
+    };
+    // The warm-up just rebuilt units this window listed. `execute` rechecks in
+    // whole days, and one day would treat those fresh stamps as live and refuse
+    // the plan, so the replay would rebuild nothing. Zero days stays dead for
+    // every stamp older than this instant. The file list is already this window's.
+    let plan = Plan::single(PlanClass::Secondary, planned, 0, made_at);
+    let state = State::open_at(scratch.join("prove-state")).map_err(|err| err.to_string())?;
+    let cfg = state.config().map_err(|err| err.to_string())?;
+    let repos = Vec::new();
+    let mains = Vec::new();
+    let ctx = Ctx {
+        state: &state,
+        fs,
+        cfg: &cfg,
+        now,
+        account_bytes: false,
+        repos: &repos,
+        mains: &mains,
+    };
+    let resolved = [ResolvedTarget {
+        path: clone.to_path_buf(),
+        owner: Some(input.checkout.clone()),
+        class: PlanClass::Secondary,
+    }];
+    let applied = apply::execute(&ctx, plan, &resolved, &|| false);
+    if applied.outcome != Outcome::Applied {
+        return Err(execute_did_not_apply(&applied));
+    }
+    Ok(())
+}
+
+fn execute_did_not_apply(applied: &apply::Applied) -> String {
+    if let Some((_, Some(path), _)) = applied
+        .findings
+        .iter()
+        .find(|(kind, _, _)| kind == "plan.delete_failed")
+    {
+        return format!("cannot delete {}", path.display());
+    }
+    format!(
+        "execute finished as {:?} ({:?}); findings: {:?}",
+        applied.outcome, applied.reason, applied.findings
+    )
+}
+
 pub fn delete_in_clone(
     fs: &dyn Fs,
     files: &[PathBuf],
@@ -1282,7 +1374,7 @@ pub fn prove_with_cloner(
             windows.push(report);
             continue;
         }
-        delete_in_clone(fs, &d.dead_files, &input.target, &clone.path)?;
+        delete_window_through_execute(fs, &d.dead_files, input, &clone.path, scratch)?;
         let before = stamps_of(fs, &clone.path)?;
         let ran = replay(scratch, &format!("w{i}"), input, &clone.path)?;
         let after = stamps_of(fs, &clone.path)?;
