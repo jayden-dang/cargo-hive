@@ -1165,7 +1165,7 @@ _Requirements: GCPLAN-2.2, GCPLAN-2.3, GCPLAN-2.12_
 
 **Depends-on:** Task 2, Task 5, Task 8
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tests/plan_apply.rs`:
 
@@ -1320,11 +1320,11 @@ fn applying_ownership_is_resolved_without_touching_the_snapshot_cache() {
 
 Run: `cargo test --test plan_apply --test plan_tier apply` — expect: failure, `error: unrecognized subcommand 'apply'`.
 
-- [ ] **Step 2: Add the command and the gates**
+- [x] **Step 2: Add the command and the gates**
 
 `Command::Apply { id: String, #[command(flatten)] out: OutputArgs }`. `apply_cmd`: install signal handlers, load registry/config/capabilities, `doctor::require` for `FingerprintReading` and `Deletion` (refusal → exit 1, plan untouched), build `Ctx` for all registered repos, call `plan_tier::apply(&ctx, &id, Authorization::Secondary, &cancelled)`, map `Applied` into a `PlanRecord` (`class` as its lowercase name, `outcome`, `reason`, `counts`), call `b.plan_tier(..)`, add `notes`, `unmeasured` and findings, and return 1 for `Refused` or `ApplyError`, otherwise 0 (needs-human, cancel and deletion failure arrive in Tasks 11 and 12). Map `Parsed::Apply` in `tests/skill.rs`.
 
-- [ ] **Step 3: Implement `apply` and `execute` (secondary path)**
+- [x] **Step 3: Implement `apply` and `execute` (secondary path)**
 
 `apply`, in order: (1) `record::get`: `Unknown` → `Refused("unknown_plan")`; `Consumed` → `Refused("already_consumed")`; a class other than `Secondary` under `Authorization::Secondary` → `Refused("unsupported_class")` (Task 11 replaces this with `needs-human`). (2) `record::consume`. (3) Resolve ownership afresh over every registered repo with `discover::checkouts` and `discover::targets(.., &mut Snapshot::default(), ..)`; build a `ResolvedTarget` for each plan target (owner path, class via `class_of_target`); Task 10 adds the distinct refusals — here a mismatch returns `Refused("owner_changed")`. (4) Call `execute`.
 
@@ -1332,7 +1332,7 @@ Run: `cargo test --test plan_apply --test plan_tier apply` — expect: failure, 
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 `git commit -m "apply: delete a secondary plan under every profile lock, once"`
 
