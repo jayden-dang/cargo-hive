@@ -415,7 +415,7 @@ enum Parsed {
     RepoAdd,
     RepoList,
     Status,
-    Gc { dry_run: bool },
+    Gc { dry_run: bool, plan: bool },
     Explain,
 }
 
@@ -439,7 +439,7 @@ fn parse(words: &[String]) -> Result<Parsed, String> {
             RepoCommand::List(_) => Ok(Parsed::RepoList),
         },
         Command::Status { .. } => Ok(Parsed::Status),
-        Command::Gc { dry_run, .. } => Ok(Parsed::Gc { dry_run }),
+        Command::Gc { dry_run, plan, .. } => Ok(Parsed::Gc { dry_run, plan }),
         Command::Explain { .. } => Ok(Parsed::Explain),
         Command::HoldLock { .. } | Command::TryLock { .. } => {
             Err("the internal lock subcommands are not part of the skill".to_string())
@@ -574,8 +574,14 @@ fn skill_documents_every_shipped_command() {
         Parsed::RepoAdd,
         Parsed::RepoList,
         Parsed::Status,
-        Parsed::Gc { dry_run: true },
-        Parsed::Gc { dry_run: false },
+        Parsed::Gc {
+            dry_run: true,
+            plan: false,
+        },
+        Parsed::Gc {
+            dry_run: false,
+            plan: false,
+        },
         Parsed::Explain,
     ] {
         assert!(

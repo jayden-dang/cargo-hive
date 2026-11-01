@@ -1,7 +1,7 @@
 //! Thin adapter: arguments → library calls → one receipt.
 
 use crate::platform::{self, MACOS_ONLY_MESSAGE};
-use crate::receipt::{Receipt, ReceiptBuilder, Scope};
+use crate::receipt::{PlanRecord, PlanTierBody, Receipt, ReceiptBuilder, Scope};
 use crate::registry::{self, Registry};
 use crate::state::{State, StateError};
 use clap::{Args, Parser, Subcommand};
@@ -48,6 +48,9 @@ pub enum Command {
         /// Report what would be deleted and freed, deleting nothing
         #[arg(long)]
         dry_run: bool,
+        /// Store a plan of dead-unit paths and delete nothing
+        #[arg(long, conflicts_with = "dry_run")]
+        plan: bool,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -143,8 +146,15 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
         Command::Gc {
             repos,
             dry_run,
+            plan,
             out,
-        } => gc_cmd(&state, &repos, dry_run, out),
+        } => {
+            if plan {
+                plan_cmd(&state, &repos, out)
+            } else {
+                gc_cmd(&state, &repos, dry_run, out)
+            }
+        }
         Command::Explain { repos, top, out } => explain_cmd(&state, &repos, top, out),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
         Command::TryLock { .. } => unreachable!("handled before the state root is opened"),
@@ -903,6 +913,165 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
         return emit(state, out, b.finish(), &human, 130);
     }
     emit(state, out, b.finish(), &human, code)
+}
+
+fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
+    use crate::discover::{Snapshot, SNAPSHOT_FILE};
+    use crate::doctor::{self, Capabilities, Capability};
+    use crate::plan_tier::build::{self, MakeError};
+    use crate::plan_tier::record;
+    use crate::plan_tier::Ctx;
+    use std::collections::BTreeMap;
+    use std::time::SystemTime;
+    const ID_ATTEMPTS: u32 = 4;
+    if let Err(e) = doctor::install_signal_handlers() {
+        return emit_failure(
+            state,
+            out,
+            "gc --plan",
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
+    }
+    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let loaded = (|| -> Result<_, StateError> {
+        Ok((
+            state.read::<Registry>(registry::FILE)?,
+            state.config()?,
+            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+            state.read::<Snapshot>(SNAPSHOT_FILE)?,
+        ))
+    })();
+    let (reg, cfg, caps, _snapshot) = match loaded {
+        Ok(v) => v,
+        Err(e) => return emit_failure(state, out, "gc --plan", &e.to_string(), 1),
+    };
+    let Ok(platform) = platform::current() else {
+        eprintln!("{MACOS_ONLY_MESSAGE}");
+        return 2;
+    };
+    let mut b = Receipt::new("gc --plan", Scope::default());
+    let release = doctor::resolve_toolchain(state.root())
+        .ok()
+        .map(|t| t.release);
+    b.toolchain(release.clone());
+    if let Err(refusal) = doctor::require(&caps, Capability::FingerprintReading, release.as_deref())
+    {
+        b.finding("refusal", None, refusal.to_string());
+        return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
+    }
+    let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
+    let mut named = Vec::new();
+    if args.is_empty() {
+        named.clone_from(&reg.repos);
+    } else {
+        for arg in args {
+            let real = arg.canonicalize().unwrap_or_else(|_| arg.clone());
+            if let Some(repo) = reg.repos.iter().find(|r| r.main == real) {
+                if !named.iter().any(|got| got.main == repo.main) {
+                    named.push(repo.clone());
+                }
+            }
+        }
+    }
+    let _checkouts = live_checkouts(&named, &registered_mains, &cfg, &mut b);
+    let now = SystemTime::now();
+    let ctx = Ctx {
+        state,
+        fs: &*platform.fs,
+        cfg: &cfg,
+        now,
+        account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
+        repos: &reg.repos,
+        mains: &registered_mains,
+    };
+    let made = match build::make(&ctx, args, &cancelled) {
+        Ok(made) => made,
+        Err(MakeError::Window(err)) => {
+            b.finding("refusal", None, err.to_string());
+            return emit(state, out, b.finish(), &format!("refused: {err}\n"), 1);
+        }
+        Err(MakeError::Cancelled) => {
+            b.finding("error", None, "gc --plan was cancelled");
+            return emit(state, out, b.finish(), "gc --plan was cancelled\n", 130);
+        }
+    };
+    let made_at = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut plans = made.plans;
+    let mut stored = false;
+    for attempt in 0..ID_ATTEMPTS {
+        match record::insert(state, &cancelled, plans.clone(), made_at) {
+            Ok(()) => {
+                stored = true;
+                break;
+            }
+            Err(StateError::DuplicatePlan { .. }) if attempt + 1 < ID_ATTEMPTS => {
+                for plan in &mut plans {
+                    build::reissue(plan);
+                }
+            }
+            Err(StateError::Cancelled) => {
+                b.finding("error", None, StateError::Cancelled.to_string());
+                return emit(state, out, b.finish(), "gc --plan was cancelled\n", 130);
+            }
+            Err(e) => {
+                b.finding("error", None, e.to_string());
+                return emit(state, out, b.finish(), &format!("{e}\n"), 1);
+            }
+        }
+    }
+    if !stored {
+        b.finding(
+            "error",
+            None,
+            "a plan id is already stored; retry with a new counter",
+        );
+        return emit(state, out, b.finish(), "could not store the plan\n", 1);
+    }
+    let mut records = Vec::new();
+    let mut human = String::new();
+    for plan in &plans {
+        let mut counts = BTreeMap::new();
+        if let Some(bytes) = plan.planned {
+            counts.insert("freed_bytes".to_string(), bytes.freed);
+            counts.insert("deleted_bytes_still_shared".to_string(), bytes.still_shared);
+        }
+        let paths = plan.targets.iter().map(|t| t.entries.len() as u64).sum();
+        human.push_str(&format!(
+            "{}  {}  {} paths\n",
+            plan.id,
+            build::class_label(plan.class),
+            paths
+        ));
+        records.push(PlanRecord {
+            id: plan.id.clone(),
+            class: build::class_label(plan.class).to_string(),
+            outcome: None,
+            reason: None,
+            targets: plan.targets.iter().map(|t| t.path.clone()).collect(),
+            paths,
+            counts,
+        });
+    }
+    if records.is_empty() {
+        human.push_str("no plan\n");
+    }
+    for item in &made.unmeasured {
+        b.unmeasured(&item.field, item.reason.clone());
+    }
+    for (kind, path, detail) in &made.findings {
+        b.finding(kind, path.clone(), detail.clone());
+    }
+    b.plan_tier(PlanTierBody {
+        plans: records,
+        undecided: made.undecided,
+        nothing_to_do: made.nothing_to_do,
+    });
+    let refused = made.findings.iter().any(|(kind, _, _)| kind == "refusal");
+    emit(state, out, b.finish(), &human, i32::from(refused))
 }
 
 fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: OutputArgs) -> i32 {

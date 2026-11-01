@@ -173,6 +173,24 @@ impl Hive {
         (out, value)
     }
 
+    /// Like `json`, with extra environment variables on the command.
+    pub fn json_env(&self, args: &[&str], env: &[(&str, &str)]) -> (Output, serde_json::Value) {
+        let mut all = args.to_vec();
+        all.push("--json");
+        let mut cmd = self.command(&all);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        let value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "not one receipt ({e}): {}",
+                String::from_utf8_lossy(&out.stdout)
+            )
+        });
+        (out, value)
+    }
+
     /// Builds `repo` three times, editing its lib in between, so each incremental crate dir
     /// holds a superseded session beside the newest one.
     pub fn build_with_sessions(&self, repo: &Path, target_dir: Option<&Path>) {
@@ -345,4 +363,5 @@ pub fn wait_within(mut child: Child, limit: Duration) -> Output {
 }
 
 pub mod cargo_fixture;
+pub mod plan_fixture;
 pub mod prove;

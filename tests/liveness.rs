@@ -203,6 +203,7 @@ fn the_cli_has_no_new_subcommand_or_flag() {
         "cargo-hive gc",
         "cargo-hive gc --dry_run",
         "cargo-hive gc --json",
+        "cargo-hive gc --plan",
         "cargo-hive gc --repos",
         "cargo-hive repo",
         "cargo-hive repo add",

@@ -108,6 +108,18 @@ GC that runs without a plan: `rustc*`/`rmeta*` temp entries and superseded incre
 **Plan tier**:
 GC through `cargo hive gc --plan` then `apply`: closure deletion and whole orphan targets.
 
+**Plan**:
+A one-use stored record of the paths one `apply` may delete in the targets of one class.
+_Avoid_: preview, dry-run list
+
+**Plan class**:
+The checkout class a plan covers: secondary, protected, or orphan. A target a protected checkout shares is protected.
+_Avoid_: tier
+
+**Outcome**:
+What `apply` did with one plan: applied, partial, refused, or needs-human. A plan just stored has no outcome.
+_Avoid_: status code
+
 **Receipt**:
 The deterministic counters a hive command returns. It never contains durations or estimated time saved.
 _Avoid_: report, summary
