@@ -249,7 +249,7 @@ _Requirements: SEED-2.23_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in `tests/seed.rs`:
+- [x] **Step 1: Write the failing test** in `tests/seed.rs`:
 
 ```rust
 #![cfg(target_os = "macos")]
@@ -279,7 +279,7 @@ fn the_fixture_builds_a_registry_crate_with_a_build_script_offline() {
 ```
 
 Run `cargo test --test seed`; expect a compile failure.
-- [ ] **Step 2: Implement the fixture,** exactly as probed in plan review (`.skills/SEED/plan-review.md`, M-5):
+- [x] **Step 2: Implement the fixture,** exactly as probed in plan review (`.skills/SEED/plan-review.md`, M-5):
   - `<reg>/leafcrate-1.0.0.crate` and `<reg>/depcrate-1.0.0.crate`, each packed with `COPYFILE_DISABLE=1 tar -czf <reg>/<name>-1.0.0.crate <name>-1.0.0` from the crate's parent directory. `cksum` is the first field of `shasum -a 256 <file>`.
   - `leafcrate`: `pub fn leaf() -> u32 { 1 }`. `depcrate`: `build = "build.rs"`, `[dependencies] leafcrate = "1"`; `build.rs` writes `$OUT_DIR/generated.rs` holding `pub const G: u32 = 7;`; `src/lib.rs` is `include!(concat!(env!("OUT_DIR"), "/generated.rs")); pub fn dep() -> u32 { leafcrate::leaf() + G }`. Both edition 2021.
   - `<reg>/index/le/af/leafcrate`: `{"name":"leafcrate","vers":"1.0.0","deps":[],"cksum":"<sha256>","features":{},"yanked":false}`
@@ -290,8 +290,8 @@ Run `cargo test --test seed`; expect a compile failure.
   - `write_capabilities` is the body of `write_ready_capabilities` with `"disabled": disabled`, `"lock_check": 1` and `"failed_marker_check": 1`. Disabling looks like `{"seeding": ["a"]}`, `{"store_compression": ["b"]}`, `{"deletion": ["d"]}`.
   - `LibCtx::open` is the body of `Planned::library_ctx_with`, reading `hive.home.path`, and `library_ctx_with` delegates to it.
   - `hold_state_lock` is `self.hold_lock_child("flock", &self.home.path.join(".lock"))`. That file exists once any command has run.
-- [ ] **Step 3: Run.** `cargo test --test seed`; expect pass.
-- [ ] **Step 4: Commit.** `test(seed): a local-registry fixture with a build script, and a state-lock holder`
+- [x] **Step 3: Run.** `cargo test --test seed`; expect pass.
+- [x] **Step 4: Commit.** `test(seed): a local-registry fixture with a build script, and a state-lock holder`
 
 _Requirements: SEED-1.9_
 
