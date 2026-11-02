@@ -990,6 +990,9 @@ impl platform::Fs for Volumes {
     fn clone_file(&self, s: &Path, d: &Path) -> std::io::Result<()> {
         self.inner.clone_file(s, d)
     }
+    fn create_dir(&self, p: &Path) -> std::io::Result<()> {
+        self.inner.create_dir(p)
+    }
     fn sharing(&self, p: &Path) -> std::io::Result<platform::Sharing> {
         self.inner.sharing(p)
     }

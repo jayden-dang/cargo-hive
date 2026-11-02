@@ -718,6 +718,10 @@ impl Fs for DirListFs {
         Err(unsupported())
     }
 
+    fn create_dir(&self, _path: &Path) -> io::Result<()> {
+        Err(unsupported())
+    }
+
     fn sharing(&self, _path: &Path) -> io::Result<Sharing> {
         Err(unsupported())
     }
@@ -3126,6 +3130,9 @@ mod tests {
             Err(unused_io())
         }
         fn clone_file(&self, _: &Path, _: &Path) -> std::io::Result<()> {
+            Err(unused_io())
+        }
+        fn create_dir(&self, _: &Path) -> std::io::Result<()> {
             Err(unused_io())
         }
         fn sharing(&self, _: &Path) -> std::io::Result<crate::platform::Sharing> {

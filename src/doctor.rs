@@ -1032,6 +1032,9 @@ mod tests {
             ids.insert(dst.to_path_buf(), id);
             Ok(())
         }
+        fn create_dir(&self, path: &Path) -> io::Result<()> {
+            std::fs::create_dir(path)
+        }
         fn sharing(&self, path: &Path) -> io::Result<Sharing> {
             let ids = self.ids.lock().unwrap();
             let id = ids.get(path).copied().unwrap_or(0);

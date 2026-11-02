@@ -1600,6 +1600,9 @@ mod tests {
         fn clone_file(&self, src: &Path, dst: &Path) -> io::Result<()> {
             self.real.clone_file(src, dst)
         }
+        fn create_dir(&self, path: &Path) -> io::Result<()> {
+            self.real.create_dir(path)
+        }
         fn sharing(&self, path: &Path) -> io::Result<crate::platform::Sharing> {
             self.real.sharing(path)
         }

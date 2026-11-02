@@ -11,6 +11,8 @@ use std::time::SystemTime;
 
 use cargo_hive::platform::{self, Fs, HeldLock, TryLock};
 
+type OnCompress = Arc<dyn Fn(&Path) + Send + Sync>;
+
 #[derive(Default)]
 struct Opts {
     unlockable: HashSet<PathBuf>,
@@ -22,6 +24,9 @@ struct Opts {
     fail_remove: HashSet<PathBuf>,
     fail_sharing: HashSet<PathBuf>,
     fail_stat: HashSet<PathBuf>,
+    fail_clone: HashMap<PathBuf, i32>,
+    plant_before_clone: HashMap<PathBuf, Vec<u8>>,
+    on_compress: Option<OnCompress>,
     /// Create `child` just before the 1-based `nth` bounded listing of `parent`.
     create_before_listing: Vec<(PathBuf, PathBuf, u64)>,
 }
@@ -118,6 +123,31 @@ impl Recording {
         self
     }
 
+    pub fn fail_clone(self, dst: impl AsRef<Path>, errno: i32) -> Recording {
+        self.state
+            .opts
+            .lock()
+            .unwrap()
+            .fail_clone
+            .insert(dst.as_ref().to_path_buf(), errno);
+        self
+    }
+
+    pub fn plant_before_clone(self, dst: impl AsRef<Path>, bytes: &[u8]) -> Recording {
+        self.state
+            .opts
+            .lock()
+            .unwrap()
+            .plant_before_clone
+            .insert(dst.as_ref().to_path_buf(), bytes.to_vec());
+        self
+    }
+
+    pub fn on_compress(self, f: impl Fn(&Path) + Send + Sync + 'static) -> Recording {
+        self.state.opts.lock().unwrap().on_compress = Some(Arc::new(f));
+        self
+    }
+
     /// `sharing` of `path` fails. A stat of that path still succeeds.
     pub fn fail_sharing(self, path: impl AsRef<Path>) -> Recording {
         self.state
@@ -188,10 +218,13 @@ impl Recording {
 
 impl Fs for Recording {
     fn temp_dir(&self, parent: &Path, prefix: &str) -> io::Result<platform::TempDir> {
-        self.state.fs.temp_dir(parent, prefix)
+        let dir = self.state.fs.temp_dir(parent, prefix)?;
+        self.push(format!("temp_dir {}", dir.path().display()));
+        Ok(dir)
     }
 
     fn write_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.push(format!("write_file {}", path.display()));
         self.state.fs.write_file(path, bytes)
     }
 
@@ -201,10 +234,12 @@ impl Fs for Recording {
     }
 
     fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {
+        self.push(format!("hardlink {}", dst.display()));
         self.state.fs.hardlink(src, dst)
     }
 
     fn set_mtime(&self, path: &Path, t: SystemTime) -> io::Result<()> {
+        self.push(format!("set_mtime {}", path.display()));
         self.state.fs.set_mtime(path, t)
     }
 
@@ -218,7 +253,26 @@ impl Fs for Recording {
     }
 
     fn clone_file(&self, src: &Path, dst: &Path) -> io::Result<()> {
+        self.push(format!("clone {} -> {}", src.display(), dst.display()));
+        let (errno, planted) = {
+            let opts = self.state.opts.lock().unwrap();
+            (
+                opts.fail_clone.get(dst).copied(),
+                opts.plant_before_clone.get(dst).cloned(),
+            )
+        };
+        if let Some(errno) = errno {
+            return Err(io::Error::from_raw_os_error(errno));
+        }
+        if let Some(bytes) = planted {
+            std::fs::write(dst, bytes)?;
+        }
         self.state.fs.clone_file(src, dst)
+    }
+
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.push(format!("create_dir {}", path.display()));
+        self.state.fs.create_dir(path)
     }
 
     fn sharing(&self, path: &Path) -> io::Result<platform::Sharing> {
@@ -229,6 +283,11 @@ impl Fs for Recording {
     }
 
     fn compress(&self, path: &Path) -> platform::CompressOutcome {
+        self.push(format!("compress {}", path.display()));
+        let hook = self.state.opts.lock().unwrap().on_compress.clone();
+        if let Some(hook) = hook {
+            hook(path);
+        }
         self.state.fs.compress(path)
     }
 
@@ -253,10 +312,16 @@ impl Fs for Recording {
         for dir in &dirs {
             std::fs::create_dir_all(dir).unwrap();
         }
-        if no_identity {
-            TryLock::Acquired(HeldLock::new(move || drop(held)))
-        } else {
-            TryLock::Acquired(held)
+        let shown = path.display().to_string();
+        let log = Arc::clone(&self.state.log);
+        let identity = if no_identity { None } else { held.identity() };
+        let release = move || {
+            log.lock().unwrap().push(format!("unlock {shown}"));
+            drop(held);
+        };
+        match identity {
+            Some((dev, ino)) => TryLock::Acquired(HeldLock::with_identity(dev, ino, release)),
+            None => TryLock::Acquired(HeldLock::new(release)),
         }
     }
 
