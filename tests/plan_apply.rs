@@ -128,8 +128,10 @@ fn a_target_the_graph_cannot_decide_is_reported_undecided_with_what_clears_it() 
 fn plan_refuses_a_window_out_of_range_and_has_no_window_option() {
     let p = Planned::new("plan-window");
     p.hive.config(r#"{"gc_window_days": 0}"#);
-    let (out, _) = p.hive.json(&["gc", "--plan"]);
+    let (out, r) = p.hive.json(&["gc", "--plan"]);
     assert_eq!(out.status.code(), Some(1));
+    assert_eq!(r["schema"], 3, "{r}");
+    assert!(r.get("plans").is_some(), "{r}");
     assert!(
         !p.hive
             .run(&["gc", "--plan", "--window", "3"])
@@ -170,6 +172,31 @@ fn a_target_shared_with_a_protected_checkout_goes_in_the_protected_plan() {
 }
 
 #[test]
+fn early_plan_and_apply_refusals_are_schema_3_and_other_commands_stay_2() {
+    let p = Planned::new("schema-early");
+    std::fs::write(p.hive.home.path.join("config.json"), b"{").unwrap();
+    let (out, r) = p.hive.json(&["gc", "--plan"]);
+    assert_eq!(out.status.code(), Some(1), "{r}");
+    assert_eq!(r["schema"], 3, "{r}");
+    assert!(
+        r.get("plans").is_some() && r.get("nothing_to_do").is_some(),
+        "{r}"
+    );
+    let (out, r) = p.hive.json(&["apply", "0123456789abcdef"]);
+    assert_eq!(out.status.code(), Some(1), "{r}");
+    assert_eq!(r["schema"], 3, "{r}");
+    let (_, r) = p.hive.json(&["status"]);
+    assert_eq!(r["schema"], 2, "{r}");
+    p.hive.config(r#"{"cache_roots":[]}"#);
+    write_caps(&p, serde_json::json!({"deletion": ["d"]}));
+    let (out, r) = p.hive.json(&["apply", "0123456789abcdef"]);
+    assert_eq!(out.status.code(), Some(1), "{r}");
+    assert_eq!(r["schema"], 3, "{r}");
+    let (_, gc) = p.hive.json(&["gc", "--dry-run"]);
+    assert_eq!(gc["schema"], 2, "{gc}");
+}
+
+#[test]
 fn gc_plan_conflicts_with_dry_run_and_gc_without_plan_is_unchanged() {
     let p = Planned::new("plan-conflict");
     assert!(!p.hive.run(&["gc", "--plan", "--dry-run"]).status.success());
@@ -182,7 +209,9 @@ fn gc_plan_conflicts_with_dry_run_and_gc_without_plan_is_unchanged() {
 fn gc_plan_needs_only_the_fingerprint_capability() {
     let p = Planned::new("plan-capability");
     write_caps(&p, serde_json::json!({"fingerprint_reading": ["f"]}));
-    assert_eq!(p.hive.json(&["gc", "--plan"]).0.status.code(), Some(1));
+    let (out, r) = p.hive.json(&["gc", "--plan"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(r["schema"], 3, "{r}");
     write_caps(&p, serde_json::json!({"deletion": ["d"]}));
     assert_eq!(p.hive.json(&["gc", "--plan"]).0.status.code(), Some(0));
 }

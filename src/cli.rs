@@ -251,8 +251,23 @@ pub fn emit(state: &State, out: OutputArgs, receipt: Receipt, human: &str, code:
 fn emit_failure(state: &State, out: OutputArgs, command: &str, error: &str, code: i32) -> i32 {
     eprintln!("cargo-hive: {error}");
     let mut receipt = Receipt::new(command, Scope::default());
+    if command == "gc --plan" || command == "apply" {
+        receipt.plan_tier(PlanTierBody {
+            plans: Vec::new(),
+            undecided: Vec::new(),
+            nothing_to_do: Vec::new(),
+        });
+    }
     receipt.finding("error", None, error.to_string());
     emit(state, out, receipt.finish(), &format!("{error}\n"), code)
+}
+
+fn begin_plan_tier(b: &mut ReceiptBuilder) {
+    b.plan_tier(PlanTierBody {
+        plans: Vec::new(),
+        undecided: Vec::new(),
+        nothing_to_do: Vec::new(),
+    });
 }
 
 fn repo_add(state: &State, path: &std::path::Path, out: OutputArgs) -> i32 {
@@ -955,6 +970,7 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
         return 2;
     };
     let mut b = Receipt::new("apply", Scope::default());
+    begin_plan_tier(&mut b);
     let release = doctor::resolve_toolchain(state.root())
         .ok()
         .map(|t| t.release);
@@ -1060,6 +1076,7 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
         return 2;
     };
     let mut b = Receipt::new("gc --plan", Scope::default());
+    begin_plan_tier(&mut b);
     let release = doctor::resolve_toolchain(state.root())
         .ok()
         .map(|t| t.release);
