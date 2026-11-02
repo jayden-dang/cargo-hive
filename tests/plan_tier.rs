@@ -438,6 +438,108 @@ fn a_later_refusal_keeps_the_measured_bytes_of_the_orphan_already_removed() {
 }
 
 #[test]
+fn a_first_orphan_remove_that_fails_is_partial_not_refused() {
+    let (p, orphan) = Planned::with_orphan("orphan-first-delete-failed");
+    let id = p.orphan_plan_id(&orphan);
+    let rec = Recording::over_real().fail_removes_after(0);
+    let lib = p.library_ctx_with(rec.fs());
+    let done = apply(
+        &lib.ctx(),
+        &id,
+        Authorization::Approved(approval_for_tests(&id)),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(
+        done.outcome,
+        Outcome::Partial,
+        "{:?} {:?}",
+        done.reason,
+        done.findings
+    );
+    assert_ne!(done.outcome, Outcome::Refused);
+    assert_eq!(done.reason.as_deref(), Some("delete failed"));
+    assert!(
+        done.findings.iter().any(|(kind, path, _)| {
+            kind == "plan.delete_failed" && path.as_ref() == Some(&orphan)
+        }),
+        "{:?}",
+        done.findings
+    );
+    assert!(
+        done.unmeasured.iter().any(|row| {
+            row.field == orphan.display().to_string()
+                && row.reason.contains("removal failed part-way")
+        }),
+        "a delete that stops part-way names that path: {:?}",
+        done.unmeasured
+    );
+    assert!(
+        done.bytes.is_none(),
+        "bytes are not invented when the removal never recorded them: {:?}",
+        done.bytes
+    );
+}
+
+#[test]
+fn a_later_orphan_is_still_removed_when_an_earlier_remove_fails() {
+    let (p, first) = Planned::with_orphan("orphan-continue-after-fail");
+    let later = first.parent().unwrap().join("later-target");
+    assert!(
+        first < later,
+        "the failing target is attempted before the one that can succeed"
+    );
+    let child = std::process::Command::new("cp")
+        .args([
+            "-R",
+            &first.display().to_string(),
+            &later.display().to_string(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let copied = common::wait_within(child, std::time::Duration::from_secs(30));
+    assert!(
+        copied.status.success(),
+        "the second orphan target was not copied"
+    );
+    let id = p.orphan_plan_id(&first);
+    let rec = Recording::over_real().fail_remove(&first);
+    let lib = p.library_ctx_with(rec.fs());
+    let done = apply(
+        &lib.ctx(),
+        &id,
+        Authorization::Approved(approval_for_tests(&id)),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(done.targets.len(), 2, "one plan holds both orphan targets");
+    assert!(!later.exists(), "the later target is still removed");
+    assert!(first.exists(), "the failed target stays");
+    assert_eq!(
+        done.outcome,
+        Outcome::Partial,
+        "{:?} {:?}",
+        done.reason,
+        done.findings
+    );
+    assert_eq!(done.reason.as_deref(), Some("delete failed"));
+    assert!(
+        done.findings.iter().any(|(kind, path, _)| {
+            kind == "plan.delete_failed" && path.as_ref() == Some(&first)
+        }),
+        "{:?}",
+        done.findings
+    );
+    let bytes = done
+        .bytes
+        .expect("the removal that succeeded still reports its bytes");
+    assert!(bytes.freed + bytes.still_shared > 0);
+}
+
+#[test]
 fn a_later_delete_failure_names_delete_failed_and_keeps_measured_bytes() {
     let (p, first) = Planned::with_orphan("orphan-delete-failed");
     let later = first.parent().unwrap().join("later-target");

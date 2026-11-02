@@ -16,7 +16,7 @@ use crate::liveness::{self, Liveness};
 use crate::plan_tier::build::{class_label, class_of_target, TargetClass};
 use crate::plan_tier::guard::{check_entry, Deleted as EntryMismatch, Expect};
 use crate::plan_tier::locks::{self, Acquired, Locked, Reason};
-use crate::plan_tier::orphan::{self, Removal};
+use crate::plan_tier::orphan::{self, Counted, Removal};
 use crate::plan_tier::record::{
     self, kind_of, BytesRec, Lookup, Plan, PlanClass, PlannedEntry, PlannedTarget, Taken,
 };
@@ -200,6 +200,7 @@ fn apply_orphan(
     let mut touched = BTreeSet::new();
     let mut cancelled = false;
     let mut refusal: Option<String> = None;
+    let mut delete_failed = false;
     for target in order {
         if cancel() {
             cancelled = true;
@@ -209,25 +210,15 @@ fn apply_orphan(
             Removal::Removed(counted) => {
                 paths_deleted += 1;
                 applied_targets += 1;
-                freed.freed = freed.freed.saturating_add(counted.bytes.freed);
-                freed.still_shared = freed
-                    .still_shared
-                    .saturating_add(counted.bytes.still_shared);
                 deleted_by_target.insert(target.path.clone(), 1);
-                per_target.insert(
-                    target.path.clone(),
-                    Bytes {
-                        freed: counted.bytes.freed,
-                        still_shared: counted.bytes.still_shared,
-                    },
+                note_counted(
+                    counted,
+                    &target.path,
+                    &mut freed,
+                    &mut per_target,
+                    &mut unmeasured,
+                    &mut unmeasured_more,
                 );
-                for (path, why) in counted.unmeasured {
-                    unmeasured.push(Unmeasured {
-                        field: path.display().to_string(),
-                        reason: why,
-                    });
-                }
-                unmeasured_more = unmeasured_more.saturating_add(counted.unmeasured_more);
                 if let Ok(volume) = ctx.fs.volume(&target.path) {
                     touched.insert(volume.container);
                 }
@@ -242,24 +233,34 @@ fn apply_orphan(
                 }
             }
             Removal::Refused(reason) => {
-                if measure_gap(&reason) {
-                    unmeasured.push(Unmeasured {
-                        field: target.path.display().to_string(),
-                        reason: reason.clone(),
-                    });
-                }
                 findings.push((reason.clone(), Some(target.path.clone()), reason.clone()));
                 refusal = Some(reason);
                 break;
             }
-            Removal::Failed(detail) => {
+            Removal::MeasureRefused(reason) => {
+                unmeasured.push(Unmeasured {
+                    field: target.path.display().to_string(),
+                    reason: reason.clone(),
+                });
+                findings.push((reason.clone(), Some(target.path.clone()), reason.clone()));
+                refusal = Some(reason);
+                break;
+            }
+            Removal::Failed(failed) => {
+                note_counted(
+                    failed.counted,
+                    &target.path,
+                    &mut freed,
+                    &mut per_target,
+                    &mut unmeasured,
+                    &mut unmeasured_more,
+                );
                 findings.push((
                     "plan.delete_failed".to_string(),
                     Some(target.path.clone()),
-                    detail,
+                    failed.detail,
                 ));
-                refusal = Some("delete failed".to_string());
-                break;
+                delete_failed = true;
             }
         }
     }
@@ -268,11 +269,13 @@ fn apply_orphan(
     let total = plan.targets.len() as u64;
     let (outcome, reason) = if cancelled {
         (Outcome::Partial, Some("cancelled".to_string()))
-    } else if let Some(reason) = &refusal {
+    } else if delete_failed {
+        (Outcome::Partial, Some("delete failed".to_string()))
+    } else if let Some(reason) = refusal {
         if paths_deleted > 0 {
-            (Outcome::Partial, Some(reason.clone()))
+            (Outcome::Partial, Some(reason))
         } else {
-            (Outcome::Refused, Some(reason.clone()))
+            (Outcome::Refused, Some(reason))
         }
     } else if applied_targets != total {
         let why = if applied_targets == 0 {
@@ -284,7 +287,9 @@ fn apply_orphan(
     } else {
         (Outcome::Applied, None)
     };
-    let publish_bytes = ctx.account_bytes && (outcome == Outcome::Applied || paths_deleted > 0);
+    let measured = freed.freed > 0 || freed.still_shared > 0;
+    let publish_bytes =
+        ctx.account_bytes && (outcome == Outcome::Applied || paths_deleted > 0 || measured);
     let bytes = publish_bytes.then_some(freed);
     if !ctx.account_bytes && outcome != Outcome::Refused {
         let gaps = std::mem::take(&mut unmeasured);
@@ -323,8 +328,32 @@ fn apply_orphan(
     }
 }
 
-fn measure_gap(reason: &str) -> bool {
-    reason.starts_with("could not measure:")
+fn note_counted(
+    counted: Counted,
+    target: &Path,
+    freed: &mut BytesRec,
+    per_target: &mut BTreeMap<PathBuf, Bytes>,
+    unmeasured: &mut Vec<Unmeasured>,
+    unmeasured_more: &mut u64,
+) {
+    freed.freed = freed.freed.saturating_add(counted.bytes.freed);
+    freed.still_shared = freed
+        .still_shared
+        .saturating_add(counted.bytes.still_shared);
+    per_target.insert(
+        target.to_path_buf(),
+        Bytes {
+            freed: counted.bytes.freed,
+            still_shared: counted.bytes.still_shared,
+        },
+    );
+    for (path, why) in counted.unmeasured {
+        unmeasured.push(Unmeasured {
+            field: path.display().to_string(),
+            reason: why,
+        });
+    }
+    *unmeasured_more = unmeasured_more.saturating_add(counted.unmeasured_more);
 }
 
 pub(crate) fn exit_code(applied: &Applied) -> i32 {

@@ -19,6 +19,7 @@ struct Opts {
     create_dir_after_lock: Vec<PathBuf>,
     /// After this many successful removes, later removes fail. `Some(0)` fails the first.
     fail_removes_after: Option<u64>,
+    fail_remove: HashSet<PathBuf>,
     fail_sharing: HashSet<PathBuf>,
 }
 
@@ -103,7 +104,21 @@ impl Recording {
         self
     }
 
-    fn refuse_remove(&self) -> bool {
+    /// `remove_file` and `remove_tree` of this path fail. Other paths are removed.
+    pub fn fail_remove(self, path: impl AsRef<Path>) -> Recording {
+        self.state
+            .opts
+            .lock()
+            .unwrap()
+            .fail_remove
+            .insert(path.as_ref().to_path_buf());
+        self
+    }
+
+    fn refuse_remove(&self, path: &Path) -> bool {
+        if self.state.opts.lock().unwrap().fail_remove.contains(path) {
+            return true;
+        }
         let after = self.state.opts.lock().unwrap().fail_removes_after;
         let Some(after) = after else {
             return false;
@@ -238,7 +253,7 @@ impl Fs for Recording {
 
     fn remove_tree(&self, path: &Path) -> io::Result<()> {
         self.push(format!("remove {}", path.display()));
-        if self.refuse_remove() {
+        if self.refuse_remove(path) {
             return Err(io::Error::other("simulated stop"));
         }
         self.state.fs.remove_tree(path)
@@ -246,7 +261,7 @@ impl Fs for Recording {
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         self.push(format!("remove {}", path.display()));
-        if self.refuse_remove() {
+        if self.refuse_remove(path) {
             return Err(io::Error::other("simulated stop"));
         }
         self.state.fs.remove_file(path)

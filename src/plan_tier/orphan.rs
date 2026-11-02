@@ -20,11 +20,17 @@ pub struct Counted {
     pub unmeasured_more: u64,
 }
 
+pub struct FailedRemoval {
+    pub detail: String,
+    pub counted: Counted,
+}
+
 pub enum Removal {
     Removed(Counted),
     Skipped(String),
     Refused(String),
-    Failed(String),
+    MeasureRefused(String),
+    Failed(FailedRemoval),
 }
 
 pub fn remove(
@@ -49,8 +55,8 @@ pub fn remove(
     if let Err(reason) = same_entry(ctx.fs, &target.path, scope.kind, scope.dev, scope.ino) {
         return Removal::Refused(reason);
     }
-    if let Err(reason) = profiles_match_plan(ctx.fs, &target.path, scope.dirs) {
-        return Removal::Refused(reason);
+    if let Err(removal) = profiles_match_plan(ctx.fs, &target.path, scope.dirs) {
+        return removal;
     }
     if let Err(reason) = still_orphan(ctx, &target.path, cancel) {
         return match reason {
@@ -85,19 +91,9 @@ pub fn remove(
         ctx.account_bytes,
         false,
     ) {
-        Ok(removed) if removed.existed => {
-            let tally = ledger.finish();
-            Removal::Removed(Counted {
-                bytes: BytesRec {
-                    freed: tally.total.freed,
-                    still_shared: tally.total.still_shared,
-                },
-                unmeasured: tally.unmeasured,
-                unmeasured_more: tally.unmeasured_more,
-            })
-        }
+        Ok(removed) if removed.existed => Removal::Removed(into_counted(ledger)),
         Ok(_) => Removal::Refused("entry_changed".to_string()),
-        Err(err) => removal_error(err),
+        Err(err) => removal_error(err, ledger),
     };
     drop(locked);
     removal
@@ -127,17 +123,17 @@ fn same_entry(fs: &dyn Fs, path: &Path, kind: EntryKind, dev: u64, ino: u64) -> 
     }
 }
 
-fn profiles_match_plan(fs: &dyn Fs, target: &Path, planned: &[PathBuf]) -> Result<(), String> {
+fn profiles_match_plan(fs: &dyn Fs, target: &Path, planned: &[PathBuf]) -> Result<(), Removal> {
     let found = match cargo_target::identify(target) {
         Some(Ok(found)) => found,
-        Some(Err(why)) => return Err(why),
-        None => return Err("unsupported_format".to_string()),
+        Some(Err(why)) => return Err(Removal::Refused(why)),
+        None => return Err(Removal::Refused("unsupported_format".to_string())),
     };
     // Profile directories are what the plan records, including `triple/profile`.
     // The triple directory itself is only listed so its profiles stay inside the cap.
     let listing = fs
         .read_dir_bounded(target, CRATE_DIR_CAP)
-        .map_err(|err| format!("could not measure: {err}"))?;
+        .map_err(|err| Removal::MeasureRefused(format!("could not measure: {err}")))?;
     for (name, kind) in &listing {
         if *kind != EntryKind::Dir {
             continue;
@@ -147,13 +143,13 @@ fn profiles_match_plan(fs: &dyn Fs, target: &Path, planned: &[PathBuf]) -> Resul
             continue;
         }
         fs.read_dir_bounded(&child, CRATE_DIR_CAP)
-            .map_err(|err| format!("could not measure: {err}"))?;
+            .map_err(|err| Removal::MeasureRefused(format!("could not measure: {err}")))?;
     }
     if found
         .iter()
         .any(|(dir, _)| !planned.iter().any(|planned| planned == dir))
     {
-        return Err("profile_set".to_string());
+        return Err(Removal::Refused("profile_set".to_string()));
     }
     Ok(())
 }
@@ -204,10 +200,25 @@ fn guard_reason(reason: Deleted) -> String {
     }
 }
 
-fn removal_error(err: crate::gc::account::RemoveFailed) -> Removal {
+fn into_counted(ledger: Ledger) -> Counted {
+    let tally = ledger.finish();
+    Counted {
+        bytes: BytesRec {
+            freed: tally.total.freed,
+            still_shared: tally.total.still_shared,
+        },
+        unmeasured: tally.unmeasured,
+        unmeasured_more: tally.unmeasured_more,
+    }
+}
+
+fn removal_error(err: crate::gc::account::RemoveFailed, ledger: Ledger) -> Removal {
     use crate::gc::account::RemoveFailed;
     match err {
-        RemoveFailed::Scan(why) => Removal::Refused(format!("could not measure: {why}")),
-        RemoveFailed::Remove(error) => Removal::Failed(format!("could not remove it: {error}")),
+        RemoveFailed::Scan(why) => Removal::MeasureRefused(format!("could not measure: {why}")),
+        RemoveFailed::Remove(error) => Removal::Failed(FailedRemoval {
+            detail: format!("could not remove it: {error}"),
+            counted: into_counted(ledger),
+        }),
     }
 }
