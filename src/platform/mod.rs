@@ -312,7 +312,8 @@ pub trait Fs {
     fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState>;
     /// `lstat`: never follows a symbolic link.
     fn entry_stat(&self, path: &Path) -> io::Result<EntryStat>;
-    /// The UTF-8 names and no-follow kinds of `dir`'s entries; more than `cap` entries is an error.
+    /// The UTF-8 names and no-follow kinds of `dir`'s entries. More than `cap` entries is an
+    /// error, and so is a name that is not UTF-8.
     fn read_dir_bounded(&self, dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>>;
     /// Removes a directory tree, or a symbolic link given as the root, never following a link.
     fn remove_tree(&self, path: &Path) -> io::Result<()>;
