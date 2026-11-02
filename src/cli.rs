@@ -61,6 +61,13 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// Fill the store from one registered repository and clone registry units into a checkout
+    Seed {
+        /// Checkout to clone into. The caller's directory selects nothing
+        checkout: std::path::PathBuf,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
     /// Report copies of one crate, feature splits, and units whose last compile failed
     Explain {
         /// Registered repos to explain; none means every registered repo
@@ -163,6 +170,7 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
             }
         }
         Command::Apply { id, out } => apply_cmd(&state, &id, out),
+        Command::Seed { checkout, out } => seed_cmd(&state, &checkout, out),
         Command::Explain { repos, top, out } => explain_cmd(&state, &repos, top, out),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
         Command::TryLock { .. } => unreachable!("handled before the state root is opened"),
@@ -1360,4 +1368,157 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
         b.unmeasured(&field, reason);
     }
     emit(state, out, b.finish(), &explanation.human, code)
+}
+
+fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
+    use crate::classify::Class;
+    use crate::doctor::{self, Capabilities, Capability};
+    use crate::plan_tier::Ctx;
+    use crate::state::window_days;
+    let loaded = (|| -> Result<_, StateError> {
+        Ok((
+            state.read::<Registry>(registry::FILE)?,
+            state.config()?,
+            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+        ))
+    })();
+    let (reg, cfg, caps) = match loaded {
+        Ok(v) => v,
+        Err(e) => return emit_failure(state, out, "seed", &e.to_string(), 1),
+    };
+    let mut b = Receipt::new("seed", Scope::default());
+    if let Err(err) = window_days(cfg.gc_window_days) {
+        b.finding("refusal", None, err.to_string());
+        return emit(state, out, b.finish(), &format!("refused: {err}\n"), 1);
+    }
+    if let Err(e) = doctor::install_signal_handlers() {
+        return emit_failure(
+            state,
+            out,
+            "seed",
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
+    }
+    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let real = match checkout.canonicalize() {
+        Ok(path) => path,
+        Err(err) => {
+            let detail = format!(
+                "{path}: {err}; pass a checkout of a registered repository",
+                path = checkout.display()
+            );
+            b.finding("refusal", Some(checkout.to_path_buf()), detail.clone());
+            return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
+        }
+    };
+    let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
+    let mut matched = None;
+    for repo in &reg.repos {
+        let (rows, _) = crate::discover::checkouts(repo, &registered_mains, &cfg);
+        if let Some(row) = rows
+            .into_iter()
+            .find(|row| row.path == real && !row.missing)
+        {
+            matched = Some((repo.clone(), row));
+            break;
+        }
+    }
+    let Some((repo, row)) = matched else {
+        let detail = format!(
+            "{path} is not a checkout of a registered repository; register it with `cargo hive repo add` and run the command again",
+            path = real.display()
+        );
+        b.finding("refusal", Some(real), detail.clone());
+        return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
+    };
+    if row.class == Class::Protected {
+        let detail = format!(
+            "{path} is protected ({reason}); seed leaves a protected checkout untouched",
+            path = real.display(),
+            reason = row.reason
+        );
+        b.finding("refusal", Some(real), detail.clone());
+        return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
+    }
+    let toolchain = match doctor::resolve_toolchain(&real) {
+        Ok(toolchain) => toolchain,
+        Err(err) => {
+            let detail = format!(
+                "{path}: {err}; install the toolchain that checkout selects and run the command again",
+                path = real.display()
+            );
+            b.finding("refusal", Some(real), detail.clone());
+            return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
+        }
+    };
+    for cap in [
+        Capability::Seeding,
+        Capability::StoreCompression,
+        Capability::Deletion,
+    ] {
+        if let Err(refusal) = doctor::require(&caps, cap, Some(toolchain.release.as_str())) {
+            let detail = refusal.to_string();
+            b.finding("refusal", Some(real.clone()), detail.clone());
+            return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
+        }
+    }
+    let Ok(platform) = platform::current() else {
+        eprintln!("{MACOS_ONLY_MESSAGE}");
+        return 2;
+    };
+    let repos = [repo];
+    let ctx = Ctx {
+        state,
+        fs: &*platform.fs,
+        cfg: &cfg,
+        now: std::time::SystemTime::now(),
+        account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
+        repos: &repos,
+        mains: &registered_mains,
+    };
+    b.toolchain(Some(toolchain.release.clone()));
+    b.scope_mut().checkouts.push(real.clone());
+    let result = crate::seed::run(&ctx, &repos[0], &row, &toolchain, &cancelled);
+    let code = crate::seed::exit_code(&result);
+    match result {
+        Ok(outcome) => {
+            for (name, n) in &outcome.counts {
+                b.count(name, *n);
+            }
+            for (field, reason) in &outcome.unmeasured {
+                b.unmeasured(field, reason.clone());
+            }
+            for note in &outcome.notes {
+                b.note(note.clone());
+            }
+            for (kind, path, detail) in &outcome.findings {
+                b.finding(kind, path.clone(), detail.clone());
+            }
+            let human = format!(
+                "seed {path}\nfilled {added}, held {held}, cloned {cloned}\n",
+                path = real.display(),
+                added = outcome
+                    .counts
+                    .get("fill_entries_added")
+                    .copied()
+                    .unwrap_or(0),
+                held = outcome
+                    .counts
+                    .get("fill_entries_held")
+                    .copied()
+                    .unwrap_or(0),
+                cloned = outcome
+                    .counts
+                    .get("clone_units_cloned")
+                    .copied()
+                    .unwrap_or(0),
+            );
+            emit(state, out, b.finish(), &human, code)
+        }
+        Err(err) => {
+            b.finding("error", None, err.to_string());
+            emit(state, out, b.finish(), &format!("{err}\n"), code)
+        }
+    }
 }
