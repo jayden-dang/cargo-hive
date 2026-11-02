@@ -1,8 +1,11 @@
 //! The seed command's library entry: the live registry units of a target, the
-//! compressed store those units are published into, and the fill that publishes them.
+//! compressed store those units are published into, the fill that publishes them,
+//! the choice of units for one repo, and the placement of those units into a
+//! target that does not exist yet.
 
 pub mod choose;
 pub mod fill;
+pub mod place;
 pub mod source;
 pub mod store;
 
@@ -14,6 +17,7 @@ use crate::state::StateError;
 pub enum Error {
     State(StateError),
     DiskFull(String),
+    Failed(String),
 }
 
 impl fmt::Display for Error {
@@ -21,6 +25,7 @@ impl fmt::Display for Error {
         match self {
             Error::State(err) => write!(f, "{err}"),
             Error::DiskFull(why) => f.write_str(&disk_full(why)),
+            Error::Failed(why) => f.write_str(why),
         }
     }
 }
@@ -33,7 +38,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::State(err) => Some(err),
-            Error::DiskFull(_) => None,
+            Error::DiskFull(_) | Error::Failed(_) => None,
         }
     }
 }

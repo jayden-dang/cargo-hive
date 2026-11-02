@@ -2,6 +2,7 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -9,10 +10,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cargo_hive::cargo_target::{Owner, TargetDir};
 use cargo_hive::fingerprint::read_profile;
 use cargo_hive::gc::{CRATE_DIR_CAP, DEPS_CAP};
+use cargo_hive::liveness::unit_timestamp;
 use cargo_hive::platform::{Fs, LockKind, LockState};
 use cargo_hive::seed::fill::FillReport;
+use cargo_hive::seed::place::{self, PlaceReport};
 use cargo_hive::seed::source::{live_registry_units, unit_files, SourceUnit};
 use cargo_hive::seed::store::{self, tag_path};
+use cargo_hive::seed::Error;
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
 use common::registry_fixture::{cargo_json, RegistryRepo};
@@ -1243,4 +1247,662 @@ fn two_targets_with_one_toolchain_share_one_row() {
     assert!(second.entries_held >= 1, "{second:?}");
     assert!(second.findings.is_empty(), "{:?}", second.findings);
     assert_eq!(toolchains(&lib), BTreeMap::from([(text, value)]));
+}
+
+const PLACE_WINDOW: Duration = Duration::from_secs(7 * 86_400);
+
+struct Filled {
+    built: Built,
+    rows: Vec<store::Row>,
+}
+
+fn filled() -> Filled {
+    let built = built();
+    let recording = Recording::over_real();
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let report = fill_in(&built.hive, &lib, &built.target, &|| false);
+    assert!(report.entries_added >= 2, "{report:?}");
+    let rows = store_rows(&lib);
+    assert!(rows.len() >= 2, "place needs more than one chosen unit");
+    Filled { built, rows }
+}
+
+fn run_place(
+    filled: &Filled,
+    checkout: &Path,
+    units: &[store::Row],
+    dir_cap: usize,
+    recording: &Recording,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<PlaceReport, Error> {
+    let lib = narrowed(&filled.built.hive, recording.fs(), &filled.built.repo.main);
+    place::place(&lib.ctx(), checkout, units, PLACE_WINDOW, dir_cap, cancel)
+}
+
+fn file_bodies(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
+    fn walk(
+        dir: &Path,
+        root: &Path,
+        out: &mut BTreeMap<PathBuf, (Vec<u8>, SystemTime)>,
+        depth: usize,
+    ) {
+        assert!(depth < 64, "walk bound hit");
+        let mut seen = 0usize;
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound && depth == 0 => return,
+            Err(err) => panic!("{}: {err}", dir.display()),
+        };
+        for entry in entries {
+            seen += 1;
+            assert!(seen < 100_000, "walk bound hit");
+            let path = entry.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                walk(&path, root, out, depth + 1);
+                continue;
+            }
+            if !meta.is_file() {
+                continue;
+            }
+            assert!(
+                meta.len() <= 32 * 1024 * 1024,
+                "{} is larger than 32 MiB",
+                path.display()
+            );
+            let rel = path.strip_prefix(root).unwrap().to_path_buf();
+            out.insert(
+                rel,
+                (std::fs::read(&path).unwrap(), meta.modified().unwrap()),
+            );
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(root, root, &mut out, 0);
+    out
+}
+
+fn first_file_rel(root: &Path) -> PathBuf {
+    fn walk(dir: &Path, root: &Path, depth: usize) -> Option<PathBuf> {
+        assert!(depth < 64, "walk bound hit");
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .collect();
+        assert!(entries.len() < 100_000, "walk bound hit");
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                if let Some(found) = walk(&path, root, depth + 1) {
+                    return Some(found);
+                }
+            } else if meta.is_file() {
+                return Some(path.strip_prefix(root).unwrap().to_path_buf());
+            }
+        }
+        None
+    }
+    walk(root, root, 0).expect("the entry has a file")
+}
+
+fn open_state(filled: &Filled) -> cargo_hive::state::State {
+    cargo_hive::state::State::open_at(filled.built.hive.home.path.clone()).unwrap()
+}
+
+fn rewrite_entry(state: &cargo_hive::state::State, row: &store::Row, files: &[&str]) {
+    let root = store::entry_dir(state, row);
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(files.len() < 100_000, "walk bound hit");
+    for rel in files {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, rel.as_bytes()).unwrap();
+    }
+}
+
+fn names_path(report: &PlaceReport, path: &Path) {
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let (_, found, detail) = &report.findings[0];
+    assert_eq!(found.as_deref(), Some(path), "{detail}");
+    assert!(detail.contains(&path.display().to_string()), "{detail}");
+}
+
+fn no_forbidden_writes(log: &[String], target: &Path) {
+    for line in log {
+        let rest = line
+            .strip_prefix("write_file ")
+            .or_else(|| line.strip_prefix("hardlink "))
+            .or_else(|| line.strip_prefix("set_mtime "))
+            .or_else(|| line.strip_prefix("compress "))
+            .or_else(|| line.strip_prefix("remove "));
+        let Some(rest) = rest else {
+            continue;
+        };
+        assert!(
+            !Path::new(rest).starts_with(target),
+            "place wrote the target by a means other than create_dir or clone_file: {line}"
+        );
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Hold {
+    Dir(BTreeMap<PathBuf, (Vec<u8>, SystemTime)>),
+    File(Vec<u8>, SystemTime),
+    Link(PathBuf),
+}
+
+fn hold(path: &Path) -> Hold {
+    let meta = std::fs::symlink_metadata(path).unwrap();
+    if meta.file_type().is_symlink() {
+        Hold::Link(std::fs::read_link(path).unwrap())
+    } else if meta.is_dir() {
+        Hold::Dir(snapshot(path))
+    } else {
+        Hold::File(std::fs::read(path).unwrap(), meta.modified().unwrap())
+    }
+}
+
+#[test]
+fn an_empty_set_creates_nothing() {
+    let filled = filled();
+    let work = filled.built.repo.worktree("empty");
+    let recording = Recording::over_real();
+    let report = run_place(&filled, &work, &[], CRATE_DIR_CAP, &recording, &|| false).unwrap();
+    assert!(!work.join("target").exists());
+    assert!(report.placed.is_empty());
+    assert_eq!(report.cloned, 0);
+    assert_eq!(report.existing, 0);
+    assert_eq!(report.failed, 0);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert!(!report.cancelled);
+    assert!(
+        recording
+            .log()
+            .iter()
+            .all(|line| !line.starts_with("create_dir ") && !line.starts_with("clone ")),
+        "{:?}",
+        recording.log()
+    );
+}
+
+#[test]
+fn an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it() {
+    let filled = filled();
+    let work = filled.built.repo.worktree("fresh");
+    let recording = Recording::over_real();
+    let report = run_place(
+        &filled,
+        &work,
+        &filled.rows,
+        CRATE_DIR_CAP,
+        &recording,
+        &|| false,
+    )
+    .unwrap();
+    let target = work.join("target");
+    assert!(
+        cargo_hive::cargo_target::identify(&target).is_some_and(|found| found.is_ok()),
+        "identify accepts the seeded target before any build"
+    );
+    let state = open_state(&filled);
+    let mut expect = file_bodies(&store::entry_dir(&state, &filled.rows[0]));
+    for row in filled.rows.iter().skip(1) {
+        expect.extend(file_bodies(&store::entry_dir(&state, row)));
+    }
+    let tag = tag_path(&state);
+    let tag_meta = std::fs::symlink_metadata(&tag).unwrap();
+    expect.insert(
+        PathBuf::from("CACHEDIR.TAG"),
+        (std::fs::read(&tag).unwrap(), tag_meta.modified().unwrap()),
+    );
+    assert_eq!(file_bodies(&target), expect);
+    assert_eq!(report.cloned, filled.rows.len() as u64, "{report:?}");
+    assert_eq!(report.placed.len() as u64, report.cloned);
+    assert_eq!(report.existing, 0);
+    assert_eq!(report.failed, 0);
+    assert_eq!(report.outside_window, 0, "{report:?}");
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert!(!report.cancelled);
+    let meta = std::fs::symlink_metadata(&target).unwrap();
+    assert_eq!(report.target_identity, Some((meta.dev(), meta.ino())));
+    for row in &filled.rows {
+        let unit = report
+            .placed
+            .iter()
+            .find(|unit| unit.dir_name == row.name_meta && unit.rel_profile == row.rel_profile)
+            .unwrap_or_else(|| panic!("missing {}", row.name_meta));
+        let entry = store::entry_dir(&state, row);
+        let bodies = file_bodies(&entry);
+        let deps = bodies
+            .keys()
+            .filter(|rel| {
+                rel.components()
+                    .any(|component| component.as_os_str() == "deps")
+            })
+            .count() as u32;
+        let has_build = bodies.keys().any(|rel| {
+            rel.components()
+                .any(|component| component.as_os_str() == "build")
+        });
+        assert_eq!(unit.deps_files, deps, "{}", row.name_meta);
+        assert_eq!(unit.has_build, has_build, "{}", row.name_meta);
+        let stored = unit_timestamp(&entry.join(&row.rel_profile), &row.name_meta, &row.kind);
+        let expected_path = unit_timestamp(Path::new(&row.rel_profile), &row.name_meta, &row.kind);
+        match std::fs::symlink_metadata(&stored) {
+            Ok(meta) => {
+                let (path, ns) = unit.stamp.clone().unwrap_or_else(|| {
+                    panic!("{} has a store stamp but no recorded stamp", row.name_meta)
+                });
+                assert_eq!(path, expected_path);
+                let expect_ns = meta
+                    .modified()
+                    .unwrap()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
+                assert_eq!(ns, expect_ns, "{}", row.name_meta);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                assert!(unit.stamp.is_none(), "{}", row.name_meta);
+            }
+            Err(err) => panic!("{}: {err}", stored.display()),
+        }
+    }
+}
+
+#[test]
+fn an_existing_path_gets_nothing_whatever_it_holds() {
+    let filled = filled();
+    for name in ["empty-dir", "plain-file", "dangling-link"] {
+        let work = filled.built.repo.worktree(name);
+        let target = work.join("target");
+        match name {
+            "empty-dir" => std::fs::create_dir(&target).unwrap(),
+            "plain-file" => std::fs::write(&target, b"keep").unwrap(),
+            "dangling-link" => {
+                std::os::unix::fs::symlink(work.join("missing"), &target).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = hold(&target);
+        let recording = Recording::over_real();
+        let report = run_place(
+            &filled,
+            &work,
+            &filled.rows,
+            CRATE_DIR_CAP,
+            &recording,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(hold(&target), before, "{name}");
+        assert_eq!(report.cloned, 0, "{name}");
+        assert_eq!(report.existing, 0, "{name}");
+        assert_eq!(report.failed, 0, "{name}");
+        assert!(report.placed.is_empty(), "{name}");
+        names_path(&report, &target);
+        no_forbidden_writes(&recording.log(), &target);
+    }
+}
+
+#[test]
+fn a_missing_parent_creates_nothing() {
+    let filled = filled();
+    let work = filled.built.repo.worktree("missing-parent");
+    std::fs::create_dir_all(work.join(".cargo")).unwrap();
+    std::fs::write(
+        work.join(".cargo/config.toml"),
+        "[build]\ntarget-dir = \"absent-parent/target\"\n",
+    )
+    .unwrap();
+    let recording = Recording::over_real();
+    let report = run_place(
+        &filled,
+        &work,
+        &filled.rows,
+        CRATE_DIR_CAP,
+        &recording,
+        &|| false,
+    )
+    .unwrap();
+    let target = work.join("absent-parent/target");
+    assert!(!work.join("absent-parent").exists());
+    assert_eq!(report.cloned, 0);
+    assert!(report.placed.is_empty());
+    names_path(&report, &target);
+}
+
+#[test]
+fn a_root_with_no_cargo_toml_and_a_split_build_directory_clone_nothing() {
+    let filled = filled();
+    let bare = filled.built.repo.scratch.path.join("not-a-crate");
+    std::fs::create_dir_all(&bare).unwrap();
+    std::fs::write(bare.join("note"), b"leave me").unwrap();
+    let recording = Recording::over_real();
+    let unresolved = run_place(
+        &filled,
+        &bare,
+        &filled.rows,
+        CRATE_DIR_CAP,
+        &recording,
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(bare.join("note")).unwrap(), b"leave me");
+    assert!(!bare.join("target").exists());
+    assert_eq!(unresolved.cloned, 0);
+    assert!(unresolved.placed.is_empty());
+    names_path(&unresolved, &bare);
+
+    let work = filled.built.repo.worktree("split");
+    let build_out = work.join("build-out");
+    std::fs::create_dir_all(work.join(".cargo")).unwrap();
+    std::fs::write(
+        work.join(".cargo/config.toml"),
+        format!("[build]\nbuild-dir = \"{}\"\n", build_out.display()),
+    )
+    .unwrap();
+    let split = run_place(
+        &filled,
+        &work,
+        &filled.rows,
+        CRATE_DIR_CAP,
+        &recording,
+        &|| false,
+    )
+    .unwrap();
+    assert!(!work.join("target").exists());
+    assert!(!build_out.exists());
+    assert_eq!(split.cloned, 0);
+    assert!(split.placed.is_empty());
+    assert_eq!(split.findings.len(), 1, "{:?}", split.findings);
+    let (_, path, detail) = &split.findings[0];
+    assert_eq!(
+        path.as_deref(),
+        Some(work.join("target").as_path()),
+        "{detail}"
+    );
+    assert!(
+        detail.contains(&build_out.display().to_string())
+            && detail.contains(&work.join("target").display().to_string()),
+        "{detail}"
+    );
+}
+
+#[test]
+fn only_create_dir_and_clone_write_into_the_target() {
+    let filled = filled();
+    let work = filled.built.repo.worktree("writes");
+    let recording = Recording::over_real();
+    let report = run_place(
+        &filled,
+        &work,
+        &filled.rows,
+        CRATE_DIR_CAP,
+        &recording,
+        &|| false,
+    )
+    .unwrap();
+    assert!(report.cloned >= 1, "{report:?}");
+    let target = work.join("target");
+    let log = recording.log();
+    no_forbidden_writes(&log, &target);
+    assert!(
+        log.iter().any(|line| line.starts_with("create_dir ")
+            && Path::new(line.strip_prefix("create_dir ").unwrap()).starts_with(&target)),
+        "{log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|line| line.starts_with("clone ") && line.contains(&*target.to_string_lossy())),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_clone_finding_an_existing_file_leaves_it_and_counts_it() {
+    let filled = filled();
+    let state = open_state(&filled);
+    let row = &filled.rows[0];
+    let rel = first_file_rel(&store::entry_dir(&state, row));
+    let work = filled.built.repo.worktree("existing-file");
+    let dst = work.join("target").join(&rel);
+    let recording = Recording::over_real().plant_before_clone(&dst, b"already-there");
+    let report = run_place(
+        &filled,
+        &work,
+        &filled.rows,
+        CRATE_DIR_CAP,
+        &recording,
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&dst).unwrap(), b"already-there");
+    assert_eq!(report.existing, 1, "{report:?}");
+    assert_eq!(report.failed, 0, "{report:?}");
+    assert_eq!(report.cloned, filled.rows.len() as u64 - 1, "{report:?}");
+    assert_eq!(report.placed.len() as u64, report.cloned);
+    assert!(report
+        .placed
+        .iter()
+        .all(|unit| unit.dir_name != row.name_meta || unit.rel_profile != row.rel_profile));
+}
+
+#[test]
+fn a_clone_failure_counts_the_unit_and_continues() {
+    let filled = filled();
+    let state = open_state(&filled);
+    let row = &filled.rows[0];
+    let rel = first_file_rel(&store::entry_dir(&state, row));
+    let work = filled.built.repo.worktree("clone-fails");
+    let dst = work.join("target").join(&rel);
+    let recording = Recording::over_real().fail_clone(&dst, libc::EIO);
+    let report = run_place(
+        &filled,
+        &work,
+        &filled.rows,
+        CRATE_DIR_CAP,
+        &recording,
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(report.failed, 1, "{report:?}");
+    assert_eq!(report.cloned, filled.rows.len() as u64 - 1, "{report:?}");
+    assert_eq!(report.existing, 0);
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let (_, path, detail) = &report.findings[0];
+    assert_eq!(path.as_deref(), Some(dst.as_path()), "{detail}");
+    assert!(
+        detail.contains(&dst.display().to_string())
+            && (detail.contains("Input/output error") || detail.contains("os error 5")),
+        "{detail}"
+    );
+    assert!(report
+        .placed
+        .iter()
+        .all(|unit| unit.dir_name != row.name_meta || unit.rel_profile != row.rel_profile));
+    assert!(report.placed.len() as u64 >= 1);
+}
+
+#[test]
+fn a_full_disk_is_an_error_not_a_finding() {
+    let filled = filled();
+    let state = open_state(&filled);
+    let rel = first_file_rel(&store::entry_dir(&state, &filled.rows[0]));
+    let work = filled.built.repo.worktree("full-disk");
+    let dst = work.join("target").join(rel);
+    let recording = Recording::over_real().fail_clone(&dst, libc::ENOSPC);
+    let err = run_place(
+        &filled,
+        &work,
+        &filled.rows,
+        CRATE_DIR_CAP,
+        &recording,
+        &|| false,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::DiskFull(_)), "{err}");
+    assert!(err.to_string().contains("disk is full"), "{err}");
+}
+
+#[test]
+fn a_cancel_stops_before_the_next_unit() {
+    let filled = filled();
+    let work = filled.built.repo.worktree("cancel");
+    let target = work.join("target");
+    let cancel = || target.join("debug").is_dir();
+    let recording = Recording::over_real();
+    let report = run_place(
+        &filled,
+        &work,
+        &filled.rows,
+        CRATE_DIR_CAP,
+        &recording,
+        &cancel,
+    )
+    .unwrap();
+    assert!(report.cancelled, "{report:?}");
+    assert!(report.cloned >= 1, "{report:?}");
+    assert!(
+        report.cloned < filled.rows.len() as u64,
+        "cloned {} of {}",
+        report.cloned,
+        filled.rows.len()
+    );
+}
+
+#[test]
+fn an_entry_at_its_directory_cap_clones_and_one_past_it_fails_that_unit() {
+    let filled = filled();
+    let state = open_state(&filled);
+    let wide = filled.rows[0].clone();
+    let narrow = filled.rows[1].clone();
+    rewrite_entry(&state, &wide, &["debug/a", "debug/b", "debug/c"]);
+    rewrite_entry(&state, &narrow, &["debug/only"]);
+    let units = [wide, narrow];
+    let fits = filled.built.repo.worktree("cap-fits");
+    let recording = Recording::over_real();
+    let at_cap = run_place(&filled, &fits, &units, 3, &recording, &|| false).unwrap();
+    assert_eq!(at_cap.cloned, 2, "{at_cap:?}");
+    assert_eq!(at_cap.failed, 0, "{at_cap:?}");
+    assert!(at_cap.findings.is_empty(), "{:?}", at_cap.findings);
+    for name in ["debug/a", "debug/b", "debug/c", "debug/only"] {
+        assert_eq!(
+            std::fs::read(fits.join("target").join(name)).unwrap(),
+            name.as_bytes(),
+            "{name}"
+        );
+    }
+    let past = filled.built.repo.worktree("cap-past");
+    let over = run_place(&filled, &past, &units, 2, &recording, &|| false).unwrap();
+    assert_eq!(over.failed, 1, "{over:?}");
+    assert_eq!(over.cloned, 1, "{over:?}");
+    assert_eq!(over.findings.len(), 1, "{:?}", over.findings);
+    let (_, _, detail) = &over.findings[0];
+    assert!(detail.contains("more than 2"), "{detail}");
+    let target = past.join("target");
+    assert_eq!(
+        std::fs::read(target.join("debug/only")).unwrap(),
+        b"debug/only"
+    );
+    for name in ["debug/a", "debug/b", "debug/c"] {
+        assert!(
+            !target.join(name).exists(),
+            "{name} was cloned past the cap"
+        );
+    }
+}
+
+#[test]
+fn an_entry_path_with_a_parent_component_is_refused() {
+    let filled = filled();
+    let state = open_state(&filled);
+    let mut row = filled.rows[0].clone();
+    rewrite_entry(&state, &row, &["leaf"]);
+    row.rel_profile = PathBuf::from("../escape");
+    let work = filled.built.repo.worktree("escape");
+    let recording = Recording::over_real();
+    let report = run_place(&filled, &work, &[row], CRATE_DIR_CAP, &recording, &|| false).unwrap();
+    assert_eq!(report.cloned, 0, "{report:?}");
+    assert_eq!(report.failed, 1, "{report:?}");
+    assert!(report.placed.is_empty());
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let (_, _, detail) = &report.findings[0];
+    assert!(
+        detail.contains("..") && detail.contains("escape"),
+        "{detail}"
+    );
+    assert!(!work.join("escape").exists());
+    assert!(!work.join("target").join("leaf").exists());
+}
+
+#[test]
+fn units_outside_the_window_are_counted() {
+    let filled = filled();
+    let state = open_state(&filled);
+    let row = &filled.rows[0];
+    let stored = unit_timestamp(
+        &store::entry_dir(&state, row).join(&row.rel_profile),
+        &row.name_meta,
+        &row.kind,
+    );
+    assert!(
+        stored.is_file(),
+        "the fixture has a stamp at {}",
+        stored.display()
+    );
+    let old = SystemTime::now() - Duration::from_secs(40 * 86_400);
+    common::cargo_fixture::set_mtime(&stored, old);
+    let expected_ns = std::fs::symlink_metadata(&stored)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    let mut outside = 0u64;
+    for row in &filled.rows {
+        let stamp = unit_timestamp(
+            &store::entry_dir(&state, row).join(&row.rel_profile),
+            &row.name_meta,
+            &row.kind,
+        );
+        match std::fs::symlink_metadata(&stamp) {
+            Ok(meta) => {
+                let modified = meta.modified().unwrap();
+                let aged = SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or(Duration::ZERO);
+                if aged > PLACE_WINDOW {
+                    outside += 1;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => outside += 1,
+            Err(err) => panic!("{}: {err}", stamp.display()),
+        }
+    }
+    assert!(outside >= 1, "the backdated stamp is outside the window");
+    let work = filled.built.repo.worktree("window");
+    let recording = Recording::over_real();
+    let report = run_place(
+        &filled,
+        &work,
+        &filled.rows,
+        CRATE_DIR_CAP,
+        &recording,
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(report.outside_window, outside, "{report:?}");
+    assert_eq!(report.cloned, filled.rows.len() as u64, "{report:?}");
+    let unit = report
+        .placed
+        .iter()
+        .find(|unit| unit.dir_name == row.name_meta)
+        .unwrap();
+    let (_, ns) = unit.stamp.clone().unwrap();
+    assert_eq!(ns, expected_ns);
 }

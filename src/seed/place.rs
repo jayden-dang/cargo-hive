@@ -1,0 +1,417 @@
+//! Clones chosen store entries into a checkout whose Cargo target does not exist yet.
+//! An empty set creates nothing. A target path that already exists, a missing parent,
+//! or a build directory that is not the target directory is one finding and clones nothing.
+//! Each file is cloned on its own, `deps/` then `build/` then `.fingerprint/`, and only
+//! through `create_dir` and `clone_file`.
+
+use std::collections::HashSet;
+use std::io;
+use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::cargo_target;
+use crate::liveness;
+use crate::plan_tier::Ctx;
+use crate::platform::{EntryKind, Fs};
+use crate::seed::store::{self, Row};
+use crate::size::MAX_DEPTH;
+
+use super::Error;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeededUnit {
+    pub rel_profile: PathBuf,
+    pub dir_name: String,
+    pub stamp: Option<(PathBuf, u64)>,
+    pub has_build: bool,
+    pub deps_files: u32,
+}
+
+#[derive(Debug, Default)]
+pub struct PlaceReport {
+    pub placed: Vec<SeededUnit>,
+    pub cloned: u64,
+    pub existing: u64,
+    pub failed: u64,
+    pub outside_window: u64,
+    pub bytes_not_shared: Option<u64>,
+    pub store_bytes: Option<u64>,
+    pub target_identity: Option<(u64, u64)>,
+    pub findings: Vec<(String, Option<PathBuf>, String)>,
+    pub unmeasured: Vec<(String, String)>,
+    pub cancelled: bool,
+}
+
+enum Stop {
+    Full(String),
+    Failed(String),
+}
+
+pub fn place(
+    ctx: &Ctx<'_>,
+    checkout: &Path,
+    units: &[Row],
+    window: Duration,
+    dir_cap: usize,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<PlaceReport, Error> {
+    if units.is_empty() {
+        return Ok(PlaceReport::default());
+    }
+    let mut report = PlaceReport::default();
+    let resolved = match cargo_target::resolve(checkout, cancel) {
+        Ok(resolved) => resolved,
+        Err(reason) => {
+            report.findings.push((
+                "target.unresolved".to_string(),
+                Some(checkout.to_path_buf()),
+                format!(
+                    "{checkout}: {reason}; nothing was cloned",
+                    checkout = checkout.display()
+                ),
+            ));
+            return Ok(report);
+        }
+    };
+    if resolved.build_directory != resolved.target_directory {
+        report.findings.push((
+            "target.split".to_string(),
+            Some(resolved.target_directory.clone()),
+            format!(
+                "the build directory {} differs from the target directory {}; nothing was cloned",
+                resolved.build_directory.display(),
+                resolved.target_directory.display()
+            ),
+        ));
+        return Ok(report);
+    }
+    let target = resolved.target_directory;
+    match ctx.fs.create_dir(&target) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            report.findings.push((
+                "target.exists".to_string(),
+                Some(target.clone()),
+                format!(
+                    "{path} already exists; seed leaves an existing target untouched",
+                    path = target.display()
+                ),
+            ));
+            return Ok(report);
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            report.findings.push((
+                "target.missing".to_string(),
+                Some(target.clone()),
+                format!(
+                    "{path}: {err}; a parent of the target does not exist, so nothing was created",
+                    path = target.display()
+                ),
+            ));
+            return Ok(report);
+        }
+        Err(err) => return Err(io_error(&target, &err)),
+    }
+    let stat = ctx.fs.entry_stat(&target).map_err(|err| {
+        Error::Failed(format!(
+            "{path}: {err}; the new target could not be identified, so run the command again",
+            path = target.display()
+        ))
+    })?;
+    report.target_identity = Some((stat.dev, stat.ino));
+    if let Err(stop) = clone_tag(ctx.fs, ctx.state, &target) {
+        return stop.into_result(&mut report, "tag.clone", &target);
+    }
+    let mut made = HashSet::new();
+    made.insert(target.clone());
+    for row in units {
+        if cancel() {
+            report.cancelled = true;
+            break;
+        }
+        match place_unit(ctx, &target, row, window, dir_cap, &mut made) {
+            Ok(UnitOutcome::Cloned(unit, outside)) => {
+                report.cloned += 1;
+                if outside {
+                    report.outside_window += 1;
+                }
+                report.placed.push(unit);
+            }
+            Ok(UnitOutcome::Existing) => report.existing += 1,
+            Ok(UnitOutcome::Failed(path, detail)) => {
+                report.failed += 1;
+                report
+                    .findings
+                    .push(("unit.refused".to_string(), Some(path), detail));
+            }
+            Err(why) => return Err(Error::DiskFull(why)),
+        }
+    }
+    Ok(report)
+}
+
+enum UnitOutcome {
+    Cloned(SeededUnit, bool),
+    Existing,
+    Failed(PathBuf, String),
+}
+
+fn place_unit(
+    ctx: &Ctx<'_>,
+    target: &Path,
+    row: &Row,
+    window: Duration,
+    dir_cap: usize,
+    made: &mut HashSet<PathBuf>,
+) -> Result<UnitOutcome, String> {
+    if !normal_only(&row.rel_profile) {
+        return Ok(UnitOutcome::Failed(
+            target.to_path_buf(),
+            format!(
+                "{} is not a path inside the target; this unit was not cloned",
+                row.rel_profile.display()
+            ),
+        ));
+    }
+    let entry = store::entry_dir(ctx.state, row);
+    let mut files = match list_files(ctx.fs, &entry, dir_cap) {
+        Ok(files) => files,
+        Err(detail) => return Ok(UnitOutcome::Failed(entry, detail)),
+    };
+    if let Some(rel) = files.iter().find(|rel| !normal_only(rel)) {
+        return Ok(UnitOutcome::Failed(
+            target.join(rel),
+            format!(
+                "{} is not a path inside the target; this unit was not cloned",
+                rel.display()
+            ),
+        ));
+    }
+    files.sort_by(|left, right| area(left).cmp(&area(right)).then(left.cmp(right)));
+    let mut deps_files = 0u32;
+    let mut has_build = false;
+    for rel in &files {
+        let dst = target.join(rel);
+        if let Some(parent) = dst.parent() {
+            if let Err(stop) = ensure_dirs(ctx.fs, parent, target, made) {
+                return match stop {
+                    Stop::Full(why) => Err(why),
+                    Stop::Failed(detail) => Ok(UnitOutcome::Failed(dst, detail)),
+                };
+            }
+        }
+        let src = entry.join(rel);
+        match ctx.fs.clone_file(&src, &dst) {
+            Ok(()) => match area(rel) {
+                0 => deps_files = deps_files.saturating_add(1),
+                1 => has_build = true,
+                _ => {}
+            },
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                return Ok(UnitOutcome::Existing);
+            }
+            Err(err) if is_full(&err) => return Err(format!("{}: {err}", dst.display())),
+            Err(err) => {
+                let detail = format!(
+                    "{shown}: {err}; this unit was not cloned",
+                    shown = dst.display()
+                );
+                return Ok(UnitOutcome::Failed(dst, detail));
+            }
+        }
+    }
+    let stamp = read_stamp(ctx.fs, target, row);
+    let outside = stamp_outside(stamp.as_ref(), ctx.now, window);
+    Ok(UnitOutcome::Cloned(
+        SeededUnit {
+            rel_profile: row.rel_profile.clone(),
+            dir_name: row.name_meta.clone(),
+            stamp,
+            has_build,
+            deps_files,
+        },
+        outside,
+    ))
+}
+
+fn clone_tag(fs: &dyn Fs, state: &crate::state::State, target: &Path) -> Result<(), Stop> {
+    let src = store::tag_path(state);
+    let dst = target.join("CACHEDIR.TAG");
+    match fs.clone_file(&src, &dst) {
+        Ok(()) => Ok(()),
+        Err(err) if is_full(&err) => Err(Stop::Full(format!("{}: {err}", dst.display()))),
+        Err(err) => Err(Stop::Failed(format!(
+            "{}: {err}; the target tag was not cloned, so no unit was cloned",
+            dst.display()
+        ))),
+    }
+}
+
+fn list_files(fs: &dyn Fs, root: &Path, dir_cap: usize) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), PathBuf::new(), 0usize)];
+    while let Some((dir, rel, depth)) = stack.pop() {
+        if depth > MAX_DEPTH {
+            return Err(format!(
+                "{} is deeper than {MAX_DEPTH} levels; this unit was not cloned",
+                dir.display()
+            ));
+        }
+        let mut entries = fs
+            .read_dir_bounded(&dir, dir_cap)
+            .map_err(|err| format!("{err}; this unit was not cloned"))?;
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        for (name, kind) in entries {
+            let child_rel = rel.join(&name);
+            if !normal_only(&child_rel) {
+                return Err(format!(
+                    "{} is not a path inside the target; this unit was not cloned",
+                    child_rel.display()
+                ));
+            }
+            let child = dir.join(&name);
+            match kind {
+                EntryKind::Dir => stack.push((child, child_rel, depth + 1)),
+                EntryKind::File => files.push(child_rel),
+                EntryKind::Symlink | EntryKind::Other => {
+                    return Err(format!(
+                        "{} is not a regular file; this unit was not cloned",
+                        child.display()
+                    ));
+                }
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn ensure_dirs(
+    fs: &dyn Fs,
+    dir: &Path,
+    target: &Path,
+    made: &mut HashSet<PathBuf>,
+) -> Result<(), Stop> {
+    if made.contains(dir) {
+        return Ok(());
+    }
+    let mut chain = Vec::new();
+    let mut cur = dir.to_path_buf();
+    loop {
+        if cur == target || made.contains(&cur) {
+            break;
+        }
+        if chain.len() > MAX_DEPTH {
+            return Err(Stop::Failed(format!(
+                "{} is deeper than {MAX_DEPTH} levels; this unit was not cloned",
+                dir.display()
+            )));
+        }
+        let Some(parent) = cur.parent().map(Path::to_path_buf) else {
+            return Err(Stop::Failed(format!(
+                "{} is not inside {}; this unit was not cloned",
+                dir.display(),
+                target.display()
+            )));
+        };
+        chain.push(cur);
+        cur = parent;
+    }
+    for path in chain.iter().rev() {
+        match fs.create_dir(path) {
+            Ok(()) => {
+                made.insert(path.clone());
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                made.insert(path.clone());
+            }
+            Err(err) if is_full(&err) => {
+                return Err(Stop::Full(format!("{}: {err}", path.display())));
+            }
+            Err(err) => {
+                return Err(Stop::Failed(format!(
+                    "{}: {err}; this unit was not cloned",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_stamp(fs: &dyn Fs, target: &Path, row: &Row) -> Option<(PathBuf, u64)> {
+    let absolute =
+        liveness::unit_timestamp(&target.join(&row.rel_profile), &row.name_meta, &row.kind);
+    let mtime = fs.mtime(&absolute).ok()?;
+    let ns = mtime.duration_since(UNIX_EPOCH).ok()?.as_nanos();
+    let ns = u64::try_from(ns).ok()?;
+    let rel = absolute
+        .strip_prefix(target)
+        .map(Path::to_path_buf)
+        .unwrap_or(absolute);
+    Some((rel, ns))
+}
+
+fn stamp_outside(stamp: Option<&(PathBuf, u64)>, now: SystemTime, window: Duration) -> bool {
+    let Some((_, ns)) = stamp else {
+        return true;
+    };
+    let Some(mtime) = UNIX_EPOCH.checked_add(Duration::from_nanos(*ns)) else {
+        return true;
+    };
+    match now.checked_sub(window) {
+        None => false,
+        Some(cutoff) => mtime < cutoff,
+    }
+}
+
+fn normal_only(path: &Path) -> bool {
+    path.components()
+        .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn area(rel: &Path) -> u8 {
+    for component in rel.components() {
+        match component.as_os_str().to_str() {
+            Some("deps") => return 0,
+            Some("build") => return 1,
+            Some(".fingerprint") => return 2,
+            _ => {}
+        }
+    }
+    3
+}
+
+fn is_full(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(libc::ENOSPC) || err.kind() == io::ErrorKind::StorageFull
+}
+
+fn io_error(path: &Path, err: &io::Error) -> Error {
+    let detail = format!(
+        "{path}: {err}; the target was not created, so run the command again",
+        path = path.display()
+    );
+    if is_full(err) {
+        Error::DiskFull(detail)
+    } else {
+        Error::Failed(detail)
+    }
+}
+
+impl Stop {
+    fn into_result(
+        self,
+        report: &mut PlaceReport,
+        code: &str,
+        path: &Path,
+    ) -> Result<PlaceReport, Error> {
+        match self {
+            Stop::Full(why) => Err(Error::DiskFull(why)),
+            Stop::Failed(detail) => {
+                report
+                    .findings
+                    .push((code.to_string(), Some(path.to_path_buf()), detail));
+                Ok(std::mem::take(report))
+            }
+        }
+    }
+}
