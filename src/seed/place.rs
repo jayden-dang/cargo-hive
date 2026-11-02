@@ -38,6 +38,7 @@ pub struct PlaceReport {
     pub outside_window: u64,
     pub bytes_not_shared: Option<u64>,
     pub store_bytes: Option<u64>,
+    pub target_directory: Option<PathBuf>,
     pub target_identity: Option<(u64, u64)>,
     pub findings: Vec<(String, Option<PathBuf>, String)>,
     pub unmeasured: Vec<(String, String)>,
@@ -151,6 +152,7 @@ pub fn place(
         return finish(ctx, report, &mut Added::default());
     }
     let target = resolved.target_directory;
+    report.target_directory = Some(target.clone());
     match ctx.fs.create_dir(&target) {
         Ok(()) => {}
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {

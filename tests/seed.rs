@@ -139,6 +139,26 @@ fn a_bad_window_is_refused_and_nothing_filled() {
 }
 
 #[test]
+fn a_bad_window_inside_run_is_a_refusal() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    hive.config(&format!(
+        r#"{{"secondary_roots": ["{}"], "gc_window_days": 0}}"#,
+        repo.scratch.path.display()
+    ));
+    let lane = repo.worktree("bad-window");
+    let result = run_seed(&hive, Recording::over_real(), &lane);
+    assert!(
+        result.is_err(),
+        "a bad window is a refusal, not a clone of nothing: {result:?}"
+    );
+    let err = result.as_ref().unwrap_err();
+    assert!(err.to_string().contains("gc_window_days"), "{err}");
+    assert_eq!(cargo_hive::seed::exit_code(&result), 1);
+    assert!(!lane.join("target").exists());
+}
+
+#[test]
 fn a_protected_checkout_is_refused_and_nothing_filled() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);
@@ -240,7 +260,74 @@ fn a_store_with_no_tag_clones_nothing_with_a_finding() {
         1,
         "{receipt}"
     );
+    assert_byte_names_unmeasured(&receipt);
     assert!(!tag.exists());
+    assert!(!lane.join("target").exists());
+}
+
+#[test]
+fn a_store_tag_that_cannot_be_stated_names_the_error() {
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    let repo = RegistryRepo::new(&hive);
+    let lane = repo.worktree("tag-error");
+    let store = hive.home.path.join("store");
+    fs::write(&store, b"not a directory").unwrap();
+    let tag = store.join("CACHEDIR.TAG");
+    let err = fs::symlink_metadata(&tag).expect_err("the tag cannot be stated");
+    assert_ne!(err.kind(), std::io::ErrorKind::NotFound);
+    let outcome = run_seed(&hive, Recording::over_real(), &lane).unwrap();
+    assert_eq!(
+        outcome
+            .counts
+            .get("clone_units_cloned")
+            .copied()
+            .unwrap_or(0),
+        0
+    );
+    assert!(!lane.join("target").exists());
+    let named = outcome.findings.iter().any(|(_, path, detail)| {
+        path.as_deref() == Some(tag.as_path())
+            && detail.contains(&err.to_string())
+            && !detail.contains("is missing")
+    });
+    assert!(named, "{err}; {:?}", outcome.findings);
+}
+
+#[test]
+fn an_empty_choice_clones_nothing_and_reports_why() {
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let warm = repo.worktree("warm-empty");
+    let (out, receipt) = hive.json(&["seed", warm.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    fs::remove_dir_all(warm.join("target")).unwrap();
+    let store = hive.home.path.join("store");
+    let mut removed = 0usize;
+    for entry in fs::read_dir(&store).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().is_some_and(|name| name == "CACHEDIR.TAG") {
+            continue;
+        }
+        if path.is_dir() {
+            fs::remove_dir_all(&path).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
+        removed += 1;
+    }
+    assert!(removed > 0, "the store had entries to drop");
+    assert!(store.join("CACHEDIR.TAG").is_file());
+    let _held = hold_build_locks(&hive, &repo.scratch.path);
+    let lane = repo.worktree("empty-choice");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
+    assert_eq!(receipt["counts"]["clone_units_cloned"], 0, "{receipt}");
+    let findings = receipt["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{receipt}");
+    assert_eq!(findings[0]["kind"], "units.empty", "{receipt}");
     assert!(!lane.join("target").exists());
 }
 
@@ -256,9 +343,14 @@ fn no_toolchain_row_clones_nothing_with_a_finding_and_exit_zero() {
     assert_eq!(out.status.code(), Some(0), "{receipt}");
     assert_eq!(receipt["counts"]["clone_units_cloned"], 0, "{receipt}");
     assert!(
-        !receipt["findings"].as_array().unwrap().is_empty(),
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "toolchain.missing"),
         "{receipt}"
     );
+    assert_byte_names_unmeasured(&receipt);
     let stored: serde_json::Value =
         serde_json::from_slice(&fs::read(hive.home.path.join("store.db")).unwrap()).unwrap();
     assert!(
@@ -382,6 +474,38 @@ fn compression_finishes_while_another_process_holds_the_state_lock() {
 }
 
 #[test]
+fn a_configured_target_dir_is_the_directory_seed_returns() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("custom-dir");
+    fs::create_dir_all(lane.join(".cargo")).unwrap();
+    fs::write(
+        lane.join(".cargo/config.toml"),
+        "[build]\ntarget-dir = \"custom-target\"\n",
+    )
+    .unwrap();
+    let outcome = run_seed(&hive, Recording::over_real(), &lane).unwrap();
+    let (path, (dev, ino)) = outcome
+        .target
+        .expect("seed returns the directory it created");
+    let created = lane.join("custom-target");
+    assert_eq!(path, created.canonicalize().unwrap());
+    assert_ne!(path, lane.join("target"));
+    assert!(!lane.join("target").exists());
+    let meta = fs::symlink_metadata(&created).unwrap();
+    assert_eq!((meta.st_dev(), meta.st_ino()), (dev, ino));
+    assert!(
+        outcome
+            .counts
+            .get("clone_units_cloned")
+            .copied()
+            .unwrap_or(0)
+            > 0
+    );
+}
+
+#[test]
 fn a_signal_exits_130() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);
@@ -419,6 +543,16 @@ fn a_signal_exits_130() {
         .success());
     let out = wait_within(child, Duration::from_secs(60));
     assert_eq!(out.status.code(), Some(130), "{out:?}");
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|err| {
+        panic!(
+            "seed did not print a receipt ({err}): stdout {} stderr {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(receipt["command"], "seed", "{receipt}");
+    assert_eq!(receipt["schema"], 2, "{receipt}");
+    assert_byte_names_unmeasured(&receipt);
     let _ = holder.kill();
     let _ = holder.wait();
 }
@@ -475,6 +609,13 @@ fn a_full_disk_reaches_the_caller() {
     );
     assert!(outcome.placed.is_empty());
     assert!(outcome.target.is_none());
+    for name in ["clone_bytes_not_shared", "store_bytes"] {
+        assert!(
+            outcome.unmeasured.iter().any(|(field, _)| field == name),
+            "{name} omitted from {outcome:?}"
+        );
+        assert!(!outcome.counts.contains_key(name), "{outcome:?}");
+    }
 }
 
 #[test]
@@ -515,6 +656,19 @@ fn seed_runs_no_cargo_subcommand_but_metadata() {
         );
     }
     assert!(lines > 0, "seed ran no cargo at all");
+}
+
+fn assert_byte_names_unmeasured(receipt: &serde_json::Value) {
+    let fields: Vec<_> = receipt["unmeasured"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["field"].as_str())
+        .collect();
+    for name in ["clone_bytes_not_shared", "store_bytes"] {
+        assert!(fields.contains(&name), "{name} omitted from {receipt}");
+        assert!(receipt["counts"].get(name).is_none(), "{receipt}");
+    }
 }
 
 fn quiet_cache(hive: &Hive) {
