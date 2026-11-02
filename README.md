@@ -4,8 +4,9 @@ Cargo build artifacts across agent worktrees on macOS, with measured receipts.
 
 It registers repositories, lists their checkouts and Cargo target dirs, and says how
 hive may treat each one. `cargo hive gc` deletes superseded rustc incremental sessions
-and leftover rustc temp dirs, each under its owner's lock. It compresses and seeds
-nothing yet.
+and leftover rustc temp dirs, each under its owner's lock. `cargo hive gc --plan` writes
+a plan and deletes nothing. `cargo hive apply` deletes that plan's paths for every class.
+It compresses and seeds nothing yet.
 
 ## Install from scratch
 
@@ -46,6 +47,8 @@ codex plugin add cargo-hive@cargo-hive
 | `cargo hive repo list` | Lists registered repositories and their root commits |
 | `cargo hive status [<repo>…] [--no-sizes]` | Lists checkouts (protected, secondary, missing) and Cargo target dirs (owner or orphan candidate, size, units and edges) |
 | `cargo hive gc [<repo>…] [--dry-run]` | Deletes superseded incremental sessions and `deps/rustc*`/`rmeta*` temp dirs. Freed bytes are counted per inode and reported as totals. `--dry-run` deletes nothing |
+| `cargo hive gc --plan [<repo>…]` | Writes a plan and deletes nothing |
+| `cargo hive apply <id>` | Deletes the plan's paths for every class |
 | `cargo hive explain [<repo>…] [-n N]` | Reports copies of one crate, feature splits, and units whose last compile failed. `-n` defaults to 10; `-n 0` shows every group |
 
 A failure of check (g) disables failed-unit reporting only.
@@ -74,7 +77,7 @@ inside Cargo target dirs:
 - It installs no Cargo configuration, environment variable, rustc wrapper, cargo shim or
   hook. `cargo` and rust-analyzer build exactly as without hive.
 - It writes only under `~/.hive/` and doctor's temporary directory. Outside those, it
-  only deletes, through `gc`, inside Cargo target dirs.
+  only deletes, through `gc` and `apply`, inside Cargo target dirs.
 - It reads Cargo's internal `.fingerprint/` files only when their exact format is known
   (docs/adr/0001). Anything else is reported as unsupported.
 
@@ -82,7 +85,9 @@ inside Cargo target dirs:
 
 None is required. `~/.hive/config.json` may set `secondary_roots`, which defaults to
 `/private/tmp` and `$TMPDIR`, and `cache_roots`, which defaults to
-`~/.cache/cargo-target`. A key you set replaces its default list.
+`~/.cache/cargo-target`. A key you set replaces its default list. `gc_window_days` is a
+whole number of days from 1 to 365 and defaults to 7; `gc --plan` records it and `apply`
+uses that recorded window.
 
 `HIVE_HOME` relocates the state directory. It exists for tests only.
 

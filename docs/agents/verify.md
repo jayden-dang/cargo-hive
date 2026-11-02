@@ -79,6 +79,8 @@ Leave `.skills/verify/`.
 | `status` — checkouts | `cargo hive status <repo>` | `counts.checkouts`, `protected`, `secondary`; a `checkout.protected` finding for the main |
 | `status` — target dirs | `cargo hive status <repo>` | `counts.targets = 1`, `owned = 1`, `bytes > 0`; a `target.owned` finding; `snapshot.json` written |
 | `gc` | `cargo hive gc [<repo>…] [--dry-run]` | Receipt counts (`sessions_deleted`, `freed_bytes`, …); dry-run changes nothing; cancel exits 130 |
+| `gc --plan` | `cargo hive gc --plan [<repo>…]` | Writes a plan and deletes nothing. `gc_window_days` in `config.json` is a whole number from 1 to 365 and defaults to 7 |
+| `apply` | `cargo hive apply <id>` | Deletes the plan's paths for every class |
 | Receipt log | any command | Each command appends one line to `$HIVE_HOME/receipts/<date>.jsonl` |
 
 ### doctor
@@ -120,6 +122,22 @@ Leave `.skills/verify/`.
 - **Driving it with the shell:** `"$HIVE" gc "$SCRATCH/app" --json > gc.json`; assert exit 0 and counts such as `sessions_deleted` / `freed_bytes`. A dry run (`--dry-run`) leaves the target tree unchanged. Cancel returns exit 130 and still appends a receipt whose `command` is `gc`.
 - **Gotchas:** gc refuses until doctor results for the active toolchain allow both deletion and fingerprint reading, which includes the current lock check; held session or build locks are skipped (`skipped_held`).
 - **Persist check:** presentational for deletions; the receipt line is the persisted record (see Receipt log). A dry run must leave `$SCRATCH/app/target` byte-identical to before.
+
+### gc --plan
+
+- **Sub-features:** one stored plan per checkout class; `gc_window_days` in `config.json`, a whole number from 1 to 365, default 7, recorded on the plan.
+- **How to get to it (user POV):** `cargo hive gc --plan <repo>` after a build has left dead units.
+- **Driving it with the shell:** `"$HIVE" gc --plan "$SCRATCH/app" --json > plan.json`; assert exit 0. The receipt lists plan ids. Nothing under `$SCRATCH/app/target` changes.
+- **Gotchas:** planning does not read `snapshot.json`. A window outside 1 to 365 is a refusal.
+- **Persist check:** re-read `$HIVE_HOME/plans.json`; it holds the plan ids from the receipt. The target tree is byte-identical to before.
+
+### apply
+
+- **Sub-features:** deletes the plan's paths for every class. One id, consumed once.
+- **How to get to it (user POV):** `cargo hive apply <id>` with an id from `gc --plan`.
+- **Driving it with the shell:** `"$HIVE" apply "$ID" --json > apply.json`; assert exit 0 and `plans[0].outcome` is `applied` when the plan still matches the tree.
+- **Gotchas:** a second apply of the same id is refused. The plan's recorded `gc_window_days` is what this run uses.
+- **Persist check:** the planned paths are gone; `$HIVE_HOME/plans.json` shows that id consumed. The receipt line is the persisted record (see Receipt log).
 
 ### Receipt log
 
