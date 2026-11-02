@@ -1,6 +1,6 @@
 # Roadmap: cargo-hive
 
-Status: Draft
+Status: Approved
 Date: 2026-11-02
 
 <!--
@@ -8,8 +8,8 @@ The program layer: milestone INTENT, above any single feature and below the prod
 vision. Optional — only multi-milestone projects need it. `plan-milestones` authors it;
 `refresh-roadmap-status` derives progress from it without writing anything.
 
-This file owns intent only: outcomes, ordering, membership, dependencies, commitments,
-blockers, deferrals, goal dispositions. It never records how far a feature has got —
+This file owns intent only: outcomes, priority, ordering, membership, dependencies,
+commitments, blockers, deferrals, goal dispositions. It never records how far a feature has got —
 that lives once, as `Status:` in the feature's own requirements.md, mirrored into its
 docs/specs/INDEX.md row. Every heading below is a REQUIRED slot — fill it or write
 `None`.
@@ -32,14 +32,29 @@ defective when any of these does not hold:
       once, live, and neither the item itself nor its own milestone; and following
       After edges (an item without After waiting on the member above it) never
       returns to the item it left
+  S9  Focus holds two lines, Now: and Next:, each `None` or comma-separated MILE-N /
+      ROAD-N, each defined once and live; no ID appears twice across both lines; Now
+      holds at most 5 entries
+
+Focus rules:
+- PRIORITY lives only in ## Focus: the human's order of attention, first entry highest.
+  IDs only — no feature code, no status, no reason. Commitment is a separate decision
+  and stays as it is when Focus changes.
+- An entry is exactly one of MILE-N (its live members) or ROAD-N (that item alone).
+  Each entry also pulls in the items its members name directly in After:; a deeper
+  predecessor is reported, never pulled in. A ROAD-N entry is how one item runs ahead
+  of the rest of its milestone.
+- After: names only work that must exist first, and Blockers: only why an item waits.
+  Neither carries priority: an invented After edge keeps an item blocked after its real
+  predecessor is done.
 
 ID rules:
 - Grammar: **MILE-<n>** and **ROAD-<n>**, flat and repo-wide.
 - Stable from first definition. Retire by strikethrough with a reason
   (~~**MILE-3**~~ superseded by MILE-5) — never renumber, never reuse.
 - A ROAD-N keeps its ID when it moves between milestones.
-- Milestone ORDER is table row order; milestone IDENTITY is the MILE-N. Reordering the
-  table never renumbers anything.
+- Table row order is dependency order (S4), not priority; milestone IDENTITY is the
+  MILE-N. Reordering the table never renumbers anything.
 - ITEM order is the After: field, written between the slug and Surfaces:
   `- **ROAD-7** <slug> — After: ROAD-5, MILE-2 — Surfaces: ...`. It names what must
   be done before this item starts: a ROAD-N in any milestone, or a MILE-N meaning
@@ -54,8 +69,15 @@ ID rules:
 - ROAD-N is a program SLOT (intent + order + Surfaces). A feature CODE is a separate
   delivery unit. Creating a ROAD does not create a feature. Binding is the INDEX
   "Roadmap item" cell (specify-behavior only). At most one live CODE binds a ROAD (R6).
+  A ROAD delivered by changing an existing feature is bound in that feature's cell after
+  the word `amends`: `ROAD-127 amends ROAD-219`.
   Same slug language does not make the IDs the same object.
 -->
+
+## Focus
+
+**Now:** ROAD-8
+**Next:** None
 
 | ID | Milestone | Outcome | Depends-on | Commitment |
 |---|---|---|---|---|
@@ -98,15 +120,15 @@ ID rules:
 **Outcome:** A new secondary checkout (a build-in-waves lane, a native Claude worktree) is seeded from a compressed, hive-owned store, so its first build recompiles zero seeded registry units while the seeded copies add about zero private bytes, and `cargo hive bench` gives the measured cold-versus-seeded time.
 **Goals:** GOAL-2, GOAL-3, GOAL-4, GOAL-7
 **Members:**
-- **ROAD-8** store-fill-compress — After: MILE-2 — Surfaces: None — the module layout is set in design-solution. Expected components: D8 try-locked fill, D1 key, embedded Applesauce compression in the store, `store.db` (`size`, `filled_at`, `last_live_at`).
-- **ROAD-9** seed-secondary-checkouts — After: ROAD-8 — Surfaces: None — the module layout is set in design-solution. Expected components: clonefile out (D2), variant pick by newest `last_live_at`, `reused_fresh` receipts, a CLI `seed` command, the hive skill extended to cover it.
+- **ROAD-8** store-fill-compress — After: MILE-2 — Surfaces: None — the module layout is set in design-solution. Expected components: D8 try-locked fill, D1 key, embedded Applesauce compression in the store, `store.db` (`size`, `filled_at`, `last_live_at`, the repo that used each key), the learned toolchain table, the seed record written through state, clonefile out (D2), for each `<name>-<metadata hash>` the copy with the newest `last_live_at` among that repo's units, a CLI `seed` command that fills then clones, per-target counts of seeded units in `status`, freed-byte accounting per D7 for compressed clones, the hive skill extended to cover it.
 - **ROAD-10** store-gc — After: ROAD-8 — Surfaces: None — the module layout is set in design-solution. Expected components: 30-day not-live eviction, rustc generation drop, cap by freeable bytes (D7), never evicting live units, the hive skill extended to cover it.
-- **ROAD-11** bench — After: ROAD-9 — Surfaces: None — the module layout is set in design-solution. Expected components: repeated cold-versus-seeded runs reporting median, p90, spread and load average, the hive skill extended to cover it.
+- **ROAD-11** bench — After: ROAD-8 — Surfaces: None — the module layout is set in design-solution. Expected components: repeated cold-versus-seeded runs reporting median, p90, spread and load average, the hive skill extended to cover it.
 - **ROAD-13** agent-skill-pass — After: ROAD-10, ROAD-11 — Surfaces: None — the hive skill from ROAD-12 and its per-item extensions. Expected components: one read of the whole skill once all three milestones' commands exist, rewriting it to read as one guide rather than a stack of per-item additions, checked against the binary's actual flags and receipts.
 **Depends-on:** MILE-2
 **Commitment:** Planned
 **Closed:** None
-**Deferred:** None
+**Deferred:**
+- ~~**ROAD-9**~~ seed-secondary-checkouts — merged into ROAD-8 2026-11-02: a filled store gives nothing until something clones from it, so one slice delivers both and is proven against GOAL-2 and GOAL-3. ROAD-8 takes the `seed` command and the `status` counts.
 **Blockers:** None
 
 ## Goal dispositions

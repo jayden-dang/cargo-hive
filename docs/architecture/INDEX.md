@@ -12,7 +12,8 @@ judges whether a design or diff actually conforms.
 
 Rules:
 - ARCH-N is flat and repo-wide: unique forever, never renumbered, never reused.
-- Retire an invariant by strikethrough with the ID that supersedes it, in prose only.
+- Reword an invariant in place under the same ID while its promise is unchanged.
+- Retire an invariant, only when its promise changes or dies, by strikethrough, naming the ID that supersedes it or stating there is none (as ARCH-12 does), in prose only.
 - Counting methods, lock primitives and other mechanisms belong in feature designs;
   an invariant states the promise they must keep.
 
@@ -24,11 +25,11 @@ package (A1-A6, D2-D5, D7, S1-S2, C1), the F9 amendment and SPIKES.md.
 ## Invariants
 
 - **ARCH-1** Stay out of the build path: install no rustc wrapper, cargo shim, Cargo config, environment variable or hook.
-- **ARCH-2** Write outside hive's state root and doctor's temp dir only by deleting from, or cloning into, a Cargo target dir; never write a repo file or `~/.cargo`.
+- **ARCH-2** Write outside hive's state root and doctor's temp dir only by deleting from, or cloning into, a Cargo target dir, or by creating directories inside that target dir that those clones need; never write a repo file or `~/.cargo`.
 - **ARCH-3** Never replace a build artifact in place.
 - **ARCH-4** On a protected checkout, only read or delete.
 - **ARCH-5** Seed only secondary checkouts.
-- **ARCH-6** Compress only in the store, then clone out; never compress a clone.
+- **ARCH-6** Compress only in the store, before any checkout shares that file, then clone out; never compress a file a checkout already shares.
 - **ARCH-7** Classify every checkout by the C1 rules, and treat anything unclassifiable as protected.
 - **ARCH-8** Take operation scope from arguments or a plan, never from the current directory.
 - **ARCH-9** Accept Cargo fingerprint files only in a known exact format signature; refuse to act on any other shape.
