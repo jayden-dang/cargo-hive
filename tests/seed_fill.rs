@@ -635,6 +635,7 @@ fn planted_unresolved() -> Planted {
         ),
     )
     .unwrap();
+    plant_rustc_info(&target_path, &repo);
     let profile_report = read_profile(&profile);
     assert!(
         matches!(
@@ -1019,4 +1020,227 @@ fn a_file_that_is_not_regular_when_cloned_fills_nothing_for_that_unit() {
     assert!(!rows.is_empty(), "the other units are still filled");
     assert_eq!(std::fs::read(&outside).unwrap(), b"not-for-the-store");
     assert!(extra.symlink_metadata().unwrap().file_type().is_symlink());
+}
+
+fn toolchains(lib: &LibCtx) -> BTreeMap<String, u64> {
+    store::read(&lib.state).unwrap().toolchains
+}
+
+fn unit_json_path(target: &Path, unit: &SourceUnit) -> PathBuf {
+    target
+        .join(&unit.rel_profile)
+        .join(".fingerprint")
+        .join(&unit.dir_name)
+        .join(format!("{}.json", unit.stem))
+}
+
+fn plant_rustc_info(target: &Path, checkout: &Path) {
+    let text = cargo_hive::doctor::resolve_toolchain(checkout)
+        .unwrap()
+        .version_text;
+    let body = serde_json::json!({
+        "outputs": {
+            "version": {"stdout": text, "stderr": ""},
+            "probe": {"stdout": "lib___.rlib\n", "stderr": ""}
+        }
+    });
+    std::fs::write(
+        target.join(".rustc_info.json"),
+        serde_json::to_string(&body).unwrap(),
+    )
+    .unwrap();
+}
+
+fn reread(target: &mut TargetDir) {
+    target.profiles = target
+        .profiles
+        .iter()
+        .map(|profile| read_profile(&profile.path))
+        .collect();
+}
+
+fn one_toolchain_finding(report: &FillReport, target: &Path) {
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let (_, path, detail) = &report.findings[0];
+    assert_eq!(path.as_deref(), Some(target));
+    assert!(detail.contains(&target.display().to_string()), "{detail}");
+}
+
+#[test]
+fn a_clean_target_writes_a_row_matching_its_toolchain() {
+    let built = built();
+    let units = registry_units(&built.hive, &built.target);
+    let value = units[0].toolchain_value;
+    assert!(
+        units.iter().all(|unit| unit.toolchain_value == value),
+        "a clean target's units share one toolchain value"
+    );
+    let text = cargo_hive::doctor::resolve_toolchain(&built.repo.main)
+        .unwrap()
+        .version_text;
+    assert_eq!(
+        cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main).unwrap(),
+        (text.clone(), value)
+    );
+    let recording = Recording::over_real();
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let report = fill_in(&built.hive, &lib, &built.target, &|| false);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert!(report.entries_added >= 1, "{report:?}");
+    assert_eq!(
+        toolchains(&lib),
+        BTreeMap::from([(text, value)]),
+        "the table key is the checkout's version text and the value is the units'"
+    );
+}
+
+#[test]
+fn a_target_with_two_toolchain_values_writes_no_row_and_one_finding() {
+    let built = built();
+    let units = registry_units(&built.hive, &built.target);
+    let value = units[0].toolchain_value;
+    assert!(units.iter().all(|unit| unit.toolchain_value == value));
+    let json = unit_json_path(&built.target_path, &units[0]);
+    let raw = std::fs::read_to_string(&json).unwrap();
+    let mut parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    parsed["rustc"] = serde_json::json!(value.wrapping_add(1));
+    std::fs::write(&json, serde_json::to_vec(&parsed).unwrap()).unwrap();
+    let mut target = built.target.clone();
+    reread(&mut target);
+    let err = cargo_hive::seed::fill::toolchain_row(&target, &built.repo.main).unwrap_err();
+    assert!(
+        err.contains(&built.target_path.display().to_string()),
+        "{err}"
+    );
+    let recording = Recording::over_real();
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let report = fill_in(&built.hive, &lib, &target, &|| false);
+    one_toolchain_finding(&report, &built.target_path);
+    assert!(toolchains(&lib).is_empty(), "{:?}", toolchains(&lib));
+    assert!(
+        report.entries_added >= 1,
+        "the units are still filled: {report:?}"
+    );
+}
+
+#[test]
+fn a_malformed_rustc_info_writes_no_row_and_one_finding() {
+    let built = built();
+    let path = built.target_path.join(".rustc_info.json");
+    std::fs::write(&path, b"not json").unwrap();
+    let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main).unwrap_err();
+    assert!(err.contains(&path.display().to_string()), "{err}");
+    let recording = Recording::over_real();
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let report = fill_in(&built.hive, &lib, &built.target, &|| false);
+    one_toolchain_finding(&report, &built.target_path);
+    assert!(toolchains(&lib).is_empty(), "{:?}", toolchains(&lib));
+    assert!(report.entries_added >= 1, "{report:?}");
+}
+
+#[test]
+fn a_missing_rustc_info_writes_no_row_and_one_finding() {
+    let built = built();
+    let path = built.target_path.join(".rustc_info.json");
+    std::fs::remove_file(&path).unwrap();
+    let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main).unwrap_err();
+    assert!(err.contains(&path.display().to_string()), "{err}");
+    let recording = Recording::over_real();
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let report = fill_in(&built.hive, &lib, &built.target, &|| false);
+    one_toolchain_finding(&report, &built.target_path);
+    assert!(toolchains(&lib).is_empty(), "{:?}", toolchains(&lib));
+    assert!(report.entries_added >= 1, "{report:?}");
+}
+
+#[test]
+fn text_that_differs_from_the_source_checkout_writes_no_row() {
+    let built = built();
+    let path = built.target_path.join(".rustc_info.json");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let mut parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let outputs = parsed["outputs"].as_object_mut().unwrap();
+    let mut changed = 0;
+    for entry in outputs.values_mut() {
+        let Some(stdout) = entry.get("stdout").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        if stdout.contains("release:") {
+            entry["stdout"] =
+                serde_json::Value::String("rustc 0.0.0\nrelease: 0.0.0\n".to_string());
+            changed += 1;
+        }
+    }
+    assert_eq!(changed, 1, "the built target has one release stdout");
+    std::fs::write(&path, serde_json::to_string(&parsed).unwrap()).unwrap();
+    let checkout = cargo_hive::doctor::resolve_toolchain(&built.repo.main)
+        .unwrap()
+        .version_text;
+    let parsed_text =
+        cargo_hive::seed::fill::rustc_info_version(&std::fs::read_to_string(&path).unwrap())
+            .unwrap();
+    assert_ne!(parsed_text, checkout);
+    let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main).unwrap_err();
+    assert!(
+        err.contains(&built.target_path.display().to_string()),
+        "{err}"
+    );
+    let recording = Recording::over_real();
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let report = fill_in(&built.hive, &lib, &built.target, &|| false);
+    one_toolchain_finding(&report, &built.target_path);
+    assert!(toolchains(&lib).is_empty(), "{:?}", toolchains(&lib));
+    assert!(report.entries_added >= 1, "{report:?}");
+}
+
+#[test]
+fn two_targets_with_one_toolchain_share_one_row() {
+    let built = built();
+    let units = registry_units(&built.hive, &built.target);
+    let value = units[0].toolchain_value;
+    assert!(units.iter().all(|unit| unit.toolchain_value == value));
+    let copy_path = built.hive.home.path.join("target-copy");
+    let status = std::process::Command::new("cp")
+        .args(["-cR"])
+        .arg(&built.target_path)
+        .arg(&copy_path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "cp the target");
+    let copy = TargetDir {
+        path: copy_path.clone(),
+        owner: Owner::Owned {
+            checkout: built.repo.main.clone(),
+        },
+        profiles: vec![read_profile(&copy_path.join("debug"))],
+        size: None,
+        unreadable: None,
+    };
+    let text = cargo_hive::doctor::resolve_toolchain(&built.repo.main)
+        .unwrap()
+        .version_text;
+    assert_eq!(
+        cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main).unwrap(),
+        (text.clone(), value)
+    );
+    assert_eq!(
+        cargo_hive::seed::fill::toolchain_row(&copy, &built.repo.main).unwrap(),
+        (text.clone(), value)
+    );
+    let recording = Recording::over_real();
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let first = fill_in(&built.hive, &lib, &built.target, &|| false);
+    assert!(first.entries_added >= 1, "{first:?}");
+    assert_eq!(toolchains(&lib), BTreeMap::from([(text.clone(), value)]));
+    let mut cleared = store::read(&lib.state).unwrap();
+    cleared.toolchains.clear();
+    lib.state
+        .locked(|tx| tx.write_bounded(store::STORE_FILE, &cleared, store::MAX_STORE_BYTES))
+        .unwrap();
+    assert!(toolchains(&lib).is_empty());
+    let second = fill_in(&built.hive, &lib, &copy, &|| false);
+    assert_eq!(second.entries_added, 0, "{second:?}");
+    assert!(second.entries_held >= 1, "{second:?}");
+    assert!(second.findings.is_empty(), "{:?}", second.findings);
+    assert_eq!(toolchains(&lib), BTreeMap::from([(text, value)]));
 }
