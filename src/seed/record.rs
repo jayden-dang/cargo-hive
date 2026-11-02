@@ -2,6 +2,7 @@
 //! records whose target is gone, then the oldest, until the file fits its cap.
 //! A file that cannot be read is replaced, and the note says so. `counts`
 //! reports what became of that record's units in the target as it stands now.
+//! A `deps/` listing that hits its bound or cannot be read is an error, not a count.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
@@ -82,10 +83,16 @@ pub struct SeedCounts {
     pub missing: u64,
 }
 
-pub fn counts(target: &TargetDir, record: &SeedRecord, deps_cap: usize) -> Option<SeedCounts> {
-    let identity = dir_identity(&target.path)?;
+pub fn counts(
+    target: &TargetDir,
+    record: &SeedRecord,
+    deps_cap: usize,
+) -> Result<Option<SeedCounts>, String> {
+    let Some(identity) = dir_identity(&target.path) else {
+        return Ok(None);
+    };
     if identity != record.identity {
-        return None;
+        return Ok(None);
     }
     let deps = dep_listings(target, record, deps_cap)?;
     let reached = reached_units(target, record);
@@ -96,7 +103,7 @@ pub fn counts(target: &TargetDir, record: &SeedRecord, deps_cap: usize) -> Optio
     for unit in &record.units {
         let names = names_for(&deps, &target.path, &unit.rel_profile);
         let key = (unit.rel_profile.clone(), unit.dir_name.clone());
-        if unit_missing(&target.path, unit, names) {
+        if unit_missing(&target.path, unit, names, deps_cap)? {
             missing += 1;
         } else if stamp_differs(&target.path, unit) {
             recompiled += 1;
@@ -106,12 +113,12 @@ pub fn counts(target: &TargetDir, record: &SeedRecord, deps_cap: usize) -> Optio
             unneeded += 1;
         }
     }
-    Some(SeedCounts {
+    Ok(Some(SeedCounts {
         fresh,
         unneeded,
         recompiled,
         missing,
-    })
+    }))
 }
 
 fn dir_identity(path: &Path) -> Option<(u64, u64)> {
@@ -123,7 +130,7 @@ fn dep_listings(
     target: &TargetDir,
     record: &SeedRecord,
     cap: usize,
-) -> Option<BTreeMap<PathBuf, Vec<String>>> {
+) -> Result<BTreeMap<PathBuf, Vec<String>>, String> {
     let mut dirs = BTreeSet::new();
     for profile in &target.profiles {
         dirs.insert(profile.path.join("deps"));
@@ -133,31 +140,45 @@ fn dep_listings(
     }
     let mut listed = BTreeMap::new();
     for dir in dirs {
-        let names = list_dir_names(&dir, cap).ok()?;
+        let names = list_dir_names(&dir, cap)?;
         if let Some(profile) = dir.parent() {
             listed.insert(profile.to_path_buf(), names);
         }
     }
-    Some(listed)
+    Ok(listed)
 }
 
-fn list_dir_names(dir: &Path, cap: usize) -> io::Result<Vec<String>> {
+fn list_dir_names(dir: &Path, cap: usize) -> Result<Vec<String>, String> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
+        Err(err) => return Err(readable(dir, &err)),
     };
     let mut names = Vec::new();
     for (seen, entry) in entries.enumerate() {
         if seen >= cap {
-            return Err(io::Error::other(format!(
-                "{} has more than {cap} entries",
+            return Err(format!(
+                "{} has more than {cap} entries; shrink the directory below its cap and build the target again",
                 dir.display()
-            )));
+            ));
         }
-        names.push(entry?.file_name().to_string_lossy().into_owned());
+        let entry = entry.map_err(|err| readable(dir, &err))?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            format!(
+                "{} has a name that is not valid UTF-8; rename that entry to valid UTF-8 and build the target again",
+                dir.display()
+            )
+        })?;
+        names.push(name);
     }
     Ok(names)
+}
+
+fn readable(path: &Path, err: &io::Error) -> String {
+    format!(
+        "{}: {err}; make it readable and build the target again",
+        path.display()
+    )
 }
 
 fn names_for<'a>(
@@ -165,42 +186,79 @@ fn names_for<'a>(
     target: &Path,
     rel: &Path,
 ) -> &'a [String] {
-    let joined = target.join(rel);
-    if let Some(names) = listings.get(&joined) {
-        return names;
-    }
     listings
-        .iter()
-        .find(|(path, _)| path.ends_with(rel))
-        .map(|(_, names)| names.as_slice())
+        .get(&target.join(rel))
+        .map(Vec::as_slice)
         .unwrap_or(&[])
 }
 
-fn unit_missing(target: &Path, unit: &SeededUnit, deps: &[String]) -> bool {
+fn unit_missing(
+    target: &Path,
+    unit: &SeededUnit,
+    deps: &[String],
+    cap: usize,
+) -> Result<bool, String> {
     let profile = target.join(&unit.rel_profile);
-    if !is_dir(&profile.join(".fingerprint").join(&unit.dir_name)) {
-        return true;
-    }
-    if unit.has_build && !is_dir(&profile.join("build").join(&unit.dir_name)) {
-        return true;
-    }
-    counted_deps(deps, &unit.dir_name) < unit.deps_files
+    let present = counted_deps(&profile.join("deps"), deps, &unit.dir_name, cap)?;
+    let unit_dir_gone = !is_dir(&profile.join(".fingerprint").join(&unit.dir_name));
+    let build_gone = unit.has_build && !is_dir(&profile.join("build").join(&unit.dir_name));
+    Ok(unit_dir_gone || build_gone || present < unit.deps_files)
 }
 
 fn is_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
-fn counted_deps(names: &[String], dir_name: &str) -> u32 {
+fn counted_deps(
+    deps_dir: &Path,
+    names: &[String],
+    dir_name: &str,
+    cap: usize,
+) -> Result<u32, String> {
     let Some(meta) = fingerprint::unit_hash(dir_name) else {
-        return 0;
+        return Ok(0);
     };
-    names
-        .iter()
-        .filter(|name| {
-            !name.ends_with(".rcgu.o") && liveness::embedded_hashes(name).any(|hash| hash == meta)
-        })
-        .count() as u32
+    let mut count = 0u32;
+    for name in names {
+        if name.ends_with(".rcgu.o") || !liveness::embedded_hashes(name).any(|hash| hash == meta) {
+            continue;
+        }
+        count = count.saturating_add(count_files(&deps_dir.join(name), cap, 0)?);
+    }
+    Ok(count)
+}
+
+/// Regular files at `path`. A directory is walked down to `depth`; `.rcgu.o` is skipped.
+fn count_files(path: &Path, cap: usize, depth: usize) -> Result<u32, String> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(readable(path, &err)),
+    };
+    if meta.file_type().is_symlink() {
+        return Ok(0);
+    }
+    if meta.is_file() {
+        return Ok(1);
+    }
+    if !meta.is_dir() {
+        return Ok(0);
+    }
+    if depth > crate::size::MAX_DEPTH {
+        return Err(format!(
+            "{} is deeper than {} levels; remove directories past that depth and build the target again",
+            path.display(),
+            crate::size::MAX_DEPTH
+        ));
+    }
+    let mut count = 0u32;
+    for name in list_dir_names(path, cap)? {
+        if name.ends_with(".rcgu.o") {
+            continue;
+        }
+        count = count.saturating_add(count_files(&path.join(name), cap, depth + 1)?);
+    }
+    Ok(count)
 }
 
 fn stamp_differs(target: &Path, unit: &SeededUnit) -> bool {
@@ -273,9 +331,9 @@ fn reached_units(target: &TargetDir, record: &SeedRecord) -> BTreeSet<(PathBuf, 
     }
     let mut reached = BTreeSet::new();
     while let Some(idx) = queue.pop_front() {
-        let fingerprints: Vec<u64> = nodes[idx].deps.iter().map(|dep| dep.fingerprint).collect();
-        for fingerprint in fingerprints {
-            let Some(nexts) = by_hash.get(&fingerprint::le_hex(fingerprint)) else {
+        let edges: Vec<u64> = nodes[idx].deps.iter().map(|dep| dep.fingerprint).collect();
+        for edge in edges {
+            let Some(nexts) = by_hash.get(&fingerprint::le_hex(edge)) else {
                 continue;
             };
             for &next in nexts {
@@ -549,6 +607,7 @@ mod tests {
         files: u32,
         recorded_files: u32,
         rcgu: bool,
+        dir_files: u32,
     }
 
     fn seeded(id: u64) -> Spec {
@@ -564,6 +623,7 @@ mod tests {
             files: 1,
             recorded_files: 1,
             rcgu: false,
+            dir_files: 0,
         }
     }
 
@@ -619,6 +679,14 @@ mod tests {
             }
             for n in 0..spec.files {
                 fs::write(profile.join("deps").join(format!("f{n}-{hex}.rlib")), b"d").unwrap();
+            }
+            if spec.dir_files > 0 {
+                let bundle = profile.join("deps").join(format!("bundle-{hex}"));
+                fs::create_dir_all(&bundle).unwrap();
+                for n in 0..spec.dir_files {
+                    fs::write(bundle.join(format!("part{n}")), b"d").unwrap();
+                }
+                fs::write(bundle.join("noise.rcgu.o"), b"o").unwrap();
             }
             if spec.rcgu {
                 fs::write(
@@ -702,7 +770,9 @@ mod tests {
 
     fn assert_buckets(label: &str, specs: &[Spec], expect: SeedCounts) {
         let (_scratch, target, record) = build(label, specs);
-        let got = counts(&target, &record, 1_000).unwrap_or_else(|| panic!("{label}"));
+        let got = counts(&target, &record, 1_000)
+            .unwrap_or_else(|err| panic!("{label}: {err}"))
+            .unwrap_or_else(|| panic!("{label}: no counts"));
         let recorded = record.units.len() as u64;
         assert_eq!(
             got.fresh + got.unneeded + got.recompiled + got.missing,
@@ -740,6 +810,10 @@ mod tests {
         only_rcgu.rcgu = true;
         let mut aside = seeded(13);
         aside.in_graph = false;
+        let mut bundled = seeded(14);
+        bundled.files = 0;
+        bundled.dir_files = 2;
+        bundled.recorded_files = 2;
         let rows: Vec<(&str, Vec<Spec>, SeedCounts)> = vec![
             (
                 "reached from a unit outside the record",
@@ -841,6 +915,16 @@ mod tests {
                     missing: 0,
                 },
             ),
+            (
+                "a dep directory counts the files inside it",
+                vec![bundled],
+                SeedCounts {
+                    fresh: 0,
+                    unneeded: 1,
+                    recompiled: 0,
+                    missing: 0,
+                },
+            ),
         ];
         for (label, specs, expect) in &rows {
             assert_buckets(label, specs, *expect);
@@ -870,6 +954,10 @@ mod tests {
         only_rcgu.rcgu = true;
         let mut aside = seeded(13);
         aside.in_graph = false;
+        let mut bundled = seeded(14);
+        bundled.files = 0;
+        bundled.dir_files = 2;
+        bundled.recorded_files = 2;
         assert_buckets(
             "together",
             &[
@@ -886,10 +974,11 @@ mod tests {
                 short,
                 only_rcgu,
                 aside,
+                bundled,
             ],
             SeedCounts {
                 fresh: 4,
-                unneeded: 2,
+                unneeded: 3,
                 recompiled: 2,
                 missing: 4,
             },
@@ -903,7 +992,7 @@ mod tests {
             record.identity.0.wrapping_add(1),
             record.identity.1.wrapping_add(1),
         );
-        assert!(counts(&target, &record, 1_000).is_none());
+        assert_eq!(counts(&target, &record, 1_000), Ok(None));
     }
 
     #[test]
@@ -914,6 +1003,44 @@ mod tests {
         fs::write(deps.join("extra-b"), b"b").unwrap();
         fs::write(deps.join("extra-c"), b"c").unwrap();
         target.profiles[0].path = scratch.0.join("target/debug");
-        assert!(counts(&target, &record, 2).is_none());
+        let err = counts(&target, &record, 2).expect_err("a listing past its cap");
+        let shown = deps.display().to_string();
+        assert!(
+            err.contains(&shown) && err.contains("shrink the directory"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn deleting_one_file_inside_a_dep_directory_makes_the_unit_missing() {
+        let mut bundled = seeded(14);
+        bundled.files = 0;
+        bundled.dir_files = 2;
+        bundled.recorded_files = 2;
+        let (scratch, target, record) = build("depdir", &[bundled]);
+        let kept = counts(&target, &record, 1_000)
+            .unwrap()
+            .expect("two files inside the directory");
+        assert_eq!(kept.missing, 0, "{kept:?}");
+        assert_eq!(kept.unneeded, 1, "{kept:?}");
+        let hex = crate::fingerprint::le_hex(14);
+        let part = scratch
+            .0
+            .join("target/debug/deps")
+            .join(format!("bundle-{hex}"))
+            .join("part0");
+        fs::remove_file(&part).unwrap();
+        let gone = counts(&target, &record, 1_000)
+            .unwrap()
+            .expect("one file left inside the directory");
+        assert_eq!(
+            gone,
+            SeedCounts {
+                fresh: 0,
+                unneeded: 0,
+                recompiled: 0,
+                missing: 1,
+            }
+        );
     }
 }

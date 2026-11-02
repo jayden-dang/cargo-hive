@@ -737,12 +737,18 @@ fn report_targets(
         }
         if let Some(seeds) = seeds {
             if let Some(record) = seeds.targets.get(&t.path) {
-                if let Some(counts) = crate::seed::record::counts(t, record, crate::gc::DEPS_CAP) {
-                    let path = t.path.display();
-                    b.count(&format!("reused_fresh:{path}"), counts.fresh)
-                        .count(&format!("seeded_unneeded:{path}"), counts.unneeded)
-                        .count(&format!("seeded_recompiled:{path}"), counts.recompiled)
-                        .count(&format!("seeded_missing:{path}"), counts.missing);
+                match crate::seed::record::counts(t, record, crate::gc::DEPS_CAP) {
+                    Ok(Some(counts)) => {
+                        let path = t.path.display();
+                        b.count(&format!("reused_fresh:{path}"), counts.fresh)
+                            .count(&format!("seeded_unneeded:{path}"), counts.unneeded)
+                            .count(&format!("seeded_recompiled:{path}"), counts.recompiled)
+                            .count(&format!("seeded_missing:{path}"), counts.missing);
+                    }
+                    Ok(None) => {}
+                    Err(why) => {
+                        b.note(why);
+                    }
                 }
             }
         }
