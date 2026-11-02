@@ -135,6 +135,8 @@ pub struct Toolchain {
     pub cargo: PathBuf,
     pub rustc: PathBuf,
     pub release: String,
+    #[serde(skip)]
+    pub version_text: String,
 }
 
 pub struct DoctorEnv {
@@ -411,6 +413,7 @@ pub fn resolve_toolchain(cwd: &Path) -> Result<Toolchain, String> {
         ));
     }
     let text = String::from_utf8_lossy(&out.stdout);
+    let version_text = text.to_string();
     let release = text
         .lines()
         .find_map(|l| l.strip_prefix("release: "))
@@ -422,6 +425,7 @@ pub fn resolve_toolchain(cwd: &Path) -> Result<Toolchain, String> {
         cargo,
         rustc,
         release,
+        version_text,
     })
 }
 
@@ -1535,6 +1539,21 @@ mod tests {
     fn the_active_toolchain_release_comes_from_rustc() {
         let t = resolve_toolchain(&std::env::temp_dir()).unwrap();
         assert!(t.release.starts_with(|c: char| c.is_ascii_digit()), "{t:?}");
+    }
+
+    #[test]
+    fn a_resolved_toolchain_keeps_the_whole_version_text() {
+        let dir = scratch("version-text");
+        let t = resolve_toolchain(&dir).unwrap();
+        assert!(t.version_text.starts_with("rustc "), "{:?}", t.version_text);
+        assert!(t.version_text.contains("host: "), "{:?}", t.version_text);
+        assert!(
+            t.version_text.contains(&format!("release: {}", t.release)),
+            "release {} missing from {:?}",
+            t.release,
+            t.version_text
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

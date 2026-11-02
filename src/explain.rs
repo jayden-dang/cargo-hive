@@ -955,6 +955,7 @@ mod tests {
             profile,
             target,
             path,
+            toolchain_value: 0,
         }
     }
 
