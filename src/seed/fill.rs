@@ -1,7 +1,9 @@
 //! Clones a target's new registry units into the store while that target's Cargo
 //! locks are held, then drops the locks before compressing or publishing anything.
 //! A unit already in the store is not cloned again. A lock that is not taken fills
-//! nothing from that target.
+//! nothing from that target. An owned target also contributes one toolchain row
+//! when `.rustc_info.json` names that checkout's toolchain and every unit shares
+//! one toolchain value.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -9,7 +11,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::cargo_target::TargetDir;
+use crate::cargo_target::{Owner, TargetDir};
 use crate::gc::{CRATE_DIR_CAP, DEPS_CAP};
 use crate::plan_tier::locks::{self, Acquired, Locked};
 use crate::plan_tier::Ctx;
@@ -23,6 +25,7 @@ use crate::state::{window_days, StateError};
 use super::Error;
 
 const HASH_CAP: u64 = 64;
+const RUSTC_INFO_CAP: u64 = 1024 * 1024;
 
 #[derive(Debug)]
 pub struct FillReport {
@@ -170,7 +173,8 @@ fn fill_target(
     if new_units.is_empty() && tag_present {
         pass.report.targets_read += 1;
         pass.report.entries_held += held_rows.len() as u64;
-        return merge_rows(pass.ctx, held_rows, pass.cancel, pass.report);
+        let table = toolchain_table(target, pass.report);
+        return merge_rows(pass.ctx, held_rows, table, pass.cancel, pass.report);
     }
     let locked = match locks::acquire(pass.ctx.fs, &target.path, false) {
         Acquired::Locked(locked) => locked,
@@ -410,6 +414,7 @@ fn publish_batch(
 ) -> Result<(), Error> {
     report.targets_read += 1;
     report.entries_held += held_rows.len() as u64;
+    let table = toolchain_table(target, report);
     let mut rows = held_rows;
     for item in batch.cloned {
         if cancel() {
@@ -436,7 +441,7 @@ fn publish_batch(
                 break;
             }
             Err(PublishFailed::DiskFull(why)) => {
-                merge_rows(ctx, rows, cancel, report)?;
+                merge_rows(ctx, rows, table, cancel, report)?;
                 return Err(Error::DiskFull(why));
             }
             Err(PublishFailed::Compress(why)) => {
@@ -449,7 +454,7 @@ fn publish_batch(
             }
         }
     }
-    merge_rows(ctx, rows, cancel, report)?;
+    merge_rows(ctx, rows, table, cancel, report)?;
     if let Some(why) = batch.disk_full {
         return Err(Error::DiskFull(why));
     }
@@ -459,13 +464,14 @@ fn publish_batch(
 fn merge_rows(
     ctx: &Ctx<'_>,
     rows: Vec<Row>,
+    table: BTreeMap<String, u64>,
     cancel: &(dyn Fn() -> bool + Sync),
     report: &mut FillReport,
 ) -> Result<(), Error> {
-    if rows.is_empty() {
+    if rows.is_empty() && table.is_empty() {
         return Ok(());
     }
-    match store::merge(ctx.state, rows, BTreeMap::new(), cancel) {
+    match store::merge(ctx.state, rows, table, cancel) {
         Ok(()) => Ok(()),
         Err(StateError::Cancelled) => {
             report.cancelled = true;
@@ -692,8 +698,300 @@ fn path_present(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
+pub fn rustc_info_version(text: &str) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .map_err(|_| "not JSON; rebuild the target and run the command again".to_string())?;
+    let Some(outputs) = value.get("outputs").and_then(serde_json::Value::as_object) else {
+        return Err("has no outputs; rebuild the target and run the command again".to_string());
+    };
+    let mut found = None;
+    for entry in outputs.values() {
+        let Some(stdout) = entry.get("stdout").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !stdout.lines().any(|line| line.contains("release:")) {
+            continue;
+        }
+        if found.is_some() {
+            return Err(
+                "has more than one release line; rebuild the target and run the command again"
+                    .to_string(),
+            );
+        }
+        found = Some(stdout.to_string());
+    }
+    found.ok_or_else(|| {
+        "has no release line; rebuild the target and run the command again".to_string()
+    })
+}
+
+pub fn toolchain_row(target: &TargetDir, source_checkout: &Path) -> Result<(String, u64), String> {
+    let path = target.path.join(".rustc_info.json");
+    let text = read_capped(&path, RUSTC_INFO_CAP)?;
+    let version = rustc_info_version(&text).map_err(|err| format!("{}: {err}", path.display()))?;
+    let resolved = crate::doctor::resolve_toolchain(source_checkout).map_err(|err| {
+        format!(
+            "{}: {err}; install the toolchain that checkout selects and run the command again",
+            source_checkout.display()
+        )
+    })?;
+    if version != resolved.version_text {
+        return Err(format!(
+            "{}: toolchain text does not match {}; build the target with that checkout's toolchain and run the command again",
+            target.path.display(),
+            source_checkout.display()
+        ));
+    }
+    Ok((version, one_toolchain_value(target)?))
+}
+
+fn toolchain_table(target: &TargetDir, report: &mut FillReport) -> BTreeMap<String, u64> {
+    let Owner::Owned { checkout } = &target.owner else {
+        return BTreeMap::new();
+    };
+    match toolchain_row(target, checkout) {
+        Ok((text, value)) => BTreeMap::from([(text, value)]),
+        Err(detail) => {
+            report.findings.push((
+                "toolchain.row".to_string(),
+                Some(target.path.clone()),
+                detail,
+            ));
+            BTreeMap::new()
+        }
+    }
+}
+
+fn one_toolchain_value(target: &TargetDir) -> Result<u64, String> {
+    let mut found = None;
+    for profile in &target.profiles {
+        let Some(graph) = &profile.graph else {
+            continue;
+        };
+        for unit in &graph.units {
+            match found {
+                None => found = Some(unit.toolchain_value),
+                Some(value) if value == unit.toolchain_value => {}
+                Some(_) => {
+                    return Err(format!(
+                        "{}: units hold more than one toolchain value; collect the older units and run the command again",
+                        target.path.display()
+                    ));
+                }
+            }
+        }
+    }
+    found.ok_or_else(|| {
+        format!(
+            "{}: no unit recorded a toolchain value; build the target and run the command again",
+            target.path.display()
+        )
+    })
+}
+
+fn read_capped(path: &Path, cap: u64) -> Result<String, String> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(format!(
+                "{} is missing; build the target and run the command again",
+                path.display()
+            ));
+        }
+        Err(err) => {
+            return Err(format!(
+                "{}: {err}; make the file readable and run the command again",
+                path.display()
+            ));
+        }
+    };
+    let mut buf = Vec::new();
+    file.by_ref()
+        .take(cap + 1)
+        .read_to_end(&mut buf)
+        .map_err(|err| {
+            format!(
+                "{}: {err}; make the file readable and run the command again",
+                path.display()
+            )
+        })?;
+    if buf.len() as u64 > cap {
+        return Err(format!(
+            "{} is larger than 1 MiB; shorten it below 1 MiB and build the target again",
+            path.display()
+        ));
+    }
+    String::from_utf8(buf).map_err(|_| {
+        format!(
+            "{} is not valid UTF-8; rebuild the target and run the command again",
+            path.display()
+        )
+    })
+}
+
 fn epoch_secs(now: SystemTime) -> u64 {
     now.duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rustc_info_version;
+    use crate::cargo_target::{Owner, TargetDir};
+    use crate::doctor::resolve_toolchain;
+    use crate::fingerprint::{Coverage, Format, ProfileReport, Unit, UnitGraph};
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn info(entries: &[(&str, &str)]) -> String {
+        let mut outputs = serde_json::Map::new();
+        for (key, stdout) in entries {
+            outputs.insert((*key).to_string(), serde_json::json!({ "stdout": stdout }));
+        }
+        serde_json::json!({ "outputs": outputs }).to_string()
+    }
+
+    #[test]
+    fn rustc_info_version_keeps_the_one_stdout_with_a_release_line() {
+        let release = "rustc 1.97.1\nbinary: rustc\nrelease: 1.97.1\n";
+        let cases = [
+            (
+                "one release stdout",
+                info(&[("probe", "lib___.rlib\n"), ("version", release)]),
+                Some(release),
+            ),
+            ("no release line", info(&[("probe", "lib___.rlib\n")]), None),
+            (
+                "two release lines",
+                info(&[
+                    ("older", "release: 1.0.0\n"),
+                    ("newer", "rustc 1.1.0\nrelease: 1.1.0\n"),
+                ]),
+                None,
+            ),
+            ("not json", "not json".to_string(), None),
+            ("no outputs", r#"{"successes":{}}"#.to_string(), None),
+        ];
+        for (name, text, want) in cases {
+            let got = rustc_info_version(&text);
+            match want {
+                Some(stdout) => assert_eq!(got.unwrap(), stdout, "{name}"),
+                None => assert!(got.is_err(), "{name}: {got:?}"),
+            }
+        }
+    }
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Scratch {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = PathBuf::from(format!(
+                "/private/tmp/hive-it-fill-{label}-{}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Scratch(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn sample_unit(value: u64) -> Unit {
+        Unit {
+            dir_name: "dep-0000000000000001".to_string(),
+            kind: "lib".to_string(),
+            hash_hex: "0123456789abcdef".to_string(),
+            deps: Vec::new(),
+            stem: "lib-dep".to_string(),
+            features: Arc::<str>::from(""),
+            coverage: Coverage::NotRecorded,
+            profile: 1,
+            target: 1,
+            path: 1,
+            toolchain_value: value,
+        }
+    }
+
+    fn owned_with(root: &Path, value: u64) -> TargetDir {
+        let path = root.join("target");
+        std::fs::create_dir_all(&path).unwrap();
+        TargetDir {
+            path,
+            owner: Owner::Owned {
+                checkout: root.to_path_buf(),
+            },
+            profiles: vec![ProfileReport {
+                path: root.join("target/debug"),
+                format: Format::Supported,
+                units: 1,
+                not_current: 0,
+                not_current_units: Vec::new(),
+                edges: None,
+                graph: Some(UnitGraph {
+                    units: vec![sample_unit(value)],
+                    edges: Vec::new(),
+                }),
+            }],
+            size: None,
+            unreadable: None,
+        }
+    }
+
+    fn rustc_info_text(stdout: &str, extra: usize) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "pad": "a".repeat(extra),
+            "outputs": {
+                "probe": {"stdout": "lib___.rlib\n"},
+                "version": {"stdout": stdout}
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_rustc_info_of_one_mibibyte_yields_the_checkout_text() {
+        let scratch = Scratch::new("bound");
+        let version = resolve_toolchain(&scratch.0).unwrap().version_text;
+        let bare = rustc_info_text(&version, 0);
+        let room = (1024 * 1024usize)
+            .checked_sub(bare.len())
+            .expect("the unpadded file is under 1 MiB");
+        let exact = rustc_info_text(&version, room);
+        assert_eq!(exact.len(), 1024 * 1024);
+        let target = owned_with(&scratch.0, 9);
+        std::fs::write(target.path.join(".rustc_info.json"), &exact).unwrap();
+        assert_eq!(
+            super::toolchain_row(&target, &scratch.0).unwrap(),
+            (version, 9)
+        );
+    }
+
+    #[test]
+    fn a_rustc_info_one_byte_past_one_mibibyte_is_an_error() {
+        let scratch = Scratch::new("over");
+        let version = resolve_toolchain(&scratch.0).unwrap().version_text;
+        let bare = rustc_info_text(&version, 0);
+        let exact = rustc_info_text(&version, (1024 * 1024usize) - bare.len());
+        let over = rustc_info_text(&version, (1024 * 1024usize) - bare.len() + 1);
+        assert_eq!(exact.len(), 1024 * 1024);
+        assert_eq!(over.len(), 1024 * 1024 + 1);
+        let target = owned_with(&scratch.0, 9);
+        std::fs::write(target.path.join(".rustc_info.json"), &over).unwrap();
+        let err = super::toolchain_row(&target, &scratch.0).unwrap_err();
+        assert!(err.contains("1 MiB"), "{err}");
+        assert!(
+            err.contains(&target.path.join(".rustc_info.json").display().to_string()),
+            "{err}"
+        );
+    }
 }
