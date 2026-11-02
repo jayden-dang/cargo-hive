@@ -52,7 +52,7 @@ pub(crate) fn faults_that_can_hide_an_owner(
 ) -> Vec<WalkFault> {
     faults
         .into_iter()
-        .filter(|fault| !absent_cache_root(&fault, cache_roots))
+        .filter(|fault| !absent_cache_root(fault, cache_roots))
         .collect()
 }
 
