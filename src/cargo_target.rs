@@ -55,12 +55,15 @@ fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(dirs)
 }
 
+type ListDirs<'a> = dyn Fn(&Path, usize) -> Result<Vec<PathBuf>, String> + 'a;
+type IsDir<'a> = dyn Fn(&Path) -> Result<bool, String> + 'a;
+
 /// `Some(layout)` when `dir` holds `.fingerprint/` or `build/<pkg>/<16 hex>/fingerprint/`.
 fn profile_layout_with(
     dir: &Path,
     cap: usize,
-    list: &dyn Fn(&Path, usize) -> Result<Vec<PathBuf>, String>,
-    is_dir: &dyn Fn(&Path) -> Result<bool, String>,
+    list: &ListDirs<'_>,
+    is_dir: &IsDir<'_>,
 ) -> Result<Option<Layout>, String> {
     if is_dir(&dir.join(".fingerprint"))? {
         return Ok(Some(Layout::Fingerprint));
@@ -91,8 +94,8 @@ fn profile_dirs(target: &Path) -> Result<Vec<(PathBuf, Layout)>, String> {
 fn profile_dirs_with(
     target: &Path,
     cap: usize,
-    list: &dyn Fn(&Path, usize) -> Result<Vec<PathBuf>, String>,
-    is_dir: &dyn Fn(&Path) -> Result<bool, String>,
+    list: &ListDirs<'_>,
+    is_dir: &IsDir<'_>,
 ) -> Result<Vec<(PathBuf, Layout)>, String> {
     let mut out = Vec::new();
     for child in list(target, cap)? {

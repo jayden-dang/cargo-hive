@@ -660,10 +660,7 @@ fn recheck(
     }
     let mut decided = Vec::new();
     for item in loaded {
-        let dead = match dead_paths(ctx, resolved, item.target, item.reports, now, window) {
-            Ok(dead) => dead,
-            Err(refusal) => return Err(refusal),
-        };
+        let dead = dead_paths(ctx, resolved, item.target, item.reports, now, window)?;
         decided.push((item.target, dead));
     }
     for (target, dead_paths) in decided {
