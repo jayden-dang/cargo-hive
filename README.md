@@ -42,7 +42,7 @@ codex plugin add cargo-hive@cargo-hive
 
 | Command | What it does |
 |---|---|
-| `cargo hive doctor` | Runs checks (a)–(g) in a temporary directory and records which capabilities are enabled for the active toolchain |
+| `cargo hive doctor` | Runs checks (a)–(d), (f), and (g) in a temporary directory and records which capabilities are enabled for the active toolchain. There is no check (e) |
 | `cargo hive repo add <path>` | Registers the main checkout containing `<path>` |
 | `cargo hive repo list` | Lists registered repositories and their root commits |
 | `cargo hive status [<repo>…] [--no-sizes]` | Lists checkouts (protected, secondary, missing) and Cargo target dirs (owner or orphan candidate, size, units and edges) |

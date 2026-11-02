@@ -136,7 +136,7 @@ Leave `.skills/verify/`.
 - **Sub-features:** deletes the plan's paths for every class. One id, consumed once.
 - **How to get to it (user POV):** `cargo hive apply <id>` with an id from `gc --plan`.
 - **Driving it with the shell:** `"$HIVE" apply "$ID" --json > apply.json`; assert exit 0 and `plans[0].outcome` is `applied` when the plan still matches the tree.
-- **Gotchas:** a second apply of the same id is refused. The plan's recorded `gc_window_days` is what this run uses.
+- **Gotchas:** a second apply of the same id is refused. The plan's recorded `gc_window_days` is what this run uses. Cancel (SIGINT or SIGTERM) exits 130 and still appends a receipt.
 - **Persist check:** the planned paths are gone; `$HIVE_HOME/plans.json` shows that id consumed. The receipt line is the persisted record (see Receipt log).
 
 ### Receipt log
