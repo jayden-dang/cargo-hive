@@ -649,7 +649,7 @@ _Requirements: SEED-4.1, SEED-4.2, SEED-4.3, SEED-4.4_
 
 **Depends-on:** Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 11
 
-- [ ] **Step 1: Write the failing tests** in `tests/seed.rs`:
+- [x] **Step 1: Write the failing tests** in `tests/seed.rs`:
 
 ```rust
 #[test]
@@ -697,10 +697,10 @@ Add, all through the binary:
   - The other commands' receipts stay guarded by `tests/receipts.rs`, `tests/status_targets.rs`, `tests/gc.rs`, `tests/plan_apply.rs` and `tests/explain.rs`, which this task must leave unedited.
 
   Run `cargo test --test seed`; expect a compile failure.
-- [ ] **Step 2: Implement `seed_cmd`.** Load registry, config and capabilities; resolve the window, a bad value being a `refusal` with exit 1; `doctor::install_signal_handlers`; canonicalize the argument. No path means SEED-1.11's refusal. Loop `reg.repos` and `discover::checkouts`, matching `row.path == real && !row.missing`. No match: `refusal`, exit 1. `Class::Protected`: `refusal`, exit 1. `resolve_toolchain(&real)`: an `Err` is a `refusal`, exit 1. `doctor::require` for `Seeding`, `StoreCompression` and `Deletion` with that release, each failure a `refusal`, exit 1. Build `Ctx` with `repos: std::slice::from_ref(repo)`, `mains: &registered_mains`, `account_bytes` from `EvictionAccounting`. `b.toolchain(Some(release))`; `scope_mut().checkouts.push(real)`. Call `seed::run`. Copy `Outcome` into the builder. The code comes from `seed::exit_code`. Add `Parsed::Seed` and its `parse` arm to `tests/skill.rs` in this commit.
-- [ ] **Step 3: Implement `seed::run`:** `owned_targets`, its walk faults becoming findings; `fill`; if cancelled, return; `store::read`; no tag means one finding and no clone; `choose`; `NoRow` means one finding and no clone; `place`; assemble the counts of decision 13.
-- [ ] **Step 4: Run.** `cargo test --test seed`, then `cargo test`; expect pass. If `the_first_build_...` fails for a command, stop and report it: this is the slice's core claim, and it reopens the owner's lock on the file set.
-- [ ] **Step 5: Commit.** `feat(seed): cargo hive seed fills the store and clones into a new secondary checkout`
+- [x] **Step 2: Implement `seed_cmd`.** Load registry, config and capabilities; resolve the window, a bad value being a `refusal` with exit 1; `doctor::install_signal_handlers`; canonicalize the argument. No path means SEED-1.11's refusal. Loop `reg.repos` and `discover::checkouts`, matching `row.path == real && !row.missing`. No match: `refusal`, exit 1. `Class::Protected`: `refusal`, exit 1. `resolve_toolchain(&real)`: an `Err` is a `refusal`, exit 1. `doctor::require` for `Seeding`, `StoreCompression` and `Deletion` with that release, each failure a `refusal`, exit 1. Build `Ctx` with `repos: std::slice::from_ref(repo)`, `mains: &registered_mains`, `account_bytes` from `EvictionAccounting`. `b.toolchain(Some(release))`; `scope_mut().checkouts.push(real)`. Call `seed::run`. Copy `Outcome` into the builder. The code comes from `seed::exit_code`. Add `Parsed::Seed` and its `parse` arm to `tests/skill.rs` in this commit.
+- [x] **Step 3: Implement `seed::run`:** `owned_targets`, its walk faults becoming findings; `fill`; if cancelled, return; `store::read`; no tag means one finding and no clone; `choose`; `NoRow` means one finding and no clone; `place`; assemble the counts of decision 13.
+- [x] **Step 4: Run.** `cargo test --test seed`, then `cargo test`; expect pass. If `the_first_build_...` fails for a command, stop and report it: this is the slice's core claim, and it reopens the owner's lock on the file set.
+- [x] **Step 5: Commit.** `feat(seed): cargo hive seed fills the store and clones into a new secondary checkout`
 
 _Requirements: SEED-1.1, SEED-1.2, SEED-2.1, SEED-1.9, SEED-1.10, SEED-1.11, SEED-1.14, SEED-1.15, SEED-1.17, SEED-3.8, SEED-7.1, SEED-7.3, SEED-7.4, SEED-7.5, SEED-10.1, SEED-10.3, SEED-10.12_
 
