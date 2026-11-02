@@ -444,14 +444,14 @@ _Requirements: SEED-2.5, SEED-2.6, SEED-2.7, SEED-2.8, SEED-2.14, SEED-2.19, SEE
 
 **Depends-on:** Task 7
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - In `src/seed/fill.rs`, `rustc_info_version` table: one `outputs` entry whose `stdout` has `release:` gives that stdout; none is an error; two are an error; not JSON is an error; JSON with no `outputs` is an error.
   - In `tests/seed_fill.rs`: `a_clean_target_writes_a_row_matching_its_toolchain`: the table's key equals `resolve_toolchain(main).version_text` and its value equals the units' value; `a_target_with_two_toolchain_values_writes_no_row_and_one_finding`: rewrite one unit JSON's `rustc` in a copy; `a_malformed_rustc_info_writes_no_row_and_one_finding`; `a_missing_rustc_info_writes_no_row_and_one_finding`; `text_that_differs_from_the_source_checkout_writes_no_row`; `two_targets_with_one_toolchain_share_one_row`, where the table has one key after both fill.
 
   Run; expect a compile failure.
-- [ ] **Step 2: Implement.** `toolchain_row` reads `<target>/.rustc_info.json`, bounded at 1 MiB, takes `rustc_info_version`, compares it with `resolve_toolchain(source_checkout)?.version_text`, and checks one distinct `toolchain_value` over all units of all profiles. `fill` calls it for each target with `Owner::Owned { checkout }`, using that checkout, whether or not there are new keys, and adds the row to the per-target merge. Any `Err` is one finding naming the target. Rows of a `BTreeMap<String, u64>` give SEED-2.18 by construction.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): learn which toolchain value each rustc version text carries`
+- [x] **Step 2: Implement.** `toolchain_row` reads `<target>/.rustc_info.json`, bounded at 1 MiB, takes `rustc_info_version`, compares it with `resolve_toolchain(source_checkout)?.version_text`, and checks one distinct `toolchain_value` over all units of all profiles. `fill` calls it for each target with `Owner::Owned { checkout }`, using that checkout, whether or not there are new keys, and adds the row to the per-target merge. Any `Err` is one finding naming the target. Rows of a `BTreeMap<String, u64>` give SEED-2.18 by construction.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): learn which toolchain value each rustc version text carries`
 
 _Requirements: SEED-2.15, SEED-2.16, SEED-2.17, SEED-2.18_
 
