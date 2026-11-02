@@ -293,7 +293,7 @@ mod tests {
         let bare = encoded(&[plan_with_pad("aaaaaaaaaaaaaaaa", 0)]);
         assert!(bare.len() < cap);
         let fitted = plan_with_pad("aaaaaaaaaaaaaaaa", cap - bare.len());
-        assert_eq!(encoded(&[fitted.clone()]).len(), cap);
+        assert_eq!(encoded(std::slice::from_ref(&fitted)).len(), cap);
         let at_cap = state("record-write-cap");
         insert(&at_cap, &|| false, vec![fitted], 1_000).unwrap();
         let path = at_cap.root().join(PLANS_FILE);
