@@ -238,6 +238,86 @@ fn stopping_after_any_one_deletion_leaves_a_target_cargo_can_build() {
 }
 
 #[test]
+fn a_closure_plan_copies_each_unmeasured_path_and_counts_only_measured_bytes() {
+    let p = Planned::new("measure-gap");
+    let target = p.worktree_target();
+    let hash = p.dead_unit_hash(&target);
+    let artifact = rlib_of(&target, &hash);
+    let full = cargo_hive::plan_tier::build::make(&p.library_ctx().ctx(), &[], &|| false).unwrap();
+    let full_freed = secondary_freed(&full);
+    let rec = Recording::over_real().fail_sharing(&artifact);
+    let made =
+        cargo_hive::plan_tier::build::make(&p.library_ctx_with(rec.fs()).ctx(), &[], &|| false)
+            .unwrap();
+    let freed = secondary_freed(&made);
+    assert!(freed > 0, "measured files were dropped from the byte total");
+    assert!(
+        freed < full_freed,
+        "the unmeasured file was still counted: {freed} vs {full_freed}"
+    );
+    assert!(
+        made.unmeasured
+            .iter()
+            .any(|row| { row.field == artifact.display().to_string() && !row.reason.is_empty() }),
+        "{:?}",
+        made.unmeasured
+    );
+}
+
+#[test]
+fn an_orphan_plan_copies_each_unmeasured_path_and_counts_only_measured_bytes() {
+    let (p, orphan) = Planned::with_orphan("measure-gap-orphan");
+    let hash = p.dead_unit_hash(&orphan);
+    let artifact = rlib_of(&orphan, &hash);
+    let full = cargo_hive::plan_tier::build::make(&p.library_ctx().ctx(), &[], &|| false).unwrap();
+    let full_freed = orphan_accounted(&full);
+    let rec = Recording::over_real().fail_sharing(&artifact);
+    let made =
+        cargo_hive::plan_tier::build::make(&p.library_ctx_with(rec.fs()).ctx(), &[], &|| false)
+            .unwrap();
+    let freed = orphan_accounted(&made);
+    assert!(freed > 0, "measured files were dropped from the byte total");
+    assert!(freed < full_freed, "{freed} vs {full_freed}");
+    assert!(
+        made.unmeasured
+            .iter()
+            .any(|row| { row.field == artifact.display().to_string() && !row.reason.is_empty() }),
+        "{:?}",
+        made.unmeasured
+    );
+}
+
+fn rlib_of(target: &std::path::Path, hash: &str) -> std::path::PathBuf {
+    let deps = target.join("debug/deps");
+    for entry in std::fs::read_dir(&deps).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap();
+        if name.contains(hash) && name.ends_with(".rlib") {
+            return path;
+        }
+    }
+    panic!("no rlib for {hash} in {}", deps.display());
+}
+
+fn secondary_freed(made: &cargo_hive::plan_tier::build::Made) -> u64 {
+    made.plans
+        .iter()
+        .find(|plan| plan.class == cargo_hive::plan_tier::record::PlanClass::Secondary)
+        .and_then(|plan| plan.planned)
+        .map(|bytes| bytes.freed)
+        .unwrap_or(0)
+}
+
+fn orphan_accounted(made: &cargo_hive::plan_tier::build::Made) -> u64 {
+    made.plans
+        .iter()
+        .find(|plan| plan.class == cargo_hive::plan_tier::record::PlanClass::Orphan)
+        .and_then(|plan| plan.planned)
+        .map(|bytes| bytes.freed.saturating_add(bytes.still_shared))
+        .unwrap_or(0)
+}
+
+#[test]
 fn a_dead_path_whose_stat_fails_stores_no_plan_and_names_the_path() {
     let p = Planned::new("stat-fail-plan");
     let target = p.worktree_target();

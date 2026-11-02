@@ -378,11 +378,13 @@ impl Runner<'_> {
 }
 
 /// What deleting a set of paths would free, counted per inode.
+/// `unmeasured` lists each path that could not be measured, up to the ledger cap.
 #[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Footprint {
     pub bytes: Bytes,
-    pub unmeasured: u64,
+    pub unmeasured: Vec<(PathBuf, String)>,
+    pub unmeasured_more: u64,
 }
 
 /// Measures `paths` as one set for `target`, so a hard link listed only once stays shared.
@@ -435,7 +437,8 @@ pub fn measure(fs: &dyn Fs, target: &Path, paths: &[PathBuf], account_bytes: boo
     let tally = ledger.finish();
     Footprint {
         bytes: tally.total,
-        unmeasured: tally.unmeasured.len() as u64 + tally.unmeasured_more,
+        unmeasured: tally.unmeasured,
+        unmeasured_more: tally.unmeasured_more,
     }
 }
 
@@ -1460,7 +1463,8 @@ mod tests {
             blocks_bytes(&file) + blocks_bytes(&a) + blocks_bytes(&b)
         );
         assert_eq!(footprint.bytes.still_shared, 0);
-        assert_eq!(footprint.unmeasured, 0);
+        assert!(footprint.unmeasured.is_empty());
+        assert_eq!(footprint.unmeasured_more, 0);
     }
 
     #[test]

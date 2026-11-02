@@ -139,7 +139,9 @@ fn window_label(window: Duration) -> String {
 fn footprint_line(f: &Footprint) -> String {
     format!(
         "{} B freed, {} B still shared, {} unmeasured",
-        f.bytes.freed, f.bytes.still_shared, f.unmeasured
+        f.bytes.freed,
+        f.bytes.still_shared,
+        f.unmeasured.len() as u64 + f.unmeasured_more
     )
 }
 
@@ -1346,7 +1348,7 @@ pub fn prove_with_cloner(
             outcome: WindowOutcome::Passed,
             dead_units,
             dead_bytes: d.dead_bytes,
-            unmapped,
+            unmapped: unmapped.clone(),
             rebuilt: 0,
             rebuilt_live: 0,
             reasons,

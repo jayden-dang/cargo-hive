@@ -29,6 +29,8 @@ pub enum TargetClass {
 
 pub struct BuiltTarget {
     pub target: PlannedTarget,
+    pub unmeasured: Vec<(PathBuf, String)>,
+    pub unmeasured_more: u64,
 }
 
 pub enum TargetPlan {
@@ -135,13 +137,19 @@ pub fn plan_for_target(ctx: &Ctx, target: &TargetDir, window: Duration) -> Targe
         Owner::Owned { checkout } => Some(checkout.clone()),
         Owner::OrphanCandidate { .. } | Owner::Unresolved { .. } => None,
     };
-    let planned = ctx.account_bytes.then(|| {
+    let (planned, unmeasured, unmeasured_more) = if ctx.account_bytes {
         let foot = gc::measure(ctx.fs, &target.path, &paths, true);
-        BytesRec {
-            freed: foot.bytes.freed,
-            still_shared: foot.bytes.still_shared,
-        }
-    });
+        (
+            Some(BytesRec {
+                freed: foot.bytes.freed,
+                still_shared: foot.bytes.still_shared,
+            }),
+            foot.unmeasured,
+            foot.unmeasured_more,
+        )
+    } else {
+        (None, Vec::new(), 0)
+    };
     TargetPlan::Planned(BuiltTarget {
         target: PlannedTarget {
             path: target.path.clone(),
@@ -150,6 +158,8 @@ pub fn plan_for_target(ctx: &Ctx, target: &TargetDir, window: Duration) -> Targe
             entries,
             orphan: None,
         },
+        unmeasured,
+        unmeasured_more,
     })
 }
 
@@ -270,6 +280,7 @@ pub fn make(
                     blocked = true;
                 }
                 TargetPlan::Planned(built) => {
+                    push_gaps(&mut measure_gaps, built.unmeasured, built.unmeasured_more);
                     store_target(&mut buckets, class, built.target, &recorded, days, now);
                 }
             },
@@ -375,21 +386,26 @@ fn measured_orphan(
     }
     let paths = [target.path.clone()];
     let foot = gc::measure(ctx.fs, &target.path, &paths, true);
-    if foot.unmeasured == 0 {
-        return Some(BytesRec {
-            freed: foot.bytes.freed,
-            still_shared: foot.bytes.still_shared,
+    push_gaps(unmeasured, foot.unmeasured, foot.unmeasured_more);
+    Some(BytesRec {
+        freed: foot.bytes.freed,
+        still_shared: foot.bytes.still_shared,
+    })
+}
+
+fn push_gaps(unmeasured: &mut Vec<Unmeasured>, gaps: Vec<(PathBuf, String)>, more: u64) {
+    for (path, reason) in gaps {
+        unmeasured.push(Unmeasured {
+            field: path.display().to_string(),
+            reason,
         });
     }
-    // A cap and a failed stat share this count, and the walk's own reason is not returned.
-    unmeasured.push(Unmeasured {
-        field: target.path.display().to_string(),
-        reason: format!(
-            "measure could not account every byte ({n} unmeasured)",
-            n = foot.unmeasured
-        ),
-    });
-    None
+    if more > 0 {
+        unmeasured.push(Unmeasured {
+            field: "unmeasured_paths".to_string(),
+            reason: format!("{more} more paths could not be measured and are not listed"),
+        });
+    }
 }
 
 fn store_target(
