@@ -1019,131 +1019,81 @@ pub fn trial_through_execute(fx: &super::cargo_fixture::Fixture) -> Result<Execu
     })
 }
 
-/// Moves `invoked.timestamp` and the fingerprint hash file of each unit that owns
-/// a planned path to two days ago. A one-day window then still calls those files dead.
-fn backdate_dead_stamps(fs: &dyn Fs, clone: &Path, entries: &[PlannedEntry]) -> Result<(), String> {
+/// Ages every unit stamp on `clone` that the proof did not call live, to two days ago.
+/// A one-day recheck then still calls the planned files dead. A warm-up can refresh a
+/// build script the plan never lists; that stamp would keep a dead dependency live.
+fn backdate_dead_stamps(
+    fs: &dyn Fs,
+    clone: &Path,
+    live: &BTreeSet<(PathBuf, String)>,
+) -> Result<(), String> {
     let when = SystemTime::now()
         .checked_sub(Duration::from_secs(2 * 86_400))
         .ok_or("the clock is too early to backdate dead units")?;
-    let mut units = Vec::new();
-    for entry in entries {
-        if let Some(dir) = fingerprint_unit(&entry.path) {
-            if !units.contains(&dir) {
-                units.push(dir);
-            }
-            continue;
-        }
-        let Some(name) = entry.path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        let Some(hash) = hash_in(name) else {
-            continue;
-        };
-        let Some(profile) = profile_owning(&entry.path, clone) else {
-            continue;
-        };
-        let fp = profile.join(".fingerprint");
-        let listed = fs::read_dir(&fp).map_err(|err| format!("{}: {err}", fp.display()))?;
-        let mut seen = 0usize;
-        for item in listed {
-            seen += 1;
-            if seen > 100_000 {
-                return Err(format!("{} has more than 100000 entries", fp.display()));
-            }
-            let item = item.map_err(|err| format!("{}: {err}", fp.display()))?;
-            let dir = item.path();
-            if item.file_name().to_string_lossy().contains(hash) && dir.is_dir() {
-                units.push(dir);
-            }
-        }
+    for profile in profile_dirs_of(clone)? {
+        let rel_profile = rel(&profile, clone);
+        backdate_stamp_tree(
+            fs,
+            &profile.join(".fingerprint"),
+            &rel_profile,
+            live,
+            when,
+            true,
+        )?;
+        backdate_stamp_tree(fs, &profile.join("build"), &rel_profile, live, when, false)?;
     }
-    for dir in units {
-        let stamp = dir.join("invoked.timestamp");
-        if fs.mtime(&stamp).is_ok() {
-            fs.set_mtime(&stamp, when)
-                .map_err(|err| format!("{}: {err}", stamp.display()))?;
+    Ok(())
+}
+
+fn backdate_stamp_tree(
+    fs: &dyn Fs,
+    root: &Path,
+    rel_profile: &Path,
+    live: &BTreeSet<(PathBuf, String)>,
+    when: SystemTime,
+    fingerprint: bool,
+) -> Result<(), String> {
+    let listed = match fs.read_dir_bounded(root, 100_000) {
+        Ok(listed) => listed,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(format!("{}: {err}", root.display())),
+    };
+    for (name, kind) in listed {
+        if kind != EntryKind::Dir {
+            continue;
         }
-        if let Some(profile) = dir.parent().and_then(|fp| fp.parent()) {
-            let build_stamp = profile
-                .join("build")
-                .join(dir.file_name().unwrap_or_default())
-                .join("invoked.timestamp");
-            if fs.mtime(&build_stamp).is_ok() {
-                fs.set_mtime(&build_stamp, when)
-                    .map_err(|err| format!("{}: {err}", build_stamp.display()))?;
-            }
+        if live.contains(&(rel_profile.to_path_buf(), name.clone())) {
+            continue;
         }
-        let listed = match fs::read_dir(&dir) {
-            Ok(listed) => listed,
-            Err(_) => continue,
+        let dir = root.join(&name);
+        set_stamp(fs, &dir.join("invoked.timestamp"), when)?;
+        if !fingerprint {
+            continue;
+        }
+        let inner = match fs.read_dir_bounded(&dir, 100_000) {
+            Ok(inner) => inner,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(format!("{}: {err}", dir.display())),
         };
-        let mut seen = 0usize;
-        for item in listed {
-            seen += 1;
-            if seen > 100_000 {
-                return Err(format!("{} has more than 100000 entries", dir.display()));
-            }
-            let item = item.map_err(|err| format!("{}: {err}", dir.display()))?;
-            let path = item.path();
-            let name = item.file_name();
-            let name = name.to_string_lossy();
-            if name.ends_with(".json") || name == "invoked.timestamp" {
+        for (child, child_kind) in inner {
+            if child_kind != EntryKind::File
+                || child.ends_with(".json")
+                || child == "invoked.timestamp"
+            {
                 continue;
             }
-            if path.is_file() {
-                fs.set_mtime(&path, when)
-                    .map_err(|err| format!("{}: {err}", path.display()))?;
-            }
+            set_stamp(fs, &dir.join(child), when)?;
         }
     }
     Ok(())
 }
 
-fn fingerprint_unit(path: &Path) -> Option<PathBuf> {
-    let mut cur = path;
-    loop {
-        let parent = cur.parent()?;
-        if parent
-            .file_name()
-            .is_some_and(|name| name == ".fingerprint")
-            && cur.is_dir()
-        {
-            return Some(cur.to_path_buf());
-        }
-        if parent
-            .parent()
-            .and_then(|grand| grand.file_name())
-            .is_some_and(|name| name == ".fingerprint")
-        {
-            return Some(parent.to_path_buf());
-        }
-        cur = parent;
+fn set_stamp(fs: &dyn Fs, path: &Path, when: SystemTime) -> Result<(), String> {
+    if fs.mtime(path).is_err() {
+        return Ok(());
     }
-}
-
-fn profile_owning(path: &Path, clone: &Path) -> Option<PathBuf> {
-    let mut cur = path.parent()?;
-    while cur.starts_with(clone) {
-        if cur.join(".fingerprint").is_dir() {
-            return Some(cur.to_path_buf());
-        }
-        cur = cur.parent()?;
-    }
-    None
-}
-
-fn hash_in(name: &str) -> Option<&str> {
-    name.match_indices('-').find_map(|(at, _)| {
-        let tail = name.get(at + 1..)?;
-        let hash = tail.get(..16)?;
-        let rest = tail.get(16..).unwrap_or("");
-        let boundary = rest.is_empty() || rest.starts_with('.') || rest.starts_with('/');
-        (boundary
-            && hash
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
-        .then_some(hash)
-    })
+    fs.set_mtime(path, when)
+        .map_err(|err| format!("{}: {err}", path.display()))
 }
 
 /// Deletes one window's dead files on the owner's clone through `execute`.
@@ -1153,6 +1103,7 @@ fn hash_in(name: &str) -> Option<&str> {
 fn delete_window_through_execute(
     fs: &dyn Fs,
     files: &[PathBuf],
+    live: &BTreeSet<(PathBuf, String)>,
     input: &ProveInput,
     clone: &Path,
     scratch: &Path,
@@ -1193,10 +1144,11 @@ fn delete_window_through_execute(
         entries,
         orphan: None,
     };
-    // `execute` accepts only a window of 1..=365 days. The warm-up refreshed the
-    // stamps of units this window listed, so those stamps are backdated past one day
-    // and the planned files stay dead. Live units are left as the warm-up wrote them.
-    backdate_dead_stamps(fs, clone, &planned.entries)?;
+    // `execute` accepts only a window of 1..=365 days. The warm-up refreshed stamps
+    // the proof did not call live, including a build script the plan never lists.
+    // Those stamps are backdated past one day so the planned files stay dead.
+    // Live units are left as the warm-up wrote them.
+    backdate_dead_stamps(fs, clone, live)?;
     let plan = Plan::single(PlanClass::Secondary, planned, 1, made_at);
     let state = State::open_at(scratch.join("prove-state")).map_err(|err| err.to_string())?;
     let cfg = state.config().map_err(|err| err.to_string())?;
@@ -1503,7 +1455,7 @@ pub fn prove_with_cloner(
             windows.push(report);
             continue;
         }
-        delete_window_through_execute(fs, &d.dead_files, input, &clone.path, scratch)?;
+        delete_window_through_execute(fs, &d.dead_files, &d.live, input, &clone.path, scratch)?;
         let before = stamps_of(fs, &clone.path)?;
         let ran = replay(scratch, &format!("w{i}"), input, &clone.path)?;
         let after = stamps_of(fs, &clone.path)?;
