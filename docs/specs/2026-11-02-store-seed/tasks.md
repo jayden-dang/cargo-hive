@@ -190,7 +190,7 @@ _Requirements: SEED-5.1, SEED-10.7_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests** in the existing test module of `src/platform/apfs.rs`, using its helpers `apfs()` and `tmp(label)`:
+- [x] **Step 1: Write the failing tests** in the existing test module of `src/platform/apfs.rs`, using its helpers `apfs()` and `tmp(label)`:
 
 ```rust
 #[test]
@@ -225,9 +225,9 @@ fn create_dir_refuses_an_existing_path_and_a_missing_parent() {
 ```
 
 Run `cargo test --lib platform::`; expect a compile failure.
-- [ ] **Step 2: Implement.** `Apfs::create_dir` is `std::fs::create_dir(path)`. In `Watch` and `WatchTask`, add `incompressible: Arc<AtomicBool>`, set by `file_skipped` for `SkipReason::EmptyFile` and by `Task::not_compressible_enough` in place of the failure text. `compress` checks it before the `UF_COMPRESSED` test and returns `Incompressible`. Every other skip stays `Failed`, `SkipReason::AlreadyCompressed` included. `Display` gains a line. In each other `impl Fs`: wrappers (`FailStat`, `Volumes`, `Recording`) forward to `inner`, and `liveness::FakeFs` to `self.real`; `DirListFs` returns `Unsupported`, as its other methods do; `doctor::FakeFs`, `explain::FakeFs` and `gc/run.rs` `Rec` follow their neighbors. Non-macOS builds compile, since `Apfs` is already gated.
-- [ ] **Step 3: Run.** `cargo test`; expect pass, doctor's check b included: it compares with `==`. `cargo check --target x86_64-unknown-linux-gnu`.
-- [ ] **Step 4: Commit.** `feat(platform): Fs::create_dir, and a compression outcome for files it cannot shrink`
+- [x] **Step 2: Implement.** `Apfs::create_dir` is `std::fs::create_dir(path)`. In `Watch` and `WatchTask`, add `incompressible: Arc<AtomicBool>`, set by `file_skipped` for `SkipReason::EmptyFile` and by `Task::not_compressible_enough` in place of the failure text. `compress` checks it before the `UF_COMPRESSED` test and returns `Incompressible`. Every other skip stays `Failed`, `SkipReason::AlreadyCompressed` included. `Display` gains a line. In each other `impl Fs`: wrappers (`FailStat`, `Volumes`, `Recording`) forward to `inner`, and `liveness::FakeFs` to `self.real`; `DirListFs` returns `Unsupported`, as its other methods do; `doctor::FakeFs`, `explain::FakeFs` and `gc/run.rs` `Rec` follow their neighbors. Non-macOS builds compile, since `Apfs` is already gated.
+- [x] **Step 3: Run.** `cargo test`; expect pass, doctor's check b included: it compares with `==`. `cargo check --target x86_64-unknown-linux-gnu`.
+- [x] **Step 4: Commit.** `feat(platform): Fs::create_dir, and a compression outcome for files it cannot shrink`
 
 _Requirements: SEED-2.23_
 
