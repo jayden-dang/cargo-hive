@@ -3,14 +3,14 @@
 //! the choice of units for one repo, and the placement of those units into a
 //! target that does not exist yet.
 //!
-//! `run` fills first, then clones. A missing store tag or toolchain row is one
-//! finding and clones nothing. `clone_units_chosen` counts the units before the
-//! ones with an open edge are dropped, so it is cloned plus existing plus failed
-//! plus dropped.
+//! `run` fills first, then clones, then records what it placed. A missing store
+//! tag or toolchain row is one finding and clones nothing. `clone_units_chosen`
+//! counts the units before the ones with an open edge are dropped, so it is
+//! cloned plus existing plus failed plus dropped.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::discover::Checkout;
 use crate::doctor::Toolchain;
@@ -27,6 +27,7 @@ use store::tag_path;
 pub mod choose;
 pub mod fill;
 pub mod place;
+pub mod record;
 pub mod source;
 pub mod store;
 
@@ -151,7 +152,20 @@ pub fn run(
     };
     let window = Duration::from_secs(days.saturating_mul(86_400));
     let placed = place::place(ctx, &checkout.path, &rows, window, CRATE_DIR_CAP, cancel)?;
-    Ok(assemble(&filled, placed, dropped, findings))
+    let disk_full = placed.disk_full.clone();
+    let outcome = record_placed(ctx, assemble(&filled, placed, dropped, findings), cancel);
+    let Some(why) = disk_full else {
+        return Ok(outcome);
+    };
+    let why = match outcome
+        .findings
+        .iter()
+        .find(|(kind, _, _)| kind == "record.failed")
+    {
+        Some((_, _, detail)) => format!("{why}; {detail}"),
+        None => why,
+    };
+    Err(Error::DiskFull(why))
 }
 
 fn empty_fill() -> FillReport {
@@ -228,6 +242,40 @@ fn assemble(
         placed: placed.placed,
         target,
     }
+}
+
+fn record_placed(
+    ctx: &Ctx<'_>,
+    mut outcome: Outcome,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Outcome {
+    if outcome.placed.is_empty() {
+        return outcome;
+    }
+    let Some((target, identity)) = outcome.target.clone() else {
+        return outcome;
+    };
+    let stored = record::SeedRecord {
+        identity,
+        written_at: epoch_secs(ctx.now),
+        units: outcome.placed.clone(),
+    };
+    match record::write(ctx.state, &target, stored, cancel) {
+        Ok(Some(note)) => outcome.notes.push(note),
+        Ok(None) => {}
+        Err(err) => outcome.findings.push((
+            "record.failed".to_string(),
+            Some(target),
+            format!("{err}; this seed was not recorded, so status reports nothing for the target"),
+        )),
+    }
+    outcome
+}
+
+fn epoch_secs(now: SystemTime) -> u64 {
+    now.duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
 }
 
 fn unmeasured_bytes() -> Vec<(String, String)> {

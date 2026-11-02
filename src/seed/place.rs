@@ -20,14 +20,7 @@ use crate::size::{allocated_bytes, MAX_DEPTH};
 
 use super::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SeededUnit {
-    pub rel_profile: PathBuf,
-    pub dir_name: String,
-    pub stamp: Option<(PathBuf, u64)>,
-    pub has_build: bool,
-    pub deps_files: u32,
-}
+pub use super::record::SeededUnit;
 
 #[derive(Debug, Default)]
 pub struct PlaceReport {
@@ -43,6 +36,8 @@ pub struct PlaceReport {
     pub findings: Vec<(String, Option<PathBuf>, String)>,
     pub unmeasured: Vec<(String, String)>,
     pub cancelled: bool,
+    /// Set when a later unit hits a full disk. Units already cloned stay in `placed`.
+    pub disk_full: Option<String>,
 }
 
 enum Stop {
@@ -215,7 +210,13 @@ pub fn place(
                     .findings
                     .push(("unit.refused".to_string(), Some(path), detail));
             }
-            Err(why) => return Err(Error::DiskFull(why)),
+            Err(why) => {
+                if report.placed.is_empty() {
+                    return Err(Error::DiskFull(why));
+                }
+                report.disk_full = Some(why);
+                return Ok(report);
+            }
         }
     }
     finish(ctx, report, &mut added)

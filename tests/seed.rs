@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cargo_hive::plan_tier::Ctx;
 use cargo_hive::seed::Error;
@@ -658,6 +658,154 @@ fn seed_runs_no_cargo_subcommand_but_metadata() {
     assert!(lines > 0, "seed ran no cargo at all");
 }
 
+#[test]
+fn seed_writes_a_record_holding_each_cloned_unit_and_its_stamp() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("recorded");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let cloned = receipt["counts"]["clone_units_cloned"].as_u64().unwrap();
+    assert!(cloned > 0, "{receipt}");
+    let target = lane.join("target").canonicalize().unwrap();
+    let state = cargo_hive::state::State::open_at(hive.home.path.clone()).unwrap();
+    let path = state.root().join(cargo_hive::seed::record::SEEDS_FILE);
+    assert!(path.is_file(), "{}", path.display());
+    let file = cargo_hive::seed::record::read(&state).unwrap();
+    let record = file
+        .targets
+        .get(&target)
+        .unwrap_or_else(|| panic!("record keys {:?}", file.targets.keys().collect::<Vec<_>>()));
+    let meta = fs::symlink_metadata(&target).unwrap();
+    assert_eq!(record.identity, (meta.st_dev(), meta.st_ino()));
+    assert_eq!(record.units.len() as u64, cloned, "{record:?}");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(
+        record.written_at <= now && now.saturating_sub(record.written_at) < 86_400,
+        "written_at {} is not epoch seconds near {now}",
+        record.written_at
+    );
+    let script = record
+        .units
+        .iter()
+        .find(|unit| stamp_under_build(unit))
+        .expect("a run-build-script unit records a stamp under build/<dir>/");
+    let (rel, ns) = script.stamp.clone().unwrap();
+    let stamp = target.join(&rel);
+    assert!(stamp.is_file(), "{}", stamp.display());
+    let modified = fs::symlink_metadata(&stamp).unwrap().modified().unwrap();
+    let modified_ns = u64::try_from(modified.duration_since(UNIX_EPOCH).unwrap().as_nanos())
+        .expect("stamp mtime fits in u64");
+    assert_eq!(ns, modified_ns, "{}", rel.display());
+    assert!(
+        record.units.iter().all(|unit| !unit.dir_name.is_empty()),
+        "{record:?}"
+    );
+}
+
+#[test]
+fn seeds_receipt_holds_none_of_the_four_counts() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("receipt-counts");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0);
+    let mut keys = Vec::new();
+    collect_keys(&receipt, &mut keys, 0);
+    let banned: Vec<_> = keys
+        .iter()
+        .filter(|key| is_seed_count(key))
+        .cloned()
+        .collect();
+    assert!(banned.is_empty(), "{banned:?} in {receipt}");
+}
+
+#[test]
+fn a_cancelled_seed_records_what_it_cloned() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("cancel-record");
+    let target = lane.join("target");
+    let cancel = || target.join("debug").is_dir();
+    let outcome = run_seed_until(&hive, Recording::over_real(), &lane, &cancel).unwrap();
+    assert!(outcome.cancelled, "{outcome:?}");
+    assert!(!outcome.placed.is_empty(), "{outcome:?}");
+    let cloned = outcome
+        .counts
+        .get("clone_units_cloned")
+        .copied()
+        .unwrap_or(0);
+    assert_eq!(cloned, outcome.placed.len() as u64, "{outcome:?}");
+    assert!(
+        outcome.placed.len() < store_units(&hive).len(),
+        "cancel should leave a stored unit uncloned: {:?}",
+        outcome.placed
+    );
+    assert_eq!(cargo_hive::seed::exit_code(&Ok(ref_outcome(&outcome))), 130);
+    let (path, identity) = outcome.target.clone().expect("the target was created");
+    let state = cargo_hive::state::State::open_at(hive.home.path.clone()).unwrap();
+    let file = cargo_hive::seed::record::read(&state).unwrap();
+    let record = file
+        .targets
+        .get(&path)
+        .expect("the cancelled seed was recorded");
+    assert_eq!(record.identity, identity);
+    assert_eq!(record.units, outcome.placed);
+}
+
+#[test]
+fn a_seed_that_cloned_nothing_writes_no_record() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("nothing-cloned");
+    cargo_json(&hive, &lane, &["build"]);
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
+    assert_eq!(receipt["counts"]["clone_units_cloned"], 0, "{receipt}");
+    let path = hive.home.path.join(cargo_hive::seed::record::SEEDS_FILE);
+    assert!(!path.exists(), "{}", path.display());
+}
+
+fn stamp_under_build(unit: &cargo_hive::seed::record::SeededUnit) -> bool {
+    let Some((rel, _)) = &unit.stamp else {
+        return false;
+    };
+    let text = rel.to_string_lossy();
+    text.contains(&format!("/build/{}/", unit.dir_name))
+        || text.starts_with(&format!("build/{}/", unit.dir_name))
+}
+
+fn is_seed_count(key: &str) -> bool {
+    [
+        "reused_fresh",
+        "seeded_unneeded",
+        "seeded_recompiled",
+        "seeded_missing",
+    ]
+    .iter()
+    .any(|name| key == *name || key.starts_with(&format!("{name}:")))
+}
+
+fn ref_outcome(outcome: &cargo_hive::seed::Outcome) -> cargo_hive::seed::Outcome {
+    cargo_hive::seed::Outcome {
+        counts: outcome.counts.clone(),
+        findings: outcome.findings.clone(),
+        unmeasured: outcome.unmeasured.clone(),
+        notes: outcome.notes.clone(),
+        cancelled: outcome.cancelled,
+        placed: outcome.placed.clone(),
+        target: outcome.target.clone(),
+    }
+}
+
 fn assert_byte_names_unmeasured(receipt: &serde_json::Value) {
     let fields: Vec<_> = receipt["unmeasured"]
         .as_array()
@@ -811,6 +959,15 @@ fn run_seed(
     recording: Recording,
     lane: &Path,
 ) -> Result<cargo_hive::seed::Outcome, Error> {
+    run_seed_until(hive, recording, lane, &|| false)
+}
+
+fn run_seed_until(
+    hive: &Hive,
+    recording: Recording,
+    lane: &Path,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<cargo_hive::seed::Outcome, Error> {
     let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
     let _home = CargoHomeGuard::set(&hive.cargo_home.path);
     let lib = LibCtx::open(hive, recording.fs());
@@ -838,7 +995,7 @@ fn run_seed(
         repos: &repos,
         mains: &lib.mains,
     };
-    cargo_hive::seed::run(&ctx, &repos[0], &checkout, &toolchain, &|| false)
+    cargo_hive::seed::run(&ctx, &repos[0], &checkout, &toolchain, cancel)
 }
 
 fn env_lock() -> &'static Mutex<()> {
