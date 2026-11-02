@@ -472,7 +472,7 @@ _Requirements: SEED-2.15, SEED-2.16, SEED-2.17, SEED-2.18_
 
 **Depends-on:** Task 6
 
-- [ ] **Step 1: Write the failing tests** in `src/seed/choose.rs`:
+- [x] **Step 1: Write the failing tests** in `src/seed/choose.rs`:
 
 ```rust
 fn row(name_meta: &str, fp: &str, value: u64, repo: &str, live: u64, deps: &[&str]) -> Row {
@@ -555,9 +555,9 @@ fn a_dependent_of_a_fingerprint_not_chosen_is_dropped_and_the_drop_repeats() {
 ```
 
 A workspace dependency is simply absent from `registry_deps`, which the last case shows by `f2` having none. Run `cargo test --lib seed::choose`; expect a compile failure.
-- [ ] **Step 2: Implement** the pure function: look up `store.toolchains.get(version_text)`, else `NoRow` with the `release:` line of the text; filter by value and `repos.contains(repo)`; group by `name_meta` and take `max_by_key((last_live_at, fingerprint_hash))`; then loop: a set of chosen fingerprint hashes, retain rows whose every `registry_deps` entry is in the set, until no row leaves; `dropped` is the count removed by this loop.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): choose one consistent set of units for a repo and toolchain`
+- [x] **Step 2: Implement** the pure function: look up `store.toolchains.get(version_text)`, else `NoRow` with the `release:` line of the text; filter by value and `repos.contains(repo)`; group by `name_meta` and take `max_by_key((last_live_at, fingerprint_hash))`; then loop: a set of chosen fingerprint hashes, retain rows whose every `registry_deps` entry is in the set, until no row leaves; `dropped` is the count removed by this loop.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): choose one consistent set of units for a repo and toolchain`
 
 _Requirements: SEED-3.1, SEED-3.2, SEED-3.3, SEED-3.4, SEED-3.5, SEED-3.6, SEED-3.7_
 
