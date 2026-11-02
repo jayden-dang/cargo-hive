@@ -649,10 +649,7 @@ mod tests {
         listed.sort();
         assert_eq!(
             listed,
-            vec![
-                ("a".into(), EntryKind::File),
-                ("b".into(), EntryKind::File)
-            ]
+            vec![("a".into(), EntryKind::File), ("b".into(), EntryKind::File)]
         );
     }
 

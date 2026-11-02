@@ -47,10 +47,7 @@ impl fmt::Display for StateError {
                 )
             }
             StateError::DuplicatePlan { id } => {
-                write!(
-                    f,
-                    "plan id {id} collided; run `cargo hive gc --plan` again"
-                )
+                write!(f, "plan id {id} collided; run `cargo hive gc --plan` again")
             }
         }
     }
