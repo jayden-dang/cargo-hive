@@ -1,4 +1,38 @@
-//! The seed command's library entry. Source reading is the part that exists:
-//! the live registry units of a target, and the files of one unit.
+//! The seed command's library entry: the live registry units of a target, and
+//! the compressed store those units are published into.
 
 pub mod source;
+pub mod store;
+
+use std::fmt;
+
+use crate::state::StateError;
+
+#[derive(Debug)]
+pub enum Error {
+    State(StateError),
+    DiskFull(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::State(err) => write!(f, "{err}"),
+            Error::DiskFull(why) => {
+                write!(
+                    f,
+                    "the disk is full ({why}); free space and run the command again"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::State(err) => Some(err),
+            Error::DiskFull(_) => None,
+        }
+    }
+}
