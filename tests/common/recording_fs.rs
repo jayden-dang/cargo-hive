@@ -21,6 +21,7 @@ struct Opts {
     fail_removes_after: Option<u64>,
     fail_remove: HashSet<PathBuf>,
     fail_sharing: HashSet<PathBuf>,
+    fail_stat: HashSet<PathBuf>,
 }
 
 struct State {
@@ -84,6 +85,17 @@ impl Recording {
             .unwrap()
             .create_dir_after_lock
             .push(dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// `entry_stat` of `path` fails. Listing the parent still succeeds.
+    pub fn fail_stat(self, path: impl AsRef<Path>) -> Recording {
+        self.state
+            .opts
+            .lock()
+            .unwrap()
+            .fail_stat
+            .insert(path.as_ref().to_path_buf());
         self
     }
 
@@ -239,6 +251,12 @@ impl Fs for Recording {
 
     fn entry_stat(&self, path: &Path) -> io::Result<platform::EntryStat> {
         self.push(format!("read {}", path.display()));
+        if self.state.opts.lock().unwrap().fail_stat.contains(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("injected stat failure for {}", path.display()),
+            ));
+        }
         self.state.fs.entry_stat(path)
     }
 

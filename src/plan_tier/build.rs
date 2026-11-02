@@ -1,7 +1,7 @@
 //! Builds one plan per checkout class from ownership and a liveness verdict.
 //! An orphan target is one entry for the directory itself, not the files inside it.
 //! Planning records paths in hive's state and writes nothing in a checkout.
-//! A listed path whose stat fails is recorded and is not an entry, and that target is not nothing to do.
+//! A listed path whose stat fails stores no plan. The finding names the path, and that target is not nothing to do.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -29,7 +29,6 @@ pub enum TargetClass {
 
 pub struct BuiltTarget {
     pub target: PlannedTarget,
-    pub stat_failures: Vec<(PathBuf, String)>,
 }
 
 pub enum TargetPlan {
@@ -45,6 +44,15 @@ pub struct Made {
     pub nothing_to_do: Vec<PathBuf>,
     pub unmeasured: Vec<Unmeasured>,
     pub findings: Vec<(String, Option<PathBuf>, String)>,
+}
+
+/// Exit status of `gc --plan` after planning finishes.
+pub fn command_code(made: &Made) -> i32 {
+    i32::from(
+        made.findings
+            .iter()
+            .any(|(kind, _, _)| kind == "refusal" || kind == "plan.unreadable"),
+    )
 }
 
 #[derive(Debug)]
@@ -117,11 +125,11 @@ pub fn plan_for_target(ctx: &Ctx, target: &TargetDir, window: Duration) -> Targe
             });
         }
     }
-    if entries.is_empty() {
-        if unread.is_empty() {
-            return TargetPlan::NothingToDo;
-        }
+    if !unread.is_empty() {
         return TargetPlan::Unreadable(unread);
+    }
+    if entries.is_empty() {
+        return TargetPlan::NothingToDo;
     }
     let owner = match &target.owner {
         Owner::Owned { checkout } => Some(checkout.clone()),
@@ -142,7 +150,6 @@ pub fn plan_for_target(ctx: &Ctx, target: &TargetDir, window: Duration) -> Targe
             entries,
             orphan: None,
         },
-        stat_failures: unread,
     })
 }
 
@@ -212,6 +219,7 @@ pub fn make(
     let mut undecided = Vec::new();
     let mut nothing_to_do = Vec::new();
     let mut measure_gaps = Vec::new();
+    let mut blocked = false;
     for target in &scan.targets {
         if cancel() {
             return Err(MakeError::Cancelled);
@@ -257,15 +265,21 @@ pub fn make(
                         .collect(),
                 }),
                 TargetPlan::NothingToDo => nothing_to_do.push(target.path.clone()),
-                TargetPlan::Unreadable(failed) => record_stat_failures(&mut findings, failed),
+                TargetPlan::Unreadable(failed) => {
+                    record_stat_failures(&mut findings, failed);
+                    blocked = true;
+                }
                 TargetPlan::Planned(built) => {
-                    record_stat_failures(&mut findings, built.stat_failures);
                     store_target(&mut buckets, class, built.target, &recorded, days, now);
                 }
             },
         }
     }
-    let plans: Vec<Plan> = buckets.into_iter().flatten().collect();
+    let plans: Vec<Plan> = if blocked {
+        Vec::new()
+    } else {
+        buckets.into_iter().flatten().collect()
+    };
     let mut unmeasured = measure_gaps;
     if !ctx.account_bytes && !plans.is_empty() {
         for field in ["freed_bytes", "deleted_bytes_still_shared"] {
@@ -788,28 +802,12 @@ mod tests {
         let plan = plan_with(&target, |path| {
             path.extension().is_some_and(|ext| ext == "rlib")
         });
-        let TargetPlan::Planned(built) = plan else {
-            panic!("a target with a path that stat'd was not planned");
+        let TargetPlan::Unreadable(failed) = plan else {
+            panic!("a path that could not be stat'd was still planned");
         };
-        assert!(built
-            .target
-            .entries
-            .iter()
-            .all(|entry| entry.path != artifact));
         assert!(
-            built.target.entries.iter().any(|entry| entry
-                .path
-                .ends_with(".fingerprint/fixture-4444444444444444")),
-            "{:?}",
-            built.target.entries
-        );
-        assert!(
-            built
-                .stat_failures
-                .iter()
-                .any(|(path, _)| path == &artifact),
-            "the artifact whose stat failed was not recorded: {:?}",
-            built.stat_failures
+            failed.iter().any(|(path, _)| path == &artifact),
+            "the artifact whose stat failed was not recorded: {failed:?}"
         );
     }
 }

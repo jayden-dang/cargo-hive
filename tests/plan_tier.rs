@@ -238,6 +238,50 @@ fn stopping_after_any_one_deletion_leaves_a_target_cargo_can_build() {
 }
 
 #[test]
+fn a_dead_path_whose_stat_fails_stores_no_plan_and_names_the_path() {
+    let p = Planned::new("stat-fail-plan");
+    let target = p.worktree_target();
+    let hash = p.dead_unit_hash(&target);
+    let mut artifact = None;
+    let deps = target.join("debug/deps");
+    for entry in std::fs::read_dir(&deps).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap();
+        if name.contains(&hash) && name.ends_with(".rlib") {
+            artifact = Some(path);
+        }
+    }
+    let artifact = artifact.expect("the dead unit has an rlib");
+    let rec = Recording::over_real().fail_stat(&artifact);
+    let lib = p.library_ctx_with(rec.fs());
+    let made = cargo_hive::plan_tier::build::make(&lib.ctx(), &[], &|| false).unwrap();
+    assert!(
+        made.plans.is_empty(),
+        "a plan was returned though a path could not be stat'd"
+    );
+    assert!(
+        made.findings.iter().any(|(kind, path, _)| {
+            kind == "plan.unreadable" && path.as_ref() == Some(&artifact)
+        }),
+        "{:?}",
+        made.findings
+    );
+    assert!(
+        !made
+            .nothing_to_do
+            .iter()
+            .any(|path| path.ends_with("wt0/target") || path == &target),
+        "the unreadable target was reported as nothing to do: {:?}",
+        made.nothing_to_do
+    );
+    assert_eq!(cargo_hive::plan_tier::build::command_code(&made), 1);
+    assert!(
+        !p.hive.home.path.join("plans.json").exists(),
+        "gc --plan stored a plan"
+    );
+}
+
+#[test]
 fn a_cancel_between_units_keeps_the_first_unit_gone_and_the_second_intact_and_the_rest_can_be_planned_again(
 ) {
     use cargo_hive::plan_tier::apply::{execute, ResolvedTarget};

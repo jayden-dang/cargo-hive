@@ -1105,30 +1105,37 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
             return emit(state, out, b.finish(), "gc --plan was cancelled\n", 130);
         }
     };
+    let code = build::command_code(&made);
     let made_at = now
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let unreadable = made
+        .findings
+        .iter()
+        .any(|(kind, _, _)| kind == "plan.unreadable");
     let mut plans = made.plans;
-    let mut stored = false;
-    for attempt in 0..ID_ATTEMPTS {
-        match record::insert(state, &cancelled, plans.clone(), made_at) {
-            Ok(()) => {
-                stored = true;
-                break;
-            }
-            Err(StateError::DuplicatePlan { .. }) if attempt + 1 < ID_ATTEMPTS => {
-                for plan in &mut plans {
-                    build::reissue(plan);
+    let mut stored = unreadable;
+    if !unreadable {
+        for attempt in 0..ID_ATTEMPTS {
+            match record::insert(state, &cancelled, plans.clone(), made_at) {
+                Ok(()) => {
+                    stored = true;
+                    break;
                 }
-            }
-            Err(StateError::Cancelled) => {
-                b.finding("error", None, StateError::Cancelled.to_string());
-                return emit(state, out, b.finish(), "gc --plan was cancelled\n", 130);
-            }
-            Err(e) => {
-                b.finding("error", None, e.to_string());
-                return emit(state, out, b.finish(), &format!("{e}\n"), 1);
+                Err(StateError::DuplicatePlan { .. }) if attempt + 1 < ID_ATTEMPTS => {
+                    for plan in &mut plans {
+                        build::reissue(plan);
+                    }
+                }
+                Err(StateError::Cancelled) => {
+                    b.finding("error", None, StateError::Cancelled.to_string());
+                    return emit(state, out, b.finish(), "gc --plan was cancelled\n", 130);
+                }
+                Err(e) => {
+                    b.finding("error", None, e.to_string());
+                    return emit(state, out, b.finish(), &format!("{e}\n"), 1);
+                }
             }
         }
     }
@@ -1179,8 +1186,7 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
         undecided: made.undecided,
         nothing_to_do: made.nothing_to_do,
     });
-    let refused = made.findings.iter().any(|(kind, _, _)| kind == "refusal");
-    emit(state, out, b.finish(), &human, i32::from(refused))
+    emit(state, out, b.finish(), &human, code)
 }
 
 fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: OutputArgs) -> i32 {
