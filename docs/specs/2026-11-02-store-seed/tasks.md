@@ -141,7 +141,7 @@ _Requirements: SEED-10.10, SEED-10.11_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test.** Add table rows, using the file's `stat` helper and a new `shares_all_flagged(private)` helper beside `clone_flagged` that sets `may_share: true, shares_all: true, clone_id: 7`:
+- [x] **Step 1: Write the failing test.** Add table rows, using the file's `stat` helper and a new `shares_all_flagged(private)` helper beside `clone_flagged` that sets `may_share: true, shares_all: true, clone_id: 7`:
 
 ```rust
 (
@@ -157,7 +157,7 @@ _Requirements: SEED-10.10, SEED-10.11_
 ```
 
 Run `cargo test --lib gc::ledger`; expect the first row to fail with `freed: 4096`. The existing row `compressed: private size is not trusted` must keep passing: it sets `shares_all: false`.
-- [ ] **Step 2: Implement.** Replace the condition at line 66, so that the rule is the flag and not a measured zero:
+- [x] **Step 2: Implement.** Replace the condition at line 66, so that the rule is the flag and not a measured zero:
 
 ```rust
 if s.shares_all && stat.compressed {
@@ -168,7 +168,7 @@ if s.shares_all && stat.compressed {
 ```
 
 Run `cargo test`; expect pass.
-- [ ] **Step 3: Commit.** `fix(gc): do not count a compressed file that shares all its blocks as freed`
+- [x] **Step 3: Commit.** `fix(gc): do not count a compressed file that shares all its blocks as freed`
 
 _Requirements: SEED-5.1, SEED-10.7_
 
