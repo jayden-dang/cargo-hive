@@ -1917,7 +1917,7 @@ _Requirements: GCPLAN-5.1, GCPLAN-5.2, GCPLAN-5.3, GCPLAN-5.4, GCPLAN-5.5, GCPLA
 
 **Depends-on:** Task 13, Task 14
 
-- [ ] **Step 1: Write the failing tests** in `tests/plan_tier.rs`
+- [x] **Step 1: Write the failing tests** in `tests/plan_tier.rs`
 
 ```rust
 #[test]
@@ -1992,13 +1992,13 @@ fn a_target_dir_that_gained_an_owner_after_the_plan_is_not_removed() {
 
 Run: `cargo test --test plan_tier orphan` — expect: failure, orphan removal not implemented.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `remove`: `locks::acquire(fs, &target.path, false)`; any `Skipped(reason)` → `Skipped(reason.count_name())`. Under the locks `identify` again and list the profile and triple dirs: a dir not in `OrphanScope::dirs`, or `entry_stat(target)` differing from the recorded kind/device/inode → `Refused`. Re-resolve ownership (`discover::targets`, empty snapshot, all repos): the path must still be an `OrphanCandidate`, else `Refused`. Then `check_entry(fs, target.parent(), &target.path, Expect::Entry{..})` and one `remove_counted(fs, &mut ledger, parent, &target.path, account_bytes, false)`; a `measure` cap hit goes to `unmeasured`. In `apply`, an `Orphan` plan under `Approved` calls `remove` instead of the unit loop.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "plan_tier: remove an approved orphan target whole, after relisting under every lock"`
 
