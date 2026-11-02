@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use crate::discover::WalkFault;
 use crate::platform::Fs;
 use crate::registry::Repo;
 use crate::state::{Config, State};
@@ -41,4 +42,20 @@ pub(crate) fn checkout_walk(
         checkouts.extend(rows);
     }
     (checkouts, faults)
+}
+
+/// A configured cache root that is not on disk is how a home says "do not scan a
+/// cache". That absence does not hide an owner. Any other scan fault can.
+pub(crate) fn faults_that_can_hide_an_owner(
+    faults: Vec<WalkFault>,
+    cache_roots: &[PathBuf],
+) -> Vec<WalkFault> {
+    faults
+        .into_iter()
+        .filter(|fault| !absent_cache_root(&fault, cache_roots))
+        .collect()
+}
+
+fn absent_cache_root(fault: &WalkFault, cache_roots: &[PathBuf]) -> bool {
+    cache_roots.iter().any(|root| root == &fault.path) && fault.detail.contains("os error 2")
 }

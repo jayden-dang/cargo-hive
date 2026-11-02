@@ -171,8 +171,9 @@ fn still_orphan(ctx: &Ctx, target: &Path, cancel: &(dyn Fn() -> bool + Sync)) ->
     if cancel() {
         return Err(Stop::Cancelled);
     }
-    if !scan.walk_faults.is_empty() {
-        return Err(Stop::Unreadable(scan.walk_faults));
+    let faults = super::faults_that_can_hide_an_owner(scan.walk_faults, &ctx.cfg.cache_roots);
+    if !faults.is_empty() {
+        return Err(Stop::Unreadable(faults));
     }
     let stat = ctx.fs.entry_stat(target).ok();
     let found = scan.targets.iter().find(|cand| {
