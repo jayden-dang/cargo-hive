@@ -63,7 +63,9 @@ impl Ledger {
             seen.target = target.to_path_buf();
         }
         if let Some(s) = sharing {
-            if (s.may_share || s.shares_all) && !stat.compressed {
+            if s.shares_all && stat.compressed {
+                seen.private = Some(0);
+            } else if (s.may_share || s.shares_all) && !stat.compressed {
                 seen.private = Some(s.private_bytes);
             }
         }
@@ -136,6 +138,15 @@ mod tests {
         }
     }
 
+    fn shares_all_flagged(private_bytes: u64) -> Sharing {
+        Sharing {
+            private_bytes,
+            clone_id: 7,
+            may_share: true,
+            shares_all: true,
+        }
+    }
+
     #[test]
     fn freed_bytes_follow_links_and_sharing() {
         let a = Path::new("/t/a");
@@ -193,6 +204,22 @@ mod tests {
                 Bytes {
                     freed: 4096,
                     still_shared: 0,
+                },
+            ),
+            (
+                "compressed and sharing every block: nothing is freed",
+                vec![(stat(7, 1, 8, true), shares_all_flagged(0))],
+                Bytes {
+                    freed: 0,
+                    still_shared: 4096,
+                },
+            ),
+            (
+                "uncompressed and sharing every block: as before",
+                vec![(stat(8, 1, 8, false), shares_all_flagged(0))],
+                Bytes {
+                    freed: 0,
+                    still_shared: 4096,
                 },
             ),
         ];
