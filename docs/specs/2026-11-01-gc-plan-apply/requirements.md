@@ -25,16 +25,17 @@ Roadmap item: ROAD-6 (MILE-2, `docs/roadmap/INDEX.md`), tracker issue #3.
 
 Sources:
 - `.skills/GCPLAN/close-package.md` (confirmed by the owner 2026-11-01), `.skills/GCPLAN/scan.md`.
+- Owner amendment 2026-11-02: plans of every class apply with no human step (ADR-0002).
 - `.skills/research/2026-11-01-cargo-build-locks.md`: which locks Cargo holds during a build.
-- Locks this feature builds on: ARCH-4, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 20; F9 (ownership resolved fresh);
+- Locks this feature builds on: ARCH-4, 8, 9, 11, 13, 14, 16, 17, 18, 19, 20; F9 (ownership resolved fresh);
   the liveness verdicts of LIVE (`docs/specs/2026-10-30-closure-liveness/`); the freed-byte rules of AUTOGC-5.
 
 Terms (defined in `CONTEXT.md`): plan tier, protected checkout, secondary checkout, orphan candidate, dead unit,
-Undecided, receipt, needs-human. This file adds three:
+Undecided, receipt. This file adds three:
 - **Plan:** a one-use record hive stores, naming the paths one `apply` may delete in the targets of one class.
 - **Class:** `secondary`, `protected` or `orphan`; the class of a target is the class of its owner checkout,
   `protected` when a protected checkout also owns it, and `orphan` when no checkout owns it.
-- **Outcome:** the typed result of one `apply`: `applied`, `partial`, `refused` or `needs-human`.
+- **Outcome:** the typed result of one `apply`: `applied`, `partial` or `refused`.
 
 Slices: the closure slice (stories 1 to 4, 6, 7) comes first; the orphan slice (story 5) follows and shares the plan
 store, ids, revalidation, receipt and skill with it.
@@ -91,19 +92,20 @@ store, ids, revalidation, receipt and skill with it.
 - **GCPLAN-3.9** WHEN `apply` refuses a plan after it marked the plan consumed THE SYSTEM SHALL keep the plan consumed.
 - **GCPLAN-3.10** IF the fingerprint-reading capability or the deletion capability has not passed THEN THE SYSTEM SHALL refuse every plan, delete nothing, leave the plan unconsumed, and exit with code 1.
 
-## 4. Stop protected plans at needs-human
+## 4. Apply protected plans
 
-**Story:** As an agent, I want `apply` on a protected plan to tell me the owner must approve it, so that I hand it over instead of deleting.
+**Story:** As an agent, I want `apply` to delete a protected plan itself, so that main's dead units are reclaimed with no human in the loop.
 
-- **GCPLAN-4.1** WHEN `apply` is given a plan of class `protected` or `orphan` THE SYSTEM SHALL delete nothing, return outcome `needs-human`, and report the plan's id, class, targets and planned bytes so the owner can see what would be approved.
+- ~~**GCPLAN-4.1**~~ superseded by GCPLAN-4.6 (owner amendment 2026-11-02: plans apply with no human step, ADR-0002) — was: ~~WHEN `apply` is given a plan of class `protected` or `orphan` THE SYSTEM SHALL delete nothing, return outcome `needs-human`, and report the plan's id, class, targets and planned bytes so the owner can see what would be approved.~~
+- **GCPLAN-4.6** WHEN `apply` is given a plan of class `protected` THE SYSTEM SHALL delete its paths by the same locks, checks, deletion and receipt as story 2 and story 3, with no owner step.
 - **GCPLAN-4.2** THE SYSTEM SHALL NOT open an owner-authentication dialog from `apply`.
-- **GCPLAN-4.3** WHEN `apply` returns `needs-human` THE SYSTEM SHALL leave the plan unconsumed.
-- **GCPLAN-4.4** THE SYSTEM SHALL give `apply` no argument or environment variable that makes it delete for a `protected` or `orphan` plan.
-- **GCPLAN-4.5** THE SYSTEM SHALL provide an internal entry point that deletes the paths of a `protected` plan by the same locks, checks, deletion and receipt as story 2 and story 3, and that runs only when given an approval value that no command-line path can construct; ROAD-7 supplies that value after the owner approves.
+- ~~**GCPLAN-4.3**~~ retired, no `needs-human` outcome exists (owner amendment 2026-11-02: plans apply with no human step, ADR-0002) — was: ~~WHEN `apply` returns `needs-human` THE SYSTEM SHALL leave the plan unconsumed.~~
+- ~~**GCPLAN-4.4**~~ retired, `apply` deletes for these classes without an argument or environment variable (owner amendment 2026-11-02: plans apply with no human step, ADR-0002) — was: ~~THE SYSTEM SHALL give `apply` no argument or environment variable that makes it delete for a `protected` or `orphan` plan.~~
+- ~~**GCPLAN-4.5**~~ superseded by GCPLAN-4.6 (owner amendment 2026-11-02: plans apply with no human step, ADR-0002) — was: ~~THE SYSTEM SHALL provide an internal entry point that deletes the paths of a `protected` plan by the same locks, checks, deletion and receipt as story 2 and story 3, and that runs only when given an approval value that no command-line path can construct; ROAD-7 supplies that value after the owner approves.~~
 
 ## 5. Plan orphan target dirs
 
-**Story:** As a developer, I want `cargo hive gc --plan` to propose removing a whole target dir that no checkout owns, so that I can review and later approve reclaiming the space of a deleted repo.
+**Story:** As a developer, I want `cargo hive gc --plan` to propose removing a whole target dir that no checkout owns, so that an agent can reclaim the space of a deleted repo.
 
 - **GCPLAN-5.1** WHEN a Cargo target dir in scope is an orphan candidate THE SYSTEM SHALL include it in the `orphan` plan as a single whole-directory removal.
 - **GCPLAN-5.2** THE SYSTEM SHALL list in an `orphan` plan only the target dir itself, and no path inside it.
@@ -111,18 +113,19 @@ store, ids, revalidation, receipt and skill with it.
 - **GCPLAN-5.4** THE SYSTEM SHALL record in an `orphan` plan the target dir's entry kind, device and inode numbers, and the profile and triple directories it holds.
 - **GCPLAN-5.5** WHEN an orphan candidate would be owned under the caller's `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR` or `CARGO_BUILD_BUILD_DIR` THE SYSTEM SHALL say so against that target in the receipt.
 - **GCPLAN-5.6** THE SYSTEM SHALL plan the removal of a whole Cargo target dir only in an `orphan` plan, and never in a `secondary` or `protected` plan (ARCH-18).
-- **GCPLAN-5.7** THE SYSTEM SHALL provide an internal entry point that removes the target dir of an `orphan` plan, and that runs only when given the approval value of GCPLAN-4.5.
+- ~~**GCPLAN-5.7**~~ superseded by GCPLAN-5.11 (owner amendment 2026-11-02: plans apply with no human step, ADR-0002) — was: ~~THE SYSTEM SHALL provide an internal entry point that removes the target dir of an `orphan` plan, and that runs only when given the approval value of GCPLAN-4.5.~~
+- **GCPLAN-5.11** WHEN `apply` is given a plan of class `orphan` THE SYSTEM SHALL remove each target dir in it by the rules of GCPLAN-5.8 to GCPLAN-5.10, with no owner step.
 - **GCPLAN-5.8** WHEN the orphan removal runs THE SYSTEM SHALL try, without waiting, an exclusive lock on each lock file present in every profile and triple directory of the target dir, and skip the removal, deleting nothing, when one is held, cannot be opened, cannot be locked on its volume, or is missing from a profile directory that has a `.fingerprint` directory.
 - **GCPLAN-5.9** WHEN the orphan removal holds its locks THE SYSTEM SHALL list the target dir's profile and triple directories again, and IF one is not in the plan, or the target dir's entry kind, device or inode number differs from the plan, or ownership resolved afresh no longer marks it an orphan candidate THEN THE SYSTEM SHALL refuse the removal and delete nothing.
 - **GCPLAN-5.10** WHEN the orphan removal proceeds THE SYSTEM SHALL remove the target dir by its entry kind without following symbolic links, and report the bytes freed and held elsewhere by the rules of AUTOGC-5.1, AUTOGC-5.2 and AUTOGC-5.5.
 
 ## 6. Read the outcome from the receipt and the exit code
 
-**Story:** As an agent, I want each `gc --plan` and `apply` receipt to say per plan what happened, so that I know whether to continue, ask the owner, or plan again without reading prose.
+**Story:** As an agent, I want each `gc --plan` and `apply` receipt to say per plan what happened, so that I know whether to continue or plan again without reading prose.
 
 - **GCPLAN-6.1** WHEN `gc --plan` or `apply` runs with `--json` THE SYSTEM SHALL print one receipt object whose schema version is 3 and which holds a list of plans, each with its id, class, outcome (for `apply`), reason, and the counters that apply to it.
 - **GCPLAN-6.2** WHEN `apply` returns outcome `applied`, or `partial` with no deletion failure and no cancel, THE SYSTEM SHALL exit with code 0.
-- **GCPLAN-6.3** WHEN `apply` returns outcome `needs-human` THE SYSTEM SHALL exit with code 3.
+- ~~**GCPLAN-6.3**~~ retired, no `needs-human` outcome exists (owner amendment 2026-11-02: plans apply with no human step, ADR-0002) — was: ~~WHEN `apply` returns outcome `needs-human` THE SYSTEM SHALL exit with code 3.~~
 - **GCPLAN-6.4** WHEN `apply` returns outcome `refused`, or fails, or returns `partial` because a deletion failed, THE SYSTEM SHALL exit with code 1.
 - **GCPLAN-6.5** WHEN `gc --plan` creates plans, or finds nothing to plan, THE SYSTEM SHALL exit with code 0.
 - **GCPLAN-6.6** THE SYSTEM SHALL take exactly one plan id per `apply`.
@@ -131,10 +134,11 @@ store, ids, revalidation, receipt and skill with it.
 
 ## 7. Teach agents the plan tier
 
-**Story:** As an agent, I want the hive skill to teach `gc --plan` and `apply`, so that I follow the plan flow, apply only what I may, and hand `needs-human` to the owner.
+**Story:** As an agent, I want the hive skill to teach `gc --plan` and `apply`, so that I follow the plan flow for every class.
 
 - **GCPLAN-7.1** THE SYSTEM SHALL document `gc --plan` and `apply` in the hive skill, each as a command line with `--json` that parses with the real CLI.
-- **GCPLAN-7.2** THE SYSTEM SHALL state in the skill that exit code 3 and outcome `needs-human` mean the owner must approve, and that an agent applies only `secondary` plans and reports the rest.
+- ~~**GCPLAN-7.2**~~ superseded by GCPLAN-7.6 (owner amendment 2026-11-02: plans apply with no human step, ADR-0002) — was: ~~THE SYSTEM SHALL state in the skill that exit code 3 and outcome `needs-human` mean the owner must approve, and that an agent applies only `secondary` plans and reports the rest.~~
+- **GCPLAN-7.6** THE SYSTEM SHALL state in the skill that an agent applies plans of every class itself, with no owner step, and that an `orphan` plan removes the whole target dir, with anything in it no build recreates.
 - **GCPLAN-7.3** THE SYSTEM SHALL state in the skill that an agent plans again after a `refused` outcome and never reuses a consumed plan id.
 - **GCPLAN-7.4** THE SYSTEM SHALL carry recorded-run entries for `gc --plan` and `apply` in the skill's eval file, in the form the existing entries use, each derived from a heading in `skills/hive/TESTS.md`.
 - **GCPLAN-7.5** THE SYSTEM SHALL replace the skill's statement that the plan tier is not available yet with the plan flow of GCPLAN-7.1 to GCPLAN-7.3.
@@ -169,7 +173,8 @@ Files and surfaces this change touches:
 - **GCPLAN-9.1** (guard) WHEN `cargo hive gc` runs without `--plan` THE SYSTEM SHALL CONTINUE TO behave as stories 2 to 5 of AUTOGC require, with the same counts, findings, exit codes and receipt schema version.
 - **GCPLAN-9.2** (guard) WHEN `cargo hive repo add`, `status`, `doctor` or `explain` runs THE SYSTEM SHALL CONTINUE TO print the receipt it printed before this feature, with schema version 2, the same count names and values, and leave every checkout, every Cargo target dir and `~/.cargo` with no file created, modified or deleted.
 - **GCPLAN-9.3** (guard) WHEN any hive command runs once hive's state is open, `gc --plan` and `apply` included, THE SYSTEM SHALL CONTINUE TO satisfy CORE-5.1 to CORE-5.7: one JSON receipt on stdout under `--json`, the receipt appended to the receipt log, only counted or measured values, no time saved, unmeasurable values omitted with a reason in `unmeasured`, version, scope and schema in every receipt, scope from arguments and never from the working directory.
-- **GCPLAN-9.4** (guard) WHEN a command other than `apply` exits THE SYSTEM SHALL CONTINUE TO use exit code 0 for success, 1 for a refusal or failure, 2 for an unsupported OS and for argument errors, and 130 for a cancel; code 3 is used only by `apply` for `needs-human`.
+- ~~**GCPLAN-9.4**~~ superseded by GCPLAN-9.11 (owner amendment 2026-11-02: plans apply with no human step, ADR-0002) — was: ~~(guard) WHEN a command other than `apply` exits THE SYSTEM SHALL CONTINUE TO use exit code 0 for success, 1 for a refusal or failure, 2 for an unsupported OS and for argument errors, and 130 for a cancel; code 3 is used only by `apply` for `needs-human`.~~
+- **GCPLAN-9.11** (guard) WHEN any command exits THE SYSTEM SHALL CONTINUE TO use exit code 0 for success, 1 for a refusal or failure, 2 for an unsupported OS and for argument errors, and 130 for a cancel, and SHALL use no other code.
 - **GCPLAN-9.5** (guard) WHEN liveness is computed THE SYSTEM SHALL CONTINUE TO return the verdicts of LIVE stories 1 and 2 for the same target, window and time; plan and apply call it and do not change it.
 - **GCPLAN-9.6** (guard) WHEN hive computes ownership THE SYSTEM SHALL CONTINUE TO run no cargo subcommand but `cargo metadata --no-deps --format-version 1 --locked --offline` with the scrubbed environment, and to compile and replay nothing.
 - **GCPLAN-9.7** (guard) WHEN hive reads its configuration THE SYSTEM SHALL CONTINUE TO read `secondary_roots` and `cache_roots` as before, and keep refusing unknown keys other than the window key this feature adds.
@@ -179,7 +184,7 @@ Files and surfaces this change touches:
 
 ## Out of Scope
 
-- `cargo hive approve`, the owner-authentication dialog, approval records and their expiry, and the code that turns an approval into the approval value of GCPLAN-4.5: ROAD-7. Until it ships, a `protected` or `orphan` plan ends at `needs-human` on every command-line path; the deletion entry points of GCPLAN-4.5 and GCPLAN-5.7 are reachable only from tests.
+- `cargo hive approve`, an owner-authentication dialog and approval records: dropped with ROAD-7 on 2026-11-02 (ADR-0002).
 - Seeding, the store, store GC and `bench`: MILE-3.
 - A full rewrite of the hive skill: ROAD-13. This feature only adds `gc --plan` and `apply`.
 - A per-run window option, and a per-repo window.

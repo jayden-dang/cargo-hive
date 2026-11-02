@@ -1,7 +1,7 @@
 # Architecture: cargo-hive
 
 Status: Approved
-Date: 2026-10-28
+Date: 2026-11-02
 
 <!--
 The architecture spine: the small set of invariants that keep independently built
@@ -34,10 +34,10 @@ package (A1-A6, D2-D5, D7, S1-S2, C1), the F9 amendment and SPIKES.md.
 - **ARCH-9** Accept Cargo fingerprint files only in a known exact format signature; refuse to act on any other shape.
 - **ARCH-10** Report only deterministic counters measured on this machine; seconds come only from `cargo hive bench`.
 - **ARCH-11** Report as freed only the bytes a deletion returns to the volume; bytes a surviving hardlink or clone still holds are counted apart, never as freed.
-- **ARCH-12** Open an owner-authentication dialog only from `cargo hive approve`, with a TTY and no agent ancestor.
+- ~~**ARCH-12** Open an owner-authentication dialog only from `cargo hive approve`, with a TTY and no agent ancestor.~~ Retired 2026-11-02, with no successor: hive has no dialog and no approval command (ADR-0002).
 - **ARCH-13** A child `git` or `cargo` never inherits the caller's target-dir or `GIT_*` variables, and a toolchain selected by the caller's directory never leaks into hive's choice of active toolchain; every other variable the child sees is set by hive or kept on purpose.
 - **ARCH-14** Gate each capability on `cargo hive doctor` results for the active toolchain.
-- **ARCH-15** Keep macOS-specific code (anything under `cfg(target_os = "macos")`, APFS and LocalAuthentication) behind the `src/platform` `Fs` and `Approve` traits.
+- **ARCH-15** Keep macOS-specific code (anything under `cfg(target_os = "macos")`, APFS) behind the `src/platform` `Fs` trait.
 - **ARCH-16** Write hive's metadata files (registry, capabilities, snapshot, plans, `store.db`) only through the `state` module, atomically, under its one lock.
 - **ARCH-17** Never compile or replay a build to decide liveness or ownership; ownership comes only from `cargo metadata --no-deps --locked --offline`.
 - **ARCH-18** A deletion inside a Cargo target dir never removes a fingerprint dir on its own and never touches `build/`; only a plan that deletes a whole orphan target removes the target entire.

@@ -2098,3 +2098,25 @@ Run: `cargo test` — expect: pass; `cargo test --test liveness_prove -- --ignor
 `git commit -m "tests: run the deletion trial through execute"`
 
 _Requirements: GCPLAN-8.2, GCPLAN-9.5, GCPLAN-9.10_
+
+### Task 18: Plans of every class apply with no owner step (owner amendment 2026-11-02)
+
+**Supersedes:** the `Authorization` and `Approval` types, `needs-human` and exit code 3 that Tasks 6, 11, 13, 15 and 16 built. Those task bodies stay as the record of what was built then; ADR-0002 says why they changed.
+
+**Files:**
+- Modify: `src/plan_tier/apply.rs`, `src/plan_tier/orphan.rs`, `src/receipt.rs`, `src/cli.rs`, `src/doctor.rs`, `src/platform/mod.rs`, `Cargo.toml`, `Cargo.lock`
+- Delete: `src/platform/local_auth.rs`
+- Modify: `plugin/skills/hive/SKILL.md`, `skills/hive/TESTS.md`, `skills/hive/eval.json`
+- Test: `tests/plan_apply.rs`, `tests/plan_tier.rs`, `tests/doctor.rs`, `tests/skill.rs`
+
+- [x] **Step 1: Write the failing tests** in `tests/plan_apply.rs`: `an_agent_applies_a_protected_plan_itself_and_the_plan_is_consumed` and `an_agent_removes_an_orphan_target_itself`.
+
+Run: `cargo test --test plan_apply an_agent_` — expect: both fail on exit 3 and outcome `needs-human`.
+
+- [x] **Step 2: Implement**
+
+`apply` takes an id and no authorization value; an `orphan` plan calls `orphan::remove`, and every other class runs `execute`. Remove `Outcome::NeedsHuman` and `EXIT_NEEDS_HUMAN`. Remove doctor check (e), `Capability::Approval`, the `Approve` trait, `local_auth.rs` and `objc2-local-authentication`; the other check letters stay as they are. Teach the skill the every-class rule. `doctor` overwrites a `capabilities.json` that still names the retired capability, covered by `doctor_replaces_capabilities_recorded_with_the_retired_approval_check`.
+
+- [x] **Step 3: Commit**
+
+_Requirements: GCPLAN-4.2, GCPLAN-4.6, GCPLAN-5.11, GCPLAN-7.6, GCPLAN-9.11, CORE-1.13, CORE-1.14, SKILL-2.7, AUTOGC-7.6, EXPLAIN-7.6_

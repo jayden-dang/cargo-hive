@@ -83,10 +83,10 @@ Leave `.skills/verify/`.
 
 ### doctor
 
-- **Sub-features:** checks (a) clone sharing, (b) Applesauce compression, (c) clone id, (d) exclusive lock proof, (e) owner-auth availability, (f) fingerprint format.
+- **Sub-features:** checks (a) clone sharing, (b) Applesauce compression, (c) clone id, (d) exclusive lock proof, (f) fingerprint format, (g) failed-unit marker. There is no check (e); the owner-authentication check it held was removed.
 - **How to get to it (user POV):** run `cargo hive doctor` after install, and again after a toolchain change.
 - **Driving it with the shell:** `"$HIVE" doctor --json > doctor.json`; assert exit 0 and `[c["id"], c["verdict"]]` for each of `doctor.json["checks"]`.
-- **Gotchas:** below macOS 27 it still runs every check and reports the floor; check (e) never shows a dialog.
+- **Gotchas:** below macOS 27 it still runs every check and reports the floor.
 - **Persist check:** re-read `$HIVE_HOME/capabilities.json`: `toolchain_release` matches `rustc -V` at `$HIVE_HOME`, and `disabled` lists no capability when every check passed.
 
 ### repo add / repo list

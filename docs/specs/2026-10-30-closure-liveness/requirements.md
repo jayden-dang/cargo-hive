@@ -386,7 +386,7 @@ liveness and takes a snapshot, so that I can run it on klynt while `cargo watch`
 ## Out of Scope
 
 - Deleting anything outside the proof's clone: plan files, apply, apply-time recheck, and the
-  user-facing window override are ROAD-6; owner approval is ROAD-7.
+  user-facing window override are ROAD-6; owner approval was ROAD-7, dropped 2026-11-02 (ADR-0002).
 - Any CLI subcommand, flag, receipt field or snapshot field for liveness, including a hidden proof
   command.
 - Closing the window gap: a command that stays fully fresh for the whole window leaves no disk trace

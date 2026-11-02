@@ -7,7 +7,7 @@ Requirements: ./requirements.md
 
 ## Context
 
-Nothing exists yet. This is a greenfield Rust crate. The surface it touches is external: Cargo's on-disk target layout and fingerprint files, git's worktree metadata, and four macOS facilities (APFS clones and their sharing attributes, decmpfs compression through Applesauce, `flock`/`fcntl` locks, LocalAuthentication). These shapes are pinned down in three places:
+Nothing exists yet. This is a greenfield Rust crate. The surface it touches is external: Cargo's on-disk target layout and fingerprint files, git's worktree metadata, and three macOS facilities (APFS clones and their sharing attributes, decmpfs compression through Applesauce, `flock`/`fcntl` locks). These shapes are pinned down in three places:
 - the scan digest `.skills/CORE/scan.md`;
 - the premise review `.skills/CORE/req-review.md`;
 - the independent design review `.skills/CORE/design-review.md`, whose findings F1 to F18 are folded in below.
@@ -28,7 +28,7 @@ Fresh retrieval (`load-subgraph`, seeded with CODE `CORE` and the requirement te
 
 ## Decisions
 
-1. **One crate, `cargo-hive`, with a library and a thin binary.** The binary is `cargo-hive`, invoked as `cargo hive`. Dependencies were approved by the user on 2026-10-25: `serde` 1.0.229, `serde_json` 1.0.154, `libc` 0.2.191, `clap` 4.6.7, `applesauce` 0.8.10, `objc2` 0.6.5, `objc2-local-authentication` 0.3.2, `block2` 0.6.2, `objc2-foundation` 0.3.2. `applesauce` builds two C libraries (`lzfse-sys`, `libdeflate-sys`). They need the C compiler that macOS linking already requires (Xcode Command Line Tools), so I1's "only a Rust toolchain" holds in practice; the README states it.
+1. **One crate, `cargo-hive`, with a library and a thin binary.** The binary is `cargo-hive`, invoked as `cargo hive`. Dependencies were approved by the user on 2026-10-25: `serde` 1.0.229, `serde_json` 1.0.154, `libc` 0.2.191, `clap` 4.6.7, `applesauce` 0.8.10, `objc2` 0.6.5, `objc2-local-authentication` 0.3.2, `block2` 0.6.2, `objc2-foundation` 0.3.2 (the objc2 crates removed 2026-11-02 with the owner-authentication check, ADR-0002). `applesauce` builds two C libraries (`lzfse-sys`, `libdeflate-sys`). They need the C compiler that macOS linking already requires (Xcode Command Line Tools), so I1's "only a Rust toolchain" holds in practice; the README states it.
 2. **macOS-specific dependencies are target-gated** under `[target.'cfg(target_os = "macos")'.dependencies]`. On any other OS the binary still builds, and every command exits non-zero with the macOS-only message (CORE-1.6).
 3. **State root and one lock.**
    - The state root is `~/.hive/`. `HIVE_HOME` overrides it; this is documented as test-only and is the only environment variable hive reads to locate itself (F17.3).
@@ -88,7 +88,7 @@ cli ──► registry ──► git (infra)
  │
  ├──► discover ──► git, classify, cargo_target ──► fingerprint
  │        └──► size  (skipped under --no-sizes)
- ├──► doctor ──► platform (Fs, Approve), fingerprint
+ ├──► doctor ──► platform (Fs), fingerprint
  └──► receipt
 state ◄── written only via cli (registry, capabilities, snapshot, receipts)
 ```
@@ -176,15 +176,15 @@ Locality: new `src/size.rs`. `discover` fills `TargetDir.size`. Under `--no-size
 
 Satisfies: CORE-1.6, CORE-6.4
 Reuse: 5 — `libc` (`clonefile`, `getattrlist`, `flock`, `fcntl`, `mkdtemp`, `sigaction`), `applesauce`, `objc2-local-authentication`; the trait shape is new (rung 7)
-Interface: `trait Fs { temp_dir(prefix) -> TempDir; write_file; read; hardlink; set_mtime; clone_file(src, dst); sharing(path) -> Sharing{private_bytes, clone_id, may_share, shares_all}; compress(path) -> CompressOutcome::{Compressed, SkippedHardLink, Failed(reason)}; hold_lock(kind, path) -> LockHolder; try_lock_exclusive(path) -> TryLock; try_lock_elsewhere(kind, path) -> LockState::{Free, Held} }` · `trait Approve { owner_auth_available() -> Availability }` · `fn current() -> Result<Platform, NotMacOs>`
+Interface: `trait Fs { temp_dir(prefix) -> TempDir; write_file; read; hardlink; set_mtime; clone_file(src, dst); sharing(path) -> Sharing{private_bytes, clone_id, may_share, shares_all}; compress(path) -> CompressOutcome::{Compressed, SkippedHardLink, Failed(reason)}; hold_lock(kind, path) -> LockHolder; try_lock_exclusive(path) -> TryLock; try_lock_elsewhere(kind, path) -> LockState::{Free, Held} }` · `fn current() -> Result<Platform, NotMacOs>`
 Depth: deletion test — callers would still need to know these filesystem operations and one auth question. These stay hidden: the FFI structs, the local EF constants, the Applesauce progress adapter, the hidden `__hold-lock` holder process, and the objc message sends.
-Locality: new `src/platform/{mod.rs, apfs.rs, local_auth.rs, unsupported.rs}`. `unsupported.rs` builds on non-macOS, and `current()` returns `NotMacOs` there (CORE-1.6). ROAD-2, 7, 8 and 9 extend these traits rather than adding new ones. `Approve` gains `evaluate` only in ROAD-7 (CORE-6.4).
+Locality: new `src/platform/{mod.rs, apfs.rs, unsupported.rs}`. `unsupported.rs` builds on non-macOS, and `current()` returns `NotMacOs` there (CORE-1.6). ROAD-2, 8 and 9 extend these traits rather than adding new ones.
 
 ### doctor
 
 Satisfies: CORE-1.1, CORE-1.2, CORE-1.3, CORE-1.4, CORE-1.7, CORE-1.8, CORE-1.9, CORE-1.10, CORE-1.11, CORE-1.12
 Reuse: none — new code (rung 7), composing `platform`, `fingerprint` and `state`
-Interface: `run(&dyn Fs, &dyn Approve, &Toolchain) -> DoctorReport{macos, below_floor, toolchain_release, checks: [Check{id: a..f, verdict: Pass | Fail | Unavailable, measured: Value}]}` · `capabilities_from(&DoctorReport) -> Capabilities` · `require(&Capabilities, Capability, active_release) -> Result<(), CapabilityRefusal{check | RunDoctor}>`
+Interface: `run(&dyn Fs, &Toolchain) -> DoctorReport{macos, below_floor, toolchain_release, checks: [Check{id: a..d, f, g, verdict: Pass | Fail | Unavailable, measured: Value}]}` · `capabilities_from(&DoctorReport) -> Capabilities` · `require(&Capabilities, Capability, active_release) -> Result<(), CapabilityRefusal{check | RunDoctor}>`
 Depth: deletion test — callers would still need to know "run six checks and get verdicts with measured values, a capability map tied to a toolchain release, and a gate". These stay hidden: the fixtures, the throwaway crate with its isolated environment, the CORE-1.3 check → capability map, the signal flag and the stale-dir sweep.
 Locality: new `src/doctor.rs`. `require` is the gate every capability-dependent command calls from ROAD-2 onward (CORE-1.4, CORE-1.10).
 
@@ -214,7 +214,7 @@ Scope always comes from the arguments. `status` with no repo means every registe
 | Seam | Kind | Covers |
 |---|---|---|
 | The `cargo-hive` binary run as a subprocess with `HIVE_HOME=<tmp>`. Fixtures are built under `/private/tmp`: git repos (main, linked worktree, submodule, unborn, shallow), tiny crates built for real target dirs, and copied fingerprint fixtures (newer layout, corrupted JSON, a `doc-lib` unit). Doctor runs against the real APFS proof machine and is machine-gated | integration | CORE-1.1, CORE-1.2, CORE-1.4, CORE-1.7, CORE-1.8, CORE-1.9, CORE-1.10, CORE-2.1–2.9, CORE-3.1, CORE-3.3, CORE-3.5–3.8, CORE-4.2, CORE-4.3, CORE-4.5, CORE-4.6, CORE-4.10–4.15, CORE-5.1, CORE-5.2, CORE-5.5–5.7, CORE-6.1, CORE-6.2, CORE-6.3, CORE-6.4, CORE-6.5, CORE-7.1, CORE-7.2 |
-| The `cargo_hive` library: `classify`; `fingerprint::read_profile`; `receipt`; `doctor::run` and `require` with fake `Fs` and `Approve`; `state` locking and atomic writes; and `platform::current` on a non-macOS cfg path through a `cfg(test)` OS override | unit | CORE-1.1, CORE-1.3, CORE-1.6, CORE-3.2, CORE-3.4, CORE-4.7, CORE-4.8, CORE-4.14, CORE-4.16, CORE-4.17, CORE-5.3, CORE-5.4 |
+| The `cargo_hive` library: `classify`; `fingerprint::read_profile`; `receipt`; `doctor::run` and `require` with a fake `Fs`; `state` locking and atomic writes; and `platform::current` on a non-macOS cfg path through a `cfg(test)` OS override | unit | CORE-1.13, CORE-1.14, CORE-1.6, CORE-3.2, CORE-3.4, CORE-4.7, CORE-4.8, CORE-4.14, CORE-4.16, CORE-4.17, CORE-5.3, CORE-5.4 |
 
 There are two new seams, since no code exists to reuse. NFR checks:
 - **CORE-6.1:** timed runs against klynt (manual performance test, not CI).

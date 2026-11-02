@@ -1,7 +1,7 @@
 # Product Vision: cargo-hive
 
 Status: Approved
-Date: 2026-10-31
+Date: 2026-11-02
 
 <!--
 The repo-level north star: WHAT this project is and for whom, above any single
@@ -22,8 +22,8 @@ Source: the problem lock in `.skills/CORE/close-package.md` (confirmed 2026-10-2
 
 ## Users
 
-- **Developer.** A Rust developer on a Mac who runs coding agents across many worktrees. Registers repos, reads status, and approves plans for protected checkouts.
-- **Agent.** A coding agent (Claude Code, Codex, or another CLI) driving hive through the CLI with `--json`, guided by the hive skill. It never gets an owner-authentication dialog, applies plans for secondary checkouts only, and takes its scope from arguments, never from the current directory.
+- **Developer.** A Rust developer on a Mac who runs coding agents across many worktrees. Registers repos and reads status and receipts.
+- **Agent.** A coding agent (Claude Code, Codex, or another CLI) driving hive through the CLI with `--json`, guided by the hive skill. It applies plans of every class itself, with no owner step, and takes its scope from arguments, never from the current directory.
 
 ## Goals
 
@@ -33,8 +33,9 @@ Each goal holds on a machine where `cargo hive doctor` passes. None promises kly
 - **GOAL-2** A fresh seeded secondary checkout's first build recompiles 0 seeded units.
 - **GOAL-3** Seeding k secondary checkouts adds about 0 private bytes to their registry part.
 - **GOAL-4** Every number hive reports, in receipts and in explain findings, is measured on this machine, never estimated; seconds come only from `cargo hive bench`.
-- **GOAL-5** An agent reclaims and seeds secondary checkouts with no human in the loop; a plan-tier change on a protected checkout returns `needs-human` until the owner approves it.
+- ~~**GOAL-5** An agent reclaims and seeds secondary checkouts with no human in the loop; a plan-tier change on a protected checkout returns `needs-human` until the owner approves it.~~ Superseded by GOAL-7 (2026-11-02): a deletion from a target dir costs at most a rebuild and holds no sensitive data, and an agent can already delete a target by hand, so the owner step added work without adding protection (ADR-0002).
 - **GOAL-6** Hive deletes no file of a unit that is live when the deletion is decided (reachable over the fingerprint graph from a unit compiled inside the GC window), so no live unit rebuilds because of a deletion; a unit hive collected rebuilds when a command needs it again. Reported freed bytes never exceed what the volume regained.
+- **GOAL-7** An agent reclaims on every checkout class and from orphan targets, and seeds secondary checkouts, with no human in the loop.
 
 Receipts are also the data Cargo lacks for a default target-dir GC policy (cargo#13136; `RESEARCH.md` §6).
 
@@ -51,11 +52,12 @@ Receipts are also the data Cargo lacks for a default target-dir GC policy (cargo
 - Claude Code hooks.
 - Time claims outside `cargo hive bench`.
 - Claiming that main is protected from agents.
+- A human approval step for a plan.
 - Build-on-host / jayden-host.
 
 ## Scope boundaries
 
-**Now.** MILE-1 is committed (ROAD-1 to ROAD-3 and ROAD-12; ROAD-4, the MCP server, dropped 2026-10-29). MILE-2 and MILE-3 are planned (`docs/roadmap/INDEX.md`).
+**Now.** MILE-1 is committed (ROAD-1 to ROAD-3 and ROAD-12; ROAD-4, the MCP server, dropped 2026-10-29). MILE-2 and MILE-3 are planned (`docs/roadmap/INDEX.md`); ROAD-7, owner approval, dropped 2026-11-02.
 
 **Deferred.**
 - Slot mode, until `-p` and `--workspace` resolve the same feature set.
@@ -65,7 +67,7 @@ Receipts are also the data Cargo lacks for a default target-dir GC policy (cargo
 **Hard constraints.**
 - macOS only. The declared floor is macOS 27; older versions are supported where `cargo hive doctor` passes.
 - Install path: `cargo install cargo-hive`, then `cargo hive doctor`, then `cargo hive repo add <main>`. For agents, install the hive skill as a plugin from this repo's marketplace (`/plugin marketplace add jayden-dang/cargo-hive`, then `/plugin install cargo-hive@cargo-hive`; Codex has the same pair) (ROAD-12); there is no MCP server. `cargo-hive <sub>` is the direct form of `cargo hive <sub>`. Until the crate is published, `cargo install --path .` (README) stands in for the first step.
-- Building needs a Rust toolchain and the Xcode Command Line Tools; nothing else at runtime. Applesauce is embedded, LocalAuthentication is reached through objc bindings, and afsctool is never used.
+- Building needs a Rust toolchain and the Xcode Command Line Tools; nothing else at runtime. Applesauce is embedded, and afsctool is never used.
 - Zero configuration works. Defaults: secondary roots `/private/tmp` and `$TMPDIR`, cache root `~/.cache/cargo-target`, GC window 7 days, store budget 40 GB, store max age 30 days.
 - `cargo hive doctor` runs the mechanism checks on each machine and disables every capability that fails.
 - Foreign mode only: every checkout builds at its own path with stock Cargo.
