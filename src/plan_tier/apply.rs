@@ -68,6 +68,20 @@ pub struct Applied {
     pub notes: Vec<String>,
     pub unmeasured: Vec<Unmeasured>,
     pub findings: Vec<(String, Option<PathBuf>, String)>,
+    pub scope_repos: Vec<PathBuf>,
+    pub scope_checkouts: Vec<PathBuf>,
+}
+
+fn plan_scope(plan: &Plan) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut checkouts = Vec::new();
+    for target in &plan.targets {
+        if let Some(owner) = &target.owner {
+            if !checkouts.contains(owner) {
+                checkouts.push(owner.clone());
+            }
+        }
+    }
+    (plan.scope_repos.clone(), checkouts)
 }
 
 pub fn apply(
@@ -280,6 +294,8 @@ fn apply_orphan(ctx: &Ctx, plan: &Plan, cancel: &(dyn Fn() -> bool + Sync)) -> A
         notes,
         unmeasured,
         findings,
+        scope_repos: plan.scope_repos.clone(),
+        scope_checkouts: plan_scope(plan).1,
     }
 }
 
@@ -474,6 +490,8 @@ pub fn execute(
         notes,
         unmeasured,
         findings,
+        scope_repos: plan.scope_repos.clone(),
+        scope_checkouts: plan_scope(&plan).1,
     }
 }
 
@@ -847,6 +865,8 @@ fn cancelled_before_delete(plan: &Plan) -> Applied {
         notes: Vec::new(),
         unmeasured: Vec::new(),
         findings: Vec::new(),
+        scope_repos: plan.scope_repos.clone(),
+        scope_checkouts: plan_scope(plan).1,
     }
 }
 
@@ -924,6 +944,8 @@ fn refuse(plan: &Plan, refusal: Refusal, counts: BTreeMap<String, u64>) -> Appli
         notes: Vec::new(),
         unmeasured: Vec::new(),
         findings,
+        scope_repos: plan.scope_repos.clone(),
+        scope_checkouts: plan_scope(plan).1,
     }
 }
 
@@ -957,6 +979,9 @@ fn window_refused(plan: &Plan, err: &crate::state::WindowError) -> Applied {
     applied
         .findings
         .push(("window".to_string(), None, err.to_string()));
+    let (repos, checkouts) = plan_scope(plan);
+    applied.scope_repos = repos;
+    applied.scope_checkouts = checkouts;
     applied
 }
 
@@ -972,6 +997,8 @@ fn refused(id: &str, class: PlanClass, reason: &str, targets: Vec<PathBuf>) -> A
         notes: Vec::new(),
         unmeasured: Vec::new(),
         findings: Vec::new(),
+        scope_repos: Vec::new(),
+        scope_checkouts: Vec::new(),
     }
 }
 
@@ -1036,6 +1063,8 @@ mod exit_code_tests {
             findings: finding
                 .map(|kind| vec![(kind.to_string(), None, "stopped".to_string())])
                 .unwrap_or_default(),
+            scope_repos: Vec::new(),
+            scope_checkouts: Vec::new(),
         }
     }
 

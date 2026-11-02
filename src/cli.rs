@@ -1024,6 +1024,8 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
     for (kind, path, detail) in &applied.findings {
         b.finding(kind, path.clone(), detail.clone());
     }
+    b.scope_mut().repos = applied.scope_repos.clone();
+    b.scope_mut().checkouts = applied.scope_checkouts.clone();
     b.plan_tier(PlanTierBody {
         plans: vec![PlanRecord {
             id: applied.id,
@@ -1101,6 +1103,19 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
         }
     }
     let _checkouts = live_checkouts(&named, &registered_mains, &cfg, &mut b);
+    if !args.is_empty() {
+        for repo in &reg.repos {
+            let (rows, _) = crate::discover::checkouts(repo, &registered_mains, &cfg);
+            for arg in args {
+                let real = arg.canonicalize().unwrap_or_else(|_| arg.clone());
+                if rows.iter().any(|row| !row.missing && row.path == real)
+                    && !b.scope_mut().checkouts.contains(&real)
+                {
+                    b.scope_mut().checkouts.push(real);
+                }
+            }
+        }
+    }
     let now = SystemTime::now();
     let ctx = Ctx {
         state,

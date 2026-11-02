@@ -52,6 +52,51 @@ fn gc_plan_stores_one_plan_per_class_and_deletes_nothing() {
 }
 
 #[test]
+fn a_named_worktree_is_in_plan_scope_and_apply_scope_comes_from_the_plan() {
+    let p = Planned::new("scope-worktree");
+    let worktree = p.worktree.canonicalize().unwrap();
+    let main = p.main.canonicalize().unwrap();
+    let r = p.plan_for(&[worktree.to_str().unwrap()]);
+    let planned = r["scope"]["checkouts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        planned
+            .iter()
+            .any(|path| path == worktree.to_str().unwrap()),
+        "the named worktree was left out of scope: {r}"
+    );
+    let id = Planned::id_of(&r, "secondary");
+    let (out, applied) = p.hive.json(&["apply", &id]);
+    assert!(out.status.success(), "{applied}");
+    let repos = applied["scope"]["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    let checkouts = applied["scope"]["checkouts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        repos.iter().any(|path| path == main.to_str().unwrap()),
+        "apply scope dropped the plan's repo: {applied}"
+    );
+    assert!(
+        checkouts
+            .iter()
+            .any(|path| path == worktree.to_str().unwrap()),
+        "apply scope dropped the owner checkout: {applied}"
+    );
+}
+
+#[test]
 fn a_stored_plan_records_what_apply_must_compare_against() {
     let p = Planned::new("plan-recorded");
     let r = p.plan();
