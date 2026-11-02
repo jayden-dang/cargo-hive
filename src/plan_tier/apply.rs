@@ -378,9 +378,14 @@ pub fn execute(
             }
         }
     }
-    if let Some(refusal) = recheck(ctx, &plan, resolved, &locked) {
-        return refuse(&plan, refusal, count_map(0, 0, &skips, None));
+    let skipped_profiles = match recheck(ctx, &plan, resolved, &locked) {
+        Ok(skipped) => skipped,
+        Err(refusal) => return refuse(&plan, refusal, count_map(0, 0, &skips, None)),
+    };
+    if let Some(count) = skips.get_mut(Reason::ProfileSet.count_name()) {
+        *count += skipped_profiles.len() as u64;
     }
+    locked.retain(|(target, _)| !skipped_profiles.contains(&target.path));
     let locked_paths: Vec<PathBuf> = locked
         .iter()
         .map(|(target, _)| target.path.clone())
@@ -628,20 +633,28 @@ fn recheck(
     plan: &Plan,
     resolved: &[ResolvedTarget],
     locked: &[(&PlannedTarget, Locked)],
-) -> Option<Refusal> {
+) -> Result<Vec<PathBuf>, Refusal> {
     let window = Duration::from_secs(plan.window_days.saturating_mul(86_400));
     let now = SystemTime::now();
     let mut loaded = Vec::new();
-    for (target, _) in locked {
-        match load_target(ctx.fs, target) {
-            Ok(item) => loaded.push(item),
-            Err(refusal) => return Some(refusal),
+    let mut skipped = Vec::new();
+    for (target, held) in locked {
+        let profiles = listed_profiles(ctx.fs, target)?;
+        let again: BTreeSet<_> = profiles.iter().cloned().collect();
+        let first: BTreeSet<_> = held.profiles.iter().cloned().collect();
+        if again != first {
+            skipped.push(target.path.clone());
+            continue;
         }
+        loaded.push(Loaded {
+            target,
+            reports: profile_reports(target, &profiles)?,
+        });
     }
     for item in &loaded {
         for entry in &item.target.entries {
             if let Some(refusal) = entry_refusal(ctx, item.target, entry) {
-                return Some(refusal);
+                return Err(refusal);
             }
         }
     }
@@ -649,14 +662,14 @@ fn recheck(
     for item in loaded {
         let dead = match dead_paths(ctx, resolved, item.target, item.reports, now, window) {
             Ok(dead) => dead,
-            Err(refusal) => return Some(refusal),
+            Err(refusal) => return Err(refusal),
         };
         decided.push((item.target, dead));
     }
     for (target, dead_paths) in decided {
         for entry in &target.entries {
             if !dead_paths.contains(entry.path.as_path()) {
-                return Some(Refusal {
+                return Err(Refusal {
                     reason: "stale_item",
                     target: target.path.clone(),
                     path: Some(entry.path.clone()),
@@ -665,34 +678,32 @@ fn recheck(
             }
         }
     }
-    None
+    Ok(skipped)
 }
 
-fn load_target<'a>(fs: &dyn Fs, target: &'a PlannedTarget) -> Result<Loaded<'a>, Refusal> {
-    let profiles = match cargo_target::identify_bounded(fs, &target.path, crate::gc::CRATE_DIR_CAP)
-    {
-        Some(Ok(profiles)) => profiles,
-        Some(Err(why)) => {
-            return Err(Refusal {
-                reason: "unsupported_format",
-                target: target.path.clone(),
-                path: Some(target.path.clone()),
-                details: vec![why],
-            });
-        }
-        None => {
-            return Err(Refusal {
-                reason: "unsupported_format",
-                target: target.path.clone(),
-                path: Some(target.path.clone()),
-                details: vec!["the target has no readable profile set".to_string()],
-            });
-        }
-    };
-    let reports: Vec<_> = profiles
-        .iter()
-        .map(|(path, _)| read_profile(path))
-        .collect();
+fn listed_profiles(fs: &dyn Fs, target: &PlannedTarget) -> Result<Vec<PathBuf>, Refusal> {
+    match cargo_target::identify_bounded(fs, &target.path, crate::gc::CRATE_DIR_CAP) {
+        Some(Ok(profiles)) => Ok(profiles.into_iter().map(|(path, _)| path).collect()),
+        Some(Err(why)) => Err(Refusal {
+            reason: "unsupported_format",
+            target: target.path.clone(),
+            path: Some(target.path.clone()),
+            details: vec![why],
+        }),
+        None => Err(Refusal {
+            reason: "unsupported_format",
+            target: target.path.clone(),
+            path: Some(target.path.clone()),
+            details: vec!["the target has no readable profile set".to_string()],
+        }),
+    }
+}
+
+fn profile_reports(
+    target: &PlannedTarget,
+    profiles: &[PathBuf],
+) -> Result<Vec<ProfileReport>, Refusal> {
+    let reports: Vec<_> = profiles.iter().map(|path| read_profile(path)).collect();
     for report in &reports {
         if let Format::Unsupported(why) = &report.format {
             return Err(Refusal {
@@ -703,7 +714,7 @@ fn load_target<'a>(fs: &dyn Fs, target: &'a PlannedTarget) -> Result<Loaded<'a>,
             });
         }
     }
-    Ok(Loaded { target, reports })
+    Ok(reports)
 }
 
 fn dead_paths(

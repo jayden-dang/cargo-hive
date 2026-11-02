@@ -148,6 +148,40 @@ fn a_lock_without_identity_or_with_a_replaced_file_skips_the_target() {
 }
 
 #[test]
+fn a_profile_that_appears_after_the_locks_are_held_skips_that_target() {
+    let p = Planned::new("recheck-profile");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let target = p.worktree_target().canonicalize().unwrap();
+    let before = common::plan_fixture::tree(&target);
+    let rec = Recording::over_real().create_before_listing(
+        &target,
+        target.join("release/.fingerprint"),
+        3,
+    );
+    let lib = p.library_ctx_with(rec.fs());
+    let done = apply(&lib.ctx(), &id, &|| false).unwrap();
+    assert_eq!(
+        done.counts
+            .get("targets_skipped_profile_set")
+            .copied()
+            .unwrap_or(0),
+        1,
+        "{:?}",
+        done.counts
+    );
+    assert_eq!(
+        done.counts.get("paths_deleted").copied().unwrap_or(0),
+        0,
+        "{:?}",
+        done.findings
+    );
+    let planted = target.join("release");
+    let mut after = common::plan_fixture::tree(&target);
+    after.retain(|path, _| !path.starts_with(&planted));
+    assert_eq!(after, before);
+}
+
+#[test]
 fn a_profile_dir_that_appears_after_the_locks_are_taken_skips_the_target() {
     let p = Planned::new("locks-profile-set");
     let new_dir = p.worktree_target().join("release/.fingerprint");

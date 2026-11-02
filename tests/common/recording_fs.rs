@@ -2,7 +2,7 @@
 //! A configured path can refuse `flock`, report no file identity, or be replaced after the lock.
 //! A configured directory is created after a lock is taken. Dropping a returned lock releases it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -22,6 +22,8 @@ struct Opts {
     fail_remove: HashSet<PathBuf>,
     fail_sharing: HashSet<PathBuf>,
     fail_stat: HashSet<PathBuf>,
+    /// Create `child` just before the 1-based `nth` bounded listing of `parent`.
+    create_before_listing: Vec<(PathBuf, PathBuf, u64)>,
 }
 
 struct State {
@@ -29,6 +31,7 @@ struct State {
     log: Arc<Mutex<Vec<String>>>,
     opts: Mutex<Opts>,
     removes: Mutex<u64>,
+    listings: Mutex<HashMap<PathBuf, u64>>,
 }
 
 #[derive(Clone)]
@@ -44,6 +47,7 @@ impl Recording {
                 log: Arc::new(Mutex::new(Vec::new())),
                 opts: Mutex::new(Opts::default()),
                 removes: Mutex::new(0),
+                listings: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -85,6 +89,21 @@ impl Recording {
             .unwrap()
             .create_dir_after_lock
             .push(dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// Creates `child` immediately before the `nth` bounded listing of `parent`.
+    pub fn create_before_listing(
+        self,
+        parent: impl AsRef<Path>,
+        child: impl AsRef<Path>,
+        nth: u64,
+    ) -> Recording {
+        self.state.opts.lock().unwrap().create_before_listing.push((
+            parent.as_ref().to_path_buf(),
+            child.as_ref().to_path_buf(),
+            nth,
+        ));
         self
     }
 
@@ -266,6 +285,24 @@ impl Fs for Recording {
         cap: usize,
     ) -> io::Result<Vec<(String, platform::EntryKind)>> {
         self.push(format!("read {}", dir.display()));
+        let nth = {
+            let mut listings = self.state.listings.lock().unwrap();
+            let seen = listings.entry(dir.to_path_buf()).or_insert(0);
+            *seen += 1;
+            *seen
+        };
+        let pending = self
+            .state
+            .opts
+            .lock()
+            .unwrap()
+            .create_before_listing
+            .clone();
+        for (parent, child, at) in pending {
+            if parent == dir && at == nth {
+                std::fs::create_dir_all(child).unwrap();
+            }
+        }
         self.state.fs.read_dir_bounded(dir, cap)
     }
 
