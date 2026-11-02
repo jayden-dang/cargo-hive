@@ -5,7 +5,7 @@
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -249,6 +249,15 @@ impl Tx<'_> {
         read_json(&state_file(self.root, name)?)
     }
 
+    /// Reads at most `max` bytes. One byte over that is an error and the rest is not read.
+    pub fn read_bounded<T: DeserializeOwned + Default>(
+        &self,
+        name: &str,
+        max: u64,
+    ) -> Result<T, StateError> {
+        read_json_limited(&state_file(self.root, name)?, max)
+    }
+
     pub fn write<T: Serialize>(&self, name: &str, value: &T) -> Result<(), StateError> {
         let path = state_file(self.root, name)?;
         let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| StateError::Malformed {
@@ -286,6 +295,31 @@ fn read_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T, StateError
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(io_err(path, e)),
     }
+}
+
+fn read_json_limited<T: DeserializeOwned + Default>(
+    path: &Path,
+    max: u64,
+) -> Result<T, StateError> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(e) => return Err(io_err(path, e)),
+    };
+    let mut bytes = Vec::new();
+    file.take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_err(path, e))?;
+    if bytes.len() as u64 > max {
+        return Err(StateError::Malformed {
+            file: path.to_path_buf(),
+            detail: format!("larger than {max} bytes"),
+        });
+    }
+    serde_json::from_slice(&bytes).map_err(|e| StateError::Malformed {
+        file: path.to_path_buf(),
+        detail: e.to_string(),
+    })
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StateError> {

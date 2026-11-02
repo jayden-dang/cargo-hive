@@ -10,6 +10,7 @@ use crate::platform::EntryKind;
 use crate::state::{State, StateError, Tx};
 
 const PLANS_FILE: &str = "plans.json";
+pub const MAX_PLANS_BYTES: u64 = 4 * 1024 * 1024;
 const KEEP_FOR: u64 = 30 * 86_400;
 const MAX_TOMBSTONES: usize = 256;
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
@@ -181,7 +182,7 @@ pub fn new_id(now_nanos: u128, pid: u32, counter: u64) -> String {
 }
 
 fn read(tx: &Tx<'_>) -> Result<PlansFile, StateError> {
-    tx.read(PLANS_FILE)
+    tx.read_bounded(PLANS_FILE, MAX_PLANS_BYTES)
 }
 
 fn duplicate_id<'a>(existing: &'a [Plan], incoming: &'a [Plan]) -> Option<&'a str> {
@@ -269,6 +270,32 @@ mod tests {
             }],
             state: PlanState::Live,
         }
+    }
+
+    #[test]
+    fn plans_json_at_the_cap_loads_and_one_byte_past_names_the_file() {
+        let s = state("record-cap");
+        assert!(matches!(
+            get(&s, "aaaaaaaaaaaaaaaa").unwrap(),
+            Lookup::Unknown
+        ));
+        let path = s.root().join(PLANS_FILE);
+        let cap = MAX_PLANS_BYTES as usize;
+        let mut body = b"{\"plans\":[]".to_vec();
+        body.extend(std::iter::repeat_n(b' ', cap - body.len() - 1));
+        body.push(b'}');
+        assert_eq!(body.len(), cap);
+        std::fs::write(&path, &body).unwrap();
+        assert!(matches!(
+            get(&s, "aaaaaaaaaaaaaaaa").unwrap(),
+            Lookup::Unknown
+        ));
+        body.push(b'x');
+        std::fs::write(&path, &body).unwrap();
+        let err = get(&s, "aaaaaaaaaaaaaaaa").unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("plans.json"), "{text}");
+        assert!(text.contains("larger than"), "{text}");
     }
 
     #[test]
