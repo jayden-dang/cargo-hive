@@ -1043,7 +1043,6 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
 }
 
 fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
-    use crate::discover::{Snapshot, SNAPSHOT_FILE};
     use crate::doctor::{self, Capabilities, Capability};
     use crate::plan_tier::build::{self, MakeError};
     use crate::plan_tier::record;
@@ -1066,10 +1065,9 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
             state.read::<Registry>(registry::FILE)?,
             state.config()?,
             state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
-            state.read::<Snapshot>(SNAPSHOT_FILE)?,
         ))
     })();
-    let (reg, cfg, caps, _snapshot) = match loaded {
+    let (reg, cfg, caps) = match loaded {
         Ok(v) => v,
         Err(e) => return emit_failure(state, out, "gc --plan", &e.to_string(), 1),
     };

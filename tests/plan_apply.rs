@@ -19,6 +19,20 @@ fn write_caps(p: &Planned, disabled: serde_json::Value) {
 }
 
 #[test]
+fn planning_does_not_read_a_missing_or_huge_snapshot() {
+    let p = Planned::new("plan-no-snapshot");
+    let snap = p.hive.home.path.join("snapshot.json");
+    let _ = std::fs::remove_file(&snap);
+    let missing = p.plan();
+    assert!(missing["plans"].is_array(), "{missing}");
+    let huge = vec![b'x'; 8 * 1024 * 1024];
+    std::fs::write(&snap, &huge).unwrap();
+    let planned = p.plan();
+    assert!(planned["plans"].is_array(), "{planned}");
+    assert_eq!(std::fs::read(&snap).unwrap(), huge);
+}
+
+#[test]
 fn gc_plan_stores_one_plan_per_class_and_deletes_nothing() {
     let p = Planned::new("plan-per-class");
     let before = (tree(&p.main_target()), tree(&p.worktree_target()));
