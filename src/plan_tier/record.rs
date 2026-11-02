@@ -411,33 +411,97 @@ mod tests {
     fn prune_drops_old_entries_and_extra_tombstones_but_never_a_young_live_plan() {
         let s = state("record-prune");
         let day = 86_400;
-        let mut plans = vec![plan("0000000000000000", PlanClass::Secondary, 0)]; // 60 days old, live
-        for n in 1..=300u64 {
-            plans.push(plan(&format!("{n:016x}"), PlanClass::Secondary, 60 * day));
-        }
-        insert(&s, &|| false, plans, 60 * day).unwrap();
-        for n in 1..=300u64 {
-            consume(&s, &|| false, &format!("{n:016x}"), 60 * day).unwrap();
+        let now = 100 * day;
+        let exactly = now - 30 * day;
+        let just_over = exactly - 1;
+        insert(
+            &s,
+            &|| false,
+            vec![
+                plan("aaaaaaaaaaaaaaaa", PlanClass::Secondary, exactly),
+                plan("bbbbbbbbbbbbbbbb", PlanClass::Secondary, just_over),
+                plan("cccccccccccccccc", PlanClass::Secondary, now),
+            ],
+            now,
+        )
+        .unwrap();
+        // prune runs before the new plans are stored, so a later insert is what drops them
+        insert(
+            &s,
+            &|| false,
+            vec![plan("dddddddddddddddd", PlanClass::Secondary, now)],
+            now,
+        )
+        .unwrap();
+        assert!(
+            matches!(get(&s, "aaaaaaaaaaaaaaaa").unwrap(), Lookup::Live(_)),
+            "a plan aged exactly 30 days is kept"
+        );
+        assert!(
+            matches!(get(&s, "bbbbbbbbbbbbbbbb").unwrap(), Lookup::Unknown),
+            "a plan aged 30 days plus one second is dropped"
+        );
+        assert!(matches!(
+            get(&s, "cccccccccccccccc").unwrap(),
+            Lookup::Live(_)
+        ));
+        assert!(matches!(
+            get(&s, "dddddddddddddddd").unwrap(),
+            Lookup::Live(_)
+        ));
+
+        let tombs: Vec<_> = (1..=256u64)
+            .map(|n| plan(&format!("{n:016x}"), PlanClass::Secondary, now))
+            .collect();
+        insert(&s, &|| false, tombs, now).unwrap();
+        for n in 1..=256u64 {
+            consume(&s, &|| false, &format!("{n:016x}"), now).unwrap();
         }
         insert(
             &s,
             &|| false,
-            vec![plan("ffffffffffffffff", PlanClass::Secondary, 60 * day)],
-            60 * day,
+            vec![plan("eeeeeeeeeeeeeeee", PlanClass::Secondary, now)],
+            now,
+        )
+        .unwrap();
+        for n in 1..=256u64 {
+            assert!(
+                matches!(get(&s, &format!("{n:016x}")).unwrap(), Lookup::Consumed),
+                "tombstone {n} was dropped inside the 256 cap"
+            );
+        }
+
+        insert(
+            &s,
+            &|| false,
+            vec![plan("ffffffffffffffff", PlanClass::Secondary, now - 10)],
+            now,
+        )
+        .unwrap();
+        consume(&s, &|| false, "ffffffffffffffff", now).unwrap();
+        insert(
+            &s,
+            &|| false,
+            vec![plan("1111111111111111", PlanClass::Secondary, now)],
+            now,
         )
         .unwrap();
         assert!(
-            matches!(get(&s, "0000000000000000").unwrap(), Lookup::Unknown),
-            "a 60-day-old live plan is dropped"
+            matches!(get(&s, "ffffffffffffffff").unwrap(), Lookup::Unknown),
+            "the 257th tombstone is the one dropped"
         );
-        assert!(matches!(
-            get(&s, "ffffffffffffffff").unwrap(),
-            Lookup::Live(_)
-        ));
-        let kept = (1..=300u64)
+        let kept = (1..=256u64)
             .filter(|n| matches!(get(&s, &format!("{n:016x}")).unwrap(), Lookup::Consumed))
             .count();
         assert_eq!(kept, 256);
+        assert!(matches!(
+            get(&s, "cccccccccccccccc").unwrap(),
+            Lookup::Live(_)
+        ));
+        assert!(matches!(
+            get(&s, "1111111111111111").unwrap(),
+            Lookup::Live(_)
+        ));
     }
 
     #[test]
