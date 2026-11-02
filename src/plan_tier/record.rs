@@ -126,7 +126,7 @@ pub fn insert(
             return Err(StateError::DuplicatePlan { id: id.to_string() });
         }
         file.plans.extend(plans);
-        tx.write(PLANS_FILE, &file)
+        tx.write_bounded(PLANS_FILE, &file, MAX_PLANS_BYTES)
     })
 }
 
@@ -270,6 +270,67 @@ mod tests {
             }],
             state: PlanState::Live,
         }
+    }
+
+    fn encoded(plans: &[Plan]) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec_pretty(&PlansFile {
+            plans: plans.to_vec(),
+        })
+        .unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    fn plan_with_pad(id: &str, pad: usize) -> Plan {
+        let mut stored = plan(id, PlanClass::Secondary, 1_000);
+        stored.targets[0].entries[0].unit = "u".repeat(pad);
+        stored
+    }
+
+    #[test]
+    fn insert_accepts_a_file_at_the_cap_and_refuses_one_byte_past() {
+        let cap = MAX_PLANS_BYTES as usize;
+        let bare = encoded(&[plan_with_pad("aaaaaaaaaaaaaaaa", 0)]);
+        assert!(bare.len() < cap);
+        let fitted = plan_with_pad("aaaaaaaaaaaaaaaa", cap - bare.len());
+        assert_eq!(encoded(&[fitted.clone()]).len(), cap);
+        let at_cap = state("record-write-cap");
+        insert(&at_cap, &|| false, vec![fitted], 1_000).unwrap();
+        let path = at_cap.root().join(PLANS_FILE);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), MAX_PLANS_BYTES);
+        assert!(matches!(
+            get(&at_cap, "aaaaaaaaaaaaaaaa").unwrap(),
+            Lookup::Live(_)
+        ));
+
+        let over = state("record-write-over");
+        let kept = plan("bbbbbbbbbbbbbbbb", PlanClass::Secondary, 1_000);
+        insert(&over, &|| false, vec![kept.clone()], 1_000).unwrap();
+        let path = over.root().join(PLANS_FILE);
+        let before = std::fs::read(&path).unwrap();
+        let with_extra = encoded(&[kept, plan_with_pad("aaaaaaaaaaaaaaaa", 0)]);
+        assert!(with_extra.len() < cap);
+        let extra = plan_with_pad("aaaaaaaaaaaaaaaa", cap + 1 - with_extra.len());
+        assert_eq!(
+            encoded(&[
+                plan("bbbbbbbbbbbbbbbb", PlanClass::Secondary, 1_000),
+                extra.clone()
+            ])
+            .len(),
+            cap + 1
+        );
+        let err = insert(&over, &|| false, vec![extra], 1_000).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("plans.json"), "{text}");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(matches!(
+            get(&over, "bbbbbbbbbbbbbbbb").unwrap(),
+            Lookup::Live(_)
+        ));
+        assert!(matches!(
+            get(&over, "aaaaaaaaaaaaaaaa").unwrap(),
+            Lookup::Unknown
+        ));
     }
 
     #[test]

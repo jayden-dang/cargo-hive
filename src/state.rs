@@ -260,11 +260,25 @@ impl Tx<'_> {
 
     pub fn write<T: Serialize>(&self, name: &str, value: &T) -> Result<(), StateError> {
         let path = state_file(self.root, name)?;
-        let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| StateError::Malformed {
-            file: path.clone(),
-            detail: e.to_string(),
-        })?;
-        bytes.push(b'\n');
+        let bytes = encode(&path, value)?;
+        atomic_write(&path, &bytes)
+    }
+
+    /// Writes `value` only when the same bytes `write` would store are at most `max`.
+    pub fn write_bounded<T: Serialize>(
+        &self,
+        name: &str,
+        value: &T,
+        max: u64,
+    ) -> Result<(), StateError> {
+        let path = state_file(self.root, name)?;
+        let bytes = encode(&path, value)?;
+        if bytes.len() as u64 > max {
+            return Err(StateError::Malformed {
+                file: path,
+                detail: format!("larger than {max} bytes"),
+            });
+        }
         atomic_write(&path, &bytes)
     }
 
@@ -284,6 +298,15 @@ impl Tx<'_> {
         atomic_write(&path, &bytes)?;
         Ok(path)
     }
+}
+
+fn encode<T: Serialize>(path: &Path, value: &T) -> Result<Vec<u8>, StateError> {
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| StateError::Malformed {
+        file: path.to_path_buf(),
+        detail: e.to_string(),
+    })?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 fn read_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T, StateError> {
