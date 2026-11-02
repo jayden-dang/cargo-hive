@@ -787,7 +787,7 @@ Run `cargo test --lib`, `cargo test --test doctor` and `cargo test --test capabi
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(doctor): check (d) proves the exclusive lock both ways; deletion requires that proof"`.
 
-_Requirements: AUTOGC-1.1, AUTOGC-1.2, AUTOGC-1.3, AUTOGC-7.4_
+_Requirements: AUTOGC-1.1, AUTOGC-1.2, AUTOGC-1.3, AUTOGC-7.6_
 
 ---
 

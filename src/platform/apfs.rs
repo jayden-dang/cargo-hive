@@ -206,13 +206,13 @@ impl Fs for Apfs {
         }
         // SAFETY: `fd` was just opened by this process and nothing else owns it.
         let file = unsafe { fs::File::from_raw_fd(fd) };
-        match file.metadata() {
-            Ok(m) if m.file_type().is_file() => {}
+        let m = match file.metadata() {
+            Ok(m) if m.file_type().is_file() => m,
             Ok(_) => {
                 return TryLock::Unopenable(io::Error::other("the lock path is not a regular file"))
             }
             Err(e) => return TryLock::Unopenable(e),
-        }
+        };
         // SAFETY: `file` owns a valid descriptor for the call.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let err = io::Error::last_os_error();
@@ -222,7 +222,9 @@ impl Fs for Apfs {
                 TryLock::Unlockable(err)
             };
         }
-        TryLock::Acquired(HeldLock::new(move || drop(file)))
+        TryLock::Acquired(HeldLock::with_identity(m.dev(), m.ino(), move || {
+            drop(file)
+        }))
     }
 
     fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState> {
@@ -270,9 +272,7 @@ impl Fs for Apfs {
             }
             let entry = entry?;
             let kind = entry_kind(entry.file_type()?);
-            if let Ok(name) = entry.file_name().into_string() {
-                out.push((name, kind));
-            }
+            out.push((utf8_name(dir, entry.file_name())?, kind));
         }
         Ok(out)
     }
@@ -312,6 +312,15 @@ impl Fs for Apfs {
             available_bytes: s.f_bavail.saturating_mul(u64::from(s.f_bsize)),
         })
     }
+}
+
+fn utf8_name(dir: &Path, name: std::ffi::OsString) -> io::Result<String> {
+    name.into_string().map_err(|_| {
+        io::Error::other(format!(
+            "{} has a name that is not valid UTF-8",
+            dir.display()
+        ))
+    })
 }
 
 fn record(slot: &Mutex<Option<String>>, why: String) {
@@ -621,6 +630,27 @@ mod tests {
             ]
         );
         assert!(apfs().read_dir_bounded(t.path(), 2).is_err());
+    }
+
+    #[test]
+    fn a_non_utf8_name_is_an_error_that_names_the_directory() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        // APFS rejects creating this name (EILSEQ), so the listing branch is the name check it calls.
+        let dir = Path::new("/private/tmp/hive-list");
+        let err = utf8_name(dir, OsString::from_vec(b"bad-\xff".to_vec())).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains(dir.display().to_string().as_str()), "{text}");
+        let t = tmp("list-utf8");
+        for name in ["a", "b"] {
+            apfs().write_file(&t.path().join(name), b"").unwrap();
+        }
+        let mut listed = apfs().read_dir_bounded(t.path(), 2).unwrap();
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![("a".into(), EntryKind::File), ("b".into(), EntryKind::File)]
+        );
     }
 
     #[test]

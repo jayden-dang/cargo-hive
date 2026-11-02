@@ -11,7 +11,7 @@ A working tree of a registered repo: the main checkout, a linked worktree, or a 
 _Avoid_: workspace (that is Cargo's term), copy
 
 **Protected checkout**:
-A checkout where hive only deletes (auto tier or approved plan) and reads. A registered main is always protected, and so is anything unclassifiable.
+A checkout where hive only deletes (auto tier or plan) and reads. A registered main is always protected, and so is anything unclassifiable.
 _Avoid_: main-only, locked checkout
 
 **Secondary checkout**:
@@ -108,9 +108,19 @@ GC that runs without a plan: `rustc*`/`rmeta*` temp entries and superseded incre
 **Plan tier**:
 GC through `cargo hive gc --plan` then `apply`: closure deletion and whole orphan targets.
 
+**Plan**:
+A one-use stored record of the paths one `apply` may delete in the targets of one class.
+_Avoid_: preview, dry-run list
+
+**Plan class**:
+The checkout class a plan covers: secondary, protected, or orphan. A target a protected checkout shares is protected.
+_Avoid_: tier
+
+**Outcome**:
+What `apply` did with one plan: applied, partial, or refused. A plan just stored has no outcome.
+_Avoid_: status code
+
 **Receipt**:
 The deterministic counters a hive command returns. It never contains durations or estimated time saved.
 _Avoid_: report, summary
 
-**needs-human**:
-The status `apply` returns for a protected plan. Only `cargo hive approve <id>` opens the owner-authentication dialog.

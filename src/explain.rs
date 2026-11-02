@@ -770,9 +770,13 @@ fn read_dir_capped(dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)
         }
         let entry = entry?;
         let kind = crate::platform::entry_kind(entry.file_type()?);
-        if let Ok(name) = entry.file_name().into_string() {
-            out.push((name, kind));
-        }
+        let name = entry.file_name().into_string().map_err(|_| {
+            io::Error::other(format!(
+                "{} has a name that is not valid UTF-8",
+                dir.display()
+            ))
+        })?;
+        out.push((name, kind));
     }
     Ok(out)
 }
@@ -3168,9 +3172,13 @@ mod tests {
                 } else {
                     crate::platform::EntryKind::File
                 };
-                if let Ok(name) = entry.file_name().into_string() {
-                    out.push((name, kind));
-                }
+                let name = entry.file_name().into_string().map_err(|_| {
+                    std::io::Error::other(format!(
+                        "{} has a name that is not valid UTF-8",
+                        dir.display()
+                    ))
+                })?;
+                out.push((name, kind));
             }
             Ok(out)
         }

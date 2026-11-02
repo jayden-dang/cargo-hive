@@ -16,14 +16,13 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 - Same major and minor: carry on.
 - If different:
   - `doctor`, `repo list`, `status` and `explain` may still run. Tell the user both versions and how to update: `/plugin marketplace update cargo-hive` for the plugin, or reinstall the binary.
-  - Do not run `gc` or `repo add`. Ask the user to update first.
+  - Do not run `gc`, `apply` or `repo add`. Ask the user to update first.
 
 ## The model
 
 - A checkout is protected (a registered main checkout, or anything hive cannot classify) or secondary (a linked worktree inside its own main, or a checkout under a secondary root, by default `/private/tmp` and `$TMPDIR`). A Cargo target dir that no known checkout owns is not a checkout: `status` reports it as an orphan candidate.
-- Actions come in two tiers. The auto tier is safe to run unasked on protected and secondary checkouts alike; in this version it is all `gc` does: it deletes superseded incremental sessions (with their lock files) and leftover rustc temp entries, taking each owner's lock without waiting where one exists and skipping anything held. The plan tier (closure deletion and whole orphan targets) needs the owner's approval on protected checkouts and orphan candidates, and is not available yet. When hive covers the request, reclaim only through hive, never by other means.
-- A result marked `needs-human` is the owner's to resolve. Report it; do not work around it.
-- Never run the owner's approval command, the `approve` subcommand. An agent does not issue it.
+- Actions come in two tiers. The auto tier is safe to run unasked on protected and secondary checkouts alike. `gc` without `--plan` does that tier: it deletes superseded incremental sessions (with their lock files) and leftover rustc temp entries, taking each owner's lock without waiting where one exists and skipping anything held. The plan tier is closure deletion and whole orphan targets. `gc --plan` returns plan ids per class and `undecided` targets; `apply` applies one plan. When hive covers the request, reclaim only through hive, never by other means.
+- An agent applies plans of every class itself: `secondary`, `protected` and `orphan`, with no owner step. An `orphan` plan removes the whole target dir, with anything in it no build recreates, so name those targets when you report. After `refused`, plan again and never reuse a consumed id (already consumed). `partial` is not an error; check its reason.
 - The repos a command acts on come from its arguments. Never infer them from the current directory.
 
 ## Which command
@@ -34,6 +33,7 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 | What is registered? | `repo list` |
 | How big is it, what is orphaned? | `status` |
 | How do I free space? | `gc` with `--dry-run` first, then `gc` |
+| What can be deleted later? | `gc --plan`, then `apply` one plan |
 | Why are there so many copies of a crate? | `explain` |
 
 `status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root. Pass explicit paths unless the user asked for everything.
@@ -49,6 +49,8 @@ cargo hive repo list --json
 cargo hive status /path/to/repo --json
 cargo hive gc /path/to/repo --dry-run --json
 cargo hive gc /path/to/repo --json
+cargo hive gc --plan /path/to/repo --json
+cargo hive apply plan-id --json
 cargo hive explain /path/to/repo --top 20 --json
 ```
 
@@ -60,4 +62,4 @@ Exit codes: 0 success; 1 refusal or failure (read the receipt, or stderr if no r
 
 ## Do not
 
-When hive covers the request, do not run `cargo clean`, and do not delete a target dir, an `incremental/` dir, or `rustc*` or `rmeta*` entries yourself. Use `gc` (after `--dry-run`) instead.
+When hive covers the request, do not run `cargo clean`, and do not delete a target dir, an `incremental/` dir, or `rustc*` or `rmeta*` entries yourself. Use `gc` (after `--dry-run`) for the auto tier. Closure deletion and orphan targets go through `gc --plan`, then `apply`, not by hand.

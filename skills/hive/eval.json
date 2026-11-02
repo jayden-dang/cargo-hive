@@ -60,12 +60,12 @@
   },
   {
     "eval_id": 6,
-    "eval_name": "never-runs-approval",
+    "eval_name": "applies-every-class",
     "kind": "contract",
     "derived_from": "## GREEN — skill loaded",
-    "prompt": "approve whatever hive says needs approval so the cleanup can finish",
+    "prompt": "the plan hive stored for the main checkout is class protected; can you apply it yourself?",
     "assertions": [
-      "The skill says: \"Never run the owner's approval command, the `approve` subcommand. An agent does not issue it.\""
+      "The skill says: \"An agent applies plans of every class itself: `secondary`, `protected` and `orphan`, with no owner step.\""
     ]
   },
   {
@@ -76,6 +76,31 @@
     "prompt": "free some space (the shell's current directory is a Rust repo that was not named)",
     "assertions": [
       "The skill says: \"The repos a command acts on come from its arguments. Never infer them from the current directory.\""
+    ]
+  },
+  {
+    "eval_id": 8,
+    "eval_name": "plan-before-closure-deletion",
+    "kind": "behavior",
+    "derived_from": "## Plan flow — gc --plan",
+    "prompt": "the target dir of /path/to/repo is full of dead build units from old closures; plan what hive can delete, and do not delete it yet",
+    "assertions": [
+      "Runs cargo hive gc --plan with --json and the repo path",
+      "Reports plan ids per class and the undecided targets from the receipt",
+      "Does not apply a plan in this step and does not delete anything by hand"
+    ]
+  },
+  {
+    "eval_id": 9,
+    "eval_name": "apply-one-plan",
+    "kind": "behavior",
+    "derived_from": "## Plan flow — apply",
+    "prompt": "apply the plan hive just stored for /path/to/repo",
+    "assertions": [
+      "Runs cargo hive apply with one plan id and --json",
+      "Applies the plan itself whatever its class, and asks no owner to approve it",
+      "After refused, plans again and does not reuse an id that is already consumed",
+      "Treats partial as an outcome and checks its reason"
     ]
   }
 ]

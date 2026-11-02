@@ -55,8 +55,16 @@ fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(dirs)
 }
 
+type ListDirs<'a> = dyn Fn(&Path, usize) -> Result<Vec<PathBuf>, String> + 'a;
+type IsDir<'a> = dyn Fn(&Path) -> Result<bool, String> + 'a;
+
 /// `Some(layout)` when `dir` holds `.fingerprint/` or `build/<pkg>/<16 hex>/fingerprint/`.
-fn profile_layout(dir: &Path) -> Result<Option<Layout>, String> {
+fn profile_layout_with(
+    dir: &Path,
+    cap: usize,
+    list: &ListDirs<'_>,
+    is_dir: &IsDir<'_>,
+) -> Result<Option<Layout>, String> {
     if is_dir(&dir.join(".fingerprint"))? {
         return Ok(Some(Layout::Fingerprint));
     }
@@ -64,8 +72,8 @@ fn profile_layout(dir: &Path) -> Result<Option<Layout>, String> {
     if !is_dir(&build)? {
         return Ok(None);
     }
-    for pkg in sorted_dirs(&build)? {
-        for hash in sorted_dirs(&pkg)? {
+    for pkg in list(&build, cap)? {
+        for hash in list(&pkg, cap)? {
             let hex = hash
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -80,14 +88,23 @@ fn profile_layout(dir: &Path) -> Result<Option<Layout>, String> {
 
 /// Profile dirs: direct children, or `<triple>/<profile>/` under `--target` builds.
 fn profile_dirs(target: &Path) -> Result<Vec<(PathBuf, Layout)>, String> {
+    profile_dirs_with(target, usize::MAX, &|path, _| sorted_dirs(path), &is_dir)
+}
+
+fn profile_dirs_with(
+    target: &Path,
+    cap: usize,
+    list: &ListDirs<'_>,
+    is_dir: &IsDir<'_>,
+) -> Result<Vec<(PathBuf, Layout)>, String> {
     let mut out = Vec::new();
-    for child in sorted_dirs(target)? {
-        if let Some(layout) = profile_layout(&child)? {
+    for child in list(target, cap)? {
+        if let Some(layout) = profile_layout_with(&child, cap, list, is_dir)? {
             out.push((child, layout));
             continue;
         }
-        for grandchild in sorted_dirs(&child)? {
-            if let Some(layout) = profile_layout(&grandchild)? {
+        for grandchild in list(&child, cap)? {
+            if let Some(layout) = profile_layout_with(&grandchild, cap, list, is_dir)? {
                 out.push((grandchild, layout));
             }
         }
@@ -99,16 +116,69 @@ fn profile_dirs(target: &Path) -> Result<Vec<(PathBuf, Layout)>, String> {
 /// Cargo tagged whose profiles cannot be read; `None` for anything else.
 pub fn identify(dir: &Path) -> Option<Result<Vec<(PathBuf, Layout)>, String>> {
     let tag = fs::read(dir.join("CACHEDIR.TAG")).ok()?;
-    if !String::from_utf8_lossy(&tag)
-        .lines()
-        .any(|l| l.trim_end() == TAG_LINE)
-    {
+    if !valid_tag(&tag) {
         return None;
     }
-    match profile_dirs(dir) {
+    finish_profiles(profile_dirs(dir))
+}
+
+/// Same as [`identify`], but every directory listing stops at `cap` entries.
+pub fn identify_bounded(
+    fs: &dyn crate::platform::Fs,
+    dir: &Path,
+    cap: usize,
+) -> Option<Result<Vec<(PathBuf, Layout)>, String>> {
+    let tag = fs.read(&dir.join("CACHEDIR.TAG")).ok()?;
+    if !valid_tag(&tag) {
+        return None;
+    }
+    finish_profiles(profile_dirs_with(
+        dir,
+        cap,
+        &|path, cap| bounded_dirs(fs, path, cap),
+        &|path| is_dir_bounded(fs, path),
+    ))
+}
+
+fn valid_tag(tag: &[u8]) -> bool {
+    String::from_utf8_lossy(tag)
+        .lines()
+        .any(|line| line.trim_end() == TAG_LINE)
+}
+
+fn finish_profiles(
+    found: Result<Vec<(PathBuf, Layout)>, String>,
+) -> Option<Result<Vec<(PathBuf, Layout)>, String>> {
+    match found {
         Ok(profiles) if profiles.is_empty() => None,
         Ok(profiles) => Some(Ok(profiles)),
         Err(why) => Some(Err(why)),
+    }
+}
+
+fn bounded_dirs(
+    fs: &dyn crate::platform::Fs,
+    dir: &Path,
+    cap: usize,
+) -> Result<Vec<PathBuf>, String> {
+    let entries = fs
+        .read_dir_bounded(dir, cap)
+        .map_err(|err| format!("{}: {err}", dir.display()))?;
+    let mut dirs = Vec::new();
+    for (name, kind) in entries {
+        if kind == crate::platform::EntryKind::Dir {
+            dirs.push(dir.join(name));
+        }
+    }
+    dirs.sort();
+    Ok(dirs)
+}
+
+fn is_dir_bounded(fs: &dyn crate::platform::Fs, path: &Path) -> Result<bool, String> {
+    match fs.entry_stat(path) {
+        Ok(stat) => Ok(stat.kind == crate::platform::EntryKind::Dir),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(format!("{}: {err}", path.display())),
     }
 }
 
@@ -377,6 +447,25 @@ mod tests {
         ));
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    #[test]
+    fn identify_bounded_matches_identify_at_the_cap_and_errors_one_past() {
+        let root = scratch("bounded");
+        tag(&root, TAG_LINE);
+        fs::create_dir_all(root.join("debug/.fingerprint")).unwrap();
+        fs::write(root.join("extra"), b"x").unwrap();
+        let n = fs::read_dir(&root).unwrap().count();
+        let open = identify(&root).unwrap().unwrap();
+        let fs = crate::platform::current().unwrap().fs;
+        let capped = identify_bounded(fs.as_ref(), &root, n).unwrap().unwrap();
+        assert_eq!(open, capped);
+        let err = identify_bounded(fs.as_ref(), &root, n - 1)
+            .unwrap()
+            .unwrap_err();
+        assert!(err.contains("more than"), "{err}");
+        assert!(identify(&root).is_some_and(|found| found.is_ok()));
+        let _ = fs::remove_dir_all(root);
     }
 
     fn tag(dir: &Path, line: &str) {

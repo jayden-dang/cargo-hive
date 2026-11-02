@@ -1,4 +1,4 @@
-//! Platform layer: the OS gate, `Fs` and `Approve`, lock try and hold, bounded listing, and volume info.
+//! Platform layer: the OS gate, `Fs`, lock try and hold, bounded listing, and volume info.
 
 use std::process::Command;
 
@@ -39,9 +39,6 @@ use std::time::SystemTime;
 
 #[cfg(target_os = "macos")]
 pub mod apfs;
-
-#[cfg(target_os = "macos")]
-pub mod local_auth;
 
 /// A directory this process created. Dropping it removes the directory and everything in it.
 #[derive(Debug)]
@@ -207,13 +204,26 @@ impl Drop for LockHolder {
 /// A lock this process holds. Dropping it releases the lock.
 pub struct HeldLock {
     release: Option<Box<dyn FnOnce() + Send>>,
+    identity: Option<(u64, u64)>,
 }
 
 impl HeldLock {
     pub fn new(release: impl FnOnce() + Send + 'static) -> HeldLock {
         HeldLock {
             release: Some(Box::new(release)),
+            identity: None,
         }
+    }
+
+    pub fn with_identity(dev: u64, ino: u64, release: impl FnOnce() + Send + 'static) -> HeldLock {
+        HeldLock {
+            release: Some(Box::new(release)),
+            identity: Some((dev, ino)),
+        }
+    }
+
+    pub fn identity(&self) -> Option<(u64, u64)> {
+        self.identity
     }
 }
 
@@ -302,7 +312,8 @@ pub trait Fs {
     fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState>;
     /// `lstat`: never follows a symbolic link.
     fn entry_stat(&self, path: &Path) -> io::Result<EntryStat>;
-    /// The UTF-8 names and no-follow kinds of `dir`'s entries; more than `cap` entries is an error.
+    /// The UTF-8 names and no-follow kinds of `dir`'s entries. More than `cap` entries is an
+    /// error, and so is a name that is not UTF-8.
     fn read_dir_bounded(&self, dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>>;
     /// Removes a directory tree, or a symbolic link given as the root, never following a link.
     fn remove_tree(&self, path: &Path) -> io::Result<()>;
@@ -317,14 +328,8 @@ pub enum Availability {
     Unavailable(String),
 }
 
-/// Owner approval. This feature only asks whether it is available; ROAD-7 adds `evaluate`.
-pub trait Approve {
-    fn owner_auth_available(&self) -> Availability;
-}
-
 pub struct Platform {
     pub fs: Box<dyn Fs>,
-    pub approve: Box<dyn Approve>,
 }
 
 #[cfg(target_os = "macos")]
@@ -332,7 +337,6 @@ pub fn current() -> Result<Platform, NotMacOs> {
     let holder = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("cargo-hive"));
     Ok(Platform {
         fs: Box::new(apfs::Apfs::new(holder)),
-        approve: Box::new(local_auth::LocalAuth),
     })
 }
 

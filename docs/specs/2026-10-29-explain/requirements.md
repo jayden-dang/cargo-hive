@@ -137,7 +137,8 @@ Files and surfaces this change touches:
 - Registered repositories' checkouts, their targets, and `~/.cargo`: behavior at risk. Guarded by EXPLAIN-6.2 and EXPLAIN-7.5.
 
 - **EXPLAIN-7.1** (guard) WHEN `cargo hive status` runs THE SYSTEM SHALL CONTINUE TO report the same checkouts, targets, owners, units, not-current units, edges, unsupported profile dirs and findings as before this feature, and never read an `output-*` file.
-- **EXPLAIN-7.2** (guard) WHEN `cargo hive doctor` runs THE SYSTEM SHALL CONTINUE TO run checks (a) to (f) with the same pass rules and measured values, and to disable capabilities by the CORE-1.3 map.
+- ~~**EXPLAIN-7.2**~~ superseded by EXPLAIN-7.6 (owner amendment 2026-11-02: plans apply with no human step, ADR-0002) — was: ~~(guard) WHEN `cargo hive doctor` runs THE SYSTEM SHALL CONTINUE TO run checks (a) to (f) with the same pass rules and measured values, and to disable capabilities by the CORE-1.3 map.~~
+- **EXPLAIN-7.6** (guard) WHEN `cargo hive doctor` runs THE SYSTEM SHALL CONTINUE TO run checks (a) to (d) and (f) with the same pass rules and measured values, and to disable capabilities by the CORE-1.14 map.
 - **EXPLAIN-7.3** (guard) WHEN `cargo hive gc` runs THE SYSTEM SHALL CONTINUE TO process the same targets and delete the same entries as before this feature.
 - **EXPLAIN-7.4** (guard) WHEN any hive command runs once hive's state is open, `explain` included, THE SYSTEM SHALL CONTINUE TO satisfy CORE-5.1 through CORE-5.7.
 - **EXPLAIN-7.5** (guard) WHEN hive is installed and repositories are registered THE SYSTEM SHALL CONTINUE TO let `cargo` and rust-analyzer build every checkout exactly as without hive, with no Cargo configuration, environment variable, wrapper or hook added (CORE-7.2).

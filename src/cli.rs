@@ -1,7 +1,7 @@
 //! Thin adapter: arguments → library calls → one receipt.
 
 use crate::platform::{self, MACOS_ONLY_MESSAGE};
-use crate::receipt::{Receipt, ReceiptBuilder, Scope};
+use crate::receipt::{PlanRecord, PlanTierBody, Receipt, ReceiptBuilder, Scope};
 use crate::registry::{self, Registry};
 use crate::state::{State, StateError};
 use clap::{Args, Parser, Subcommand};
@@ -48,6 +48,16 @@ pub enum Command {
         /// Report what would be deleted and freed, deleting nothing
         #[arg(long)]
         dry_run: bool,
+        /// Store a plan of dead-unit paths and delete nothing
+        #[arg(long, conflicts_with = "dry_run")]
+        plan: bool,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// Delete the dead units recorded in one stored plan
+    Apply {
+        /// Id of the plan to apply
+        id: String,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -143,8 +153,16 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
         Command::Gc {
             repos,
             dry_run,
+            plan,
             out,
-        } => gc_cmd(&state, &repos, dry_run, out),
+        } => {
+            if plan {
+                plan_cmd(&state, &repos, out)
+            } else {
+                gc_cmd(&state, &repos, dry_run, out)
+            }
+        }
+        Command::Apply { id, out } => apply_cmd(&state, &id, out),
         Command::Explain { repos, top, out } => explain_cmd(&state, &repos, top, out),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
         Command::TryLock { .. } => unreachable!("handled before the state root is opened"),
@@ -233,8 +251,23 @@ pub fn emit(state: &State, out: OutputArgs, receipt: Receipt, human: &str, code:
 fn emit_failure(state: &State, out: OutputArgs, command: &str, error: &str, code: i32) -> i32 {
     eprintln!("cargo-hive: {error}");
     let mut receipt = Receipt::new(command, Scope::default());
+    if command == "gc --plan" || command == "apply" {
+        receipt.plan_tier(PlanTierBody {
+            plans: Vec::new(),
+            undecided: Vec::new(),
+            nothing_to_do: Vec::new(),
+        });
+    }
     receipt.finding("error", None, error.to_string());
     emit(state, out, receipt.finish(), &format!("{error}\n"), code)
+}
+
+fn begin_plan_tier(b: &mut ReceiptBuilder) {
+    b.plan_tier(PlanTierBody {
+        plans: Vec::new(),
+        undecided: Vec::new(),
+        nothing_to_do: Vec::new(),
+    });
 }
 
 fn repo_add(state: &State, path: &std::path::Path, out: OutputArgs) -> i32 {
@@ -336,7 +369,7 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
             1,
         );
     }
-    let report = match doctor::run(&*platform.fs, &*platform.approve, &env) {
+    let report = match doctor::run(&*platform.fs, &env) {
         Ok(r) => r,
         Err(doctor::DoctorError::Cancelled) => {
             return emit_failure(
@@ -723,6 +756,25 @@ fn put_counts(b: &mut ReceiptBuilder, suffix: &str, c: &crate::gc::Counts) {
     }
 }
 
+pub(crate) fn cross_check_notes(
+    before: &std::collections::BTreeMap<String, (std::path::PathBuf, u64)>,
+    after: &std::collections::BTreeMap<String, (std::path::PathBuf, u64)>,
+    touched: &std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    for container in touched {
+        if let (Some((mount, was)), Some((_, now))) = (before.get(container), after.get(container))
+        {
+            let change = i128::from(*now) - i128::from(*was);
+            notes.push(format!(
+                "cross-check, not a count: available bytes in APFS container {container} (mounted at {}) changed by {change:+} during this run",
+                mount.display()
+            ));
+        }
+    }
+    notes
+}
+
 fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: OutputArgs) -> i32 {
     use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
     use crate::doctor::{self, Capabilities, Capability};
@@ -811,7 +863,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
     let report = gc::run(&*platform.fs, &scan.targets, &scope, &opts, &cancelled);
     if !dry_run {
         let after = volumes(&*platform.fs);
-        let deleted_on: BTreeSet<String> = report
+        let touched: BTreeSet<String> = report
             .per_target
             .iter()
             .filter(|(_, c)| {
@@ -819,16 +871,8 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             })
             .filter_map(|(p, _)| platform.fs.volume(p).ok().map(|v| v.container))
             .collect();
-        for container in &deleted_on {
-            if let (Some((mount, was)), Some((_, now))) =
-                (before.get(container), after.get(container))
-            {
-                let change = i128::from(*now) - i128::from(*was);
-                b.note(format!(
-                    "cross-check, not a count: available bytes in APFS container {container} (mounted at {}) changed by {change:+} during this run",
-                    mount.display()
-                ));
-            }
+        for note in cross_check_notes(&before, &after, &touched) {
+            b.note(note);
         }
     }
     put_counts(&mut b, "", &report.totals);
@@ -891,6 +935,287 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
         b.finding("error", None, "gc was cancelled");
         return emit(state, out, b.finish(), &human, 130);
     }
+    emit(state, out, b.finish(), &human, code)
+}
+
+fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
+    use crate::doctor::{self, Capabilities, Capability};
+    use crate::plan_tier::apply;
+    use crate::plan_tier::build;
+    use crate::plan_tier::Ctx;
+    use crate::receipt::Outcome;
+    if let Err(e) = doctor::install_signal_handlers() {
+        return emit_failure(
+            state,
+            out,
+            "apply",
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
+    }
+    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let loaded = (|| -> Result<_, StateError> {
+        Ok((
+            state.read::<Registry>(registry::FILE)?,
+            state.config()?,
+            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+        ))
+    })();
+    let (reg, cfg, caps) = match loaded {
+        Ok(v) => v,
+        Err(e) => return emit_failure(state, out, "apply", &e.to_string(), 1),
+    };
+    let Ok(platform) = platform::current() else {
+        eprintln!("{MACOS_ONLY_MESSAGE}");
+        return 2;
+    };
+    let mut b = Receipt::new("apply", Scope::default());
+    begin_plan_tier(&mut b);
+    let release = doctor::resolve_toolchain(state.root())
+        .ok()
+        .map(|t| t.release);
+    b.toolchain(release.clone());
+    for cap in [Capability::FingerprintReading, Capability::Deletion] {
+        if let Err(refusal) = doctor::require(&caps, cap, release.as_deref()) {
+            b.finding("refusal", None, refusal.to_string());
+            return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
+        }
+    }
+    let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
+    let ctx = Ctx {
+        state,
+        fs: &*platform.fs,
+        cfg: &cfg,
+        now: std::time::SystemTime::now(),
+        account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
+        repos: &reg.repos,
+        mains: &registered_mains,
+    };
+    let applied = match apply::apply(&ctx, id, &cancelled) {
+        Ok(applied) => applied,
+        Err(e) => {
+            b.finding("error", None, e.to_string());
+            return emit(state, out, b.finish(), &format!("{e}\n"), 1);
+        }
+    };
+    let code = apply::exit_code(&applied);
+    let word = match applied.outcome {
+        Outcome::Applied => "applied",
+        Outcome::Partial => "partial",
+        Outcome::Refused => "refused",
+    };
+    let human = format!(
+        "{}  {}  {word}\n",
+        applied.id,
+        build::class_label(applied.class)
+    );
+    let paths = applied
+        .counts
+        .get("paths")
+        .or_else(|| applied.counts.get("paths_deleted"))
+        .copied()
+        .unwrap_or(0);
+    for note in &applied.notes {
+        b.note(note.clone());
+    }
+    for item in &applied.unmeasured {
+        b.unmeasured(&item.field, item.reason.clone());
+    }
+    for (kind, path, detail) in &applied.findings {
+        b.finding(kind, path.clone(), detail.clone());
+    }
+    b.scope_mut().repos = applied.scope_repos.clone();
+    b.scope_mut().checkouts = applied.scope_checkouts.clone();
+    b.plan_tier(PlanTierBody {
+        plans: vec![PlanRecord {
+            id: applied.id,
+            class: build::class_label(applied.class).to_string(),
+            outcome: Some(applied.outcome),
+            reason: applied.reason,
+            targets: applied.targets,
+            paths,
+            counts: applied.counts,
+        }],
+        undecided: Vec::new(),
+        nothing_to_do: Vec::new(),
+    });
+    emit(state, out, b.finish(), &human, code)
+}
+
+fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
+    use crate::doctor::{self, Capabilities, Capability};
+    use crate::plan_tier::build::{self, MakeError};
+    use crate::plan_tier::record;
+    use crate::plan_tier::Ctx;
+    use std::collections::BTreeMap;
+    use std::time::SystemTime;
+    const ID_ATTEMPTS: u32 = 4;
+    if let Err(e) = doctor::install_signal_handlers() {
+        return emit_failure(
+            state,
+            out,
+            "gc --plan",
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
+    }
+    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let loaded = (|| -> Result<_, StateError> {
+        Ok((
+            state.read::<Registry>(registry::FILE)?,
+            state.config()?,
+            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+        ))
+    })();
+    let (reg, cfg, caps) = match loaded {
+        Ok(v) => v,
+        Err(e) => return emit_failure(state, out, "gc --plan", &e.to_string(), 1),
+    };
+    let Ok(platform) = platform::current() else {
+        eprintln!("{MACOS_ONLY_MESSAGE}");
+        return 2;
+    };
+    let mut b = Receipt::new("gc --plan", Scope::default());
+    begin_plan_tier(&mut b);
+    let release = doctor::resolve_toolchain(state.root())
+        .ok()
+        .map(|t| t.release);
+    b.toolchain(release.clone());
+    if let Err(refusal) = doctor::require(&caps, Capability::FingerprintReading, release.as_deref())
+    {
+        b.finding("refusal", None, refusal.to_string());
+        return emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1);
+    }
+    let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
+    let mut named = Vec::new();
+    if args.is_empty() {
+        named.clone_from(&reg.repos);
+    } else {
+        for arg in args {
+            let real = arg.canonicalize().unwrap_or_else(|_| arg.clone());
+            if let Some(repo) = reg.repos.iter().find(|r| r.main == real) {
+                if !named.iter().any(|got| got.main == repo.main) {
+                    named.push(repo.clone());
+                }
+            }
+        }
+    }
+    let _checkouts = live_checkouts(&named, &registered_mains, &cfg, &mut b);
+    if !args.is_empty() {
+        for repo in &reg.repos {
+            let (rows, _) = crate::discover::checkouts(repo, &registered_mains, &cfg);
+            for arg in args {
+                let real = arg.canonicalize().unwrap_or_else(|_| arg.clone());
+                if rows.iter().any(|row| !row.missing && row.path == real)
+                    && !b.scope_mut().checkouts.contains(&real)
+                {
+                    b.scope_mut().checkouts.push(real);
+                }
+            }
+        }
+    }
+    let now = SystemTime::now();
+    let ctx = Ctx {
+        state,
+        fs: &*platform.fs,
+        cfg: &cfg,
+        now,
+        account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
+        repos: &reg.repos,
+        mains: &registered_mains,
+    };
+    let made = match build::make(&ctx, args, &cancelled) {
+        Ok(made) => made,
+        Err(MakeError::Window(err)) => {
+            b.finding("refusal", None, err.to_string());
+            return emit(state, out, b.finish(), &format!("refused: {err}\n"), 1);
+        }
+        Err(MakeError::Cancelled) => {
+            b.finding("error", None, "gc --plan was cancelled");
+            return emit(state, out, b.finish(), "gc --plan was cancelled\n", 130);
+        }
+    };
+    let code = build::command_code(&made);
+    let made_at = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let unreadable = made
+        .findings
+        .iter()
+        .any(|(kind, _, _)| kind == "plan.unreadable");
+    let mut plans = made.plans;
+    let mut stored = unreadable;
+    if !unreadable {
+        for attempt in 0..ID_ATTEMPTS {
+            match record::insert(state, &cancelled, plans.clone(), made_at) {
+                Ok(()) => {
+                    stored = true;
+                    break;
+                }
+                Err(StateError::DuplicatePlan { .. }) if attempt + 1 < ID_ATTEMPTS => {
+                    for plan in &mut plans {
+                        build::reissue(plan);
+                    }
+                }
+                Err(StateError::Cancelled) => {
+                    b.finding("error", None, StateError::Cancelled.to_string());
+                    return emit(state, out, b.finish(), "gc --plan was cancelled\n", 130);
+                }
+                Err(e) => {
+                    b.finding("error", None, e.to_string());
+                    return emit(state, out, b.finish(), &format!("{e}\n"), 1);
+                }
+            }
+        }
+    }
+    if !stored {
+        b.finding(
+            "error",
+            None,
+            "a plan id collided; run `cargo hive gc --plan` again",
+        );
+        return emit(state, out, b.finish(), "could not store the plan\n", 1);
+    }
+    let mut records = Vec::new();
+    let mut human = String::new();
+    for plan in &plans {
+        let mut counts = BTreeMap::new();
+        if let Some(bytes) = plan.planned {
+            counts.insert("freed_bytes".to_string(), bytes.freed);
+            counts.insert("deleted_bytes_still_shared".to_string(), bytes.still_shared);
+        }
+        let paths = plan.targets.iter().map(|t| t.entries.len() as u64).sum();
+        human.push_str(&format!(
+            "{}  {}  {} paths\n",
+            plan.id,
+            build::class_label(plan.class),
+            paths
+        ));
+        records.push(PlanRecord {
+            id: plan.id.clone(),
+            class: build::class_label(plan.class).to_string(),
+            outcome: None,
+            reason: None,
+            targets: plan.targets.iter().map(|t| t.path.clone()).collect(),
+            paths,
+            counts,
+        });
+    }
+    if records.is_empty() {
+        human.push_str("no plan\n");
+    }
+    for item in &made.unmeasured {
+        b.unmeasured(&item.field, item.reason.clone());
+    }
+    for (kind, path, detail) in &made.findings {
+        b.finding(kind, path.clone(), detail.clone());
+    }
+    b.plan_tier(PlanTierBody {
+        plans: records,
+        undecided: made.undecided,
+        nothing_to_do: made.nothing_to_do,
+    });
     emit(state, out, b.finish(), &human, code)
 }
 

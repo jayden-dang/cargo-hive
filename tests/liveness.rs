@@ -194,6 +194,9 @@ fn the_cli_has_no_new_subcommand_or_flag() {
         "cargo-hive __try-lock",
         "cargo-hive __try-lock --kind",
         "cargo-hive __try-lock --path",
+        "cargo-hive apply",
+        "cargo-hive apply --id",
+        "cargo-hive apply --json",
         "cargo-hive doctor",
         "cargo-hive doctor --json",
         "cargo-hive explain",
@@ -203,6 +206,7 @@ fn the_cli_has_no_new_subcommand_or_flag() {
         "cargo-hive gc",
         "cargo-hive gc --dry_run",
         "cargo-hive gc --json",
+        "cargo-hive gc --plan",
         "cargo-hive gc --repos",
         "cargo-hive repo",
         "cargo-hive repo add",
@@ -1117,6 +1121,41 @@ fn the_proof_passes_a_window_whose_dead_units_cargo_does_not_need_and_calls_an_e
         lock_before
     );
     no_clone_left(&scratch.path);
+}
+
+#[test]
+fn a_profile_with_fingerprints_and_no_build_lock_cannot_prove_the_target_idle() {
+    let scratch = Scratch::new("prove-no-lock");
+    let target = scratch.path.join("target");
+    let profile = target.join("debug");
+    fs::create_dir_all(profile.join(".fingerprint")).unwrap();
+    fs::write(
+        target.join("CACHEDIR.TAG"),
+        "# This file is a cache directory tag created by cargo.\n",
+    )
+    .unwrap();
+    let checkout = scratch.path.join("app");
+    fs::create_dir_all(&checkout).unwrap();
+    let fs_ = platform::current().unwrap().fs;
+
+    let err = prove::prove_with(
+        fs_.as_ref(),
+        &scratch.path,
+        &prove::ProveInput {
+            target,
+            checkout,
+            cmds: vec![vec!["build".to_string()]],
+            windows: vec![WINDOW],
+            now: SystemTime::now(),
+        },
+    )
+    .unwrap_err();
+
+    assert!(err.contains(&profile.display().to_string()), "{err}");
+    assert!(
+        err.contains("no build lock file; cannot prove the target idle"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -2194,4 +2233,18 @@ fn decide_at_decides_a_backdated_target_for_the_given_instant() {
         decide_at(&fx.target, now, WINDOW),
         Liveness::Decided { .. }
     ));
+}
+
+#[test]
+fn deleting_through_execute_on_a_fixture_clone_rebuilds_no_live_unit() {
+    let fx = common::cargo_fixture::fixture("execute-trial");
+    common::cargo_fixture::cargo(&fx, &["build"]);
+    common::cargo_fixture::backdate_all(&fx.target, std::time::Duration::from_secs(10 * 86_400));
+    common::cargo_fixture::cargo(&fx, &["build", "--features", "f"]);
+    let report = common::prove::trial_through_execute(&fx).expect("trial");
+    assert!(
+        report.deleted_files > 0,
+        "a trial that deletes nothing proves nothing"
+    );
+    assert_eq!(report.rebuilt_live_units, 0, "{report:?}");
 }

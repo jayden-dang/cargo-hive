@@ -415,7 +415,8 @@ enum Parsed {
     RepoAdd,
     RepoList,
     Status,
-    Gc { dry_run: bool },
+    Gc { dry_run: bool, plan: bool },
+    Apply,
     Explain,
 }
 
@@ -439,7 +440,8 @@ fn parse(words: &[String]) -> Result<Parsed, String> {
             RepoCommand::List(_) => Ok(Parsed::RepoList),
         },
         Command::Status { .. } => Ok(Parsed::Status),
-        Command::Gc { dry_run, .. } => Ok(Parsed::Gc { dry_run }),
+        Command::Gc { dry_run, plan, .. } => Ok(Parsed::Gc { dry_run, plan }),
+        Command::Apply { .. } => Ok(Parsed::Apply),
         Command::Explain { .. } => Ok(Parsed::Explain),
         Command::HoldLock { .. } | Command::TryLock { .. } => {
             Err("the internal lock subcommands are not part of the skill".to_string())
@@ -574,8 +576,19 @@ fn skill_documents_every_shipped_command() {
         Parsed::RepoAdd,
         Parsed::RepoList,
         Parsed::Status,
-        Parsed::Gc { dry_run: true },
-        Parsed::Gc { dry_run: false },
+        Parsed::Gc {
+            dry_run: true,
+            plan: false,
+        },
+        Parsed::Gc {
+            dry_run: false,
+            plan: false,
+        },
+        Parsed::Apply,
+        Parsed::Gc {
+            dry_run: false,
+            plan: true,
+        },
         Parsed::Explain,
     ] {
         assert!(
@@ -583,6 +596,26 @@ fn skill_documents_every_shipped_command() {
             "the skill documents no command line for {want:?}"
         );
     }
+}
+
+#[test]
+fn the_skill_teaches_the_plan_flow_for_every_class() {
+    let body = skill_body();
+    for needle in [
+        "every class",
+        "no owner step",
+        "plan again",
+        "already consumed",
+    ] {
+        assert!(body.contains(needle), "SKILL.md lacks {needle}");
+    }
+    for gone in ["needs-human", "exit 3", "approve"] {
+        assert!(!body.contains(gone), "SKILL.md still says {gone}");
+    }
+    assert!(
+        !body.contains("not available yet"),
+        "the plan tier is available now"
+    );
 }
 
 const QUOTE_LEAD: &str = "The skill says: \"";

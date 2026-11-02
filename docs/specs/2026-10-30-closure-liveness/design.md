@@ -350,7 +350,8 @@ Order of one run:
      before a `--`.
 2. **Quiesce and preflight (LIVE-4.15, LIVE-4.16).** Build the `TargetDir`, try-lock
    `.cargo-build-lock` in every profile dir and hold the locks to the end (a missing lock file
-   needs no lock). A lock held elsewhere fails the test. `Fs::volume` of the target must report
+   is not proof that no build runs: a profile dir with a `.fingerprint` directory and no lock
+   file fails the test). A lock held elsewhere fails the test. `Fs::volume` of the target must report
    `apfs`, and the scratch dir must sit on the same volume (`mount` equal), or the test fails.
 3. **Snapshot the original (LIVE-4.13).** Walk the target dir (path, mtime, size) and stat the
    checkout's `Cargo.lock`. The review measured 3.4 s for 545k entries.

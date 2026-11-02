@@ -15,10 +15,10 @@ Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
 
-**Goal:** Add `cargo hive gc --plan` and `cargo hive apply <id>`: a stored, one-use plan of the dead-unit files (and orphan target dirs) of the targets in scope, applied only after liveness, ownership and locks are rechecked, with `needs-human` for protected and orphan plans.
+**Goal:** Add `cargo hive gc --plan` and `cargo hive apply <id>`: a stored, one-use plan of the dead-unit files (and orphan target dirs) of the targets in scope, applied only after liveness, ownership and locks are rechecked, for every class, with no owner step.
 
 **Architecture:**
-- **`src/plan_tier/`** (new) holds the plan record and its store (`plans.json`), the plan builder, the lock acquisition for one target, the two-phase apply, the orphan removal and the path guard. Its public surface is `make`, `apply`, `execute`, `Authorization` and `Approval`.
+- **`src/plan_tier/`** (new) holds the plan record and its store (`plans.json`), the plan builder, the lock acquisition for one target, the two-phase apply, the orphan removal and the path guard. Its public surface is `make`, `apply`, and `execute`.
 - **Platform and gc** gain only what apply needs: `HeldLock` reports the identity of the opened lock file, and the byte-accounting delete of the auto tier is extracted as `gc::account::remove_counted`.
 - **Receipt schema 3** is additive and appears only on `gc --plan` and `apply`; every other command keeps schema 2.
 
@@ -105,7 +105,7 @@ Retrieval (manual approximation of `load-subgraph`'s `blast_radius` and `cluster
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in `tests/platform_locks.rs`
+- [x] **Step 1: Write the failing test** in `tests/platform_locks.rs`
 
 ```rust
 #[test]
@@ -139,13 +139,13 @@ fn a_lock_whose_file_was_replaced_after_it_was_opened_reports_a_different_identi
 
 Run: `cargo test --test platform_locks identity` — expect: compile error, no method `identity` on `HeldLock`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 In `src/platform/mod.rs` give `HeldLock` an `identity: Option<(u64, u64)>` field that `HeldLock::new` sets to `None`; add `pub fn with_identity(dev: u64, ino: u64, release: impl FnOnce() + Send + 'static) -> HeldLock` and `pub fn identity(&self) -> Option<(u64, u64)>`. In `Apfs::try_lock_exclusive` (`src/platform/apfs.rs`, where the opened file's metadata `m` is already read for the regular-file check) return `TryLock::Acquired(HeldLock::with_identity(m.dev(), m.ino(), move || drop(file)))` (bind `m` outside the `match file.metadata()` arm so it is in scope here) using `std::os::unix::fs::MetadataExt`, without a second `metadata()` call. Leave the `HeldLock::new` calls in `src/doctor.rs` and `src/gc/run.rs` untouched.
 
 Run: `cargo test --test platform_locks` — expect: pass, existing lock tests still pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "platform: a held lock reports the identity of the file it opened"`
 
@@ -170,7 +170,7 @@ _Requirements: GCPLAN-2.4_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in `src/gc/account.rs`
+- [x] **Step 1: Write the failing test** in `src/gc/account.rs`
 
 ```rust
 #[cfg(all(test, target_os = "macos"))]
@@ -249,13 +249,13 @@ mod tests {
 
 Run: `cargo test -p cargo-hive account` — expect: compile error, module `account` not found.
 
-- [ ] **Step 2: Implement `remove_counted`**
+- [x] **Step 2: Implement `remove_counted`**
 
 For `EntryKind::File` or `Symlink` roots: `entry_stat` once, record that single file into the ledger as `record` does for a scanned file, then `fs.remove_file` (skipped when `dry_run`). For `Dir`: reuse the existing `scan(fs, root, account_bytes)` and `record(ledger, target, files)` free functions (make `scan` and `record` `pub(super)`), then `fs.remove_tree` (skipped when `dry_run`). Keep exactly the error handling of `Runner::remove_measured` (`src/gc/run.rs`): a scan error is `RemoveFailed::Scan`, a removal error is `RemoveFailed::Remove` after `ledger.unmeasured(..)` for a part-way removal, `NotFound` counts nothing. Make `Runner::remove_measured` a thin wrapper that maps the result onto its existing `skip(..)` calls and `bool`, with byte-identical counts, findings and `unmeasured`. Move the volume cross-check block of `gc_cmd` into `cross_check_notes` with the same text: `cross-check, not a count: available bytes in APFS container {c} (mounted at {m}) changed by {change:+} during this run`.
 
 Run: `cargo test` — expect: pass, including all of `tests/gc.rs` unchanged (dry-run parity included).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "gc: extract the counted delete and the volume cross-check for reuse"`
 
@@ -280,7 +280,7 @@ _Requirements: GCPLAN-9.1_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in `src/plan_tier/guard.rs`
+- [x] **Step 1: Write the failing test** in `src/plan_tier/guard.rs`
 
 ```rust
 #[cfg(all(test, target_os = "macos"))]
@@ -364,17 +364,17 @@ mod tests {
 
 Run: `cargo test -p cargo-hive guard` — expect: compile error, module `plan_tier::guard` not found.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `check_entry`: canonicalize the path's parent with `std::fs::canonicalize` (an `ErrorKind::NotFound` → `Err(Missing)`, any other error → `Err(Outside)`); require the canonical parent to start with the canonicalized `root`, else `Err(Outside)`; `entry_stat(path)` (lstat) — not found → `Err(Missing)`; with `Expect::Entry`, any difference in kind, device or inode → `Err(Changed)`; an `Other` kind → `Err(Changed)`; else `Ok(stat)`. `delete_checked`: `check_entry`, then `Dir` → `fs.remove_tree`, `File`/`Symlink` → `fs.remove_file`; a removal error → `Missing` when its kind is `NotFound`, else `Changed`; `Removed` otherwise. Nothing follows a link. Give `src/plan_tier/mod.rs` a `//!` header saying what the module is.
 
-- [ ] **Step 3: Move the proof's guard onto it**
+- [x] **Step 3: Move the proof's guard onto it**
 
 In `tests/common/prove.rs` change `delete_in_clone` to call `cargo_hive::plan_tier::guard::delete_checked(fs, clone_root, path, Expect::Any)` for each file, treating `Missing` as it does today, and mapping `Outside` to `format!("{} reaches outside the clone through a link", path.display())` and `Changed` to `format!("cannot delete {}", path.display())` — the substrings `tests/liveness.rs` asserts for `debug/deps` and the cannot-delete case must still match.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 `git commit -m "plan_tier: a path guard that checks an entry and deletes by kind inside one target dir"`
 
@@ -396,7 +396,7 @@ _Requirements: GCPLAN-8.1_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in the existing `#[cfg(test)]` module of `src/state.rs`, which has `fn scratch(label) -> PathBuf` (returns an uncreated path under the OS temp dir)
+- [x] **Step 1: Write the failing test** in the existing `#[cfg(test)]` module of `src/state.rs`, which has `fn scratch(label) -> PathBuf` (returns an uncreated path under the OS temp dir)
 
 ```rust
 #[test]
@@ -430,13 +430,13 @@ fn an_out_of_range_window_does_not_fail_config_for_commands_that_ignore_it() {
 
 Run: `cargo test -p cargo-hive state::` — expect: compile error, no field `gc_window_days`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 Add `gc_window_days: Option<u64>` to `ConfigFile` (still `deny_unknown_fields`) and to `Config`, copied through `State::config()` without validation. Add `window_days` and `WindowError`.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "state: a gc_window_days config key, validated where plans use it"`
 
@@ -459,7 +459,7 @@ _Requirements: GCPLAN-1.8, GCPLAN-1.9, GCPLAN-9.7_
 
 **Depends-on:** Task 3
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[cfg(test)]
@@ -559,13 +559,13 @@ mod tests {
 
 Run: `cargo test -p cargo-hive record::` — expect: compile error, `plan_tier::record` not found.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `plans.json` is `{ "plans": [Plan, ...] }` with a `Default` wrapper type; read and write it only through `Tx` inside `State::locked_or_cancelled(cancel, ...)`. `insert`: prune first, refuse a duplicate id with `StateError::Malformed { file: "plans.json".into(), detail }`, then append. `consume`: in one locked section find the plan; `Live` → replace `targets` with an empty vec, set `state = Consumed { at: now }`, write, return `Taken::Plan(copy_before_stripping)`; `Consumed` → `AlreadyConsumed`; missing → `Unknown`. `prune(now)`: drop any entry with `made_at` older than 30 days; then keep only the newest 256 consumed tombstones; never drop a `Live` plan younger than 30 days. `new_id` mixes its three inputs (FNV-1a over their bytes) into 16 hex characters; callers retry with a new counter if `insert` reports a duplicate.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "plan_tier: store plans in state and consume each once"`
 
@@ -587,7 +587,7 @@ _Requirements: GCPLAN-1.7, GCPLAN-1.14, GCPLAN-2.11, GCPLAN-3.7, GCPLAN-3.9, GCP
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -641,13 +641,13 @@ fn a_populated_plan_tier_receipt_names_no_time_or_estimate() {
 
 Run: `cargo test -p cargo-hive receipt::` — expect: compile error, no `plan_tier` on `ReceiptBuilder`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 Add the three optional fields to `Receipt` (initialised to `None` in `with_os`) and the types above. `plan_tier` sets `schema = 3` and `Some(...)` on all three fields, so an empty body still prints `"plans": []`. Do not touch `SCHEMA` (`2`); update its doc comment to say plan and apply receipts are version 3. `tests/receipts.rs` is not edited.
 
 Run: `cargo test` — expect: pass, including the unchanged `tests/receipts.rs`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "receipt: schema 3 body for plan and apply, schema 2 elsewhere"`
 
@@ -675,7 +675,7 @@ _Requirements: GCPLAN-6.1, GCPLAN-9.2, GCPLAN-9.3_
 
 **Depends-on:** Task 2, Task 4, Task 5, Task 6
 
-- [ ] **Step 1: Write the fixture and the failing tests**
+- [x] **Step 1: Write the fixture and the failing tests**
 
 `tests/common/plan_fixture.rs`:
 
@@ -994,17 +994,17 @@ fn a_dead_unit_that_owns_no_artifact_is_never_planned_for_its_lone_fingerprint_d
 
 Run: `cargo test --test plan_apply` — expect: failure, `error: unexpected argument '--plan'`.
 
-- [ ] **Step 2: Implement `class_of_target`, `Ctx` and `plan_for_target`**
+- [x] **Step 2: Implement `class_of_target`, `Ctx` and `plan_for_target`**
 
 In `src/plan_tier/mod.rs` add `Ctx`. In `src/plan_tier/build.rs`: `class_of_target(owner, checkouts)` — `Owner::Owned { checkout }` → the `Checkout` whose `path == checkout`: `Class::Secondary` → `Class(Secondary)`; `Class::Protected` or not found (ARCH-7) → `Class(Protected)`; `Owner::OrphanCandidate` → `Class(Orphan)`; `Owner::Unresolved` → `Unresolved` (the `protected_owner` rule is already applied by `discover::targets` when it sets the owner). Unit-test the five cases in `build.rs` with hand-made `Owner` and `Checkout` values. `plan_for_target(ctx, target, window)` runs `liveness`: `Undecided` → `TargetPlan::Undecided(reasons)`; `Decided` with no listed path → `NothingToDo`; else a `PlannedTarget` with one `PlannedEntry` per path of `DeadUnit.files` in order (skipping a path an earlier unit already listed), `fs.entry_stat` kind/dev/ino, `unit = "<profile dir relative to the target>/<unit dir name>"`, and `planned` bytes from `gc::measure(fs, &target.path, &paths, ctx.account_bytes)` when `account_bytes`. `Plan::single` builds a one-target plan with a fresh id.
 
-- [ ] **Step 3: Implement `make` and the CLI**
+- [x] **Step 3: Implement `make` and the CLI**
 
 `make`: for every registered repo `discover::checkouts` (destructure the `(checkouts, faults)` tuple), then `discover::targets(&checkouts, cfg, true, &mut Snapshot::default(), cancel)`, then keep only targets inside `scope_repos` (all when empty) via `Scope::from_paths`. Validate the window with `state::window_days(cfg.gc_window_days)`; an error becomes `MakeError::Window`, which the CLI turns into a refusal finding and exit 1. For each target: `class_of_target`; `Unresolved` → a finding, no plan; `plan_for_target`; group the `Planned` targets by class into one `Plan` each (`Plan::single` for the first target of a class, then push the rest and sum `planned`). `Orphan` targets are skipped with a finding until Task 14. Add `Command::Gc { plan }` with `#[arg(long, conflicts_with = "dry_run")]`; `plan_cmd` (new, in `src/cli.rs`) reuses the load closure of `gc_cmd`, `doctor::require(.., FingerprintReading, ..)` only, `select`, `live_checkouts`, `emit`; it calls `make`, `record::insert`, builds the `PlanTierBody` (a `PlanRecord` per plan with `outcome: None`, `targets`, `paths`, and planned `freed_bytes`/`deleted_bytes_still_shared` counts when measured), calls `b.plan_tier(body)` and exits 0. `gc` without `--plan` keeps its exact path. Update `tests/skill.rs`: `Parsed::Gc { dry_run: bool, plan: bool }` and `parse` (the existing `want` entries become `Parsed::Gc { dry_run: _, plan: false }`; Task 16 adds the `plan: true` entry when it documents the command).
 
 Add to `CONTEXT.md` the terms Plan (a one-use stored record of the paths one `apply` may delete in the targets of one class), Plan class and Outcome, in the file's existing format.
 
-- [ ] **Step 4: Run and commit**
+- [x] **Step 4: Run and commit**
 
 Run: `cargo test` — expect: pass.
 
@@ -1032,7 +1032,7 @@ _Requirements: GCPLAN-1.1, GCPLAN-1.2, GCPLAN-1.3, GCPLAN-1.4, GCPLAN-1.5, GCPLA
 
 **Depends-on:** Task 1, Task 3, Task 7
 
-- [ ] **Step 1: Write the recording wrapper and the failing tests**
+- [x] **Step 1: Write the recording wrapper and the failing tests**
 
 `tests/common/recording_fs.rs`: `Recording` implements `cargo_hive::platform::Fs` by delegating every method to `platform::current().unwrap().fs` — model it on `Volumes` in `tests/liveness.rs` — behind an `Arc<Mutex<Vec<String>>>` log. `try_lock_exclusive(path)` logs `lock <path>` and applies the options for that path: `unlockable` returns `TryLock::Unlockable(io::Error::other("flock unsupported"))`; `no_identity` returns `TryLock::Acquired(HeldLock::new(|| {}))` after really locking; `replace_after_lock` locks, then deletes and recreates the file; `create_dir_after_lock` locks, then creates the directory. `remove_tree`/`remove_file` log `remove <path>` and delegate.
 
@@ -1130,7 +1130,7 @@ fn a_profile_dir_that_appears_after_the_locks_are_taken_skips_the_target() {
 
 Run: `cargo test --test plan_tier` — expect: compile error, module `plan_tier::locks` not found.
 
-- [ ] **Step 2: Implement `acquire`**
+- [x] **Step 2: Implement `acquire`**
 
 `cargo_target::identify(target)` returns `Option<Result<Vec<(PathBuf, Layout)>, String>>`; `None` or `Err` → `Skipped(Missing)`. For each returned profile and triple directory, candidates are `.cargo-build-lock`, `.cargo-lock` and, when `lists_examples`, `.cargo-artifact-lock`, keeping those that `entry_stat` finds. A directory with a `.fingerprint` child and no candidate → `Skipped(Missing)`. `try_lock_exclusive` each: `Held` → `Held`, `Unopenable` → `Unopenable`, `Unlockable` → `Unlockable`, `Gone` → `Missing`; `Acquired(h)` → compare `h.identity()` with `entry_stat(path)` (`None`, an error or a mismatch → `Missing`); on any skip drop every lock taken. Once all are held, `identify` again; a different set of directories → `Skipped(ProfileSet)`. Return `Locked { profiles, held }`.
 
@@ -1138,7 +1138,7 @@ In `docs/specs/2026-10-30-closure-liveness/design.md` lines 352-353 replace the 
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "plan_tier: take every Cargo lock of one target, and skip when any is not sound"`
 
@@ -1165,7 +1165,7 @@ _Requirements: GCPLAN-2.2, GCPLAN-2.3, GCPLAN-2.12_
 
 **Depends-on:** Task 2, Task 5, Task 8
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tests/plan_apply.rs`:
 
@@ -1320,11 +1320,11 @@ fn applying_ownership_is_resolved_without_touching_the_snapshot_cache() {
 
 Run: `cargo test --test plan_apply --test plan_tier apply` — expect: failure, `error: unrecognized subcommand 'apply'`.
 
-- [ ] **Step 2: Add the command and the gates**
+- [x] **Step 2: Add the command and the gates**
 
 `Command::Apply { id: String, #[command(flatten)] out: OutputArgs }`. `apply_cmd`: install signal handlers, load registry/config/capabilities, `doctor::require` for `FingerprintReading` and `Deletion` (refusal → exit 1, plan untouched), build `Ctx` for all registered repos, call `plan_tier::apply(&ctx, &id, Authorization::Secondary, &cancelled)`, map `Applied` into a `PlanRecord` (`class` as its lowercase name, `outcome`, `reason`, `counts`), call `b.plan_tier(..)`, add `notes`, `unmeasured` and findings, and return 1 for `Refused` or `ApplyError`, otherwise 0 (needs-human, cancel and deletion failure arrive in Tasks 11 and 12). Map `Parsed::Apply` in `tests/skill.rs`.
 
-- [ ] **Step 3: Implement `apply` and `execute` (secondary path)**
+- [x] **Step 3: Implement `apply` and `execute` (secondary path)**
 
 `apply`, in order: (1) `record::get`: `Unknown` → `Refused("unknown_plan")`; `Consumed` → `Refused("already_consumed")`; a class other than `Secondary` under `Authorization::Secondary` → `Refused("unsupported_class")` (Task 11 replaces this with `needs-human`). (2) `record::consume`. (3) Resolve ownership afresh over every registered repo with `discover::checkouts` and `discover::targets(.., &mut Snapshot::default(), ..)`; build a `ResolvedTarget` for each plan target (owner path, class via `class_of_target`); Task 10 adds the distinct refusals — here a mismatch returns `Refused("owner_changed")`. (4) Call `execute`.
 
@@ -1332,7 +1332,7 @@ Run: `cargo test --test plan_apply --test plan_tier apply` — expect: failure, 
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 `git commit -m "apply: delete a secondary plan under every profile lock, once"`
 
@@ -1354,7 +1354,7 @@ _Requirements: GCPLAN-2.1, GCPLAN-2.5, GCPLAN-2.6, GCPLAN-2.7, GCPLAN-2.8, GCPLA
 
 **Depends-on:** Task 9
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 fn refused(p: &Planned, id: &str, reason: &str) {
@@ -1499,13 +1499,13 @@ fn every_target_is_checked_before_any_is_deleted() {
 
 Run: `cargo test --test plan_apply stale` — expect: failures with `stale_item`/`owner_changed` where another reason is named (Task 9 returns coarse reasons).
 
-- [ ] **Step 2: Implement the distinct refusals**
+- [x] **Step 2: Implement the distinct refusals**
 
 Phase A returns, for the first failing check across all targets in sorted order, a typed `Refusal { reason, target, path }`, checking in this order: `Owner::Unresolved` or a resolution failure → `ownership_unresolved`; owner path differs → `owner_changed`; class differs → `class_changed`; a profile whose `Format` is unsupported → `unsupported_format`; for each planned path a `check_entry` failure (missing, other kind, device or inode, or `Outside`) → `entry_changed`; `Undecided` (carry its reasons into a finding) → `undecided`; a planned path not in the recomputed dead set → `stale_item`. Release every lock, delete nothing, report the target and first path in a finding. The plan stays consumed.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "apply: refuse a stale plan whole, with a reason per cause"`
 
@@ -1529,7 +1529,7 @@ _Requirements: GCPLAN-3.1, GCPLAN-3.2, GCPLAN-3.3, GCPLAN-3.4, GCPLAN-3.5, GCPLA
 
 **Depends-on:** Task 10
 
-- [ ] **Step 1: Write the failing tests** — first delete `a_non_secondary_plan_is_not_applied_until_the_needs_human_task` from `tests/plan_apply.rs`
+- [x] **Step 1: Write the failing tests** — first delete `a_non_secondary_plan_is_not_applied_until_the_needs_human_task` from `tests/plan_apply.rs`
 
 ```rust
 #[test]
@@ -1576,17 +1576,17 @@ fn apply_never_blocks_on_an_owner_authentication_prompt() {
 
 Run: `cargo test --test plan_apply needs_human` — expect: failure, exit code is 1, not 3.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 At step (1) of `apply`, a `Live` plan whose class is not `Secondary` and under `Authorization::Secondary` (the only value until Task 13) returns `Applied { outcome: NeedsHuman, id, class, targets, bytes: plan.planned, counts: { paths, freed_bytes, deleted_bytes_still_shared when present } }` before `record::consume` and before any lock or `cargo metadata` call. `apply_cmd` returns `EXIT_NEEDS_HUMAN` (3) for it; an unlogged receipt still forces 1 (`emit`). Remove the `unsupported_class` refusal. `apply` takes no option other than `--json`, so no clap change. In `docs/standards/errors-logging.md`, in the exit-code row, add `3 needs-human (apply only)`.
 
 Run: `cargo test` — expect: pass, including the unchanged `tests/receipts.rs`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "apply: protected plans return needs-human, exit 3, and stay unconsumed"`
 
-_Requirements: GCPLAN-4.1, GCPLAN-4.2, GCPLAN-4.3, GCPLAN-4.4, GCPLAN-6.3, GCPLAN-9.4_
+_Requirements: GCPLAN-4.2, GCPLAN-4.6, GCPLAN-9.11_
 
 ---
 
@@ -1606,7 +1606,7 @@ _Requirements: GCPLAN-4.1, GCPLAN-4.2, GCPLAN-4.3, GCPLAN-4.4, GCPLAN-6.3, GCPLA
 
 **Depends-on:** Task 11
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tests/plan_tier.rs`:
 
@@ -1703,13 +1703,13 @@ fn a_sigint_during_apply_exits_130_logs_a_receipt_and_leaves_the_plan_consumed()
 
 Run: `cargo test --test plan_tier --test plan_apply` — expect: failure, no `fail_removes_after`, then outcomes not `Partial`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 Poll `cancel` after `consume`, again immediately after `discover::targets` returns (before any `Unresolved` owner is turned into `ownership_unresolved`), and between units in Phase B; on true release the locks and return `Ok(Applied { outcome: Partial, reason: Some("cancelled"), .. })`. `apply_cmd` passes 130 to `emit` for it, because `emit` returns whatever code it is given, and still logs the receipt. Add `pub(crate) fn exit_code(a: &Applied) -> i32` in `apply.rs`: 3 for `NeedsHuman`; 130 for reason `cancelled`; 1 for `Refused` and for `Partial` with a `plan.delete_failed` finding; 0 otherwise; `apply_cmd` calls it, and a unit test covers the four outcomes with and without a delete failure, a cancel and a skip. A `Missing`, `Changed` or `Outside` from `check_entry` or a `RemoveFailed` in Phase B stops that target at the end of its current unit, adds a `plan.delete_failed` finding with the path and reason, continues with the next target, and the command exits 1 with outcome `partial`. Add `fail_removes_after` to the recording wrapper.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "apply: stop between units on cancel and fail closed on a deletion error"`
 
@@ -1732,7 +1732,7 @@ _Requirements: GCPLAN-6.8, GCPLAN-8.3, GCPLAN-8.5_
 
 **Depends-on:** Task 12
 
-- [ ] **Step 1: Write the failing test** in `tests/plan_tier.rs`
+- [x] **Step 1: Write the failing test** in `tests/plan_tier.rs`
 
 ```rust
 use cargo_hive::plan_tier::apply::approval_for_tests;
@@ -1754,17 +1754,17 @@ fn an_approved_protected_plan_is_deleted_by_the_same_steps_as_a_secondary_one() 
 
 Run: `cargo test --test plan_tier approved` — expect: compile error, no `approval_for_tests`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `Approval` has a private field and no `pub` constructor besides the `#[doc(hidden)]` test function. In `apply`, `Authorization::Approved(a)` skips the needs-human return only for a `Protected` or `Orphan` plan whose id equals `a.plan_id`; a different id returns `Refused("approval_mismatch")` before consuming. The CLI still passes only `Authorization::Secondary`. Add the term Approval value to `CONTEXT.md`.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "plan_tier: protected plans delete only behind an approval value"`
 
-_Requirements: GCPLAN-4.5_
+_Requirements: GCPLAN-4.6_
 
 ---
 
@@ -1783,7 +1783,7 @@ _Requirements: GCPLAN-4.5_
 
 **Depends-on:** Task 7, Task 12 (Task 12 also edits `tests/plan_apply.rs`; Task 11's needs-human return for the `Orphan` class is already in place)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/common/plan_fixture.rs` (inside `impl Planned`; imports `init_repo` and `Path` are already there):
 
@@ -1888,13 +1888,13 @@ fn an_orphan_owned_under_the_callers_environment_is_planned_with_a_note() {
 
 Run: `cargo test --test plan_apply orphan` — expect: failure, no `orphan` plan.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 In `make`, for `TargetClass::Class(PlanClass::Orphan)` add a `PlannedTarget` whose `entries` holds one `PlannedEntry` for the target dir (`fs.entry_stat`, `unit` = the target path) and whose `orphan` is `OrphanScope { root_kind, root_dev, root_ino, dirs }`, `dirs` being the profile and triple dirs from `cargo_target::identify`. Planned bytes come from `gc::measure(.., &[target.path], ..)`; hitting its cap becomes an `Unmeasured`. Add a finding `plan.caller_env` with the variable name when the owner is `OrphanCandidate { owned_under_caller_env: Some(_) }`. Remove the "skipped with a finding" branch of Task 7. `apply` already returns `needs-human` for the `Orphan` class (Task 11).
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "gc: --plan proposes unowned target dirs as one orphan entry"`
 
@@ -1917,7 +1917,7 @@ _Requirements: GCPLAN-5.1, GCPLAN-5.2, GCPLAN-5.3, GCPLAN-5.4, GCPLAN-5.5, GCPLA
 
 **Depends-on:** Task 13, Task 14
 
-- [ ] **Step 1: Write the failing tests** in `tests/plan_tier.rs`
+- [x] **Step 1: Write the failing tests** in `tests/plan_tier.rs`
 
 ```rust
 #[test]
@@ -1992,17 +1992,17 @@ fn a_target_dir_that_gained_an_owner_after_the_plan_is_not_removed() {
 
 Run: `cargo test --test plan_tier orphan` — expect: failure, orphan removal not implemented.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `remove`: `locks::acquire(fs, &target.path, false)`; any `Skipped(reason)` → `Skipped(reason.count_name())`. Under the locks `identify` again and list the profile and triple dirs: a dir not in `OrphanScope::dirs`, or `entry_stat(target)` differing from the recorded kind/device/inode → `Refused`. Re-resolve ownership (`discover::targets`, empty snapshot, all repos): the path must still be an `OrphanCandidate`, else `Refused`. Then `check_entry(fs, target.parent(), &target.path, Expect::Entry{..})` and one `remove_counted(fs, &mut ledger, parent, &target.path, account_bytes, false)`; a `measure` cap hit goes to `unmeasured`. In `apply`, an `Orphan` plan under `Approved` calls `remove` instead of the unit loop.
 
 Run: `cargo test` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "plan_tier: remove an approved orphan target whole, after relisting under every lock"`
 
-_Requirements: GCPLAN-5.7, GCPLAN-5.8, GCPLAN-5.9, GCPLAN-5.10_
+_Requirements: GCPLAN-5.8, GCPLAN-5.9, GCPLAN-5.10, GCPLAN-5.11_
 
 ---
 
@@ -2022,7 +2022,7 @@ _Requirements: GCPLAN-5.7, GCPLAN-5.8, GCPLAN-5.9, GCPLAN-5.10_
 
 **Depends-on:** Task 11
 
-- [ ] **Step 1: Write the failing test** — extend `tests/skill.rs`
+- [x] **Step 1: Write the failing test** — extend `tests/skill.rs`
 
 Add `Parsed::Apply` and `Parsed::Gc { dry_run: false, plan: true }` to the expected set in `skill_documents_every_shipped_command` (the `want` list of `Parsed` values near the end of that test) and add:
 
@@ -2039,17 +2039,17 @@ fn the_skill_teaches_the_plan_flow_and_its_exit_code() {
 
 Run: `cargo test --test skill` — expect: failure, the documented commands do not cover `apply`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 In `SKILL.md`: replace the sentence ending "…is not available yet" (line 24) with the flow, using fenced command lines only (the drift scanner rejects CLI mentions outside command lines): `cargo hive gc --plan <repo-path> --json` returns plan ids per class and `undecided` targets; `cargo hive apply <plan-id> --json` applies one plan. State in prose: an agent applies only `secondary` plans; `needs-human` or exit 3 means report it to the owner and never try to approve a plan yourself; after `refused` plan again and never reuse a consumed id (already consumed); `partial` is not an error, check its reason. Update the Exit codes sentence (line 59) with 3. Keep the body within its 150-line budget. Add the two eval entries to `skills/hive/eval.json` in the existing entry form, each with a `derived_from` naming a new `## ` heading added to `skills/hive/TESTS.md`.
 
 Run: `cargo test --test skill` — expect: pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "skill: teach gc --plan, apply and the needs-human hand-off"`
 
-_Requirements: GCPLAN-7.1, GCPLAN-7.2, GCPLAN-7.3, GCPLAN-7.4, GCPLAN-7.5, GCPLAN-9.9_
+_Requirements: GCPLAN-7.1, GCPLAN-7.3, GCPLAN-7.4, GCPLAN-7.5, GCPLAN-7.6, GCPLAN-9.9_
 
 ---
 
@@ -2068,7 +2068,7 @@ _Requirements: GCPLAN-7.1, GCPLAN-7.2, GCPLAN-7.3, GCPLAN-7.4, GCPLAN-7.5, GCPLA
 
 **Depends-on:** Task 7, Task 12
 
-- [ ] **Step 1: Write the failing test** in `tests/liveness.rs`
+- [x] **Step 1: Write the failing test** in `tests/liveness.rs`
 
 ```rust
 #[test]
@@ -2085,7 +2085,7 @@ fn deleting_through_execute_on_a_fixture_clone_rebuilds_no_live_unit() {
 
 Run: `cargo test --test liveness execute_trial` — expect: compile error, no `trial_through_execute`.
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `trial_through_execute` copies the fixture target with `cp -c -R -p` (the proof's existing clone helper), builds a `TargetDir` of the clone with `read_target`, makes a one-target plan with `plan_for_target` (`cargo_fixture::WINDOW`) and `Plan::single(PlanClass::Secondary, ..)`, resolves it as a `ResolvedTarget` for the clone, calls `execute` with the real `Apfs` and a `Ctx` over a scratch `State`, then replays compile-only exactly as the existing trial does (`cargo_in(&fx.app, &clone, &fx.logs, ..)`) and counts rebuilt units that were live (`prove::rebuilt_live`). Point `tests/liveness_prove.rs` (ignored, real target) at it too, keeping the trial's vacuity checks (no dead file → vacuous).
 
@@ -2093,8 +2093,30 @@ In `tests/common/prove.rs` change the `TryLock::Gone => {}` arm (line 1002) to `
 
 Run: `cargo test` — expect: pass; `cargo test --test liveness_prove -- --ignored` runs on the owner's real target when present (owner present).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 `git commit -m "tests: run the deletion trial through execute"`
 
 _Requirements: GCPLAN-8.2, GCPLAN-9.5, GCPLAN-9.10_
+
+### Task 18: Plans of every class apply with no owner step (owner amendment 2026-11-02)
+
+**Supersedes:** the `Authorization` and `Approval` types, `needs-human` and exit code 3 that Tasks 6, 11, 13, 15 and 16 built. Those task bodies stay as the record of what was built then; ADR-0002 says why they changed.
+
+**Files:**
+- Modify: `src/plan_tier/apply.rs`, `src/plan_tier/orphan.rs`, `src/receipt.rs`, `src/cli.rs`, `src/doctor.rs`, `src/platform/mod.rs`, `Cargo.toml`, `Cargo.lock`
+- Delete: `src/platform/local_auth.rs`
+- Modify: `plugin/skills/hive/SKILL.md`, `skills/hive/TESTS.md`, `skills/hive/eval.json`
+- Test: `tests/plan_apply.rs`, `tests/plan_tier.rs`, `tests/doctor.rs`, `tests/skill.rs`
+
+- [x] **Step 1: Write the failing tests** in `tests/plan_apply.rs`: `an_agent_applies_a_protected_plan_itself_and_the_plan_is_consumed` and `an_agent_removes_an_orphan_target_itself`.
+
+Run: `cargo test --test plan_apply an_agent_` — expect: both fail on exit 3 and outcome `needs-human`.
+
+- [x] **Step 2: Implement**
+
+`apply` takes an id and no authorization value; an `orphan` plan calls `orphan::remove`, and every other class runs `execute`. Remove `Outcome::NeedsHuman` and `EXIT_NEEDS_HUMAN`. Remove doctor check (e), `Capability::Approval`, the `Approve` trait, `local_auth.rs` and `objc2-local-authentication`; the other check letters stay as they are. Teach the skill the every-class rule. `doctor` overwrites a `capabilities.json` that still names the retired capability, covered by `doctor_replaces_capabilities_recorded_with_the_retired_approval_check`.
+
+- [x] **Step 3: Commit**
+
+_Requirements: GCPLAN-4.2, GCPLAN-4.6, GCPLAN-5.11, GCPLAN-7.6, GCPLAN-9.11, CORE-1.13, CORE-1.14, SKILL-2.7, AUTOGC-7.6, EXPLAIN-7.6_

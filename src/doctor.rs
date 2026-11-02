@@ -3,7 +3,7 @@
 
 use crate::platform::major_version;
 use crate::platform::{
-    Approve, Availability, CompressOutcome, EntryKind, Fs, LockHolder, LockKind, LockState, TryLock,
+    Availability, CompressOutcome, EntryKind, Fs, LockHolder, LockKind, LockState, TryLock,
 };
 use crate::receipt::Measured;
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,6 @@ pub enum CheckId {
     B,
     C,
     D,
-    E,
     F,
     G,
 }
@@ -41,7 +40,6 @@ pub enum Capability {
     StoreCompression,
     EvictionAccounting,
     Deletion,
-    Approval,
     FingerprintReading,
     FailedUnitReporting,
 }
@@ -53,7 +51,6 @@ impl CheckId {
             CheckId::B => "b",
             CheckId::C => "c",
             CheckId::D => "d",
-            CheckId::E => "e",
             CheckId::F => "f",
             CheckId::G => "g",
         }
@@ -66,7 +63,6 @@ impl CheckId {
             CheckId::B => &[Capability::StoreCompression],
             CheckId::C => &[Capability::EvictionAccounting],
             CheckId::D => &[Capability::Deletion],
-            CheckId::E => &[Capability::Approval],
             CheckId::F => &[
                 Capability::FingerprintReading,
                 Capability::Deletion,
@@ -84,7 +80,6 @@ impl Capability {
             Capability::StoreCompression => "store compression",
             Capability::EvictionAccounting => "store eviction accounting and private-byte receipts",
             Capability::Deletion => "deletion",
-            Capability::Approval => "approval",
             Capability::FingerprintReading => "fingerprint graph reading",
             Capability::FailedUnitReporting => "failed-unit reporting",
         }
@@ -886,27 +881,7 @@ fn check_failed_marker(
     })
 }
 
-/// (e) Owner authentication: availability only, never a dialog.
-fn check_owner_auth(approve: &dyn Approve) -> Check {
-    match approve.owner_auth_available() {
-        Availability::Available => Check {
-            id: CheckId::E,
-            verdict: Verdict::Pass,
-            measured: Measures::from([("available".to_string(), Measured::Bool(true))]),
-        },
-        Availability::Unavailable(reason) => Check {
-            id: CheckId::E,
-            verdict: Verdict::Unavailable,
-            measured: Measures::from([("reason".to_string(), Measured::Text(reason))]),
-        },
-    }
-}
-
-pub fn run(
-    fs: &dyn Fs,
-    approve: &dyn Approve,
-    env: &DoctorEnv,
-) -> Result<DoctorReport, DoctorError> {
+pub fn run(fs: &dyn Fs, env: &DoctorEnv) -> Result<DoctorReport, DoctorError> {
     let stale_removed = sweep_stale(&env.tmp_parent);
     let tmp = fs
         .temp_dir(
@@ -915,12 +890,11 @@ pub fn run(
         )
         .map_err(DoctorError::TempDir)?;
     let dir = tmp.path();
-    let steps: [&dyn Fn() -> Check; 5] = [
+    let steps: [&dyn Fn() -> Check; 4] = [
         &|| check_clone_sharing(fs, dir),
         &|| check_compression(fs, dir),
         &|| check_sharing_flags(fs, dir),
         &|| check_lock_probe(fs, dir),
-        &|| check_owner_auth(approve),
     ];
     let mut checks = Vec::new();
     for step in steps {
@@ -1148,14 +1122,6 @@ mod tests {
         }
     }
 
-    struct FakeApprove(Availability);
-
-    impl Approve for FakeApprove {
-        fn owner_auth_available(&self) -> Availability {
-            self.0.clone()
-        }
-    }
-
     fn scratch(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1177,8 +1143,8 @@ mod tests {
         }
     }
 
-    /// Capabilities from checks a–e only: checks f and g need a real toolchain.
-    fn caps_a_to_e(report: &DoctorReport) -> Capabilities {
+    /// Capabilities from checks a–d only: checks f and g need a real toolchain.
+    fn caps_a_to_d(report: &DoctorReport) -> Capabilities {
         let mut only = report.clone();
         only.checks
             .retain(|c| c.id != CheckId::F && c.id != CheckId::G);
@@ -1201,12 +1167,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let parent = scratch("healthy");
-        let report = run(
-            &FakeFs::new(Knobs::default()),
-            &FakeApprove(Availability::Available),
-            &env(&parent, "27.0.1"),
-        )
-        .unwrap();
+        let report = run(&FakeFs::new(Knobs::default()), &env(&parent, "27.0.1")).unwrap();
         for c in report
             .checks
             .iter()
@@ -1215,7 +1176,7 @@ mod tests {
             assert_eq!(c.verdict, Verdict::Pass, "{:?}: {:?}", c.id, c.measured);
             assert!(!c.measured.is_empty(), "{:?} has no measured value", c.id);
         }
-        assert!(caps_a_to_e(&report).disabled.is_empty());
+        assert!(caps_a_to_d(&report).disabled.is_empty());
         std::fs::remove_dir_all(parent).unwrap();
     }
 
@@ -1310,12 +1271,7 @@ mod tests {
         ];
         for (name, knobs, failing, mut want) in cases {
             let parent = scratch("table");
-            let report = run(
-                &FakeFs::new(knobs),
-                &FakeApprove(Availability::Available),
-                &env(&parent, "27.0.1"),
-            )
-            .unwrap();
+            let report = run(&FakeFs::new(knobs), &env(&parent, "27.0.1")).unwrap();
             for c in report
                 .checks
                 .iter()
@@ -1334,7 +1290,7 @@ mod tests {
             }
             want.sort();
             assert_eq!(
-                caps_a_to_e(&report)
+                caps_a_to_d(&report)
                     .disabled
                     .keys()
                     .copied()
@@ -1344,28 +1300,6 @@ mod tests {
             );
             std::fs::remove_dir_all(parent).unwrap();
         }
-    }
-
-    #[test]
-    fn unavailable_owner_authentication_disables_approval() {
-        let _serial = SERIAL
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let parent = scratch("noauth");
-        let report = run(
-            &FakeFs::new(Knobs::default()),
-            &FakeApprove(Availability::Unavailable("no passcode".into())),
-            &env(&parent, "27.0.1"),
-        )
-        .unwrap();
-        let e = report.checks.iter().find(|c| c.id == CheckId::E).unwrap();
-        assert_eq!(e.verdict, Verdict::Unavailable);
-        assert_eq!(e.measured["reason"], Measured::Text("no passcode".into()));
-        assert_eq!(
-            caps_a_to_e(&report).disabled.get(&Capability::Approval),
-            Some(&BTreeSet::from([CheckId::E]))
-        );
-        std::fs::remove_dir_all(parent).unwrap();
     }
 
     #[test]
@@ -1387,14 +1321,9 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let parent = scratch("floor");
-        let report = run(
-            &FakeFs::new(Knobs::default()),
-            &FakeApprove(Availability::Available),
-            &env(&parent, "26.4"),
-        )
-        .unwrap();
+        let report = run(&FakeFs::new(Knobs::default()), &env(&parent, "26.4")).unwrap();
         assert!(report.below_floor);
-        for id in [CheckId::A, CheckId::B, CheckId::C, CheckId::D, CheckId::E] {
+        for id in [CheckId::A, CheckId::B, CheckId::C, CheckId::D] {
             assert!(
                 report.checks.iter().any(|c| c.id == id),
                 "{id:?} did not run"
@@ -1405,12 +1334,7 @@ mod tests {
             note.contains("26.4") && note.contains("below the declared floor 27"),
             "{note}"
         );
-        let current = run(
-            &FakeFs::new(Knobs::default()),
-            &FakeApprove(Availability::Available),
-            &env(&parent, "27.0.1"),
-        )
-        .unwrap();
+        let current = run(&FakeFs::new(Knobs::default()), &env(&parent, "27.0.1")).unwrap();
         assert_eq!(floor_note(&current), None);
         std::fs::remove_dir_all(parent).unwrap();
     }
@@ -1451,7 +1375,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("(f)"), "{e}");
-        assert_eq!(require(&off, Capability::Approval, Some("1.97.1")), Ok(()));
+        assert_eq!(require(&off, Capability::Seeding, Some("1.97.1")), Ok(()));
     }
 
     #[test]
@@ -1460,12 +1384,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let parent = scratch("matrix");
-        let report = run(
-            &FakeFs::new(Knobs::default()),
-            &FakeApprove(Availability::Available),
-            &env(&parent, "27.0.1"),
-        )
-        .unwrap();
+        let report = run(&FakeFs::new(Knobs::default()), &env(&parent, "27.0.1")).unwrap();
         let d = report.checks.iter().find(|c| c.id == CheckId::D).unwrap();
         let mut keys: Vec<&str> = d.measured.keys().map(String::as_str).collect();
         keys.sort();
@@ -1624,19 +1543,13 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let parent = scratch("cleanup");
-        run(
-            &FakeFs::new(Knobs::default()),
-            &FakeApprove(Availability::Available),
-            &env(&parent, "27.0.1"),
-        )
-        .unwrap();
+        run(&FakeFs::new(Knobs::default()), &env(&parent, "27.0.1")).unwrap();
         assert_eq!(leftovers(&parent), Vec::<String>::new(), "after success");
         run(
             &FakeFs::new(Knobs {
                 probe_sees_locks: false,
                 ..Knobs::default()
             }),
-            &FakeApprove(Availability::Available),
             &env(&parent, "27.0.1"),
         )
         .unwrap();
@@ -1651,7 +1564,6 @@ mod tests {
                     panic_in_compress: true,
                     ..Knobs::default()
                 }),
-                &FakeApprove(Availability::Available),
                 &env(&parent, "27.0.1"),
             )
         }));
@@ -1667,11 +1579,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let parent = scratch("cancel");
         CANCEL.store(true, Ordering::SeqCst);
-        let result = run(
-            &FakeFs::new(Knobs::default()),
-            &FakeApprove(Availability::Available),
-            &env(&parent, "27.0.1"),
-        );
+        let result = run(&FakeFs::new(Knobs::default()), &env(&parent, "27.0.1"));
         CANCEL.store(false, Ordering::SeqCst);
         assert!(matches!(result, Err(DoctorError::Cancelled)));
         assert_eq!(leftovers(&parent), Vec::<String>::new());

@@ -5,7 +5,7 @@
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -20,9 +20,18 @@ pub enum StateError {
         file: PathBuf,
         detail: String,
     },
+    /// A write that was not stored because the encoded file would pass its cap.
+    /// The file already on disk is unchanged.
+    Oversized {
+        file: PathBuf,
+        max: u64,
+    },
     NoHome,
     /// The caller cancelled while another process held the state lock.
     Cancelled,
+    DuplicatePlan {
+        id: String,
+    },
 }
 
 impl fmt::Display for StateError {
@@ -36,12 +45,22 @@ impl fmt::Display for StateError {
                     file.display()
                 )
             }
+            StateError::Oversized { file, max } => {
+                write!(
+                    f,
+                    "{} would be larger than {max} bytes; plan a smaller set of repositories",
+                    file.display()
+                )
+            }
             StateError::NoHome => write!(f, "HOME is not set, so ~/.hive cannot be located"),
             StateError::Cancelled => {
                 write!(
                     f,
                     "cancelled while another hive process held the state lock"
                 )
+            }
+            StateError::DuplicatePlan { id } => {
+                write!(f, "plan id {id} collided; run `cargo hive gc --plan` again")
             }
         }
     }
@@ -158,6 +177,7 @@ pub const CONFIG_FILE: &str = "config.json";
 struct ConfigFile {
     secondary_roots: Option<Vec<PathBuf>>,
     cache_roots: Option<Vec<PathBuf>>,
+    gc_window_days: Option<u64>,
 }
 
 /// Effective configuration: a key set in `config.json` replaces its default list.
@@ -165,6 +185,33 @@ struct ConfigFile {
 pub struct Config {
     pub secondary_roots: Vec<PathBuf>,
     pub cache_roots: Vec<PathBuf>,
+    pub gc_window_days: Option<u64>,
+}
+
+#[derive(Debug)]
+pub struct WindowError(pub u64);
+
+impl fmt::Display for WindowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "gc_window_days is {}, not a whole number of days from 1 to 365; set it within that range in config.json",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for WindowError {}
+
+pub fn window_days(raw: Option<u64>) -> Result<u64, WindowError> {
+    let Some(days) = raw else {
+        return Ok(7);
+    };
+    if (1..=365).contains(&days) {
+        Ok(days)
+    } else {
+        Err(WindowError(days))
+    }
 }
 
 impl State {
@@ -198,6 +245,7 @@ impl State {
         Ok(Config {
             secondary_roots: dedup(secondary),
             cache_roots: dedup(cache),
+            gc_window_days: file.gc_window_days,
         })
     }
 }
@@ -211,13 +259,33 @@ impl Tx<'_> {
         read_json(&state_file(self.root, name)?)
     }
 
+    /// Reads at most `max` bytes. One byte over that is an error and the rest is not read.
+    pub fn read_bounded<T: DeserializeOwned + Default>(
+        &self,
+        name: &str,
+        max: u64,
+    ) -> Result<T, StateError> {
+        read_json_limited(&state_file(self.root, name)?, max)
+    }
+
     pub fn write<T: Serialize>(&self, name: &str, value: &T) -> Result<(), StateError> {
         let path = state_file(self.root, name)?;
-        let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| StateError::Malformed {
-            file: path.clone(),
-            detail: e.to_string(),
-        })?;
-        bytes.push(b'\n');
+        let bytes = encode(&path, value)?;
+        atomic_write(&path, &bytes)
+    }
+
+    /// Writes `value` only when the same bytes `write` would store are at most `max`.
+    pub fn write_bounded<T: Serialize>(
+        &self,
+        name: &str,
+        value: &T,
+        max: u64,
+    ) -> Result<(), StateError> {
+        let path = state_file(self.root, name)?;
+        let bytes = encode(&path, value)?;
+        if bytes.len() as u64 > max {
+            return Err(StateError::Oversized { file: path, max });
+        }
         atomic_write(&path, &bytes)
     }
 
@@ -239,6 +307,15 @@ impl Tx<'_> {
     }
 }
 
+fn encode<T: Serialize>(path: &Path, value: &T) -> Result<Vec<u8>, StateError> {
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| StateError::Malformed {
+        file: path.to_path_buf(),
+        detail: e.to_string(),
+    })?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
 fn read_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T, StateError> {
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| StateError::Malformed {
@@ -248,6 +325,31 @@ fn read_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T, StateError
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(io_err(path, e)),
     }
+}
+
+fn read_json_limited<T: DeserializeOwned + Default>(
+    path: &Path,
+    max: u64,
+) -> Result<T, StateError> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(e) => return Err(io_err(path, e)),
+    };
+    let mut bytes = Vec::new();
+    file.take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_err(path, e))?;
+    if bytes.len() as u64 > max {
+        return Err(StateError::Malformed {
+            file: path.to_path_buf(),
+            detail: format!("larger than {max} bytes"),
+        });
+    }
+    serde_json::from_slice(&bytes).map_err(|e| StateError::Malformed {
+        file: path.to_path_buf(),
+        detail: e.to_string(),
+    })
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
@@ -332,6 +434,34 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("hive-state-{label}-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn the_window_defaults_to_seven_days_and_accepts_one_to_365() {
+        assert_eq!(window_days(None).unwrap(), 7);
+        assert_eq!(window_days(Some(1)).unwrap(), 1);
+        assert_eq!(window_days(Some(365)).unwrap(), 365);
+        for bad in [0u64, 366, 10_000] {
+            assert!(window_days(Some(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn config_reads_the_window_key_and_still_refuses_unknown_keys() {
+        let root = scratch("window-key");
+        let state = State::open_at(root.clone()).unwrap();
+        std::fs::write(root.join("config.json"), r#"{"gc_window_days": 30}"#).unwrap();
+        assert_eq!(state.config().unwrap().gc_window_days, Some(30));
+        std::fs::write(root.join("config.json"), r#"{"gc_window": 30}"#).unwrap();
+        assert!(state.config().is_err());
+    }
+
+    #[test]
+    fn an_out_of_range_window_does_not_fail_config_for_commands_that_ignore_it() {
+        let root = scratch("window-ignored");
+        let state = State::open_at(root.clone()).unwrap();
+        std::fs::write(root.join("config.json"), r#"{"gc_window_days": 0}"#).unwrap();
+        assert!(state.config().is_ok());
     }
 
     #[test]
