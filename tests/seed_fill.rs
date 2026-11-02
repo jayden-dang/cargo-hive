@@ -1,7 +1,8 @@
 #![cfg(target_os = "macos")]
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -11,7 +12,11 @@ use cargo_hive::cargo_target::{Owner, TargetDir};
 use cargo_hive::fingerprint::read_profile;
 use cargo_hive::gc::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive::liveness::unit_timestamp;
-use cargo_hive::platform::{Fs, LockKind, LockState};
+use cargo_hive::platform::apfs::Apfs;
+use cargo_hive::platform::{
+    CompressOutcome, EntryKind, EntryStat, Fs, LockHolder, LockKind, LockState, Sharing, TempDir,
+    TryLock, VolumeInfo,
+};
 use cargo_hive::seed::fill::FillReport;
 use cargo_hive::seed::place::{self, PlaceReport};
 use cargo_hive::seed::source::{live_registry_units, unit_files, SourceUnit};
@@ -1905,4 +1910,351 @@ fn units_outside_the_window_are_counted() {
         .unwrap();
     let (_, ns) = unit.stamp.clone().unwrap();
     assert_eq!(ns, expected_ns);
+}
+
+fn real_apfs() -> Apfs {
+    Apfs::new(PathBuf::from(env!("CARGO_BIN_EXE_cargo-hive")))
+}
+
+fn place_with(
+    filled: &Filled,
+    checkout: &Path,
+    units: &[store::Row],
+    fs: Box<dyn Fs>,
+    account_bytes: bool,
+) -> PlaceReport {
+    let lib = narrowed(&filled.built.hive, fs, &filled.built.repo.main);
+    let mut ctx = lib.ctx();
+    ctx.account_bytes = account_bytes;
+    place::place(&ctx, checkout, units, PLACE_WINDOW, CRATE_DIR_CAP, &|| {
+        false
+    })
+    .unwrap_or_else(|err| panic!("place failed: {err}"))
+}
+
+fn cloned_pairs(log: &[String]) -> Vec<(PathBuf, PathBuf)> {
+    log.iter()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("clone ")?;
+            let (src, dst) = rest.split_once(" -> ")?;
+            Some((PathBuf::from(src), PathBuf::from(dst)))
+        })
+        .collect()
+}
+
+fn rel_with_blocks(root: &Path) -> Option<PathBuf> {
+    fn walk(dir: &Path, root: &Path, depth: usize) -> Option<PathBuf> {
+        assert!(depth < 64, "walk bound hit");
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .collect();
+        assert!(entries.len() < 100_000, "walk bound hit");
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                if let Some(found) = walk(&path, root, depth + 1) {
+                    return Some(found);
+                }
+            } else if meta.is_file() && meta.blocks() > 0 {
+                return Some(path.strip_prefix(root).unwrap().to_path_buf());
+            }
+        }
+        None
+    }
+    walk(root, root, 0)
+}
+
+fn heavy_store_file(filled: &Filled) -> (store::Row, PathBuf) {
+    let state = open_state(filled);
+    for row in &filled.rows {
+        let root = store::entry_dir(&state, row);
+        if let Some(rel) = rel_with_blocks(&root) {
+            return (row.clone(), rel);
+        }
+    }
+    panic!("a filled store has a file that allocates blocks");
+}
+
+fn regular_files(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+        assert!(depth <= 64, "walk bound hit");
+        let mut seen = 0usize;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            seen += 1;
+            assert!(seen < 100_000, "walk bound hit");
+            let path = entry.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                walk(&path, out, depth + 1);
+            } else if meta.is_file() {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out, 0);
+    out
+}
+
+fn allocated_from_metadata(root: &Path) -> u64 {
+    let mut seen = HashSet::new();
+    let mut total = 0u64;
+    for path in regular_files(root) {
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        if seen.insert((meta.dev(), meta.ino())) {
+            total += meta.blocks() * 512;
+        }
+    }
+    total
+}
+
+/// `sharing` of one path returns a fixed value. Every other call goes to `inner`.
+struct NamedShare {
+    inner: Box<dyn Fs>,
+    path: PathBuf,
+    sharing: Sharing,
+}
+
+impl Fs for NamedShare {
+    fn temp_dir(&self, parent: &Path, prefix: &str) -> io::Result<TempDir> {
+        self.inner.temp_dir(parent, prefix)
+    }
+    fn write_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write_file(path, bytes)
+    }
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.inner.read(path)
+    }
+    fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {
+        self.inner.hardlink(src, dst)
+    }
+    fn set_mtime(&self, path: &Path, t: SystemTime) -> io::Result<()> {
+        self.inner.set_mtime(path, t)
+    }
+    fn mtime(&self, path: &Path) -> io::Result<SystemTime> {
+        self.inner.mtime(path)
+    }
+    fn inode(&self, path: &Path) -> io::Result<u64> {
+        self.inner.inode(path)
+    }
+    fn clone_file(&self, src: &Path, dst: &Path) -> io::Result<()> {
+        self.inner.clone_file(src, dst)
+    }
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.inner.create_dir(path)
+    }
+    fn sharing(&self, path: &Path) -> io::Result<Sharing> {
+        if path == self.path {
+            Ok(self.sharing)
+        } else {
+            self.inner.sharing(path)
+        }
+    }
+    fn compress(&self, path: &Path) -> CompressOutcome {
+        self.inner.compress(path)
+    }
+    fn hold_lock(&self, kind: LockKind, path: &Path) -> io::Result<LockHolder> {
+        self.inner.hold_lock(kind, path)
+    }
+    fn try_lock_exclusive(&self, path: &Path) -> TryLock {
+        self.inner.try_lock_exclusive(path)
+    }
+    fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState> {
+        self.inner.try_lock_elsewhere(kind, path)
+    }
+    fn entry_stat(&self, path: &Path) -> io::Result<EntryStat> {
+        self.inner.entry_stat(path)
+    }
+    fn read_dir_bounded(&self, dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>> {
+        self.inner.read_dir_bounded(dir, cap)
+    }
+    fn remove_tree(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_tree(path)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_file(path)
+    }
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        self.inner.volume(path)
+    }
+}
+
+fn place_one_overridden(
+    filled: &Filled,
+    label: &str,
+    sharing_of: impl Fn(&Sharing) -> Sharing,
+) -> (PlaceReport, PathBuf, Apfs) {
+    let (row, rel) = heavy_store_file(filled);
+    let src = store::entry_dir(&open_state(filled), &row).join(&rel);
+    let work = filled.built.repo.worktree(label);
+    let dst = work.join("target").join(&rel);
+    let apfs = real_apfs();
+    let store_sharing = apfs.sharing(&src).unwrap();
+    let recording = Recording::over_real();
+    let fs = NamedShare {
+        inner: recording.fs(),
+        path: dst.clone(),
+        sharing: sharing_of(&store_sharing),
+    };
+    let report = place_with(filled, &work, &filled.rows, Box::new(fs), true);
+    assert!(
+        report.cloned >= 1,
+        "the overridden file's unit was cloned: {report:?}"
+    );
+    (report, dst, apfs)
+}
+
+#[test]
+fn a_real_clone_of_a_compressed_entry_adds_no_unshared_bytes() {
+    let filled = filled();
+    let work = filled.built.repo.worktree("shared");
+    let recording = Recording::over_real();
+    let report = place_with(&filled, &work, &filled.rows, recording.fs(), true);
+    assert_eq!(report.bytes_not_shared, Some(0), "{report:?}");
+    let apfs = real_apfs();
+    let pairs = cloned_pairs(&recording.log());
+    assert!(pairs.len() >= 2, "the tag and a unit file were cloned");
+    let mut occupied = 0u64;
+    for (src, dst) in &pairs {
+        let stat = apfs
+            .entry_stat(dst)
+            .unwrap_or_else(|err| panic!("{}: {err}", dst.display()));
+        if stat.blocks == 0 {
+            continue;
+        }
+        occupied += 1;
+        let clone = apfs
+            .sharing(dst)
+            .unwrap_or_else(|err| panic!("{}: {err}", dst.display()));
+        let store = apfs
+            .sharing(src)
+            .unwrap_or_else(|err| panic!("{}: {err}", src.display()));
+        assert!(
+            clone.shares_all,
+            "{} does not share every block",
+            dst.display()
+        );
+        assert_eq!(
+            clone.clone_id,
+            store.clone_id,
+            "{} clone id differs from {}",
+            dst.display(),
+            src.display()
+        );
+    }
+    assert!(occupied >= 1, "a cloned file allocates blocks");
+}
+
+#[test]
+fn a_file_that_does_not_share_is_counted_by_its_blocks_and_never_by_private_bytes() {
+    let filled = filled();
+    let (report, dst, apfs) = place_one_overridden(&filled, "not-shared", |store| Sharing {
+        private_bytes: 0,
+        clone_id: store.clone_id,
+        may_share: true,
+        shares_all: false,
+    });
+    let blocks = apfs.entry_stat(&dst).unwrap().blocks;
+    assert!(blocks > 0, "{} allocates no blocks", dst.display());
+    assert_eq!(report.bytes_not_shared, Some(blocks * 512), "{report:?}");
+}
+
+#[test]
+fn a_different_clone_id_is_not_shared() {
+    let filled = filled();
+    let (report, dst, apfs) = place_one_overridden(&filled, "other-id", |store| Sharing {
+        private_bytes: 0,
+        clone_id: store.clone_id.wrapping_add(1),
+        may_share: true,
+        shares_all: true,
+    });
+    let blocks = apfs.entry_stat(&dst).unwrap().blocks;
+    assert!(blocks > 0, "{} allocates no blocks", dst.display());
+    assert_eq!(report.bytes_not_shared, Some(blocks * 512), "{report:?}");
+}
+
+#[test]
+fn a_failed_sharing_read_is_unmeasured_not_zero() {
+    let filled = filled();
+    let (_, rel) = heavy_store_file(&filled);
+    let work = filled.built.repo.worktree("share-unread");
+    let dst = work.join("target").join(rel);
+    let recording = Recording::over_real().fail_sharing(&dst);
+    let report = place_with(&filled, &work, &filled.rows, recording.fs(), true);
+    assert!(report.cloned >= 1, "{report:?}");
+    assert_eq!(report.bytes_not_shared, None, "{report:?}");
+    assert_ne!(report.bytes_not_shared, Some(0));
+    assert!(
+        report.unmeasured.iter().any(|(field, reason)| {
+            field == "clone_bytes_not_shared"
+                && reason.contains(&dst.display().to_string())
+                && reason.contains("sharing attributes could not be read")
+        }),
+        "{:?}",
+        report.unmeasured
+    );
+    assert!(report.store_bytes.is_some(), "{report:?}");
+}
+
+#[test]
+fn with_accounting_off_the_number_is_unmeasured() {
+    let filled = filled();
+    let work = filled.built.repo.worktree("no-account");
+    let recording = Recording::over_real();
+    let report = place_with(&filled, &work, &filled.rows, recording.fs(), false);
+    assert!(report.cloned >= 1, "{report:?}");
+    assert_eq!(report.bytes_not_shared, None, "{report:?}");
+    assert_eq!(
+        report
+            .unmeasured
+            .iter()
+            .find(|(field, _)| field == "clone_bytes_not_shared"),
+        Some(&(
+            "clone_bytes_not_shared".to_string(),
+            "doctor check (c) did not pass".to_string(),
+        )),
+        "{:?}",
+        report.unmeasured
+    );
+    assert!(report.store_bytes.unwrap_or(0) > 0, "{report:?}");
+}
+
+#[test]
+fn store_bytes_counts_allocated_blocks() {
+    let filled = filled();
+    let work = filled.built.repo.worktree("store-bytes");
+    let recording = Recording::over_real();
+    let report = place_with(&filled, &work, &filled.rows, recording.fs(), true);
+    let store_root = store::store_dir(&open_state(&filled));
+    let apfs = real_apfs();
+    let files = regular_files(&store_root);
+    assert!(!files.is_empty(), "the store has a file");
+    let mut compressed_blocks = None;
+    for path in &files {
+        let sharing = apfs
+            .sharing(path)
+            .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        assert_eq!(
+            sharing.private_bytes,
+            0,
+            "{} private bytes are not zero",
+            path.display()
+        );
+        let stat = apfs.entry_stat(path).unwrap();
+        if stat.compressed && stat.blocks > 0 {
+            compressed_blocks = Some(stat.blocks);
+        }
+    }
+    let compressed_blocks = compressed_blocks.expect("a compressed store file allocates blocks");
+    let got = report.store_bytes.expect("the store size is measured");
+    assert!(got > 0, "{report:?}");
+    assert!(
+        got >= compressed_blocks * 512,
+        "store size {got} is below one compressed file's {} blocks",
+        compressed_blocks
+    );
+    assert_eq!(got, allocated_from_metadata(&store_root), "{report:?}");
 }

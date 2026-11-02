@@ -2,7 +2,9 @@
 //! An empty set creates nothing. A target path that already exists, a missing parent,
 //! or a build directory that is not the target directory is one finding and clones nothing.
 //! Each file is cloned on its own, `deps/` then `build/` then `.fingerprint/`, and only
-//! through `create_dir` and `clone_file`.
+//! through `create_dir` and `clone_file`. A clone counts as shared only when it reports
+//! `shares_all` and the same clone id as its store file; anything else adds that file's
+//! allocated blocks. `private_bytes` is not read. The store's size is its allocated blocks.
 
 use std::collections::HashSet;
 use std::io;
@@ -14,7 +16,7 @@ use crate::liveness;
 use crate::plan_tier::Ctx;
 use crate::platform::{EntryKind, Fs};
 use crate::seed::store::{self, Row};
-use crate::size::MAX_DEPTH;
+use crate::size::{allocated_bytes, MAX_DEPTH};
 
 use super::Error;
 
@@ -47,6 +49,69 @@ enum Stop {
     Failed(String),
 }
 
+#[derive(Default)]
+struct Added {
+    bytes: u64,
+    failed: bool,
+    gaps: Vec<(String, String)>,
+}
+
+impl Added {
+    fn gap(&mut self, path: &Path, err: &io::Error) {
+        self.failed = true;
+        self.gaps.push((
+            "clone_bytes_not_shared".to_string(),
+            format!(
+                "{path}: {err}; the bytes this clone adds were not measured",
+                path = path.display()
+            ),
+        ));
+    }
+}
+
+fn charge(fs: &dyn Fs, added: &mut Added, src: &Path, dst: &Path) {
+    if added.failed {
+        return;
+    }
+    let shared = match (fs.sharing(dst), fs.sharing(src)) {
+        (Ok(clone), Ok(stored)) => clone.shares_all && clone.clone_id == stored.clone_id,
+        (Err(err), _) => return added.gap(dst, &err),
+        (_, Err(err)) => return added.gap(src, &err),
+    };
+    if shared {
+        return;
+    }
+    match fs.entry_stat(dst) {
+        Ok(stat) => added.bytes = added.bytes.saturating_add(stat.blocks.saturating_mul(512)),
+        Err(err) => added.gap(dst, &err),
+    }
+}
+
+fn record_bytes(ctx: &Ctx<'_>, report: &mut PlaceReport, added: &mut Added) {
+    if !ctx.account_bytes {
+        report.unmeasured.push((
+            "clone_bytes_not_shared".to_string(),
+            "doctor check (c) did not pass".to_string(),
+        ));
+    } else if added.failed {
+        report.unmeasured.append(&mut added.gaps);
+    } else {
+        report.bytes_not_shared = Some(added.bytes);
+    }
+    match allocated_bytes(&store::store_dir(ctx.state), MAX_DEPTH) {
+        Ok(bytes) => report.store_bytes = Some(bytes),
+        Err(err) => report.unmeasured.push((
+            "store_bytes".to_string(),
+            format!("{err}; the store's size was not measured"),
+        )),
+    }
+}
+
+fn finish(ctx: &Ctx<'_>, mut report: PlaceReport, added: &mut Added) -> Result<PlaceReport, Error> {
+    record_bytes(ctx, &mut report, added);
+    Ok(report)
+}
+
 pub fn place(
     ctx: &Ctx<'_>,
     checkout: &Path,
@@ -56,7 +121,7 @@ pub fn place(
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<PlaceReport, Error> {
     if units.is_empty() {
-        return Ok(PlaceReport::default());
+        return finish(ctx, PlaceReport::default(), &mut Added::default());
     }
     let mut report = PlaceReport::default();
     let resolved = match cargo_target::resolve(checkout, cancel) {
@@ -70,7 +135,7 @@ pub fn place(
                     checkout = checkout.display()
                 ),
             ));
-            return Ok(report);
+            return finish(ctx, report, &mut Added::default());
         }
     };
     if resolved.build_directory != resolved.target_directory {
@@ -83,7 +148,7 @@ pub fn place(
                 resolved.target_directory.display()
             ),
         ));
-        return Ok(report);
+        return finish(ctx, report, &mut Added::default());
     }
     let target = resolved.target_directory;
     match ctx.fs.create_dir(&target) {
@@ -97,7 +162,7 @@ pub fn place(
                     path = target.display()
                 ),
             ));
-            return Ok(report);
+            return finish(ctx, report, &mut Added::default());
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             report.findings.push((
@@ -108,7 +173,7 @@ pub fn place(
                     path = target.display()
                 ),
             ));
-            return Ok(report);
+            return finish(ctx, report, &mut Added::default());
         }
         Err(err) => return Err(io_error(&target, &err)),
     }
@@ -119,8 +184,12 @@ pub fn place(
         ))
     })?;
     report.target_identity = Some((stat.dev, stat.ino));
-    if let Err(stop) = clone_tag(ctx.fs, ctx.state, &target) {
-        return stop.into_result(&mut report, "tag.clone", &target);
+    let mut added = Added::default();
+    if let Err(stop) = clone_tag(ctx, &mut added, &target) {
+        return match stop.into_result(&mut report, "tag.clone", &target) {
+            Ok(report) => finish(ctx, report, &mut added),
+            Err(err) => Err(err),
+        };
     }
     let mut made = HashSet::new();
     made.insert(target.clone());
@@ -129,7 +198,7 @@ pub fn place(
             report.cancelled = true;
             break;
         }
-        match place_unit(ctx, &target, row, window, dir_cap, &mut made) {
+        match place_unit(ctx, &target, row, window, dir_cap, &mut made, &mut added) {
             Ok(UnitOutcome::Cloned(unit, outside)) => {
                 report.cloned += 1;
                 if outside {
@@ -147,7 +216,7 @@ pub fn place(
             Err(why) => return Err(Error::DiskFull(why)),
         }
     }
-    Ok(report)
+    finish(ctx, report, &mut added)
 }
 
 enum UnitOutcome {
@@ -163,6 +232,7 @@ fn place_unit(
     window: Duration,
     dir_cap: usize,
     made: &mut HashSet<PathBuf>,
+    added: &mut Added,
 ) -> Result<UnitOutcome, String> {
     if !normal_only(&row.rel_profile) {
         return Ok(UnitOutcome::Failed(
@@ -202,11 +272,16 @@ fn place_unit(
         }
         let src = entry.join(rel);
         match ctx.fs.clone_file(&src, &dst) {
-            Ok(()) => match area(rel) {
-                0 => deps_files = deps_files.saturating_add(1),
-                1 => has_build = true,
-                _ => {}
-            },
+            Ok(()) => {
+                if ctx.account_bytes {
+                    charge(ctx.fs, added, &src, &dst);
+                }
+                match area(rel) {
+                    0 => deps_files = deps_files.saturating_add(1),
+                    1 => has_build = true,
+                    _ => {}
+                }
+            }
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                 return Ok(UnitOutcome::Existing);
             }
@@ -234,11 +309,16 @@ fn place_unit(
     ))
 }
 
-fn clone_tag(fs: &dyn Fs, state: &crate::state::State, target: &Path) -> Result<(), Stop> {
-    let src = store::tag_path(state);
+fn clone_tag(ctx: &Ctx<'_>, added: &mut Added, target: &Path) -> Result<(), Stop> {
+    let src = store::tag_path(ctx.state);
     let dst = target.join("CACHEDIR.TAG");
-    match fs.clone_file(&src, &dst) {
-        Ok(()) => Ok(()),
+    match ctx.fs.clone_file(&src, &dst) {
+        Ok(()) => {
+            if ctx.account_bytes {
+                charge(ctx.fs, added, &src, &dst);
+            }
+            Ok(())
+        }
         Err(err) if is_full(&err) => Err(Stop::Full(format!("{}: {err}", dst.display()))),
         Err(err) => Err(Stop::Failed(format!(
             "{}: {err}; the target tag was not cloned, so no unit was cloned",
