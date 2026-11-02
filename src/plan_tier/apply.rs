@@ -364,6 +364,18 @@ pub fn execute(
                     *count += 1;
                 }
             }
+            Acquired::Failed(why) => {
+                return refuse(
+                    &plan,
+                    Refusal {
+                        reason: "unsupported_format",
+                        target: target.path.clone(),
+                        path: Some(target.path.clone()),
+                        details: vec![why],
+                    },
+                    count_map(0, 0, &skips, None),
+                );
+            }
         }
     }
     if let Some(refusal) = recheck(ctx, &plan, resolved, &locked) {
@@ -621,7 +633,7 @@ fn recheck(
     let now = SystemTime::now();
     let mut loaded = Vec::new();
     for (target, _) in locked {
-        match load_target(target) {
+        match load_target(ctx.fs, target) {
             Ok(item) => loaded.push(item),
             Err(refusal) => return Some(refusal),
         }
@@ -656,8 +668,9 @@ fn recheck(
     None
 }
 
-fn load_target(target: &PlannedTarget) -> Result<Loaded<'_>, Refusal> {
-    let profiles = match cargo_target::identify(&target.path) {
+fn load_target<'a>(fs: &dyn Fs, target: &'a PlannedTarget) -> Result<Loaded<'a>, Refusal> {
+    let profiles = match cargo_target::identify_bounded(fs, &target.path, crate::gc::CRATE_DIR_CAP)
+    {
         Some(Ok(profiles)) => profiles,
         Some(Err(why)) => {
             return Err(Refusal {

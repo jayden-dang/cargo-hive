@@ -11,7 +11,34 @@ fn skipped(a: Acquired) -> Reason {
     match a {
         Acquired::Skipped(r) => r,
         Acquired::Locked(_) => panic!("expected a skip"),
+        Acquired::Failed(why) => panic!("expected a skip, listing failed: {why}"),
     }
+}
+
+#[test]
+fn a_profile_listing_past_the_cap_is_an_error_and_under_the_cap_still_locks() {
+    use cargo_hive::plan_tier::locks::acquire_capped;
+    let p = Planned::new("list-cap");
+    let target = p.worktree_target();
+    let n = std::fs::read_dir(&target).unwrap().count();
+    let fs = Recording::over_real().fs();
+    assert!(
+        matches!(
+            acquire_capped(fs.as_ref(), &target, false, n),
+            Acquired::Locked(_)
+        ),
+        "a listing at the cap did not lock"
+    );
+    match acquire_capped(fs.as_ref(), &target, false, n - 1) {
+        Acquired::Failed(why) => assert!(why.contains("more than"), "{why}"),
+        Acquired::Locked(_) | Acquired::Skipped(_) => panic!("expected a listing error"),
+    }
+    let before = common::plan_fixture::tree(&target);
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let lib = p.library_ctx();
+    let done = apply(&lib.ctx(), &id, &|| false).unwrap();
+    assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.findings);
+    assert!(common::plan_fixture::tree(&target).len() < before.len());
 }
 
 #[test]

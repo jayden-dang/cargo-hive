@@ -37,11 +37,18 @@ pub struct Locked {
 pub enum Acquired {
     Locked(Locked),
     Skipped(Reason),
+    Failed(String),
 }
 
 pub fn acquire(fs: &dyn Fs, target: &Path, lists_examples: bool) -> Acquired {
-    let Some(Ok(found)) = cargo_target::identify(target) else {
-        return Acquired::Skipped(Reason::Missing);
+    acquire_capped(fs, target, lists_examples, crate::gc::CRATE_DIR_CAP)
+}
+
+pub fn acquire_capped(fs: &dyn Fs, target: &Path, lists_examples: bool, cap: usize) -> Acquired {
+    let found = match cargo_target::identify_bounded(fs, target, cap) {
+        Some(Ok(found)) => found,
+        Some(Err(why)) => return Acquired::Failed(why),
+        None => return Acquired::Skipped(Reason::Missing),
     };
     let profiles: Vec<PathBuf> = found.into_iter().map(|(path, _)| path).collect();
     let mut held = Vec::new();
@@ -69,8 +76,10 @@ pub fn acquire(fs: &dyn Fs, target: &Path, lists_examples: bool) -> Acquired {
             }
         }
     }
-    if !same_directories(target, &profiles) {
-        return Acquired::Skipped(Reason::ProfileSet);
+    match same_directories(fs, target, &profiles, cap) {
+        Ok(true) => {}
+        Ok(false) => return Acquired::Skipped(Reason::ProfileSet),
+        Err(why) => return Acquired::Failed(why),
     }
     Acquired::Locked(Locked { profiles, held })
 }
@@ -90,11 +99,18 @@ fn present_locks(fs: &dyn Fs, dir: &Path, lists_examples: bool) -> Vec<PathBuf> 
     found
 }
 
-fn same_directories(target: &Path, profiles: &[PathBuf]) -> bool {
-    let Some(Ok(found)) = cargo_target::identify(target) else {
-        return false;
+fn same_directories(
+    fs: &dyn Fs,
+    target: &Path,
+    profiles: &[PathBuf],
+    cap: usize,
+) -> Result<bool, String> {
+    let found = match cargo_target::identify_bounded(fs, target, cap) {
+        Some(Ok(found)) => found,
+        Some(Err(why)) => return Err(why),
+        None => return Ok(false),
     };
     let again: BTreeSet<_> = found.into_iter().map(|(path, _)| path).collect();
     let first: BTreeSet<_> = profiles.iter().cloned().collect();
-    again == first
+    Ok(again == first)
 }

@@ -337,25 +337,27 @@ fn plan_orphan(
         }
     };
     let kind = kind_name(stat.kind).to_string();
-    let dirs = match crate::cargo_target::identify(&target.path) {
-        Some(Ok(found)) => found.into_iter().map(|(dir, _)| dir).collect(),
-        Some(Err(why)) => {
-            findings.push((
-                "plan.unreadable".to_string(),
-                Some(target.path.clone()),
-                why,
-            ));
-            return None;
-        }
-        None => {
-            findings.push((
-                "plan.unreadable".to_string(),
-                Some(target.path.clone()),
-                format!("{} is no longer a Cargo target dir", target.path.display()),
-            ));
-            return None;
-        }
-    };
+    let dirs =
+        match crate::cargo_target::identify_bounded(ctx.fs, &target.path, crate::gc::CRATE_DIR_CAP)
+        {
+            Some(Ok(found)) => found.into_iter().map(|(dir, _)| dir).collect(),
+            Some(Err(why)) => {
+                findings.push((
+                    "plan.unreadable".to_string(),
+                    Some(target.path.clone()),
+                    why,
+                ));
+                return None;
+            }
+            None => {
+                findings.push((
+                    "plan.unreadable".to_string(),
+                    Some(target.path.clone()),
+                    format!("{} is no longer a Cargo target dir", target.path.display()),
+                ));
+                return None;
+            }
+        };
     Some(PlannedTarget {
         path: target.path.clone(),
         owner: None,

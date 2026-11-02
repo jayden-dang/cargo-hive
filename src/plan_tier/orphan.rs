@@ -42,6 +42,7 @@ pub fn remove(ctx: &Ctx, target: &PlannedTarget, cancel: &(dyn Fn() -> bool + Sy
     let locked = match locks::acquire(ctx.fs, &target.path, false) {
         Acquired::Locked(locked) => locked,
         Acquired::Skipped(reason) => return Removal::Skipped(reason.count_name().to_string()),
+        Acquired::Failed(why) => return Removal::Refused(why),
     };
     if let Err(reason) = same_entry(ctx.fs, &target.path, scope.kind, scope.dev, scope.ino) {
         return Removal::Refused(reason);
@@ -115,7 +116,7 @@ fn same_entry(fs: &dyn Fs, path: &Path, kind: EntryKind, dev: u64, ino: u64) -> 
 }
 
 fn profiles_match_plan(fs: &dyn Fs, target: &Path, planned: &[PathBuf]) -> Result<(), Removal> {
-    let found = match cargo_target::identify(target) {
+    let found = match cargo_target::identify_bounded(fs, target, CRATE_DIR_CAP) {
         Some(Ok(found)) => found,
         Some(Err(why)) => return Err(Removal::Refused(why)),
         None => return Err(Removal::Refused("unsupported_format".to_string())),
