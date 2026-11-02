@@ -578,7 +578,7 @@ _Requirements: SEED-3.1, SEED-3.2, SEED-3.3, SEED-3.4, SEED-3.5, SEED-3.6, SEED-
 
 **Depends-on:** Task 3, Task 4, Task 6, Task 7
 
-- [ ] **Step 1: Write the failing tests** in `tests/seed_fill.rs`, each with a filled store from `RegistryRepo` and a new worktree:
+- [x] **Step 1: Write the failing tests** in `tests/seed_fill.rs`, each with a filled store from `RegistryRepo` and a new worktree:
   - `an_empty_set_creates_nothing`: no `target/` afterward.
   - `an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it`: `cargo_target::identify(&target)` is `Some` before any build; files keep the store's mtimes.
   - `an_existing_path_gets_nothing_whatever_it_holds`, table: an empty directory, a file, a dangling symlink; contents unchanged; one finding naming the path.
@@ -594,9 +594,9 @@ _Requirements: SEED-3.1, SEED-3.2, SEED-3.3, SEED-3.4, SEED-3.5, SEED-3.6, SEED-
   - `units_outside_the_window_are_counted`: backdate a store stamp.
 
   Run `cargo test --test seed_fill`; expect a compile failure.
-- [ ] **Step 2: Implement** (design decisions 8, 9). Return at once for an empty `units`. `cargo_target::resolve(checkout, cancel)`; an `Err` or a differing `build_directory` is one finding. `fs.create_dir(target_directory)`: `AlreadyExists` and `NotFound` are one finding each, and anything else is an `Error`. Clone the tag, then create inner directories per component with a set of made paths, tolerating `AlreadyExists`. For each row, poll `cancel`; walk `entry_dir(row)` with `CRATE_DIR_CAP`, group files by `deps/`, `build/`, `.fingerprint/`, and clone in that order. Each relative path must hold only `Component::Normal`; `rel_profile` too. `AlreadyExists` from `clone_file` adds `existing` and ends that unit; `ENOSPC` is `Error::DiskFull`; any other error adds `failed` with one finding and ends that unit. Record `SeededUnit`: the stamp through `liveness::unit_timestamp(profile, dir_name, kind)` and `Fs::mtime`, as nanoseconds; `has_build`; `deps_files`. `outside_window` counts units with no stamp or a stamp older than `window`; `seed_cmd` resolves it through `state::window_days(cfg.gc_window_days)` and a bad value is a `refusal` before anything runs, as in `plan_cmd`. `target_identity` is the `dev` and `ino` of `entry_stat(target_directory)`.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): place chosen units into a target that does not exist yet`
+- [x] **Step 2: Implement** (design decisions 8, 9). Return at once for an empty `units`. `cargo_target::resolve(checkout, cancel)`; an `Err` or a differing `build_directory` is one finding. `fs.create_dir(target_directory)`: `AlreadyExists` and `NotFound` are one finding each, and anything else is an `Error`. Clone the tag, then create inner directories per component with a set of made paths, tolerating `AlreadyExists`. For each row, poll `cancel`; walk `entry_dir(row)` with `CRATE_DIR_CAP`, group files by `deps/`, `build/`, `.fingerprint/`, and clone in that order. Each relative path must hold only `Component::Normal`; `rel_profile` too. `AlreadyExists` from `clone_file` adds `existing` and ends that unit; `ENOSPC` is `Error::DiskFull`; any other error adds `failed` with one finding and ends that unit. Record `SeededUnit`: the stamp through `liveness::unit_timestamp(profile, dir_name, kind)` and `Fs::mtime`, as nanoseconds; `has_build`; `deps_files`. `outside_window` counts units with no stamp or a stamp older than `window`; `seed_cmd` resolves it through `state::window_days(cfg.gc_window_days)` and a bad value is a `refusal` before anything runs, as in `plan_cmd`. `target_identity` is the `dev` and `ino` of `entry_stat(target_directory)`.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): place chosen units into a target that does not exist yet`
 
 _Requirements: SEED-1.3, SEED-1.4, SEED-1.5, SEED-1.6, SEED-1.7, SEED-1.8, SEED-1.12, SEED-1.16, SEED-1.18, SEED-1.19, SEED-7.2, SEED-9.2, SEED-9.5, SEED-10.9_
 
