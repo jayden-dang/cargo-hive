@@ -826,6 +826,27 @@ fn a_held_lock_skips_the_orphan_removal_and_deletes_nothing() {
 }
 
 #[test]
+fn a_held_artifact_lock_skips_the_orphan_removal_and_deletes_nothing() {
+    let (p, orphan) = Planned::with_orphan("orphan-artifact-lock");
+    let id = p.orphan_plan_id(&orphan);
+    let artifact = orphan.join("debug/.cargo-artifact-lock");
+    std::fs::write(&artifact, b"").unwrap();
+    let mut holder = p.hive.hold_lock_child("flock", &artifact);
+    let before = common::plan_fixture::tree(&orphan);
+    let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert_ne!(done.outcome, Outcome::Applied, "{:?}", done.reason);
+    assert_eq!(
+        done.counts.get("paths_deleted").copied().unwrap_or(0),
+        0,
+        "{:?}",
+        done.counts
+    );
+    assert_eq!(common::plan_fixture::tree(&orphan), before);
+}
+
+#[test]
 fn a_profile_dir_that_appeared_after_the_plan_refuses_the_removal() {
     let (p, orphan) = Planned::with_orphan("orphan-relist");
     let id = p.orphan_plan_id(&orphan);

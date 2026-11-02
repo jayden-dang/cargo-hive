@@ -39,7 +39,8 @@ pub fn remove(ctx: &Ctx, target: &PlannedTarget, cancel: &(dyn Fn() -> bool + Sy
     if let Err(reason) = same_entry(ctx.fs, &target.path, scope.kind, scope.dev, scope.ino) {
         return Removal::Refused(reason);
     }
-    let locked = match locks::acquire(ctx.fs, &target.path, false) {
+    // Present lock files include `.cargo-artifact-lock`; unit plans pass that only for examples.
+    let locked = match locks::acquire(ctx.fs, &target.path, true) {
         Acquired::Locked(locked) => locked,
         Acquired::Skipped(reason) => return Removal::Skipped(reason.count_name().to_string()),
         Acquired::Failed(why) => return Removal::Refused(why),
