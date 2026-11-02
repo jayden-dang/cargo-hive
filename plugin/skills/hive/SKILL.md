@@ -22,9 +22,7 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 
 - A checkout is protected (a registered main checkout, or anything hive cannot classify) or secondary (a linked worktree inside its own main, or a checkout under a secondary root, by default `/private/tmp` and `$TMPDIR`). A Cargo target dir that no known checkout owns is not a checkout: `status` reports it as an orphan candidate.
 - Actions come in two tiers. The auto tier is safe to run unasked on protected and secondary checkouts alike. `gc` without `--plan` does that tier: it deletes superseded incremental sessions (with their lock files) and leftover rustc temp entries, taking each owner's lock without waiting where one exists and skipping anything held. The plan tier is closure deletion and whole orphan targets. `gc --plan` returns plan ids per class and `undecided` targets; `apply` applies one plan. When hive covers the request, reclaim only through hive, never by other means.
-- An agent applies only `secondary` plans and reports the rest. The plan tier needs the owner's approval on protected checkouts and orphan candidates. `needs-human` or exit 3 means the owner must approve: report it to the owner and never try to approve a plan yourself. After `refused`, plan again and never reuse a consumed id (already consumed). `partial` is not an error; check its reason.
-- A result marked `needs-human` is the owner's to resolve. Report it; do not work around it.
-- Never run the owner's approval command, the `approve` subcommand. An agent does not issue it.
+- An agent applies plans of every class itself: `secondary`, `protected` and `orphan`, with no owner step. An `orphan` plan removes the whole target dir, with anything in it no build recreates, so name those targets when you report. After `refused`, plan again and never reuse a consumed id (already consumed). `partial` is not an error; check its reason.
 - The repos a command acts on come from its arguments. Never infer them from the current directory.
 
 ## Which command
@@ -60,7 +58,7 @@ cargo hive explain /path/to/repo --top 20 --json
 
 With `--json`, hive prints exactly one JSON object on stdout and its prose on stderr. Read the object and report its counters as measured. Never estimate bytes or time yourself, and say so when a field says a size was not measured.
 
-Exit codes: 0 success; 1 refusal or failure (read the receipt, or stderr if no receipt was printed); 2 unsupported operating system; exit 3 when `apply` returns `needs-human`; 130 cancelled.
+Exit codes: 0 success; 1 refusal or failure (read the receipt, or stderr if no receipt was printed); 2 unsupported operating system; 130 cancelled.
 
 ## Do not
 

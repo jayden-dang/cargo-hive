@@ -1,4 +1,4 @@
-//! Removes one approved orphan target directory.
+//! Removes one orphan target directory.
 //! Locks are held across the relist, the fresh ownership check and the removal.
 //! A symbolic link inside the directory is unlinked, not followed.
 
@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use crate::cargo_target::{self, Owner};
 use crate::discover::{self, Snapshot};
 use crate::gc::{self, Ledger, CRATE_DIR_CAP};
-use crate::plan_tier::apply::Approval;
 use crate::plan_tier::guard::{check_entry, Deleted, Expect};
 use crate::plan_tier::locks::{self, Acquired};
 use crate::plan_tier::record::{kind_of, BytesRec, PlannedTarget};
@@ -33,15 +32,7 @@ pub enum Removal {
     Failed(FailedRemoval),
 }
 
-pub fn remove(
-    ctx: &Ctx,
-    target: &PlannedTarget,
-    approval: &Approval,
-    cancel: &(dyn Fn() -> bool + Sync),
-) -> Removal {
-    if approval.plan_id().is_empty() {
-        return Removal::Refused("approval_mismatch".to_string());
-    }
+pub fn remove(ctx: &Ctx, target: &PlannedTarget, cancel: &(dyn Fn() -> bool + Sync)) -> Removal {
     let Some(scope) = recorded(target) else {
         return Removal::Refused("entry_changed".to_string());
     };

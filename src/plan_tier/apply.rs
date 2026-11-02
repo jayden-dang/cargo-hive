@@ -50,30 +50,6 @@ impl std::error::Error for ApplyError {
 }
 
 #[derive(Debug)]
-pub enum Authorization {
-    Secondary,
-    Approved(Approval),
-}
-
-#[derive(Debug)]
-pub struct Approval {
-    plan_id: String,
-}
-
-impl Approval {
-    pub(crate) fn plan_id(&self) -> &str {
-        &self.plan_id
-    }
-}
-
-#[doc(hidden)]
-pub fn approval_for_tests(plan_id: &str) -> Approval {
-    Approval {
-        plan_id: plan_id.to_owned(),
-    }
-}
-
-#[derive(Debug)]
 pub struct ResolvedTarget {
     pub path: PathBuf,
     pub owner: Option<PathBuf>,
@@ -97,7 +73,6 @@ pub struct Applied {
 pub fn apply(
     ctx: &Ctx,
     id: &str,
-    auth: Authorization,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Applied, ApplyError> {
     let plan = match record::get(ctx.state, id).map_err(ApplyError::State)? {
@@ -118,21 +93,6 @@ pub fn apply(
             ))
         }
         Lookup::Live(plan) => plan,
-    };
-    let approved = match auth {
-        Authorization::Secondary if plan.class != PlanClass::Secondary => {
-            return Ok(needs_human(plan));
-        }
-        Authorization::Approved(approval) if approval.plan_id != id => {
-            return Ok(refused(
-                id,
-                plan.class,
-                "approval_mismatch",
-                target_paths(&plan),
-            ));
-        }
-        Authorization::Approved(approval) => Some(approval),
-        Authorization::Secondary => None,
     };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -162,10 +122,7 @@ pub fn apply(
         return Ok(cancelled_before_delete(&plan));
     }
     if plan.class == PlanClass::Orphan {
-        let Some(approval) = &approved else {
-            return Ok(needs_human(plan));
-        };
-        return Ok(apply_orphan(ctx, &plan, approval, cancel));
+        return Ok(apply_orphan(ctx, &plan, cancel));
     }
     let resolved = match resolve(ctx, &plan, cancel) {
         Ok(resolved) => resolved,
@@ -175,12 +132,7 @@ pub fn apply(
     Ok(execute(ctx, plan, &resolved, cancel))
 }
 
-fn apply_orphan(
-    ctx: &Ctx,
-    plan: &Plan,
-    approval: &Approval,
-    cancel: &(dyn Fn() -> bool + Sync),
-) -> Applied {
+fn apply_orphan(ctx: &Ctx, plan: &Plan, cancel: &(dyn Fn() -> bool + Sync)) -> Applied {
     let mut order: Vec<&PlannedTarget> = plan.targets.iter().collect();
     order.sort_by(|left, right| left.path.cmp(&right.path));
     let paths: Vec<PathBuf> = order.iter().map(|target| target.path.clone()).collect();
@@ -206,7 +158,7 @@ fn apply_orphan(
             cancelled = true;
             break;
         }
-        match orphan::remove(ctx, target, approval, cancel) {
+        match orphan::remove(ctx, target, cancel) {
             Removal::Removed(counted) => {
                 paths_deleted += 1;
                 applied_targets += 1;
@@ -357,9 +309,6 @@ fn note_counted(
 }
 
 pub(crate) fn exit_code(applied: &Applied) -> i32 {
-    if applied.outcome == Outcome::NeedsHuman {
-        return crate::cli::EXIT_NEEDS_HUMAN;
-    }
     if applied.reason.as_deref() == Some("cancelled") {
         return 130;
     }
@@ -997,36 +946,6 @@ fn refusal_findings(refusal: &Refusal) -> Vec<(String, Option<PathBuf>, String)>
     vec![(kind, Some(path), detail)]
 }
 
-fn needs_human(plan: Plan) -> Applied {
-    let paths = plan
-        .targets
-        .iter()
-        .map(|target| target.entries.len() as u64)
-        .sum();
-    let mut counts = BTreeMap::new();
-    counts.insert("paths".to_string(), paths);
-    if let Some(planned) = plan.planned {
-        counts.insert("freed_bytes".to_string(), planned.freed);
-        counts.insert(
-            "deleted_bytes_still_shared".to_string(),
-            planned.still_shared,
-        );
-    }
-    let targets = target_paths(&plan);
-    Applied {
-        outcome: Outcome::NeedsHuman,
-        reason: None,
-        class: plan.class,
-        id: plan.id,
-        targets,
-        counts,
-        bytes: plan.planned,
-        notes: Vec::new(),
-        unmeasured: Vec::new(),
-        findings: Vec::new(),
-    }
-}
-
 fn refused(id: &str, class: PlanClass, reason: &str, targets: Vec<PathBuf>) -> Applied {
     Applied {
         outcome: Outcome::Refused,
@@ -1109,7 +1028,6 @@ mod exit_code_tests {
     #[test]
     fn each_outcome_keeps_its_exit_and_a_failed_delete_is_not_a_skip() {
         assert_eq!(exit_code(&sample(Outcome::Applied, None, None)), 0);
-        assert_eq!(exit_code(&sample(Outcome::NeedsHuman, None, None)), 3);
         assert_eq!(
             exit_code(&sample(Outcome::Refused, Some("unknown_plan"), None)),
             1

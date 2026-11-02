@@ -339,43 +339,24 @@ fn apply_refuses_without_the_deletion_capability_and_leaves_the_plan_unconsumed(
 }
 
 #[test]
-fn a_protected_plan_returns_needs_human_with_what_would_be_approved_and_stays_unconsumed() {
-    let p = Planned::new("needs-human");
+fn an_agent_applies_a_protected_plan_itself_and_the_plan_is_consumed() {
+    let p = Planned::new("protected-apply");
     let id = Planned::id_of(&p.plan(), "protected");
     let before = tree(&p.main_target());
-    for _ in 0..2 {
-        let (out, r) = p.hive.json(&["apply", &id]);
-        assert_eq!(out.status.code(), Some(3), "{r}");
-        let plan = &r["plans"][0];
-        assert_eq!(plan["outcome"], "needs-human");
-        assert_eq!(plan["class"], "protected");
-        assert_eq!(plan["id"], id.as_str());
-        assert!(plan["paths"].as_u64().unwrap() > 0);
-        assert_eq!(plan["targets"].as_array().unwrap().len(), 1);
-        assert!(
-            plan["counts"]["freed_bytes"].as_u64().is_some(),
-            "planned bytes are reported: {plan}"
-        );
-        assert_eq!(tree(&p.main_target()), before);
-    }
-}
-
-#[test]
-fn apply_has_no_option_or_environment_variable_that_deletes_for_a_protected_plan() {
-    let p = Planned::new("no-bypass");
-    let id = Planned::id_of(&p.plan(), "protected");
-    for extra in [vec!["--yes"], vec!["--force"], vec!["--approve"]] {
-        let mut args = vec!["apply", id.as_str()];
-        args.extend(extra);
-        assert!(!p.hive.run(&args).status.success());
-    }
-    let out = p
-        .hive
-        .command(&["apply", &id])
-        .env("HIVE_APPROVE", "1")
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(3));
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    let plan = &r["plans"][0];
+    assert_eq!(plan["outcome"], "applied");
+    assert_eq!(plan["class"], "protected");
+    assert_eq!(plan["id"], id.as_str());
+    assert!(
+        plan["counts"]["paths_deleted"].as_u64().unwrap() > 0,
+        "{plan}"
+    );
+    assert!(tree(&p.main_target()).len() < before.len());
+    let (again, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(again.status.code(), Some(1), "{r}");
+    assert_eq!(r["plans"][0]["reason"], "already_consumed");
 }
 
 #[test]
@@ -391,7 +372,7 @@ fn apply_never_blocks_on_an_owner_authentication_prompt() {
         .spawn()
         .unwrap();
     let out = common::wait_within(child, std::time::Duration::from_secs(60));
-    assert_eq!(out.status.code(), Some(3));
+    assert_eq!(out.status.code(), Some(0));
 }
 
 #[test]
@@ -743,12 +724,25 @@ fn no_other_class_plans_the_removal_of_a_whole_target_dir() {
 }
 
 #[test]
-fn an_orphan_plan_ends_at_needs_human() {
-    let (p, orphan) = Planned::with_orphan("orphan-human");
+fn an_agent_removes_an_orphan_target_itself() {
+    let (p, orphan) = Planned::with_orphan("orphan-apply");
     let id = p.orphan_plan_id(&orphan);
     let (out, r) = p.hive.json(&["apply", &id]);
-    assert_eq!(out.status.code(), Some(3), "{r}");
-    assert!(orphan.exists());
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    assert_eq!(r["plans"][0]["outcome"], "applied");
+    assert_eq!(r["plans"][0]["class"], "orphan");
+    assert!(!orphan.exists());
+}
+
+#[test]
+fn doctor_replaces_capabilities_recorded_with_the_retired_approval_check() {
+    let p = Planned::new("retired-approval");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    write_caps(&p, serde_json::json!({"approval": ["e"]}));
+    assert_eq!(p.hive.json(&["apply", &id]).0.status.code(), Some(1));
+    assert!(p.hive.run(&["doctor"]).status.success());
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(0), "{r}");
 }
 
 #[test]

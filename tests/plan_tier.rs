@@ -1,7 +1,7 @@
 //! One target is locked through Cargo's lock files, or skipped when a lock is not sound.
 #![cfg(target_os = "macos")]
 mod common;
-use cargo_hive::plan_tier::apply::{apply, approval_for_tests, Authorization};
+use cargo_hive::plan_tier::apply::apply;
 use cargo_hive::plan_tier::locks::{acquire, Acquired, Reason};
 use cargo_hive::receipt::Outcome;
 use common::plan_fixture::Planned;
@@ -136,7 +136,7 @@ fn locks_are_all_held_before_the_first_removal_and_each_unit_is_removed_dot_d_fi
     let id = Planned::id_of(&p.plan(), "secondary");
     let rec = Recording::over_real();
     let lib = p.library_ctx_with(rec.fs());
-    let done = apply(&lib.ctx(), &id, Authorization::Secondary, &|| false).unwrap();
+    let done = apply(&lib.ctx(), &id, &|| false).unwrap();
     assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.findings);
     let log = rec.log();
     let last_lock = log.iter().rposition(|l| l.starts_with("lock ")).unwrap();
@@ -182,7 +182,7 @@ fn a_removal_failure_is_partial_and_names_delete_failed() {
     let id = Planned::id_of(&p.plan(), "secondary");
     let rec = Recording::over_real().fail_removes_after(0);
     let lib = p.library_ctx_with(rec.fs());
-    let done = apply(&lib.ctx(), &id, Authorization::Secondary, &|| false).unwrap();
+    let done = apply(&lib.ctx(), &id, &|| false).unwrap();
     assert_eq!(done.outcome, Outcome::Partial);
     assert_eq!(done.reason.as_deref(), Some("delete failed"));
 }
@@ -194,7 +194,7 @@ fn applying_ownership_is_resolved_without_touching_the_snapshot_cache() {
     let snap = p.hive.home.path.join("snapshot.json");
     let before = std::fs::read(&snap).ok();
     let lib = p.library_ctx();
-    apply(&lib.ctx(), &id, Authorization::Secondary, &|| false).unwrap();
+    apply(&lib.ctx(), &id, &|| false).unwrap();
     assert_eq!(std::fs::read(&snap).ok(), before);
 }
 
@@ -215,7 +215,7 @@ fn stopping_after_any_one_deletion_leaves_a_target_cargo_can_build() {
         let id = Planned::id_of(&p.plan(), "secondary");
         let rec = Recording::over_real().fail_removes_after(stop_after);
         let lib = p.library_ctx_with(rec.fs());
-        let done = apply(&lib.ctx(), &id, Authorization::Secondary, &|| false).unwrap();
+        let done = apply(&lib.ctx(), &id, &|| false).unwrap();
         assert_eq!(done.outcome, Outcome::Partial, "stop {stop_after}");
         assert!(
             done.findings.iter().any(|f| f.0 == "plan.delete_failed"),
@@ -294,33 +294,18 @@ fn a_cancel_between_units_keeps_the_first_unit_gone_and_the_second_intact_and_th
 }
 
 #[test]
-fn an_approved_protected_plan_is_deleted_by_the_same_steps_as_a_secondary_one() {
-    let p = Planned::new("approved-protected");
+fn a_protected_plan_is_deleted_by_the_same_steps_as_a_secondary_one() {
+    let p = Planned::new("protected-steps");
     let id = Planned::id_of(&p.plan(), "protected");
     let before = common::plan_fixture::tree(&p.main_target());
     let lib = p.library_ctx();
-    let wrong = apply(
-        &lib.ctx(),
-        &id,
-        Authorization::Approved(approval_for_tests("0000000000000000")),
-        &|| false,
-    )
-    .unwrap();
-    assert_eq!(wrong.reason.as_deref(), Some("approval_mismatch"));
-    assert_eq!(common::plan_fixture::tree(&p.main_target()), before);
-    let done = apply(
-        &lib.ctx(),
-        &id,
-        Authorization::Approved(approval_for_tests(&id)),
-        &|| false,
-    )
-    .unwrap();
+    let done = apply(&lib.ctx(), &id, &|| false).unwrap();
     assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.findings);
     assert!(common::plan_fixture::tree(&p.main_target()).len() < before.len());
 }
 
 #[test]
-fn an_approved_orphan_plan_removes_the_whole_target_dir_after_taking_every_lock() {
+fn an_orphan_plan_removes_the_whole_target_dir_after_taking_every_lock() {
     let (p, orphan) = Planned::with_orphan("orphan-remove");
     let outside_link_target = p.scratch.path.join("link-target");
     std::fs::write(&outside_link_target, b"keep").unwrap();
@@ -328,13 +313,7 @@ fn an_approved_orphan_plan_removes_the_whole_target_dir_after_taking_every_lock(
     let id = p.orphan_plan_id(&orphan);
     let rec = Recording::over_real();
     let lib = p.library_ctx_with(rec.fs());
-    let done = apply(
-        &lib.ctx(),
-        &id,
-        Authorization::Approved(approval_for_tests(&id)),
-        &|| false,
-    )
-    .unwrap();
+    let done = apply(&lib.ctx(), &id, &|| false).unwrap();
     assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.findings);
     assert!(!orphan.exists());
     assert!(
@@ -363,13 +342,7 @@ fn a_file_whose_sharing_cannot_be_read_is_named_after_the_orphan_is_removed() {
     let id = p.orphan_plan_id(&orphan);
     let rec = Recording::over_real().fail_sharing(&missed);
     let lib = p.library_ctx_with(rec.fs());
-    let done = apply(
-        &lib.ctx(),
-        &id,
-        Authorization::Approved(approval_for_tests(&id)),
-        &|| false,
-    )
-    .unwrap();
+    let done = apply(&lib.ctx(), &id, &|| false).unwrap();
     assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.findings);
     assert!(!orphan.exists(), "the directory is still removed");
     assert!(
@@ -404,13 +377,7 @@ fn a_later_refusal_keeps_the_measured_bytes_of_the_orphan_already_removed() {
     let id = p.orphan_plan_id(&first);
     std::fs::create_dir_all(later.join("release/.fingerprint")).unwrap();
     std::fs::write(later.join("release/.cargo-build-lock"), b"").unwrap();
-    let done = apply(
-        &p.library_ctx().ctx(),
-        &id,
-        Authorization::Approved(approval_for_tests(&id)),
-        &|| false,
-    )
-    .unwrap();
+    let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
     assert_eq!(done.targets.len(), 2, "one plan holds both orphan targets");
     assert_eq!(
         done.outcome,
@@ -443,13 +410,7 @@ fn a_first_orphan_remove_that_fails_is_partial_not_refused() {
     let id = p.orphan_plan_id(&orphan);
     let rec = Recording::over_real().fail_removes_after(0);
     let lib = p.library_ctx_with(rec.fs());
-    let done = apply(
-        &lib.ctx(),
-        &id,
-        Authorization::Approved(approval_for_tests(&id)),
-        &|| false,
-    )
-    .unwrap();
+    let done = apply(&lib.ctx(), &id, &|| false).unwrap();
     assert_eq!(
         done.outcome,
         Outcome::Partial,
@@ -508,13 +469,7 @@ fn a_later_orphan_is_still_removed_when_an_earlier_remove_fails() {
     let id = p.orphan_plan_id(&first);
     let rec = Recording::over_real().fail_remove(&first);
     let lib = p.library_ctx_with(rec.fs());
-    let done = apply(
-        &lib.ctx(),
-        &id,
-        Authorization::Approved(approval_for_tests(&id)),
-        &|| false,
-    )
-    .unwrap();
+    let done = apply(&lib.ctx(), &id, &|| false).unwrap();
     assert_eq!(done.targets.len(), 2, "one plan holds both orphan targets");
     assert!(!later.exists(), "the later target is still removed");
     assert!(first.exists(), "the failed target stays");
@@ -566,13 +521,7 @@ fn a_later_delete_failure_names_delete_failed_and_keeps_measured_bytes() {
     let id = p.orphan_plan_id(&first);
     let rec = Recording::over_real().fail_removes_after(1);
     let lib = p.library_ctx_with(rec.fs());
-    let done = apply(
-        &lib.ctx(),
-        &id,
-        Authorization::Approved(approval_for_tests(&id)),
-        &|| false,
-    )
-    .unwrap();
+    let done = apply(&lib.ctx(), &id, &|| false).unwrap();
     assert_eq!(done.targets.len(), 2, "one plan holds both orphan targets");
     assert_eq!(
         done.outcome,
@@ -616,13 +565,7 @@ fn a_held_lock_skips_the_orphan_removal_and_deletes_nothing() {
         .hive
         .hold_lock_child("flock", &orphan.join("debug/.cargo-build-lock"));
     let before = common::plan_fixture::tree(&orphan);
-    let done = apply(
-        &p.library_ctx().ctx(),
-        &id,
-        Authorization::Approved(approval_for_tests(&id)),
-        &|| false,
-    )
-    .unwrap();
+    let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
     let _ = holder.kill();
     let _ = holder.wait();
     assert_ne!(done.outcome, Outcome::Applied);
@@ -635,13 +578,7 @@ fn a_profile_dir_that_appeared_after_the_plan_refuses_the_removal() {
     let id = p.orphan_plan_id(&orphan);
     std::fs::create_dir_all(orphan.join("release/.fingerprint")).unwrap();
     std::fs::write(orphan.join("release/.cargo-build-lock"), b"").unwrap();
-    let done = apply(
-        &p.library_ctx().ctx(),
-        &id,
-        Authorization::Approved(approval_for_tests(&id)),
-        &|| false,
-    )
-    .unwrap();
+    let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
     assert_eq!(done.outcome, Outcome::Refused);
     assert!(orphan.exists());
 }
@@ -659,13 +596,7 @@ fn a_target_dir_whose_identity_changed_after_the_plan_is_not_removed() {
         b"Signature: 8a477f597d28d172789f06886806bc55",
     )
     .unwrap();
-    let done = apply(
-        &p.library_ctx().ctx(),
-        &id,
-        Authorization::Approved(approval_for_tests(&id)),
-        &|| false,
-    )
-    .unwrap();
+    let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
     assert_eq!(done.outcome, Outcome::Refused);
     assert!(orphan.exists());
 }
@@ -681,13 +612,7 @@ fn a_target_dir_that_gained_an_owner_after_the_plan_is_not_removed() {
         format!("[build]\ntarget-dir = \"{}\"\n", orphan.display()),
     )
     .unwrap();
-    let done = apply(
-        &p.library_ctx().ctx(),
-        &id,
-        Authorization::Approved(approval_for_tests(&id)),
-        &|| false,
-    )
-    .unwrap();
+    let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
     assert_eq!(done.outcome, Outcome::Refused);
     assert!(orphan.exists());
 }

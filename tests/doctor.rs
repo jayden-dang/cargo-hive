@@ -74,7 +74,7 @@ fn doctor(hive: &Hive) -> (Output, serde_json::Value) {
     (out, receipt)
 }
 
-const EXPECTED_IDS: [&str; 7] = ["a", "b", "c", "d", "e", "f", "g"];
+const EXPECTED_IDS: [&str; 6] = ["a", "b", "c", "d", "f", "g"];
 
 #[test]
 fn doctor_reports_every_check_with_its_measured_value_and_records_capabilities() {
@@ -89,12 +89,10 @@ fn doctor_reports_every_check_with_its_measured_value_and_records_capabilities()
             "{c}"
         );
         assert!(!c["measured"].as_object().unwrap().is_empty(), "{c}");
-        if c["id"] != "e" {
-            assert_eq!(
-                c["verdict"], "pass",
-                "on the proof machine every filesystem check passes: {c}"
-            );
-        }
+        assert_eq!(
+            c["verdict"], "pass",
+            "on the proof machine every filesystem check passes: {c}"
+        );
     }
     assert!(
         out.status.success(),

@@ -599,10 +599,18 @@ fn skill_documents_every_shipped_command() {
 }
 
 #[test]
-fn the_skill_teaches_the_plan_flow_and_its_exit_code() {
+fn the_skill_teaches_the_plan_flow_for_every_class() {
     let body = skill_body();
-    for needle in ["needs-human", "exit 3", "plan again", "already consumed"] {
+    for needle in [
+        "every class",
+        "no owner step",
+        "plan again",
+        "already consumed",
+    ] {
         assert!(body.contains(needle), "SKILL.md lacks {needle}");
+    }
+    for gone in ["needs-human", "exit 3", "approve"] {
+        assert!(!body.contains(gone), "SKILL.md still says {gone}");
     }
     assert!(
         !body.contains("not available yet"),

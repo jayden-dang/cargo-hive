@@ -104,8 +104,6 @@ pub struct OutputArgs {
     pub json: bool,
 }
 
-pub const EXIT_NEEDS_HUMAN: i32 = 3;
-
 /// `cargo hive …` runs `cargo-hive hive …`; drop that inserted word.
 fn strip_cargo_subcommand(mut args: Vec<OsString>) -> Vec<OsString> {
     if args.get(1).is_some_and(|a| a == "hive") {
@@ -356,7 +354,7 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
             1,
         );
     }
-    let report = match doctor::run(&*platform.fs, &*platform.approve, &env) {
+    let report = match doctor::run(&*platform.fs, &env) {
         Ok(r) => r,
         Err(doctor::DoctorError::Cancelled) => {
             return emit_failure(
@@ -927,7 +925,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
 
 fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
     use crate::doctor::{self, Capabilities, Capability};
-    use crate::plan_tier::apply::{self, Authorization};
+    use crate::plan_tier::apply;
     use crate::plan_tier::build;
     use crate::plan_tier::Ctx;
     use crate::receipt::Outcome;
@@ -977,7 +975,7 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
         repos: &reg.repos,
         mains: &registered_mains,
     };
-    let applied = match apply::apply(&ctx, id, Authorization::Secondary, &cancelled) {
+    let applied = match apply::apply(&ctx, id, &cancelled) {
         Ok(applied) => applied,
         Err(e) => {
             b.finding("error", None, e.to_string());
@@ -989,7 +987,6 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
         Outcome::Applied => "applied",
         Outcome::Partial => "partial",
         Outcome::Refused => "refused",
-        Outcome::NeedsHuman => "needs-human",
     };
     let human = format!(
         "{}  {}  {word}\n",

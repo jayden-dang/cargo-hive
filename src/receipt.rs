@@ -52,7 +52,6 @@ pub enum Outcome {
     Applied,
     Partial,
     Refused,
-    NeedsHuman,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -328,8 +327,8 @@ mod tests {
     #[test]
     fn outcomes_serialize_by_their_names_and_old_log_lines_still_parse() {
         assert_eq!(
-            serde_json::to_string(&Outcome::NeedsHuman).unwrap(),
-            "\"needs-human\""
+            serde_json::to_string(&Outcome::Refused).unwrap(),
+            "\"refused\""
         );
         let old =
             serde_json::to_string(&Receipt::with_os("status", Scope::default(), None).finish())

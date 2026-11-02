@@ -1,4 +1,4 @@
-//! Platform layer: the OS gate, `Fs` and `Approve`, lock try and hold, bounded listing, and volume info.
+//! Platform layer: the OS gate, `Fs`, lock try and hold, bounded listing, and volume info.
 
 use std::process::Command;
 
@@ -39,9 +39,6 @@ use std::time::SystemTime;
 
 #[cfg(target_os = "macos")]
 pub mod apfs;
-
-#[cfg(target_os = "macos")]
-pub mod local_auth;
 
 /// A directory this process created. Dropping it removes the directory and everything in it.
 #[derive(Debug)]
@@ -330,14 +327,8 @@ pub enum Availability {
     Unavailable(String),
 }
 
-/// Owner approval. This feature only asks whether it is available; ROAD-7 adds `evaluate`.
-pub trait Approve {
-    fn owner_auth_available(&self) -> Availability;
-}
-
 pub struct Platform {
     pub fs: Box<dyn Fs>,
-    pub approve: Box<dyn Approve>,
 }
 
 #[cfg(target_os = "macos")]
@@ -345,7 +336,6 @@ pub fn current() -> Result<Platform, NotMacOs> {
     let holder = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("cargo-hive"));
     Ok(Platform {
         fs: Box::new(apfs::Apfs::new(holder)),
-        approve: Box::new(local_auth::LocalAuth),
     })
 }
 
