@@ -26,6 +26,8 @@ struct Opts {
     fail_stat: HashSet<PathBuf>,
     fail_clone: HashMap<PathBuf, i32>,
     plant_before_clone: HashMap<PathBuf, Vec<u8>>,
+    /// After the first `entry_stat` of this path, replace the file with a symlink to the value.
+    symlink_after_stat: HashMap<PathBuf, PathBuf>,
     on_compress: Option<OnCompress>,
     /// Create `child` just before the 1-based `nth` bounded listing of `parent`.
     create_before_listing: Vec<(PathBuf, PathBuf, u64)>,
@@ -37,6 +39,7 @@ struct State {
     opts: Mutex<Opts>,
     removes: Mutex<u64>,
     listings: Mutex<HashMap<PathBuf, u64>>,
+    stated: Mutex<HashSet<PathBuf>>,
 }
 
 #[derive(Clone)]
@@ -53,6 +56,7 @@ impl Recording {
                 opts: Mutex::new(Opts::default()),
                 removes: Mutex::new(0),
                 listings: Mutex::new(HashMap::new()),
+                stated: Mutex::new(HashSet::new()),
             }),
         }
     }
@@ -120,6 +124,17 @@ impl Recording {
             .unwrap()
             .fail_stat
             .insert(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// The first `entry_stat` still sees the real file. It is then replaced with a symlink.
+    pub fn symlink_after_stat(self, path: impl AsRef<Path>, dest: impl AsRef<Path>) -> Recording {
+        self.state
+            .opts
+            .lock()
+            .unwrap()
+            .symlink_after_stat
+            .insert(path.as_ref().to_path_buf(), dest.as_ref().to_path_buf());
         self
     }
 
@@ -341,7 +356,25 @@ impl Fs for Recording {
                 format!("injected stat failure for {}", path.display()),
             ));
         }
-        self.state.fs.entry_stat(path)
+        let stat = self.state.fs.entry_stat(path)?;
+        let dest = self
+            .state
+            .opts
+            .lock()
+            .unwrap()
+            .symlink_after_stat
+            .get(path)
+            .cloned();
+        if let Some(dest) = dest {
+            let mut stated = self.state.stated.lock().unwrap();
+            if stated.insert(path.to_path_buf()) {
+                std::fs::remove_file(path)
+                    .unwrap_or_else(|err| panic!("replace {} after stat: {err}", path.display()));
+                std::os::unix::fs::symlink(&dest, path)
+                    .unwrap_or_else(|err| panic!("symlink {} after stat: {err}", path.display()));
+            }
+        }
+        Ok(stat)
     }
 
     fn read_dir_bounded(

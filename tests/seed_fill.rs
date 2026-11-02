@@ -538,6 +538,191 @@ fn a_seeded_target_no_build_has_touched_counts_as_lock_missing() {
 }
 
 #[test]
+fn a_hash_reread_longer_than_64_bytes_names_the_path_and_skips_the_unit() {
+    let built = built();
+    let units = registry_units(&built.hive, &built.target);
+    let unit = units[0].clone();
+    let hash_path = built
+        .target_path
+        .join("debug/.fingerprint")
+        .join(&unit.dir_name)
+        .join(&unit.stem);
+    std::fs::write(&hash_path, vec![b'a'; 65]).unwrap();
+    let recording = Recording::over_real();
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let report = fill_in(&built.hive, &lib, &built.target, &|| false);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|(_, _, detail)| { detail.contains(&hash_path.display().to_string()) }),
+        "{:?}",
+        report.findings
+    );
+    let rows = store_rows(&lib);
+    assert!(rows.iter().all(|row| {
+        row.name_meta != unit.dir_name || row.fingerprint_hash != unit.fingerprint_hash
+    }));
+    assert!(!rows.is_empty(), "the other units are still filled");
+}
+
+#[test]
+fn a_unit_left_out_for_an_unresolved_edge_is_named_and_the_others_are_filled() {
+    let planted = planted_unresolved();
+    let recording = Recording::over_real();
+    let lib = narrowed(&planted.hive, recording.fs(), &planted.repo);
+    let report = fill_in(&planted.hive, &lib, &planted.target, &|| false);
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let (_, path, detail) = &report.findings[0];
+    assert_eq!(path.as_deref(), Some(planted.target_path.as_path()));
+    assert!(
+        detail.contains(&planted.left_out)
+            && detail.contains(&planted.target_path.display().to_string()),
+        "{detail}"
+    );
+    let rows = store_rows(&lib);
+    assert!(
+        rows.iter().all(|row| row.name_meta != planted.left_out),
+        "the left-out unit is not stored: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.name_meta == planted.kept),
+        "the other unit is still filled: {rows:?} {report:?}"
+    );
+    assert!(!report.cancelled);
+}
+
+struct Planted {
+    hive: Hive,
+    repo: PathBuf,
+    target_path: PathBuf,
+    target: TargetDir,
+    left_out: String,
+    kept: String,
+}
+
+fn planted_unresolved() -> Planted {
+    let hive = Hive::ready();
+    let repo = common::init_repo(&hive.home.path.join("app"), "");
+    common::register(&hive, &repo);
+    let target_path = hive.home.path.join("target");
+    let profile = target_path.join("debug");
+    let hour = Duration::from_secs(3600);
+    let month = Duration::from_secs(30 * 86_400);
+    let open = "a-1111111111111111";
+    let learned = "d-4444444444444444";
+    let kept = "liba-aaaaaaaaaaaaaaa1";
+    let stale = "liba-aaaaaaaaaaaaaaa2";
+    plant_unit(&profile, open, "bin-a", 101, &[("liba", 7, 999)], hour);
+    plant_unit(&profile, learned, "bin-d", 104, &[("liba", 7, 201)], hour);
+    plant_unit(&profile, kept, "lib-liba", 201, &[], month);
+    plant_unit(&profile, stale, "lib-liba", 1, &[], month);
+    empty_hash(&profile, stale, "lib-liba", month);
+    let registry = hive
+        .cargo_home
+        .path
+        .join("registry/src/index.crates.io-1/a-1.0.0/src/lib.rs");
+    let registry = registry.display().to_string();
+    plant_dep_info(&profile, "bin-a", open, &registry);
+    plant_dep_info(&profile, "bin-d", learned, "src/lib.rs");
+    plant_dep_info(&profile, "lib-liba", kept, &registry);
+    std::fs::write(profile.join(".cargo-build-lock"), b"lock").unwrap();
+    std::fs::write(
+        target_path.join("CACHEDIR.TAG"),
+        format!(
+            "Signature: 8a477f597d28d172789f06886806bc55\n{}\n",
+            cargo_hive::cargo_target::TAG_LINE
+        ),
+    )
+    .unwrap();
+    let profile_report = read_profile(&profile);
+    assert!(
+        matches!(
+            profile_report.format,
+            cargo_hive::fingerprint::Format::Supported
+        ),
+        "{:?}",
+        profile_report.format
+    );
+    let target = TargetDir {
+        path: target_path.clone(),
+        owner: Owner::Owned {
+            checkout: repo.clone(),
+        },
+        profiles: vec![profile_report],
+        size: None,
+        unreadable: None,
+    };
+    Planted {
+        hive,
+        repo,
+        target_path,
+        target,
+        left_out: open.to_string(),
+        kept: kept.to_string(),
+    }
+}
+
+fn plant_unit(
+    profile: &Path,
+    name: &str,
+    stem: &str,
+    fp: u64,
+    deps: &[(&str, u64, u64)],
+    age: Duration,
+) {
+    let dir = profile.join(".fingerprint").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(stem), cargo_hive::fingerprint::le_hex(fp)).unwrap();
+    let body: Vec<String> = deps
+        .iter()
+        .map(|(dep, package, hash)| format!("[{package},\"{dep}\",false,{hash}]"))
+        .collect();
+    std::fs::write(
+        dir.join(format!("{stem}.json")),
+        format!(
+            "{{\"rustc\":1,\"features\":\"[]\",\"declared_features\":\"[]\",\"target\":2,\"profile\":3,\"path\":4,\"deps\":[{}],\"local\":[],\"rustflags\":[],\"config\":5,\"compile_kind\":0}}",
+            body.join(",")
+        ),
+    )
+    .unwrap();
+    let kind = cargo_hive::fingerprint::kind_of(stem);
+    let stamp = cargo_hive::liveness::unit_timestamp(profile, name, &kind);
+    std::fs::write(&stamp, b"").unwrap();
+    let when = SystemTime::now() - age;
+    std::fs::File::options()
+        .write(true)
+        .open(&stamp)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+fn empty_hash(profile: &Path, name: &str, stem: &str, age: Duration) {
+    let hash = profile.join(".fingerprint").join(name).join(stem);
+    std::fs::write(&hash, b"").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&hash)
+        .unwrap()
+        .set_modified(SystemTime::now() - age)
+        .unwrap();
+}
+
+fn plant_dep_info(profile: &Path, stem: &str, dir_name: &str, first_input: &str) {
+    let meta = cargo_hive::fingerprint::unit_hash(dir_name).unwrap();
+    let kind = cargo_hive::fingerprint::kind_of(stem);
+    let crate_name = stem
+        .strip_prefix(&format!("{kind}-"))
+        .filter(|name| !name.is_empty())
+        .unwrap_or(stem);
+    let deps = profile.join("deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    let name = format!("{crate_name}-{meta}.d");
+    std::fs::write(deps.join(name), format!("out: {first_input}\n")).unwrap();
+}
+
+#[test]
 fn a_cancelled_fill_merges_what_it_published() {
     let built = built();
     let _units = registry_units(&built.hive, &built.target);
@@ -550,4 +735,288 @@ fn a_cancelled_fill_merges_what_it_published() {
     let rows = store_rows(&lib);
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert!(store::entry_dir(&lib.state, &rows[0]).is_dir());
+    assert!(
+        tag_path(&lib.state).is_file(),
+        "cancel still clones the tag when it was absent"
+    );
+}
+
+#[test]
+fn a_second_fill_moves_last_live_at_and_leaves_filled_at() {
+    let built = built();
+    let recording = Recording::over_real();
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let first = fill_in(&built.hive, &lib, &built.target, &|| false);
+    assert!(first.entries_added >= 1, "{first:?}");
+    let before = store_rows(&lib);
+    std::thread::sleep(Duration::from_secs(2));
+    let second = fill_in(&built.hive, &lib, &built.target, &|| false);
+    assert_eq!(second.entries_added, 0, "{second:?}");
+    assert!(second.entries_held >= 1, "{second:?}");
+    let after = store_rows(&lib);
+    assert_eq!(after.len(), before.len());
+    for row in &after {
+        let prev = before
+            .iter()
+            .find(|kept| {
+                kept.name_meta == row.name_meta && kept.fingerprint_hash == row.fingerprint_hash
+            })
+            .unwrap();
+        assert_eq!(row.filled_at, prev.filled_at, "{row:?}");
+        assert!(
+            row.last_live_at > prev.last_live_at,
+            "last_live_at moved: before {} after {} ({})",
+            prev.last_live_at,
+            row.last_live_at,
+            row.name_meta
+        );
+    }
+}
+
+#[test]
+fn a_final_directory_with_no_row_is_held_and_adopted() {
+    let built = built();
+    let recording = Recording::over_real();
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let first = fill_in(&built.hive, &lib, &built.target, &|| false);
+    assert!(first.entries_added >= 1, "{first:?}");
+    let before = store_rows(&lib);
+    std::fs::remove_file(lib.state.root().join(store::STORE_FILE)).unwrap();
+    assert!(store_rows(&lib).is_empty(), "the row is gone");
+    for row in &before {
+        assert!(store::entry_dir(&lib.state, row).is_dir());
+    }
+    let mark = recording.log().len();
+    let second = fill_in(&built.hive, &lib, &built.target, &|| false);
+    let later = &recording.log()[mark..];
+    assert!(
+        later.iter().all(|line| !line.starts_with("clone ")),
+        "a final directory is not cloned again: {later:?}"
+    );
+    assert_eq!(second.entries_added, 0, "{second:?}");
+    assert!(second.entries_held >= 1, "{second:?}");
+    let adopted = store_rows(&lib);
+    assert_eq!(adopted.len(), before.len(), "{adopted:?}");
+    for row in &adopted {
+        assert!(
+            before.iter().any(|prev| {
+                prev.name_meta == row.name_meta && prev.fingerprint_hash == row.fingerprint_hash
+            }),
+            "adopted {row:?}"
+        );
+        assert!(row.filled_at > 0 && row.last_live_at > 0, "{row:?}");
+    }
+}
+
+fn try_fill(
+    hive: &Hive,
+    lib: &LibCtx,
+    target: &TargetDir,
+) -> Result<FillReport, cargo_hive::seed::Error> {
+    let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let _home = CargoHomeGuard::set(&hive.cargo_home.path);
+    cargo_hive::seed::fill::fill(
+        &lib.ctx(),
+        &lib.repos[0],
+        std::slice::from_ref(target),
+        &|| false,
+    )
+}
+
+#[test]
+fn a_full_disk_cloning_the_tag_is_disk_full() {
+    let built = built();
+    let state = cargo_hive::state::State::open_at(built.hive.home.path.clone()).unwrap();
+    let tag = tag_path(&state);
+    let recording = Recording::over_real().fail_clone(&tag, libc::ENOSPC);
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let err = try_fill(&built.hive, &lib, &built.target).expect_err("a full disk is not success");
+    assert!(matches!(err, cargo_hive::seed::Error::DiskFull(_)), "{err}");
+}
+
+#[test]
+fn a_full_disk_resetting_the_temp_directory_is_disk_full() {
+    let built = built();
+    let unit = registry_units(&built.hive, &built.target)
+        .into_iter()
+        .next()
+        .unwrap();
+    let key = format!("{}-{}", unit.dir_name, unit.fingerprint_hash);
+    let tmp_name = format!("{}-{key}", std::process::id());
+    let disk = FullDisk::mount_with(|mount| {
+        std::fs::write(mount.join(&tmp_name), b"").unwrap();
+    });
+    point_store_tmp(&built.hive, &disk.mount);
+    let recording = Recording::over_real();
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let err = try_fill(&built.hive, &lib, &built.target).expect_err("a full disk is not success");
+    assert!(matches!(err, cargo_hive::seed::Error::DiskFull(_)), "{err}");
+}
+
+#[test]
+fn a_full_disk_creating_the_temp_parent_is_disk_full() {
+    let built = built();
+    let disk = FullDisk::mount_with(|_| {});
+    point_store_tmp(&built.hive, &disk.mount);
+    let recording = Recording::over_real();
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let err = try_fill(&built.hive, &lib, &built.target).expect_err("a full disk is not success");
+    assert!(matches!(err, cargo_hive::seed::Error::DiskFull(_)), "{err}");
+}
+
+struct FullDisk {
+    _scratch: common::Scratch,
+    mount: PathBuf,
+    _filler: std::fs::File,
+}
+
+impl FullDisk {
+    fn mount_with(prepare: impl FnOnce(&Path)) -> FullDisk {
+        sweep_full_disks();
+        let scratch = common::Scratch::new("diskfull");
+        let image = scratch.path.join("hive.dmg");
+        let mount = scratch.path.join("mnt");
+        std::fs::create_dir_all(&mount).unwrap();
+        disk_tool(&[
+            "hdiutil",
+            "create",
+            "-size",
+            "12m",
+            "-fs",
+            "HFS+",
+            "-volname",
+            "hive-it",
+            "-quiet",
+            image.to_str().unwrap(),
+        ]);
+        disk_tool(&[
+            "hdiutil",
+            "attach",
+            "-nobrowse",
+            "-quiet",
+            "-mountpoint",
+            mount.to_str().unwrap(),
+            image.to_str().unwrap(),
+        ]);
+        std::fs::write(mount.join(".metadata_never_index"), b"").unwrap();
+        prepare(&mount);
+        let mut filler = std::fs::File::create(mount.join("filler")).unwrap();
+        pack_until_full(&mut filler);
+        match std::fs::create_dir(mount.join("no-room")) {
+            Err(err) if err.raw_os_error() == Some(libc::ENOSPC) => {}
+            other => panic!("the volume should be full before the fill, got {other:?}"),
+        }
+        FullDisk {
+            _scratch: scratch,
+            mount,
+            _filler: filler,
+        }
+    }
+}
+
+impl Drop for FullDisk {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("hdiutil")
+            .args(["detach", "-force", "-quiet"])
+            .arg(&self.mount)
+            .status();
+    }
+}
+
+fn pack_until_full(file: &mut std::fs::File) {
+    use std::io::Write;
+    for size in [1024 * 1024, 4096, 512, 1] {
+        let chunk = vec![b'x'; size];
+        loop {
+            match file.write(&chunk) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let _ = file.flush();
+                }
+                Err(err) if err.raw_os_error() == Some(libc::ENOSPC) => break,
+                Err(err) => panic!("filling the volume: {err}"),
+            }
+        }
+    }
+}
+
+fn point_store_tmp(hive: &Hive, mount: &Path) {
+    let store = hive.home.path.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    std::os::unix::fs::symlink(mount, store.join(".tmp")).unwrap();
+}
+
+fn disk_tool(args: &[&str]) {
+    let out = std::process::Command::new(args[0])
+        .args(&args[1..])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn sweep_full_disks() {
+    let Ok(entries) = std::fs::read_dir("/private/tmp") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(rest) = name.strip_prefix("hive-it-diskfull-") else {
+            continue;
+        };
+        let pid = rest.split('-').next().unwrap_or("");
+        if pid == std::process::id().to_string() {
+            continue;
+        }
+        let alive = std::process::Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if alive {
+            continue;
+        }
+        let _ = std::process::Command::new("hdiutil")
+            .args(["detach", "-force", "-quiet"])
+            .arg(entry.path().join("mnt"))
+            .status();
+        let _ = std::fs::remove_dir_all(entry.path());
+    }
+}
+
+#[test]
+fn a_file_that_is_not_regular_when_cloned_fills_nothing_for_that_unit() {
+    let built = built();
+    let units = registry_units(&built.hive, &built.target);
+    let unit = units[0].clone();
+    let outside = built.hive.home.path.join("outside-the-target");
+    std::fs::write(&outside, b"not-for-the-store").unwrap();
+    let extra = built
+        .target_path
+        .join("debug/.fingerprint")
+        .join(&unit.dir_name)
+        .join("extra");
+    std::fs::write(&extra, b"regular-at-listing").unwrap();
+    let recording = Recording::over_real().symlink_after_stat(&extra, &outside);
+    let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
+    let report = fill_in(&built.hive, &lib, &built.target, &|| false);
+    assert!(
+        report.findings.iter().any(|(_, _, detail)| {
+            detail.contains("not a regular file") && detail.contains(&extra.display().to_string())
+        }),
+        "{:?}",
+        report.findings
+    );
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let rows = store_rows(&lib);
+    assert!(rows.iter().all(|row| {
+        row.name_meta != unit.dir_name || row.fingerprint_hash != unit.fingerprint_hash
+    }));
+    assert!(!rows.is_empty(), "the other units are still filled");
+    assert_eq!(std::fs::read(&outside).unwrap(), b"not-for-the-store");
+    assert!(extra.symlink_metadata().unwrap().file_type().is_symlink());
 }

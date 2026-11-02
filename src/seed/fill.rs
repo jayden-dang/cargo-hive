@@ -45,6 +45,11 @@ enum ClonedUnit {
     StopTarget,
 }
 
+enum Stop {
+    Full(String),
+    Failed(String),
+}
+
 struct Batch {
     cloned: Vec<Cloned>,
     disk_full: Option<String>,
@@ -126,7 +131,20 @@ fn fill_target(
     window: Duration,
 ) -> Result<(), Error> {
     let units = match source::live_registry_units(pass.ctx, target, home, window) {
-        Ok((units, _)) => units,
+        Ok((units, left_out)) => {
+            if !left_out.is_empty() {
+                pass.report.findings.push((
+                    "unit.left_out".to_string(),
+                    Some(target.path.clone()),
+                    format!(
+                        "{}: {} left out; a dependency edge resolved to no unit, so these units were not stored",
+                        target.path.display(),
+                        left_out.join(", ")
+                    ),
+                ));
+            }
+            units
+        }
         Err(skip) => {
             note_skip(pass.report, target, &skip);
             return Ok(());
@@ -227,12 +245,19 @@ fn clone_under_lock(
         }
     }
     if !tag_present {
-        if let Err(detail) = clone_tag(pass.ctx, target) {
-            pass.report.findings.push((
-                "tag.clone".to_string(),
-                Some(target.path.clone()),
-                format!("{}: {detail}", target.path.display()),
-            ));
+        match clone_tag(pass.ctx, target) {
+            Ok(()) => {}
+            Err(Stop::Full(why)) => {
+                batch.disk_full = Some(why);
+                return batch;
+            }
+            Err(Stop::Failed(detail)) => {
+                pass.report.findings.push((
+                    "tag.clone".to_string(),
+                    Some(target.path.clone()),
+                    format!("{}: {detail}", target.path.display()),
+                ));
+            }
         }
     }
     batch
@@ -278,13 +303,18 @@ fn clone_unit(
     };
     let key = format!("{}-{}", unit.dir_name, unit.fingerprint_hash);
     let tmp = store::tmp_dir(ctx.state, &key);
-    if let Err(detail) = reset_tmp(&tmp) {
-        report.findings.push((
-            "store.tmp".to_string(),
-            Some(target.path.clone()),
-            format!("{}: {detail}", target.path.display()),
-        ));
-        return Ok(ClonedUnit::Skip);
+    if let Err(stop) = reset_tmp(&tmp) {
+        return match stop {
+            Stop::Full(why) => Err(why),
+            Stop::Failed(detail) => {
+                report.findings.push((
+                    "store.tmp".to_string(),
+                    Some(target.path.clone()),
+                    format!("{}: {detail}", target.path.display()),
+                ));
+                Ok(ClonedUnit::Skip)
+            }
+        };
     }
     let mut size = 0u64;
     for rel in &files {
@@ -293,16 +323,22 @@ fn clone_unit(
         if let Some(parent) = dst.parent() {
             if let Err(err) = std::fs::create_dir_all(parent) {
                 abandon(&tmp);
-                report.findings.push((
-                    "store.tmp".to_string(),
-                    Some(target.path.clone()),
-                    format!(
-                        "{}: {}: {err}; remove the temp directory and run the command again",
-                        target.path.display(),
-                        parent.display()
-                    ),
-                ));
-                return Ok(ClonedUnit::Skip);
+                let detail = format!(
+                    "{}: {}: {err}; remove the temp directory and run the command again",
+                    target.path.display(),
+                    parent.display()
+                );
+                return match stop_io(&err, &detail) {
+                    Stop::Full(why) => Err(why),
+                    Stop::Failed(detail) => {
+                        report.findings.push((
+                            "store.tmp".to_string(),
+                            Some(target.path.clone()),
+                            detail,
+                        ));
+                        Ok(ClonedUnit::Skip)
+                    }
+                };
             }
         }
         let stat = match ctx.fs.entry_stat(&src) {
@@ -321,6 +357,19 @@ fn clone_unit(
                 return Ok(ClonedUnit::Skip);
             }
         };
+        if stat.kind != EntryKind::File {
+            abandon(&tmp);
+            report.findings.push((
+                "unit.refused".to_string(),
+                Some(target.path.clone()),
+                format!(
+                    "{}: {} is not a regular file; this unit was not stored",
+                    target.path.display(),
+                    src.display()
+                ),
+            ));
+            return Ok(ClonedUnit::Skip);
+        }
         if let Err(err) = ctx.fs.clone_file(&src, &dst) {
             abandon(&tmp);
             let detail = format!(
@@ -520,57 +569,72 @@ fn hash_unchanged(path: &Path, expected: &str) -> Result<bool, String> {
         .read_to_end(&mut buf)
         .map_err(|err| format!("{}: {err}", path.display()))?;
     if buf.len() as u64 > HASH_CAP {
-        return Ok(false);
+        return Err(format!(
+            "{} is longer than {HASH_CAP} bytes; shorten the hash file and build the unit again",
+            path.display()
+        ));
     }
     Ok(buf == expected.as_bytes())
 }
 
-fn clone_tag(ctx: &Ctx<'_>, target: &TargetDir) -> Result<(), String> {
+fn clone_tag(ctx: &Ctx<'_>, target: &TargetDir) -> Result<(), Stop> {
     let dst = store::tag_path(ctx.state);
     if path_present(&dst) {
         return Ok(());
     }
     let src = target.path.join("CACHEDIR.TAG");
     if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            format!(
-                "{}: {err}; remove the store directory and run the command again",
-                parent.display()
-            )
-        })?;
-    }
-    ctx.fs.clone_file(&src, &dst).map_err(|err| {
-        format!(
-            "{}: {err}; the store tag was not written, so run the command again",
-            src.display()
-        )
-    })
-}
-
-fn reset_tmp(tmp: &Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(tmp) {
-        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(tmp),
-        Ok(_) => std::fs::remove_file(tmp),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => {
-            return Err(format!(
-                "{}: {err}; remove the temp directory and run the command again",
-                tmp.display()
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            return Err(stop_io(
+                &err,
+                &format!(
+                    "{}: {err}; remove the store directory and run the command again",
+                    parent.display()
+                ),
             ));
         }
     }
-    .map_err(|err| {
-        format!(
+    match ctx.fs.clone_file(&src, &dst) {
+        Ok(()) => Ok(()),
+        Err(err) => Err(stop_io(
+            &err,
+            &format!(
+                "{}: {err}; the store tag was not written, so run the command again",
+                src.display()
+            ),
+        )),
+    }
+}
+
+fn stop_io(err: &io::Error, detail: &str) -> Stop {
+    if err.raw_os_error() == Some(libc::ENOSPC) || err.kind() == io::ErrorKind::StorageFull {
+        Stop::Full(detail.to_string())
+    } else {
+        Stop::Failed(detail.to_string())
+    }
+}
+
+fn reset_tmp(tmp: &Path) -> Result<(), Stop> {
+    let removed = match std::fs::symlink_metadata(tmp) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(tmp),
+        Ok(_) => std::fs::remove_file(tmp),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(tmp_stop(tmp, err)),
+    };
+    if let Err(err) = removed {
+        return Err(tmp_stop(tmp, err));
+    }
+    std::fs::create_dir_all(tmp).map_err(|err| tmp_stop(tmp, err))
+}
+
+fn tmp_stop(tmp: &Path, err: io::Error) -> Stop {
+    stop_io(
+        &err,
+        &format!(
             "{}: {err}; remove the temp directory and run the command again",
             tmp.display()
-        )
-    })?;
-    std::fs::create_dir_all(tmp).map_err(|err| {
-        format!(
-            "{}: {err}; remove the temp directory and run the command again",
-            tmp.display()
-        )
-    })
+        ),
+    )
 }
 
 fn abandon(tmp: &Path) {
