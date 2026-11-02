@@ -722,14 +722,14 @@ _Requirements: SEED-1.1, SEED-1.2, SEED-2.1, SEED-1.9, SEED-1.10, SEED-1.11, SEE
 
 **Depends-on:** Task 12
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `src/seed/record.rs`: `a_write_drops_records_whose_target_is_gone`; `a_write_over_the_cap_drops_the_oldest_records_until_it_fits`, with a `write_capped` seam taking the cap; `the_newest_record_survives_the_cap`.
   - `tests/seed.rs`: `seed_writes_a_record_holding_each_cloned_unit_and_its_stamp`: `seeds.json` names the lane's target and a run-build-script unit's stamp under `build/<dir>/`; `seeds_receipt_holds_none_of_the_four_counts`; `a_cancelled_seed_records_what_it_cloned`, at the `seed::run` seam; `a_seed_that_cloned_nothing_writes_no_record`.
 
   Run; expect a compile failure.
-- [ ] **Step 2: Implement** (design decision 4). `write` runs inside `locked_or_cancelled`: read with `read_bounded`, treat unreadable as empty with a note, insert, drop records whose path is gone, sort by `written_at`, and encode; while over the cap, drop the oldest; `write_bounded`. `seed::run` calls it after `place` on every path that placed anything, a cancel and `DiskFull` included. A failure is a finding and leaves the exit code 0, since `status` then reports nothing for the target, as SEED-6.8 allows.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): record what a seed cloned`
+- [x] **Step 2: Implement** (design decision 4). `write` runs inside `locked_or_cancelled`: read with `read_bounded`, treat unreadable as empty with a note, insert, drop records whose path is gone, sort by `written_at`, and encode; while over the cap, drop the oldest; `write_bounded`. `seed::run` calls it after `place` on every path that placed anything, a cancel and `DiskFull` included. A failure is a finding and leaves the exit code 0, since `status` then reports nothing for the target, as SEED-6.8 allows.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): record what a seed cloned`
 
 _Requirements: SEED-6.1, SEED-6.10_
 
