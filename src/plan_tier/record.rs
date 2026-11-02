@@ -322,6 +322,11 @@ mod tests {
         let err = insert(&over, &|| false, vec![extra], 1_000).unwrap_err();
         let text = err.to_string();
         assert!(text.contains("plans.json"), "{text}");
+        assert!(text.contains("larger than"), "{text}");
+        assert!(text.contains("smaller"), "{text}");
+        assert!(!text.contains("malformed"), "{text}");
+        assert!(!text.contains("remove it"), "{text}");
+        assert!(!matches!(err, StateError::Malformed { .. }), "{text}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert!(matches!(
             get(&over, "bbbbbbbbbbbbbbbb").unwrap(),

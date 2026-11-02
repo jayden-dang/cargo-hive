@@ -20,6 +20,12 @@ pub enum StateError {
         file: PathBuf,
         detail: String,
     },
+    /// A write that was not stored because the encoded file would pass its cap.
+    /// The file already on disk is unchanged.
+    Oversized {
+        file: PathBuf,
+        max: u64,
+    },
     NoHome,
     /// The caller cancelled while another process held the state lock.
     Cancelled,
@@ -36,6 +42,13 @@ impl fmt::Display for StateError {
                 write!(
                     f,
                     "{} is malformed ({detail}); fix or remove it by hand",
+                    file.display()
+                )
+            }
+            StateError::Oversized { file, max } => {
+                write!(
+                    f,
+                    "{} would be larger than {max} bytes; plan a smaller set of repositories",
                     file.display()
                 )
             }
@@ -271,10 +284,7 @@ impl Tx<'_> {
         let path = state_file(self.root, name)?;
         let bytes = encode(&path, value)?;
         if bytes.len() as u64 > max {
-            return Err(StateError::Malformed {
-                file: path,
-                detail: format!("larger than {max} bytes"),
-            });
+            return Err(StateError::Oversized { file: path, max });
         }
         atomic_write(&path, &bytes)
     }
