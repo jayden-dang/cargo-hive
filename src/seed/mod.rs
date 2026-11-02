@@ -18,14 +18,13 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::State(err) => write!(f, "{err}"),
-            Error::DiskFull(why) => {
-                write!(
-                    f,
-                    "the disk is full ({why}); free space and run the command again"
-                )
-            }
+            Error::DiskFull(why) => f.write_str(&disk_full(why)),
         }
     }
+}
+
+pub(crate) fn disk_full(why: &str) -> String {
+    format!("the disk is full ({why}); free space and run the command again")
 }
 
 impl std::error::Error for Error {

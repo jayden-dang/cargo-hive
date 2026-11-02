@@ -60,37 +60,71 @@ pub fn tmp_dir(state: &State, key: &str) -> PathBuf {
         .join(format!("{}-{key}", std::process::id()))
 }
 
-pub fn sweep_tmp(state: &State, now: SystemTime) {
+pub fn sweep_tmp(state: &State, now: SystemTime) -> Result<(), String> {
+    sweep_tmp_bounded(state, now, CRATE_DIR_CAP)
+}
+
+fn sweep_tmp_bounded(state: &State, now: SystemTime, cap: usize) -> Result<(), String> {
     let dir = store_dir(state).join(".tmp");
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return;
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(format!(
+                "{}: {err}; remove the temp directory and run the command again",
+                dir.display()
+            ));
+        }
     };
     for (seen, entry) in entries.enumerate() {
-        if seen >= CRATE_DIR_CAP {
-            return;
+        if seen >= cap {
+            return Err(format!(
+                "{} has more than {cap} entries; remove temp entries until fewer remain and run the command again",
+                dir.display()
+            ));
         }
-        let Ok(entry) = entry else {
-            continue;
-        };
+        let entry = entry.map_err(|err| {
+            format!(
+                "{}: {err}; remove the temp directory and run the command again",
+                dir.display()
+            )
+        })?;
         let path = entry.path();
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        let Ok(modified) = meta.modified() else {
-            continue;
-        };
+        let meta = fs::symlink_metadata(&path).map_err(|err| {
+            format!(
+                "{}: {err}; remove that temp entry and run the command again",
+                path.display()
+            )
+        })?;
+        let modified = meta.modified().map_err(|err| {
+            format!(
+                "{}: {err}; remove that temp entry and run the command again",
+                path.display()
+            )
+        })?;
         let Ok(age) = now.duration_since(modified) else {
             continue;
         };
         if age <= TMP_KEEP {
             continue;
         }
-        if meta.file_type().is_dir() {
-            let _ = fs::remove_dir_all(&path);
-        } else {
-            let _ = fs::remove_file(&path);
-        }
+        remove_aged(&path, meta.file_type().is_dir())?;
     }
+    Ok(())
+}
+
+fn remove_aged(path: &Path, is_dir: bool) -> Result<(), String> {
+    let removed = if is_dir {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    removed.map_err(|err| {
+        format!(
+            "{}: {err}; remove that temp entry and run the command again",
+            path.display()
+        )
+    })
 }
 
 pub fn read(state: &State) -> Result<StoreFile, StateError> {
@@ -115,7 +149,7 @@ pub enum Published {
 pub enum PublishFailed {
     Compress(String),
     DiskFull(String),
-    Stopped,
+    Stopped(String),
 }
 
 impl fmt::Display for PublishFailed {
@@ -127,16 +161,11 @@ impl fmt::Display for PublishFailed {
                     "could not publish the entry ({why}); it was left unavailable"
                 )
             }
-            PublishFailed::DiskFull(why) => {
+            PublishFailed::DiskFull(why) => f.write_str(&super::disk_full(why)),
+            PublishFailed::Stopped(path) => {
                 write!(
                     f,
-                    "the disk is full ({why}); free space and run the command again"
-                )
-            }
-            PublishFailed::Stopped => {
-                write!(
-                    f,
-                    "stopped while publishing an entry; run the command again"
+                    "stopped while publishing an entry ({path}); run the command again"
                 )
             }
         }
@@ -157,12 +186,12 @@ pub fn compress_and_publish(
     files.sort();
     for path in &files {
         if cancel() {
-            return Err(PublishFailed::Stopped);
+            return Err(PublishFailed::Stopped(tmp.display().to_string()));
         }
         compress_one(fs, tmp, path)?;
     }
     if cancel() {
-        return Err(PublishFailed::Stopped);
+        return Err(PublishFailed::Stopped(tmp.display().to_string()));
     }
     publish(state, tmp, row)
 }
@@ -345,6 +374,7 @@ mod tests {
     use crate::state::{State, StateError};
     use std::collections::BTreeMap;
     use std::os::macos::fs::MetadataExt as _;
+    use std::os::unix::io::AsRawFd;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, SystemTime};
@@ -429,9 +459,15 @@ mod tests {
             let polls = AtomicUsize::new(0);
             let cancel = || polls.fetch_add(1, Ordering::SeqCst) >= stop_after;
             let published = compress_and_publish(&*fs, &state, &tmp, &row, &cancel);
+            let err = published.unwrap_err();
             assert!(
-                matches!(published, Err(PublishFailed::Stopped)),
-                "stop_after {stop_after}"
+                matches!(err, PublishFailed::Stopped(_)),
+                "stop_after {stop_after}: {err}"
+            );
+            let text = err.to_string();
+            assert!(
+                text.contains(&tmp.display().to_string()),
+                "stop_after {stop_after}: {text}"
             );
             assert!(read(&state).unwrap().units.is_empty());
             assert!(tmp.is_dir(), "a stopped publish leaves its temp directory");
@@ -600,9 +636,15 @@ mod tests {
             entry_stat: None,
         };
         let err = compress_and_publish(&fs, &state, &tmp, &row, &|| false).unwrap_err();
-        assert!(
-            matches!(err, PublishFailed::DiskFull(ref why) if why.contains("libd-0123456789abcdef.rlib")),
-            "{err}"
+        let PublishFailed::DiskFull(why) = &err else {
+            panic!("{err}");
+        };
+        assert!(why.contains("libd-0123456789abcdef.rlib"), "{err}");
+        let sentence = format!("the disk is full ({why}); free space and run the command again");
+        assert_eq!(err.to_string(), sentence);
+        assert_eq!(
+            crate::seed::Error::DiskFull(why.clone()).to_string(),
+            sentence
         );
         assert!(!entry_dir(&state, &row).exists());
         assert!(read(&state).unwrap().units.is_empty());
@@ -692,11 +734,190 @@ mod tests {
         set_mtime(&old, now - day - Duration::from_secs(2));
         set_mtime(&boundary, now - day);
         set_mtime(&young, now - Duration::from_secs(30));
-        sweep_tmp(&state, now);
+        sweep_tmp(&state, now).unwrap();
         assert!(!old.exists());
         assert!(boundary.is_dir());
         assert!(young.is_dir());
         finish(&state);
+    }
+
+    #[test]
+    fn sweep_tmp_reports_a_listing_past_its_cap_and_leaves_the_rest() {
+        let (state, _) = scratch_state("sweep-cap");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let day = Duration::from_secs(86_400);
+        let tmp = store_dir(&state).join(".tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut planted = Vec::new();
+        for name in ["one", "two", "three", "four"] {
+            let path = tmp.join(name);
+            std::fs::create_dir(&path).unwrap();
+            set_mtime(&path, now - day - Duration::from_secs(2));
+            planted.push(path);
+        }
+        // `sweep_tmp` calls this with `CRATE_DIR_CAP`. A smaller cap still runs that check.
+        let err = sweep_tmp_bounded(&state, now, 3)
+            .expect_err("a listing past the cap is not a finished sweep");
+        assert!(
+            err.contains(&format!("{} has more than 3 entries", tmp.display())),
+            "{err}"
+        );
+        assert!(
+            err.contains("remove temp entries until fewer remain and run the command again"),
+            "{err}"
+        );
+        assert_eq!(
+            planted.iter().filter(|path| path.exists()).count(),
+            1,
+            "the entry past the cap stays"
+        );
+        finish(&state);
+    }
+
+    #[test]
+    fn sweep_tmp_reports_a_removal_that_fails() {
+        let (state, _) = scratch_state("sweep-remove");
+        let old = tmp_dir(&state, "stuck");
+        std::fs::create_dir_all(&old).unwrap();
+        let file = old.join("f");
+        std::fs::write(&file, b"x").unwrap();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let day = Duration::from_secs(86_400);
+        set_mtime(&old, now - day - Duration::from_secs(2));
+        {
+            let _clear = ClearFlag(file.clone());
+            assert!(set_user_immutable(&file, true));
+            let err = sweep_tmp(&state, now).expect_err("a failed removal names the path");
+            assert!(err.contains(&old.display().to_string()), "{err}");
+            assert!(
+                err.contains("remove that temp entry and run the command again"),
+                "{err}"
+            );
+            assert!(file.exists(), "the entry that could not be removed stays");
+        }
+        finish(&state);
+    }
+
+    #[test]
+    fn sweep_tmp_reports_when_tmp_is_not_a_directory() {
+        let (state, _) = scratch_state("sweep-not-dir");
+        let dir = store_dir(&state).join(".tmp");
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::fs::write(&dir, b"not a directory").unwrap();
+        let err = sweep_tmp(&state, SystemTime::UNIX_EPOCH)
+            .expect_err("a temp path that is not a directory is not a finished sweep");
+        assert!(err.contains(&format!("{}:", dir.display())), "{err}");
+        assert!(
+            err.contains("remove the temp directory and run the command again"),
+            "{err}"
+        );
+        finish(&state);
+    }
+
+    #[test]
+    fn sweep_tmp_accepts_a_missing_tmp_directory() {
+        let (state, _) = scratch_state("sweep-missing");
+        sweep_tmp(&state, SystemTime::UNIX_EPOCH).unwrap();
+        assert!(!store_dir(&state).join(".tmp").exists());
+        finish(&state);
+    }
+
+    #[test]
+    fn sweep_tmp_reports_a_stat_that_fails() {
+        let prefix = PathBuf::from(format!(
+            "/private/tmp/hive-it-store-sweep-stat-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&prefix);
+        let mut root = prefix.clone();
+        while root.join("store/.tmp").display().to_string().len() < 860 {
+            root.push("d".repeat(40));
+        }
+        let state = State::open_at(root).unwrap();
+        let tmp = store_dir(&state).join(".tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let name = "n".repeat(200);
+        let child = tmp.join(&name);
+        assert!(
+            child.display().to_string().len() > 1024,
+            "the child path has to be too long to stat"
+        );
+        {
+            let _clear = UnlinkLong {
+                dir: tmp.clone(),
+                name: name.clone(),
+            };
+            create_long_name(&tmp, &name);
+            let err = sweep_tmp(&state, SystemTime::UNIX_EPOCH)
+                .expect_err("a failed stat names the path");
+            assert!(err.contains(&child.display().to_string()), "{err}");
+            assert!(
+                err.contains("remove that temp entry and run the command again"),
+                "{err}"
+            );
+        }
+        finish(&state);
+        let _ = std::fs::remove_dir_all(&prefix);
+    }
+
+    struct UnlinkLong {
+        dir: PathBuf,
+        name: String,
+    }
+
+    impl Drop for UnlinkLong {
+        fn drop(&mut self) {
+            unlink_long_name(&self.dir, &self.name);
+        }
+    }
+
+    fn create_long_name(dir: &Path, name: &str) {
+        let file = std::fs::File::open(dir).unwrap();
+        let c_name = std::ffi::CString::new(name).unwrap();
+        // SAFETY: `file` is an open directory and `c_name` is one NUL-terminated
+        // component, so `openat` creates that name only inside this directory.
+        let fd = unsafe {
+            libc::openat(
+                file.as_raw_fd(),
+                c_name.as_ptr(),
+                libc::O_CREAT | libc::O_WRONLY,
+                0o644,
+            )
+        };
+        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: `fd` is the descriptor just returned by `openat` and is not used again.
+        unsafe { libc::close(fd) };
+    }
+
+    fn unlink_long_name(dir: &Path, name: &str) {
+        let Ok(file) = std::fs::File::open(dir) else {
+            return;
+        };
+        let Ok(c_name) = std::ffi::CString::new(name) else {
+            return;
+        };
+        // SAFETY: `file` is an open directory and `c_name` is the component created above.
+        unsafe {
+            libc::unlinkat(file.as_raw_fd(), c_name.as_ptr(), 0);
+        }
+    }
+
+    struct ClearFlag(PathBuf);
+
+    impl Drop for ClearFlag {
+        fn drop(&mut self) {
+            let _ = set_user_immutable(&self.0, false);
+        }
+    }
+
+    fn set_user_immutable(path: &Path, on: bool) -> bool {
+        let flag = if on { "uchg" } else { "nouchg" };
+        std::process::Command::new("chflags")
+            .arg(flag)
+            .arg(path)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 
     fn set_mtime(path: &Path, t: SystemTime) {
