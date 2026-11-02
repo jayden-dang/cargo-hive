@@ -206,6 +206,17 @@ fn apply_orphan(ctx: &Ctx, plan: &Plan, cancel: &(dyn Fn() -> bool + Sync)) -> A
                 refusal = Some(reason);
                 break;
             }
+            Removal::Unreadable(faults) => {
+                for fault in faults {
+                    findings.push((
+                        "walk.unreadable".to_string(),
+                        Some(fault.path),
+                        fault.detail,
+                    ));
+                }
+                refusal = Some("walk.unreadable".to_string());
+                break;
+            }
             Removal::MeasureRefused(reason) => {
                 unmeasured.push(Unmeasured {
                     field: target.path.display().to_string(),
@@ -529,10 +540,12 @@ fn resolve(
     plan: &Plan,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Vec<ResolvedTarget>, ResolveStop> {
-    let mut checkouts = Vec::new();
-    for repo in ctx.repos {
-        let (rows, _) = discover::checkouts(repo, ctx.mains, ctx.cfg);
-        checkouts.extend(rows);
+    let (checkouts, faults) = super::checkout_walk(ctx);
+    if cancel() {
+        return Err(ResolveStop::Cancelled);
+    }
+    if !faults.is_empty() {
+        return Err(walk_refusal(plan, faults));
     }
     let mut snapshot = Snapshot::default();
     let scan = discover::targets(&checkouts, ctx.cfg, true, &mut snapshot, cancel);
@@ -600,6 +613,25 @@ fn resolve(
         });
     }
     Ok(resolved)
+}
+
+fn walk_refusal(plan: &Plan, faults: Vec<crate::discover::WalkFault>) -> ResolveStop {
+    let target = plan
+        .targets
+        .first()
+        .map(|target| target.path.clone())
+        .unwrap_or_else(|| faults[0].path.clone());
+    let path = faults[0].path.clone();
+    let details = faults
+        .iter()
+        .map(|fault| format!("{}: {}", fault.path.display(), fault.detail))
+        .collect();
+    ResolveStop::Refusal(Refusal {
+        reason: "walk.unreadable",
+        target,
+        path: Some(path),
+        details,
+    })
 }
 
 fn owned_checkout(owner: &Owner) -> Option<PathBuf> {

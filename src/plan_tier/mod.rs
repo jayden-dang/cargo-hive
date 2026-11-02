@@ -26,3 +26,19 @@ pub struct Ctx<'a> {
     pub repos: &'a [Repo],
     pub mains: &'a [PathBuf],
 }
+
+pub(crate) fn checkout_walk(
+    ctx: &Ctx<'_>,
+) -> (
+    Vec<crate::discover::Checkout>,
+    Vec<crate::discover::WalkFault>,
+) {
+    let mut checkouts = Vec::new();
+    let mut faults = Vec::new();
+    for repo in ctx.repos {
+        let (rows, found) = crate::discover::checkouts(repo, ctx.mains, ctx.cfg);
+        faults.extend(found);
+        checkouts.extend(rows);
+    }
+    (checkouts, faults)
+}

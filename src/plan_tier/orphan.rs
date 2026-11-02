@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::cargo_target::{self, Owner};
-use crate::discover::{self, Snapshot};
+use crate::discover::{self, Snapshot, WalkFault};
 use crate::gc::{self, Ledger, CRATE_DIR_CAP};
 use crate::plan_tier::guard::{check_entry, Deleted, Expect};
 use crate::plan_tier::locks::{self, Acquired};
@@ -28,6 +28,7 @@ pub enum Removal {
     Removed(Counted),
     Skipped(String),
     Refused(String),
+    Unreadable(Vec<WalkFault>),
     MeasureRefused(String),
     Failed(FailedRemoval),
 }
@@ -55,6 +56,7 @@ pub fn remove(ctx: &Ctx, target: &PlannedTarget, cancel: &(dyn Fn() -> bool + Sy
         return match reason {
             Stop::Cancelled => Removal::Skipped("cancelled".to_string()),
             Stop::Refused(reason) => Removal::Refused(reason),
+            Stop::Unreadable(faults) => Removal::Unreadable(faults),
         };
     }
     let Some(parent) = target.path.parent() else {
@@ -150,19 +152,19 @@ fn profiles_match_plan(fs: &dyn Fs, target: &Path, planned: &[PathBuf]) -> Resul
 enum Stop {
     Cancelled,
     Refused(String),
+    Unreadable(Vec<WalkFault>),
 }
 
 fn still_orphan(ctx: &Ctx, target: &Path, cancel: &(dyn Fn() -> bool + Sync)) -> Result<(), Stop> {
     if cancel() {
         return Err(Stop::Cancelled);
     }
-    let mut checkouts = Vec::new();
-    for repo in ctx.repos {
-        let (rows, _) = discover::checkouts(repo, ctx.mains, ctx.cfg);
-        checkouts.extend(rows);
-    }
+    let (checkouts, faults) = super::checkout_walk(ctx);
     if cancel() {
         return Err(Stop::Cancelled);
+    }
+    if !faults.is_empty() {
+        return Err(Stop::Unreadable(faults));
     }
     let mut snapshot = Snapshot::default();
     let scan = discover::targets(&checkouts, ctx.cfg, true, &mut snapshot, cancel);

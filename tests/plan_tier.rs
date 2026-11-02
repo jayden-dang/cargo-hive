@@ -1,6 +1,8 @@
 //! One target is locked through Cargo's lock files, or skipped when a lock is not sound.
 #![cfg(target_os = "macos")]
 mod common;
+use std::os::unix::fs::PermissionsExt;
+
 use cargo_hive::plan_tier::apply::apply;
 use cargo_hive::plan_tier::locks::{acquire, Acquired, Reason};
 use cargo_hive::receipt::Outcome;
@@ -873,6 +875,28 @@ fn a_target_dir_whose_identity_changed_after_the_plan_is_not_removed() {
     let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
     assert_eq!(done.outcome, Outcome::Refused);
     assert!(orphan.exists());
+}
+
+#[test]
+fn a_checkout_walk_fault_refuses_the_orphan_removal_before_any_delete() {
+    let (p, orphan) = Planned::with_orphan("orphan-walk-fault");
+    let id = p.orphan_plan_id(&orphan);
+    let blocked = p.scratch.path.join("blocked-checkouts");
+    std::fs::create_dir_all(&blocked).unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(done.outcome, Outcome::Refused, "{:?}", done.reason);
+    assert!(orphan.exists(), "a walk fault was treated as no owner");
+    assert!(
+        done.findings.iter().any(|(_, path, detail)| {
+            path.as_ref()
+                .is_some_and(|path| path.display().to_string().contains("blocked-checkouts"))
+                || detail.contains("blocked-checkouts")
+        }),
+        "{:?}",
+        done.findings
+    );
 }
 
 #[test]

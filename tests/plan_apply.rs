@@ -571,6 +571,34 @@ fn a_unit_that_became_dead_after_the_plan_is_left_alone() {
 }
 
 #[test]
+fn a_checkout_walk_fault_refuses_apply_before_any_delete() {
+    let p = Planned::new("apply-walk-fault");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let before = tree(&p.worktree_target());
+    let blocked = p.scratch.path.join("blocked-checkouts");
+    std::fs::create_dir_all(&blocked).unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (out, r) = p.hive.json(&["apply", &id]);
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{r}");
+    assert_eq!(r["plans"][0]["outcome"], "refused", "{r}");
+    assert_eq!(tree(&p.worktree_target()), before);
+    assert!(
+        r["findings"].as_array().unwrap().iter().any(|f| {
+            f["path"]
+                .as_str()
+                .unwrap_or("")
+                .contains("blocked-checkouts")
+                || f["detail"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("blocked-checkouts")
+        }),
+        "{r}"
+    );
+}
+
+#[test]
 fn a_changed_class_refuses_the_plan() {
     let p = Planned::new("stale-class");
     let id = Planned::id_of(&p.plan(), "secondary");

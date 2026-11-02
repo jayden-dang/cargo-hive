@@ -74,6 +74,12 @@ impl Planned {
         for wt in &p.more_worktrees {
             p.supersede(wt, 1);
         }
+        // Own the secondary walk so an unreadable directory elsewhere under /private/tmp
+        // is not a checkout fault for this fixture.
+        p.hive.config(&format!(
+            r#"{{"secondary_roots": ["{}"]}}"#,
+            p.scratch.path.display()
+        ));
         p
     }
 
@@ -192,8 +198,9 @@ impl Planned {
     /// Runs `gc --plan` over every registered repo (`Hive::config` overwrites config.json) and returns the one orphan plan's id.
     pub fn orphan_plan_id(&self, orphan: &Path) -> String {
         self.hive.config(&format!(
-            r#"{{"cache_roots": ["{}"]}}"#,
-            orphan.parent().unwrap().display()
+            r#"{{"cache_roots": ["{}"], "secondary_roots": ["{}"]}}"#,
+            orphan.parent().unwrap().display(),
+            self.scratch.path.display()
         ));
         let r = self.plan();
         assert_eq!(
