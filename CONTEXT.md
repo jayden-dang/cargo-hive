@@ -58,7 +58,7 @@ The status name for a target no checkout owns when resolution succeeded. It is a
 _Avoid_: stale target, dead target
 
 **Store**:
-Hive's content store of compressed registry units under `~/.hive/store/<rustc>/`. It is the only place that gets compressed and the only source of clones.
+Hive's content store of compressed registry units under `~/.hive/store/`, keyed by toolchain value, name-meta and fingerprint hash. It is the only place that gets compressed and the only source of clones.
 _Avoid_: cache, shared target
 
 **Seed**:
@@ -66,8 +66,36 @@ Cloning store units into a secondary checkout's target with APFS clonefile.
 _Avoid_: warm, prefill, restore
 
 **Fill**:
-Copying new registry units from a live checkout into the store, under a try-lock on that checkout's target, then compressing them there.
+Cloning new registry units from a live target into the store, under a try-lock on that target, then releasing the lock and compressing them there.
 _Avoid_: harvest
+
+**Registry unit**:
+A unit whose dep-info file names, as its first input, a path under a Cargo registry source directory, or a unit with no dep-info file that has at least one dependency edge, every one of them resolved to a registry unit. Only these go in the store.
+_Avoid_: dependency unit, third-party unit
+
+**Name-meta**:
+A unit's directory name under `.fingerprint/`, `<name>-<metadata hash>`.
+_Avoid_: unit name, crate name
+
+**Toolchain value**:
+The `rustc` number in a unit's fingerprint JSON. Two toolchains printing the same `rustc -vV` text carry the same value.
+_Avoid_: toolchain hash, rustc fingerprint
+
+**Store key**:
+(toolchain value, name-meta, fingerprint hash): what one entry in the store is held under.
+_Avoid_: cache key
+
+**Entry**:
+The files the store holds for one store key, each with its path relative to the Cargo target dir: the whole `.fingerprint/<dir>/`, the whole `build/<dir>/` if present, and the `deps/` files in whose names `embedded_hashes` finds the unit's hash, except names ending in `.rcgu.o`.
+_Avoid_: store item, artifact
+
+**Stamp**:
+A unit's `invoked.timestamp`, at the path `liveness::unit_timestamp` gives for its kind: under `build/<dir>/` for a run-build-script unit, under `.fingerprint/<dir>/` otherwise.
+_Avoid_: timestamp file
+
+**Toolchain table**:
+The rows hive learns at fill, each from the whole `rustc -vV` text to one toolchain value. Seed looks up the checkout's text here and clones nothing when it finds no row.
+_Avoid_: toolchain map, toolchain cache
 
 **Roots**:
 Units whose `invoked.timestamp` mtime falls inside the GC window, or lies later than now. A not-current unit is a root too, dated by the later of its `invoked.timestamp` and its hash file's mtime (the moment Cargo last wanted it).
