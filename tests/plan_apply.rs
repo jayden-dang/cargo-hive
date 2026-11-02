@@ -672,6 +672,42 @@ fn a_plan_edited_to_name_a_file_outside_its_target_is_refused_and_the_file_survi
     assert!(keep.exists(), "a path outside the target was deleted");
 }
 
+#[test]
+fn a_plan_whose_parent_is_a_symlink_is_refused_and_the_target_stays() {
+    let p = Planned::new("stale-symlink");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let outside = p.scratch.path.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let keep = outside.join("keep");
+    std::fs::write(&keep, b"mine").unwrap();
+    let escape = p.worktree_target().join("debug/deps/escape");
+    std::os::unix::fs::symlink(&outside, &escape).unwrap();
+    let linked = escape.join("keep");
+    let md = std::fs::metadata(&keep).unwrap();
+    use std::os::unix::fs::MetadataExt;
+    let mut stored = p.plans_json();
+    for plan in stored["plans"].as_array_mut().unwrap() {
+        if plan["id"] == id.as_str() {
+            let e = &mut plan["targets"][0]["entries"][0];
+            e["path"] = serde_json::json!(linked.to_str().unwrap());
+            e["kind"] = serde_json::json!("file");
+            e["dev"] = serde_json::json!(md.dev());
+            e["ino"] = serde_json::json!(md.ino());
+        }
+    }
+    std::fs::write(p.hive.home.path.join("plans.json"), stored.to_string()).unwrap();
+    let before = tree(&p.worktree_target());
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(1), "{r}");
+    assert_eq!(r["plans"][0]["outcome"], "refused", "{r}");
+    assert_eq!(
+        tree(&p.worktree_target()),
+        before,
+        "apply changed a target whose plan named a symlinked parent"
+    );
+    assert_eq!(std::fs::read(&keep).unwrap(), b"mine");
+}
+
 fn pid_alive(pid: u32) -> bool {
     let child = std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
