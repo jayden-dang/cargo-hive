@@ -8,9 +8,9 @@
 > The chosen skill writes `Execution-mode:`. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 Feature code: SEED
-Status: Approved
+Status: In-progress
 Date: 2026-11-02
-Execution-mode: unset
+Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
