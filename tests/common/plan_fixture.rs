@@ -170,17 +170,7 @@ impl Planned {
     }
 
     pub fn library_ctx_with(&self, fs: Box<dyn Fs>) -> LibCtx {
-        let state = State::open_at(self.hive.home.path.clone()).unwrap();
-        let cfg = state.config().unwrap();
-        let reg: Registry = state.read(REGISTRY_FILE).unwrap();
-        let mains: Vec<PathBuf> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
-        LibCtx {
-            state,
-            cfg,
-            repos: reg.repos,
-            mains,
-            fs,
-        }
+        LibCtx::open(&self.hive, fs)
     }
 
     /// A built target dir no registered checkout owns, inside the default cache root
@@ -234,6 +224,20 @@ pub struct LibCtx {
 }
 
 impl LibCtx {
+    pub fn open(hive: &Hive, fs: Box<dyn Fs>) -> LibCtx {
+        let state = State::open_at(hive.home.path.clone()).unwrap();
+        let cfg = state.config().unwrap();
+        let reg: Registry = state.read(REGISTRY_FILE).unwrap();
+        let mains: Vec<PathBuf> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
+        LibCtx {
+            state,
+            cfg,
+            repos: reg.repos,
+            mains,
+            fs,
+        }
+    }
+
     pub fn ctx(&self) -> Ctx<'_> {
         Ctx {
             state: &self.state,
