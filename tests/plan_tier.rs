@@ -362,6 +362,74 @@ fn a_dead_path_whose_stat_fails_stores_no_plan_and_names_the_path() {
 }
 
 #[test]
+fn a_cancel_between_two_apply_deletions_is_partial_consumed_and_replanned() {
+    use cargo_hive::plan_tier::record::{self, Lookup};
+    let p = Planned::with_dead_units("apply-cancel-two", 2);
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let lib = p.library_ctx();
+    let plan = match record::get(&lib.state, &id).unwrap() {
+        Lookup::Live(plan) => plan,
+        other => panic!("plan was not live: {other:?}"),
+    };
+    let target = &plan.targets[0];
+    let mut units = Vec::new();
+    for entry in &target.entries {
+        if !units.iter().any(|unit| unit == &entry.unit) {
+            units.push(entry.unit.clone());
+        }
+    }
+    assert!(units.len() >= 2, "need two units, got {units:?}");
+    let first: Vec<_> = target
+        .entries
+        .iter()
+        .filter(|entry| entry.unit == units[0])
+        .map(|entry| entry.path.clone())
+        .collect();
+    let second: Vec<_> = target
+        .entries
+        .iter()
+        .filter(|entry| entry.unit == units[1])
+        .map(|entry| entry.path.clone())
+        .collect();
+    let marker = first[0].clone();
+    let survivor = second[0].clone();
+    let done = apply(&lib.ctx(), &id, &|| !marker.exists()).unwrap();
+    assert_eq!(
+        (done.outcome, done.reason.as_deref()),
+        (Outcome::Partial, Some("cancelled")),
+        "{:?}",
+        done.findings
+    );
+    assert!(!marker.exists(), "the first deletion did not happen");
+    assert!(survivor.exists(), "the second unit was deleted");
+    let again = apply(&lib.ctx(), &id, &|| false).unwrap();
+    assert_eq!(again.reason.as_deref(), Some("already_consumed"));
+    let listed = p.plan();
+    let stored = p.plans_json();
+    let fresh = stored["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plan| plan["id"] == Planned::id_of(&listed, "secondary"))
+        .unwrap();
+    let paths: Vec<_> = fresh["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|target| target["entries"].as_array().unwrap())
+        .map(|entry| entry["path"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        paths.iter().any(|path| path == survivor.to_str().unwrap()),
+        "the remaining unit was not planned again: {paths:?}"
+    );
+    assert!(
+        paths.iter().all(|path| path != marker.to_str().unwrap()),
+        "the deleted path was planned again: {paths:?}"
+    );
+}
+
+#[test]
 fn a_cancel_between_units_keeps_the_first_unit_gone_and_the_second_intact_and_the_rest_can_be_planned_again(
 ) {
     use cargo_hive::plan_tier::apply::{execute, ResolvedTarget};
