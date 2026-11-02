@@ -1,7 +1,7 @@
 # Requirements: Plan-tier GC (stored plans of dead-unit files and orphan targets, applied after a recheck)
 
 Feature code: GCPLAN
-Status: In-progress
+Status: Implemented
 Date: 2026-11-01
 
 <!--

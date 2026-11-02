@@ -14,6 +14,7 @@ Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
+Delivered-by: 0704a6b89bc11e0115bb5f1b206ec8525b5a4347
 
 **Goal:** Add `cargo hive gc --plan` and `cargo hive apply <id>`: a stored, one-use plan of the dead-unit files (and orphan target dirs) of the targets in scope, applied only after liveness, ownership and locks are rechecked, for every class, with no owner step.
 
