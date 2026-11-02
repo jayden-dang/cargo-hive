@@ -1019,6 +1019,133 @@ pub fn trial_through_execute(fx: &super::cargo_fixture::Fixture) -> Result<Execu
     })
 }
 
+/// Moves `invoked.timestamp` and the fingerprint hash file of each unit that owns
+/// a planned path to two days ago. A one-day window then still calls those files dead.
+fn backdate_dead_stamps(fs: &dyn Fs, clone: &Path, entries: &[PlannedEntry]) -> Result<(), String> {
+    let when = SystemTime::now()
+        .checked_sub(Duration::from_secs(2 * 86_400))
+        .ok_or("the clock is too early to backdate dead units")?;
+    let mut units = Vec::new();
+    for entry in entries {
+        if let Some(dir) = fingerprint_unit(&entry.path) {
+            if !units.contains(&dir) {
+                units.push(dir);
+            }
+            continue;
+        }
+        let Some(name) = entry.path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(hash) = hash_in(name) else {
+            continue;
+        };
+        let Some(profile) = profile_owning(&entry.path, clone) else {
+            continue;
+        };
+        let fp = profile.join(".fingerprint");
+        let listed = fs::read_dir(&fp).map_err(|err| format!("{}: {err}", fp.display()))?;
+        let mut seen = 0usize;
+        for item in listed {
+            seen += 1;
+            if seen > 100_000 {
+                return Err(format!("{} has more than 100000 entries", fp.display()));
+            }
+            let item = item.map_err(|err| format!("{}: {err}", fp.display()))?;
+            let dir = item.path();
+            if item.file_name().to_string_lossy().contains(hash) && dir.is_dir() {
+                units.push(dir);
+            }
+        }
+    }
+    for dir in units {
+        let stamp = dir.join("invoked.timestamp");
+        if fs.mtime(&stamp).is_ok() {
+            fs.set_mtime(&stamp, when)
+                .map_err(|err| format!("{}: {err}", stamp.display()))?;
+        }
+        if let Some(profile) = dir.parent().and_then(|fp| fp.parent()) {
+            let build_stamp = profile
+                .join("build")
+                .join(dir.file_name().unwrap_or_default())
+                .join("invoked.timestamp");
+            if fs.mtime(&build_stamp).is_ok() {
+                fs.set_mtime(&build_stamp, when)
+                    .map_err(|err| format!("{}: {err}", build_stamp.display()))?;
+            }
+        }
+        let listed = match fs::read_dir(&dir) {
+            Ok(listed) => listed,
+            Err(_) => continue,
+        };
+        let mut seen = 0usize;
+        for item in listed {
+            seen += 1;
+            if seen > 100_000 {
+                return Err(format!("{} has more than 100000 entries", dir.display()));
+            }
+            let item = item.map_err(|err| format!("{}: {err}", dir.display()))?;
+            let path = item.path();
+            let name = item.file_name();
+            let name = name.to_string_lossy();
+            if name.ends_with(".json") || name == "invoked.timestamp" {
+                continue;
+            }
+            if path.is_file() {
+                fs.set_mtime(&path, when)
+                    .map_err(|err| format!("{}: {err}", path.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn fingerprint_unit(path: &Path) -> Option<PathBuf> {
+    let mut cur = path;
+    loop {
+        let parent = cur.parent()?;
+        if parent
+            .file_name()
+            .is_some_and(|name| name == ".fingerprint")
+            && cur.is_dir()
+        {
+            return Some(cur.to_path_buf());
+        }
+        if parent
+            .parent()
+            .and_then(|grand| grand.file_name())
+            .is_some_and(|name| name == ".fingerprint")
+        {
+            return Some(parent.to_path_buf());
+        }
+        cur = parent;
+    }
+}
+
+fn profile_owning(path: &Path, clone: &Path) -> Option<PathBuf> {
+    let mut cur = path.parent()?;
+    while cur.starts_with(clone) {
+        if cur.join(".fingerprint").is_dir() {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+    }
+    None
+}
+
+fn hash_in(name: &str) -> Option<&str> {
+    name.match_indices('-').find_map(|(at, _)| {
+        let tail = name.get(at + 1..)?;
+        let hash = tail.get(..16)?;
+        let rest = tail.get(16..).unwrap_or("");
+        let boundary = rest.is_empty() || rest.starts_with('.') || rest.starts_with('/');
+        (boundary
+            && hash
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+        .then_some(hash)
+    })
+}
+
 /// Deletes one window's dead files on the owner's clone through `execute`.
 /// The caller's replay is what runs the owner's command list. A file that is
 /// already gone is skipped, matching a missing entry. No remaining file means
@@ -1066,11 +1193,11 @@ fn delete_window_through_execute(
         entries,
         orphan: None,
     };
-    // The warm-up just rebuilt units this window listed. `execute` rechecks in
-    // whole days, and one day would treat those fresh stamps as live and refuse
-    // the plan, so the replay would rebuild nothing. Zero days stays dead for
-    // every stamp older than this instant. The file list is already this window's.
-    let plan = Plan::single(PlanClass::Secondary, planned, 0, made_at);
+    // `execute` accepts only a window of 1..=365 days. The warm-up refreshed the
+    // stamps of units this window listed, so those stamps are backdated past one day
+    // and the planned files stay dead. Live units are left as the warm-up wrote them.
+    backdate_dead_stamps(fs, clone, &planned.entries)?;
+    let plan = Plan::single(PlanClass::Secondary, planned, 1, made_at);
     let state = State::open_at(scratch.join("prove-state")).map_err(|err| err.to_string())?;
     let cfg = state.config().map_err(|err| err.to_string())?;
     let repos = Vec::new();

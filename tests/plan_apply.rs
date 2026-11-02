@@ -547,6 +547,31 @@ fn a_workspace_that_no_longer_resolves_refuses_the_plan_as_ownership_unresolved(
 }
 
 #[test]
+fn a_stored_window_outside_1_to_365_is_refused_before_any_delete() {
+    let p = Planned::new("apply-window");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let before = tree(&p.worktree_target());
+    let mut stored = p.plans_json();
+    for plan in stored["plans"].as_array_mut().unwrap() {
+        if plan["id"] == id.as_str() {
+            plan["window_days"] = serde_json::json!(0);
+        }
+    }
+    std::fs::write(p.hive.home.path.join("plans.json"), stored.to_string()).unwrap();
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(1), "{r}");
+    assert_eq!(r["plans"][0]["outcome"], "refused");
+    assert_eq!(r["plans"][0]["reason"], "window");
+    assert_eq!(tree(&p.worktree_target()), before);
+    let (again, second) = p.hive.json(&["apply", &id]);
+    assert_eq!(again.status.code(), Some(1), "{second}");
+    assert_eq!(
+        second["plans"][0]["reason"], "window",
+        "a refused window consumed the plan"
+    );
+}
+
+#[test]
 fn a_plan_edited_to_name_a_file_outside_its_target_is_refused_and_the_file_survives() {
     let p = Planned::new("stale-outside");
     let id = Planned::id_of(&p.plan(), "secondary");

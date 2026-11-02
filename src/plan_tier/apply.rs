@@ -94,6 +94,9 @@ pub fn apply(
         }
         Lookup::Live(plan) => plan,
     };
+    if let Err(err) = crate::state::window_days(Some(plan.window_days)) {
+        return Ok(window_refused(&plan, &err));
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -330,6 +333,9 @@ pub fn execute(
     resolved: &[ResolvedTarget],
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Applied {
+    if let Err(err) = crate::state::window_days(Some(plan.window_days)) {
+        return window_refused(&plan, &err);
+    }
     let mut order: Vec<&PlannedTarget> = plan.targets.iter().collect();
     order.sort_by(|left, right| left.path.cmp(&right.path));
     let mut skips = skip_counts();
@@ -944,6 +950,14 @@ fn refusal_findings(refusal: &Refusal) -> Vec<(String, Option<PathBuf>, String)>
         )
     };
     vec![(kind, Some(path), detail)]
+}
+
+fn window_refused(plan: &Plan, err: &crate::state::WindowError) -> Applied {
+    let mut applied = refused(&plan.id, plan.class, "window", target_paths(plan));
+    applied
+        .findings
+        .push(("window".to_string(), None, err.to_string()));
+    applied
 }
 
 fn refused(id: &str, class: PlanClass, reason: &str, targets: Vec<PathBuf>) -> Applied {
