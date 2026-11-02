@@ -616,7 +616,7 @@ _Requirements: SEED-1.3, SEED-1.4, SEED-1.5, SEED-1.6, SEED-1.7, SEED-1.8, SEED-
 
 **Depends-on:** Task 10
 
-- [ ] **Step 1: Write the failing tests** in `tests/seed_fill.rs`:
+- [x] **Step 1: Write the failing tests** in `tests/seed_fill.rs`:
   - `a_real_clone_of_a_compressed_entry_adds_no_unshared_bytes`: `bytes_not_shared == Some(0)`, with a real `Apfs`; every cloned file with `blocks > 0` reads `shares_all` and the store file's `clone_id`.
   - `a_file_that_does_not_share_is_counted_by_its_blocks_and_never_by_private_bytes`, overriding `sharing` for one named clone with `shares_all: false, private_bytes: 0`: `bytes_not_shared == Some(entry_stat(that clone).blocks * 512)`.
   - `a_different_clone_id_is_not_shared`, overriding `sharing` for one named clone.
@@ -625,9 +625,9 @@ _Requirements: SEED-1.3, SEED-1.4, SEED-1.5, SEED-1.6, SEED-1.7, SEED-1.8, SEED-
   - `store_bytes_counts_allocated_blocks`: it is at least one compressed entry's blocks, above 0 while every store file's `private_bytes` is 0.
 
   Run; expect failure on the unset fields.
-- [ ] **Step 2: Implement.** After each cloned file, when `ctx.account_bytes`: `Fs::sharing` for the clone and the store file; shared only with `shares_all` and equal `clone_id`; otherwise add `entry_stat.blocks * 512`. `store_bytes` is `size::allocated_bytes(&store_dir, size::MAX_DEPTH)`; a walk error is an `unmeasured` row. Nothing reads `private_bytes`.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): count the bytes a seed adds by real sharing, and report the store's size`
+- [x] **Step 2: Implement.** After each cloned file, when `ctx.account_bytes`: `Fs::sharing` for the clone and the store file; shared only with `shares_all` and equal `clone_id`; otherwise add `entry_stat.blocks * 512`. `store_bytes` is `size::allocated_bytes(&store_dir, size::MAX_DEPTH)`; a walk error is an `unmeasured` row. Nothing reads `private_bytes`.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): count the bytes a seed adds by real sharing, and report the store's size`
 
 _Requirements: SEED-4.1, SEED-4.2, SEED-4.3, SEED-4.4_
 
