@@ -202,7 +202,7 @@ Design "doctor" and Decisions 6, 7.
 - [x] **Step 4: Docs.** README doctor text lists (g) and what it disables. ADR-0001 gains the sentence of design Decision 12. Run the merge gate.
 - [x] **Step 5: Commit** `feat(doctor): check (g) proves a failed compile leaves rustc's summary line`.
 
-_Requirements: EXPLAIN-4.1, EXPLAIN-4.2, EXPLAIN-7.2_
+_Requirements: EXPLAIN-4.1, EXPLAIN-4.2, EXPLAIN-7.6_
 
 ---
 

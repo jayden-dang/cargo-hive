@@ -68,7 +68,7 @@ For each target the class is: the class of its owner checkout when `Owner::Owned
 
 ### Applying a plan (`src/plan_tier/apply.rs`)
 
-Satisfies: GCPLAN-2.1, GCPLAN-2.5, GCPLAN-2.6, GCPLAN-2.7, GCPLAN-2.8, GCPLAN-2.9, GCPLAN-2.10, GCPLAN-2.13, GCPLAN-3.1, GCPLAN-3.2, GCPLAN-3.3, GCPLAN-3.4, GCPLAN-3.5, GCPLAN-3.6, GCPLAN-3.8, GCPLAN-4.1, GCPLAN-4.3, GCPLAN-4.5, GCPLAN-6.8, GCPLAN-8.2, GCPLAN-8.3, GCPLAN-8.5
+Satisfies: GCPLAN-2.1, GCPLAN-2.5, GCPLAN-2.6, GCPLAN-2.7, GCPLAN-2.8, GCPLAN-2.9, GCPLAN-2.10, GCPLAN-2.13, GCPLAN-3.1, GCPLAN-3.2, GCPLAN-3.3, GCPLAN-3.4, GCPLAN-3.5, GCPLAN-3.6, GCPLAN-3.8, GCPLAN-4.6, GCPLAN-6.8, GCPLAN-8.2, GCPLAN-8.3, GCPLAN-8.5
 Reuse: rung 2 — `Fs::try_lock_exclusive` and `TryLock` (`src/platform/mod.rs`), `cargo_target::identify` and `fingerprint::read_profile` to rebuild a `TargetDir` under the locks (`src/cargo_target.rs`, `src/fingerprint.rs:396`), `liveness::liveness`, `discover::targets` with an empty snapshot for ownership, `gc::Ledger` and the volume cross-check note (extracted from `src/cli.rs:808-833`). New: the two-phase driver, rung 7.
 Respects: ARCH-9, ARCH-11, ARCH-13, ARCH-17, ARCH-18, ARCH-19, ARCH-20
 Surface: the byte-accounting helper of `gc::run` (`remove_measured`, `scan`, `record`, `src/gc/run.rs:356-490`) — `replace`: extracted to a crate-visible `gc::account::remove_counted(fs, ledger, target, path, account_bytes, dry_run) -> Result<Removed, RemoveFailed>`, `RemoveFailed` being `Scan(String)` or `Remove(io::Error)` so the auto tier keeps its own skip and `unmeasured` wording that `Runner` and `apply` both call. A directory root goes through `scan` then `remove_tree`; a file or symlink root is recorded from one `entry_stat` and removed with `remove_file`, because `scan` rejects a file root and would skip every `deps/*.rlib`. `Ledger` and `Tally` (`pub(crate)` in a private module, `src/gc/ledger.rs:25-35`) are re-exported from `gc` as `pub(crate)`. Auto-tier counts, findings and receipts stay identical (GCPLAN-9.1). The volume cross-check block in `gc_cmd` (`src/cli.rs:801-833`) — `replace`: becomes `cross_check_notes(before, after, containers)`; its caller keeps the same text. Callers of `Runner::remove_measured` (`src/gc/run.rs:259,297,345`) — `replace`.
@@ -120,7 +120,7 @@ Locality: new file; `tests/common/prove.rs` is edited (`extend`) to call it.
 
 ### Orphan target removal (`src/plan_tier/orphan.rs`)
 
-Satisfies: GCPLAN-5.7, GCPLAN-5.8, GCPLAN-5.9, GCPLAN-5.10
+Satisfies: GCPLAN-5.8, GCPLAN-5.9, GCPLAN-5.10, GCPLAN-5.11
 Reuse: rung 2 — the lock helpers and Ledger of the apply module, `identify` for the relist, `discover::targets` for fresh ownership; new orchestration is rung 7.
 Respects: ARCH-17, ARCH-18, ARCH-19
 Interface: `remove(ctx, plan_target, cancel) -> Removed | Refused(reason) | Skipped(reason)`.
@@ -150,19 +150,19 @@ Locality: `src/receipt.rs` (`extend`); field names avoid the words the no-time t
 
 ### CLI commands (`src/cli.rs`)
 
-Satisfies: GCPLAN-1.10, GCPLAN-3.10, GCPLAN-4.2, GCPLAN-4.4, GCPLAN-6.2, GCPLAN-6.3, GCPLAN-6.4, GCPLAN-6.5, GCPLAN-6.6, GCPLAN-6.7
+Satisfies: GCPLAN-1.10, GCPLAN-3.10, GCPLAN-4.2, GCPLAN-6.2, GCPLAN-6.4, GCPLAN-6.5, GCPLAN-6.6, GCPLAN-6.7
 Reuse: rung 2 — `select`, `live_checkouts`, `emit`, `emit_failure`, `OutputArgs`, `doctor::require`, `install_signal_handlers` and the load closure of `gc_cmd` (`src/cli.rs:726-770`).
 Respects: ARCH-8, ARCH-14
-Surface: `Command::Gc` readers — `src/cli.rs:143` dispatch and `tests/skill.rs:418,442,555,577,578` — `replace`: `Gc` gains `plan: bool` (conflicts with nothing), and `tests/skill.rs` `Parsed` and `parse` map `Gc { plan }` and the new `Apply { id }`; `main_with` exit-code table — `frozen` for 0, 1, 2, 130; `3` is added for `apply` only. `gc` without `--plan` takes the old path unchanged.
+Surface: `Command::Gc` readers — `src/cli.rs:143` dispatch and `tests/skill.rs:418,442,555,577,578` — `replace`: `Gc` gains `plan: bool` (conflicts with nothing), and `tests/skill.rs` `Parsed` and `parse` map `Gc { plan }` and the new `Apply { id }`; `main_with` exit-code table — `frozen` for 0, 1, 2, and 130. `gc` without `--plan` takes the old path unchanged.
 Interface: `cargo hive gc --plan [repos…] [--json]` and `cargo hive apply <id> [--json]`. No window option. `apply` takes one id.
 Depth: n/a — extends the `Command` enum and `main_with` dispatch.
-Locality: `src/cli.rs` (`extend`: two functions `plan_cmd`, `apply_cmd`, one constant `EXIT_NEEDS_HUMAN`, and the extracted `cross_check_notes`); `gc_cmd` (`leave`).
+Locality: `src/cli.rs` (`extend`: two functions `plan_cmd`, `apply_cmd`, and the extracted `cross_check_notes`); `gc_cmd` (`leave`).
 
 `--plan` conflicts with `--dry-run` in clap; `gc --plan` requires `FingerprintReading`; `apply` requires `FingerprintReading` and `Deletion` (as `gc_cmd` does, `src/cli.rs:763`) and refuses with exit 1 before it consumes anything. `gc --plan` exits 0 whether it made plans or found nothing. The skipped-target counts of step 7 keep the names listed there, so they never collide with the AUTOGC-5.3 names for sessions and profile directories.
 
 ### Skill and eval (`plugin/skills/hive/SKILL.md`, `skills/hive/eval.json`, `skills/hive/TESTS.md`)
 
-Satisfies: GCPLAN-7.1, GCPLAN-7.2, GCPLAN-7.3, GCPLAN-7.4, GCPLAN-7.5
+Satisfies: GCPLAN-7.1, GCPLAN-7.3, GCPLAN-7.4, GCPLAN-7.5, GCPLAN-7.6
 Reuse: rung 2 — the existing skill, its eval entries and the drift tests of `tests/skill.rs`.
 Surface: `plugin/skills/hive/SKILL.md` line stating the plan tier "is not available yet" and its "Exit codes" sentence — `replace`; `tests/skill.rs` `skill_documents_every_shipped_command` hard-coded `want` list (`:572`) — `replace`: gains `gc --plan` and `apply`; `skills/hive/eval.json` entries — `compat` with no change to the existing ones; new entries carry `derived_from` headings added to `skills/hive/TESTS.md`.
 Interface: two fenced command lines with `--json` and a path word, the every-class rule, and the plan-again rule after `refused`.
@@ -183,10 +183,10 @@ The harness runs the real binary (`env!("CARGO_BIN_EXE_cargo-hive")`, `Hive::rea
 | Receipt shape (`tests/receipts.rs`, unit tests in `src/receipt.rs`) | integration / unit | GCPLAN-6.1, 9.2, 9.3 |
 | Deletion trial through `plan_tier::execute` on a scratch clone (`tests/common/prove.rs`, ignored proof test) | integration | GCPLAN-8.2, 9.5 |
 | Skill drift tests (`tests/skill.rs`) | integration | GCPLAN-7.1 to 7.5, 9.9 |
-| Existing `status`, `doctor`, `explain`, `gc` tests | integration | GCPLAN-9.1, 9.2, 9.4, 9.6 to 9.8, 9.10 |
+| Existing `status`, `doctor`, `explain`, `gc` tests | integration | GCPLAN-9.1, 9.2, 9.6 to 9.8, 9.10, 9.11 |
 
 ## Coverage check
 
 Every ID of requirements.md appears in exactly one `Satisfies:` line above, with these deliberate exceptions:
-- GCPLAN-9.1 to 9.10 (guards) have no `Satisfies:` line: they are held by leaving the guarded code unchanged, by the `Surface:` rows above, and by the existing tests named in the last rows of the seam table.
+- GCPLAN-9.1 to 9.11 (guards) have no `Satisfies:` line: they are held by leaving the guarded code unchanged, by the `Surface:` rows above, and by the existing tests named in the last rows of the seam table.
 - Story 8's Performance and Accessibility lines are `None` and carry no ID.

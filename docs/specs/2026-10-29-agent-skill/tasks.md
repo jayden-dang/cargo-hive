@@ -273,7 +273,7 @@ The skill body is complete. An agent reading it knows:
 - [x] **Step 4: Verify.** Run the merge gate. `git diff main -- src/` is empty.
 - [x] **Step 5: Commit** `feat(skill): teach agents the hive model, the version rule and how to read receipts`.
 
-_Requirements: SKILL-2.2, SKILL-2.3, SKILL-2.5, SKILL-2.6, SKILL-3.1, SKILL-3.2, SKILL-3.3, SKILL-6.1_
+_Requirements: SKILL-2.2, SKILL-2.7, SKILL-2.5, SKILL-2.6, SKILL-3.1, SKILL-3.2, SKILL-3.3, SKILL-6.1_
 
 ---
 

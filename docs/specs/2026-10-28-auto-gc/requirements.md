@@ -159,7 +159,7 @@ Files and surfaces this change touches:
 - **AUTOGC-7.2** (guard) WHEN hive is installed and repositories are registered THE SYSTEM SHALL CONTINUE TO let `cargo` and rust-analyzer build every checkout exactly as without hive, with no Cargo configuration, environment variable, wrapper or hook added (CORE-7.2).
 - **AUTOGC-7.3** (guard) WHEN `cargo hive status` runs THE SYSTEM SHALL CONTINUE TO report the same checkouts, targets, owner per target, findings, count names and values as before this feature.
 - ~~**AUTOGC-7.4**~~ superseded by AUTOGC-7.6 (owner amendment 2026-11-02: plans apply with no human step, ADR-0002) — was: ~~(guard) WHEN `cargo hive doctor` runs THE SYSTEM SHALL CONTINUE TO run checks (a), (b), (c), (e) and (f) with the same pass rules and measured values, and to disable capabilities by the CORE-1.3 map.~~
-- **AUTOGC-7.6** (guard) WHEN `cargo hive doctor` runs THE SYSTEM SHALL CONTINUE TO run checks (a), (b), (c) and (f) with the same pass rules and measured values, and to disable capabilities by the CORE-1.3 map.
+- **AUTOGC-7.6** (guard) WHEN `cargo hive doctor` runs THE SYSTEM SHALL CONTINUE TO run checks (a), (b), (c) and (f) with the same pass rules and measured values, and to disable capabilities by the CORE-1.14 map.
 - **AUTOGC-7.5** (guard) WHEN any hive command runs once hive's state is open, `gc` included, THE SYSTEM SHALL CONTINUE TO satisfy CORE-5.1 through CORE-5.7, which require that the command:
   - prints exactly one JSON receipt on stdout under `--json` (5.1);
   - appends its receipt to the receipt log (5.2);

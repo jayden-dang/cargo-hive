@@ -2641,7 +2641,7 @@ Run: `cargo test --lib platform::apfs` — expect: 3 passed. Then run `cargo cli
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(platform): APFS temp dirs, clones and block-sharing attributes"`
 
-_Requirements: CORE-1.1_
+_Requirements: CORE-1.13_
 
 ---
 
@@ -3036,7 +3036,7 @@ Run: `cargo test --lib platform::apfs` and `cargo test --test platform_locks` �
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(platform): applesauce compression, lock holder process and non-blocking probe"`
 
-_Requirements: CORE-1.1_
+_Requirements: CORE-1.13_
 
 ---
 
@@ -3151,7 +3151,7 @@ Run: `cargo test --lib platform::local_auth` — expect: 1 passed. Then run `car
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(platform): owner-authentication availability without any dialog"`
 
-_Requirements: CORE-1.1_
+_Requirements: CORE-1.13_
 
 ---
 
@@ -3950,7 +3950,7 @@ Run: `cargo test --test doctor` — expect: 1 passed. Then run `cargo test` and 
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(doctor): filesystem, lock and auth checks with a capability gate"`
 
-_Requirements: CORE-1.1, CORE-1.2, CORE-1.3, CORE-1.4, CORE-1.7, CORE-1.10_
+_Requirements: CORE-1.13, CORE-1.2, CORE-1.14, CORE-1.4, CORE-1.7, CORE-1.10_
 
 ---
 
@@ -4083,7 +4083,7 @@ Run: `cargo test --test doctor` — expect: 2 passed. Then run `cargo test --lib
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(doctor): check f builds a throwaway crate and reads its fingerprints"`
 
-_Requirements: CORE-1.1, CORE-1.2, CORE-6.4_
+_Requirements: CORE-1.13, CORE-1.2_
 
 ---
 

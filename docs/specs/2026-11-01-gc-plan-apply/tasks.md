@@ -15,10 +15,10 @@ Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
 
-**Goal:** Add `cargo hive gc --plan` and `cargo hive apply <id>`: a stored, one-use plan of the dead-unit files (and orphan target dirs) of the targets in scope, applied only after liveness, ownership and locks are rechecked, with `needs-human` for protected and orphan plans.
+**Goal:** Add `cargo hive gc --plan` and `cargo hive apply <id>`: a stored, one-use plan of the dead-unit files (and orphan target dirs) of the targets in scope, applied only after liveness, ownership and locks are rechecked, for every class, with no owner step.
 
 **Architecture:**
-- **`src/plan_tier/`** (new) holds the plan record and its store (`plans.json`), the plan builder, the lock acquisition for one target, the two-phase apply, the orphan removal and the path guard. Its public surface is `make`, `apply`, `execute`, `Authorization` and `Approval`.
+- **`src/plan_tier/`** (new) holds the plan record and its store (`plans.json`), the plan builder, the lock acquisition for one target, the two-phase apply, the orphan removal and the path guard. Its public surface is `make`, `apply`, and `execute`.
 - **Platform and gc** gain only what apply needs: `HeldLock` reports the identity of the opened lock file, and the byte-accounting delete of the auto tier is extracted as `gc::account::remove_counted`.
 - **Receipt schema 3** is additive and appears only on `gc --plan` and `apply`; every other command keeps schema 2.
 
@@ -1586,7 +1586,7 @@ Run: `cargo test` — expect: pass, including the unchanged `tests/receipts.rs`.
 
 `git commit -m "apply: protected plans return needs-human, exit 3, and stay unconsumed"`
 
-_Requirements: GCPLAN-4.1, GCPLAN-4.2, GCPLAN-4.3, GCPLAN-4.4, GCPLAN-6.3, GCPLAN-9.4_
+_Requirements: GCPLAN-4.2, GCPLAN-4.6, GCPLAN-9.11_
 
 ---
 
@@ -1764,7 +1764,7 @@ Run: `cargo test` — expect: pass.
 
 `git commit -m "plan_tier: protected plans delete only behind an approval value"`
 
-_Requirements: GCPLAN-4.5_
+_Requirements: GCPLAN-4.6_
 
 ---
 
@@ -2002,7 +2002,7 @@ Run: `cargo test` — expect: pass.
 
 `git commit -m "plan_tier: remove an approved orphan target whole, after relisting under every lock"`
 
-_Requirements: GCPLAN-5.7, GCPLAN-5.8, GCPLAN-5.9, GCPLAN-5.10_
+_Requirements: GCPLAN-5.8, GCPLAN-5.9, GCPLAN-5.10, GCPLAN-5.11_
 
 ---
 
@@ -2049,7 +2049,7 @@ Run: `cargo test --test skill` — expect: pass.
 
 `git commit -m "skill: teach gc --plan, apply and the needs-human hand-off"`
 
-_Requirements: GCPLAN-7.1, GCPLAN-7.2, GCPLAN-7.3, GCPLAN-7.4, GCPLAN-7.5, GCPLAN-9.9_
+_Requirements: GCPLAN-7.1, GCPLAN-7.3, GCPLAN-7.4, GCPLAN-7.5, GCPLAN-7.6, GCPLAN-9.9_
 
 ---
 
