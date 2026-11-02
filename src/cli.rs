@@ -1173,7 +1173,7 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
         b.finding(
             "error",
             None,
-            "a plan id is already stored; retry with a new counter",
+            "a plan id collided; run `cargo hive gc --plan` again",
         );
         return emit(state, out, b.finish(), "could not store the plan\n", 1);
     }

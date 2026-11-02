@@ -491,7 +491,13 @@ mod tests {
         ));
         let text = err.to_string();
         assert!(text.contains("aaaaaaaaaaaaaaaa"), "{text}");
-        assert!(text.contains("retry") && text.contains("counter"), "{text}");
+        assert!(text.contains("collided"), "{text}");
+        assert!(text.contains("cargo hive gc --plan"), "{text}");
+        assert!(!text.contains("counter"), "{text}");
+        assert!(
+            !matches!(err, StateError::Malformed { .. }),
+            "a collision is a retry refusal, not a malformed file: {text}"
+        );
         assert_eq!(
             std::fs::read_to_string(s.root().join("plans.json")).unwrap(),
             before

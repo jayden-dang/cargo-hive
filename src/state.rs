@@ -49,7 +49,7 @@ impl fmt::Display for StateError {
             StateError::DuplicatePlan { id } => {
                 write!(
                     f,
-                    "plan id {id} is already stored; retry with a new counter"
+                    "plan id {id} collided; run `cargo hive gc --plan` again"
                 )
             }
         }
