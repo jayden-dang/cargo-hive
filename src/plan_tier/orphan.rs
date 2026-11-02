@@ -171,6 +171,9 @@ fn still_orphan(ctx: &Ctx, target: &Path, cancel: &(dyn Fn() -> bool + Sync)) ->
     if cancel() {
         return Err(Stop::Cancelled);
     }
+    if !scan.walk_faults.is_empty() {
+        return Err(Stop::Unreadable(scan.walk_faults));
+    }
     let stat = ctx.fs.entry_stat(target).ok();
     let found = scan.targets.iter().find(|cand| {
         cand.path == target
@@ -182,8 +185,10 @@ fn still_orphan(ctx: &Ctx, target: &Path, cancel: &(dyn Fn() -> bool + Sync)) ->
     });
     match found.map(|cand| &cand.owner) {
         Some(Owner::OrphanCandidate { .. }) => Ok(()),
+        Some(Owner::Unresolved { .. }) | None => {
+            Err(Stop::Refused("ownership_unresolved".to_string()))
+        }
         Some(_) => Err(Stop::Refused("class_changed".to_string())),
-        None => Err(Stop::Refused("ownership_unresolved".to_string())),
     }
 }
 

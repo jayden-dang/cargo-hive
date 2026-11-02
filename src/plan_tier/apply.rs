@@ -552,6 +552,9 @@ fn resolve(
     if cancel() {
         return Err(ResolveStop::Cancelled);
     }
+    if !scan.walk_faults.is_empty() {
+        return Err(walk_refusal(plan, scan.walk_faults));
+    }
     let mut planned: Vec<&PlannedTarget> = plan.targets.iter().collect();
     planned.sort_by(|left, right| left.path.cmp(&right.path));
     let mut located = Vec::new();

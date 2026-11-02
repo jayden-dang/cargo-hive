@@ -900,6 +900,40 @@ fn a_checkout_walk_fault_refuses_the_orphan_removal_before_any_delete() {
 }
 
 #[test]
+fn an_unresolved_owner_refuses_the_orphan_and_names_that_reason() {
+    let (p, orphan) = Planned::with_orphan("orphan-unresolved");
+    let id = p.orphan_plan_id(&orphan);
+    std::fs::write(p.worktree.join("Cargo.toml"), b"not a manifest\n").unwrap();
+    let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
+    assert_eq!(done.outcome, Outcome::Refused);
+    assert_eq!(done.reason.as_deref(), Some("ownership_unresolved"));
+    assert!(orphan.exists());
+}
+
+#[test]
+fn a_target_scan_fault_refuses_the_orphan_removal_before_any_delete() {
+    let (p, orphan) = Planned::with_orphan("orphan-scan-fault");
+    let id = p.orphan_plan_id(&orphan);
+    let blocked = p.worktree.join("unreadable-child");
+    std::fs::create_dir_all(&blocked).unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(done.outcome, Outcome::Refused, "{:?}", done.reason);
+    assert_eq!(done.reason.as_deref(), Some("walk.unreadable"));
+    assert!(orphan.exists());
+    assert!(
+        done.findings.iter().any(|(_, path, detail)| {
+            path.as_ref()
+                .is_some_and(|path| path.display().to_string().contains("unreadable-child"))
+                || detail.contains("unreadable-child")
+        }),
+        "{:?}",
+        done.findings
+    );
+}
+
+#[test]
 fn a_target_dir_that_gained_an_owner_after_the_plan_is_not_removed() {
     let (p, orphan) = Planned::with_orphan("orphan-owned");
     let id = p.orphan_plan_id(&orphan);
