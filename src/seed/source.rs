@@ -279,12 +279,16 @@ fn list_deps(fs: &dyn Fs, profile: &Path) -> Result<Vec<(String, EntryKind)>, Sk
     match fs.read_dir_bounded(&dir, DEPS_CAP) {
         Ok(entries) => Ok(entries),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(err) => Err(Skip::Bound(format!("{}: {err}", dir.display()))),
+        Err(err) => Err(Skip::Bound(format!(
+            "{}: {err}; shrink the directory below its cap and build the target again",
+            dir.display()
+        ))),
     }
 }
 
-/// Dep-info and `deps/` names use the metadata hash in the directory name.
-/// `fingerprint_hash` is the hash file's text and is a different number.
+/// `deps/<crate>-<metadata>.d`: `<crate>` is the fingerprint stem with its kind
+/// prefix removed (`lib-depcrate` → `depcrate`), not the stem itself. `<metadata>`
+/// is `unit_hash` of the unit directory. `fingerprint_hash` is the hash-file text.
 fn dep_class(
     fs: &dyn Fs,
     profile: &Path,
@@ -296,7 +300,7 @@ fn dep_class(
     let Some(meta) = fingerprint::unit_hash(dir_name) else {
         return Ok(DepClass::Absent);
     };
-    let dep_name = format!("{stem}-{meta}.d");
+    let dep_name = format!("{}-{meta}.d", dep_info_crate(stem));
     let path = if deps_listing
         .iter()
         .any(|(name, kind)| name == &dep_name && *kind == EntryKind::File)
@@ -328,7 +332,12 @@ fn build_dep_info(
     let entries = match fs.read_dir_bounded(&dir, CRATE_DIR_CAP) {
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(Skip::Bound(format!("{}: {err}", dir.display()))),
+        Err(err) => {
+            return Err(Skip::Bound(format!(
+                "{}: {err}; shrink the directory below its cap and build the target again",
+                dir.display()
+            )))
+        }
     };
     let mut names: Vec<String> = entries
         .into_iter()
@@ -349,7 +358,7 @@ fn read_dep_info(path: &Path) -> Result<Option<String>, Skip> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(Skip::Bound(format!(
-                "{}: {err}; the dep-info cannot be classified",
+                "{}: {err}; make the dep-info readable and build the target again",
                 path.display()
             )))
         }
@@ -360,19 +369,19 @@ fn read_dep_info(path: &Path) -> Result<Option<String>, Skip> {
         .read_to_end(&mut buf)
         .map_err(|err| {
             Skip::Bound(format!(
-                "{}: {err}; the dep-info cannot be classified",
+                "{}: {err}; make the dep-info readable and build the target again",
                 path.display()
             ))
         })?;
     if buf.len() as u64 > DEP_INFO_CAP {
         return Err(Skip::Bound(format!(
-            "{} is larger than 1 MiB; the dep-info read stops at that bound",
+            "{} is larger than 1 MiB; shorten the dep-info below 1 MiB and build the target again",
             path.display()
         )));
     }
     let text = String::from_utf8(buf).map_err(|_| {
         Skip::Bound(format!(
-            "{} is not valid UTF-8; the dep-info cannot be classified",
+            "{} is not valid UTF-8; rewrite the dep-info as UTF-8 and build the target again",
             path.display()
         ))
     })?;
@@ -476,7 +485,7 @@ fn walk(
         return Err(Refused(
             dir.to_path_buf(),
             format!(
-                "{} is deeper than {MAX_DEPTH} levels; the unit is left unread",
+                "{} is deeper than {MAX_DEPTH} levels; remove directories past that depth and build the unit again",
                 dir.display()
             ),
         ));
@@ -517,6 +526,14 @@ fn take_entry(
             path.to_path_buf(),
             "not a regular file or directory; remove it and build the unit again".to_string(),
         )),
+    }
+}
+
+fn dep_info_crate(stem: &str) -> &str {
+    let kind = fingerprint::kind_of(stem);
+    match stem.strip_prefix(&format!("{kind}-")) {
+        Some(name) if !name.is_empty() => name,
+        _ => stem,
     }
 }
 
@@ -589,6 +606,32 @@ mod tests {
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct CargoHomeGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl CargoHomeGuard {
+        fn set(path: &Path) -> CargoHomeGuard {
+            let prev = std::env::var_os("CARGO_HOME");
+            // SAFETY: `cargo metadata` inherits this process's environment. The previous
+            // value is restored when the guard drops, including when an assertion panics.
+            unsafe { std::env::set_var("CARGO_HOME", path) };
+            CargoHomeGuard { prev }
+        }
+    }
+
+    impl Drop for CargoHomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: paired with `CargoHomeGuard::set`. Restores the environment this test replaced.
+            unsafe {
+                match self.prev.take() {
+                    Some(value) => std::env::set_var("CARGO_HOME", value),
+                    None => std::env::remove_var("CARGO_HOME"),
+                }
+            }
         }
     }
 
@@ -676,9 +719,14 @@ mod tests {
 
     fn write_dep_info(profile: &Path, stem: &str, dir_name: &str, first_input: &str) -> PathBuf {
         let hash = fingerprint::unit_hash(dir_name).unwrap();
+        let kind = fingerprint::kind_of(stem);
+        let crate_name = stem
+            .strip_prefix(&format!("{kind}-"))
+            .filter(|name| !name.is_empty())
+            .unwrap_or(stem);
         let deps = profile.join("deps");
         fs::create_dir_all(&deps).unwrap();
-        let name = format!("{stem}-{hash}.d");
+        let name = format!("{crate_name}-{hash}.d");
         let path = deps.join(&name);
         fs::write(&path, format!("{name}: {first_input}\n")).unwrap();
         path
@@ -791,6 +839,75 @@ mod tests {
             "/t/deps/f-6.d: /Users/x\\ y/.cargo/registry/src/i/f/src/lib.rs",
             spaced
         ));
+    }
+
+    #[test]
+    fn a_registry_lib_dep_info_is_named_by_the_package_not_the_fingerprint_stem() {
+        let scratch = Scratch::new("pkg-dep");
+        let env = Env::new(&scratch.0);
+        let home = scratch.0.join("cargo-home");
+        let profile = scratch.0.join("debug");
+        let dir = "depcrate-cccccccccccccccc";
+        let stem = "lib-depcrate";
+        write_unit(&profile, dir, stem, 10, &[], env.now, HOUR);
+        let hash = fingerprint::unit_hash(dir).unwrap();
+        let deps = profile.join("deps");
+        fs::create_dir_all(&deps).unwrap();
+        let name = format!("depcrate-{hash}.d");
+        fs::write(
+            deps.join(&name),
+            format!("{name}: {}\n", registry_src(&home)),
+        )
+        .unwrap();
+        assert!(!deps.join(format!("lib-depcrate-{hash}.d")).exists());
+        let (units, left_out) = read_units(&env, &scratch.0, &[&profile], &home).unwrap();
+        assert!(left_out.is_empty(), "{left_out:?}");
+        assert_eq!(units.len(), 1, "{units:?}");
+        assert_eq!(units[0].dir_name, dir);
+        assert_eq!(units[0].stem, stem);
+        assert_eq!(units[0].kind, "lib");
+        assert_eq!(units[0].fingerprint_hash, hash_file(&profile, dir, stem));
+    }
+
+    #[test]
+    fn a_workspace_lib_named_by_its_package_is_not_emitted_for_a_registry_edge() {
+        let scratch = Scratch::new("ws-pkg");
+        let env = Env::new(&scratch.0);
+        let home = scratch.0.join("cargo-home");
+        let profile = scratch.0.join("debug");
+        let reg = "reg-bbbbbbbbbbbbbbbb";
+        let ws = "workpkg-aaaaaaaaaaaaaaaa";
+        write_unit(&profile, reg, "lib-reg", 10, &[], env.now, HOUR);
+        write_unit(
+            &profile,
+            ws,
+            "lib-workpkg",
+            11,
+            &[("reg", 1, 10)],
+            env.now,
+            HOUR,
+        );
+        let reg_hash = fingerprint::unit_hash(reg).unwrap();
+        let build = profile.join("build").join(reg);
+        fs::create_dir_all(&build).unwrap();
+        let build_name = format!("output-{reg_hash}.d");
+        fs::write(
+            build.join(&build_name),
+            format!("{build_name}: {}\n", registry_src(&home)),
+        )
+        .unwrap();
+        let ws_hash = fingerprint::unit_hash(ws).unwrap();
+        let deps = profile.join("deps");
+        fs::create_dir_all(&deps).unwrap();
+        let ws_name = format!("workpkg-{ws_hash}.d");
+        fs::write(deps.join(&ws_name), format!("{ws_name}: src/lib.rs\n")).unwrap();
+        assert!(!deps.join(format!("lib-workpkg-{ws_hash}.d")).exists());
+        let (units, left_out) = read_units(&env, &scratch.0, &[&profile], &home).unwrap();
+        assert!(left_out.is_empty(), "{left_out:?}");
+        let got = by_dir(&units);
+        assert!(!got.contains_key(ws), "{got:?}");
+        assert!(got.contains_key(reg), "{got:?}");
+        assert_eq!(got[reg].stem, "lib-reg");
     }
 
     #[test]
@@ -1077,7 +1194,7 @@ mod tests {
         let err =
             read_units(&env, &scratch.0, &[&profile], &scratch.0.join("cargo-home")).unwrap_err();
         assert!(
-            matches!(err, Skip::Bound(ref why) if why.contains("more than")),
+            matches!(err, Skip::Bound(ref why) if why.contains("more than") && why.contains("build the target again")),
             "{err:?}"
         );
     }
@@ -1152,7 +1269,7 @@ mod tests {
         fs::write(&path, body).unwrap();
         let err = read_units(&env, &over.0, &[&profile], &home).unwrap_err();
         assert!(
-            matches!(err, Skip::Bound(ref why) if why.contains("1 MiB") && why.contains(&path.display().to_string())),
+            matches!(err, Skip::Bound(ref why) if why.contains("1 MiB") && why.contains("build the target again") && why.contains(&path.display().to_string())),
             "{err:?}"
         );
     }
@@ -1199,7 +1316,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.1.contains("deeper") || err.1.contains(&MAX_DEPTH.to_string()),
+            err.1.contains("deeper") && err.1.contains("build the unit again"),
             "{err:?}"
         );
     }
@@ -1255,6 +1372,9 @@ mod tests {
             repos: &repos,
             mains: &mains,
         };
+        let cargo_home = scratch.0.join("cargo-home");
+        fs::create_dir_all(&cargo_home).unwrap();
+        let _cargo_home = CargoHomeGuard::set(&cargo_home);
         let (targets, findings) = owned_targets(&ctx, &|| false);
         assert_eq!(targets.len(), 1, "{targets:?} {findings:?}");
         assert_eq!(targets[0].path, target.canonicalize().unwrap());
