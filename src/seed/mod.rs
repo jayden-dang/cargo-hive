@@ -1,6 +1,7 @@
-//! The seed command's library entry: the live registry units of a target, and
-//! the compressed store those units are published into.
+//! The seed command's library entry: the live registry units of a target, the
+//! compressed store those units are published into, and the fill that publishes them.
 
+pub mod fill;
 pub mod source;
 pub mod store;
 
