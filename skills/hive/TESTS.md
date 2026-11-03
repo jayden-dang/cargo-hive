@@ -141,6 +141,14 @@ No agent run covers this command either; the entry is taken from the skill text.
 
 Expected command, with `--json` and one plan id: `cargo hive apply plan-id --json`. The agent applies a plan of any class itself, with no owner step, and names the targets of an `orphan` plan when it reports. After `refused`, the agent plans again and does not reuse an id that is already consumed. `partial` is not an error; the agent checks its reason.
 
+## Seed a new lane
+
+No separate agent was run. This entry is taken from the skill text, the same way the plan-flow entries are.
+
+Prompt: a new worktree at /path/to/checkout has no target yet; seed it before the first build, and do not seed the main checkout.
+
+Expected command, with `--json` and the checkout path: `cargo hive seed /path/to/checkout --json`. The receipt keeps fill counts (`fill_entries_added`, `fill_entries_held`, `fill_targets_read`, `fill_targets_skipped`) apart from clone counts (`clone_units_chosen`, `clone_units_cloned`, `clone_units_dropped`, `clone_units_existing`, `clone_units_failed`, `clone_units_outside_window`). There is no duration. A later `status` reports `reused_fresh` for a unit that was seeded, reached, and unchanged; that count is not Cargo's printed fresh count. The other three are `seeded_unneeded`, `seeded_recompiled`, and `seeded_missing`.
+
 ## Install — Claude Code
 
 Run on 2026-10-30 from a clean `git clone --branch skill` of this repo at `/private/tmp/hive-skill-install-20261030/clone`, with `CLAUDE_CONFIG_DIR=/private/tmp/hive-skill-install-20261030/claude` so the real `~/.claude` was never written. These are the CLI forms of `/plugin marketplace add` and `/plugin install`. The outputs below are concatenated in command order.

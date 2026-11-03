@@ -16,7 +16,7 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 - Same major and minor: carry on.
 - If different:
   - `doctor`, `repo list`, `status` and `explain` may still run. Tell the user both versions and how to update: `/plugin marketplace update cargo-hive` for the plugin, or reinstall the binary.
-  - Do not run `gc`, `apply` or `repo add`. Ask the user to update first.
+  - Do not run `gc`, `apply`, `repo add` or `seed`. Ask the user to update first.
 
 ## The model
 
@@ -35,10 +35,13 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 | How do I free space? | `gc` with `--dry-run` first, then `gc` |
 | What can be deleted later? | `gc --plan`, then `apply` one plan |
 | Why are there so many copies of a crate? | `explain` |
+| How do I seed a new secondary checkout before its first build? | `seed` |
 
-`status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root. Pass explicit paths unless the user asked for everything.
+`status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root. Pass explicit paths unless the user asked for everything. `seed` takes one registered checkout and does not mean every repo.
 
 `explain` shows 10 groups by default; `--top 0` shows all of them, as in `cargo hive explain /path/to/repo --top 0 --json`.
+
+`seed` copies registry output from checkouts that have already built into that new checkout. A checkout that already has a target gets nothing. Seed one lane first when starting several.
 
 ## Command lines
 
@@ -52,6 +55,7 @@ cargo hive gc /path/to/repo --json
 cargo hive gc --plan /path/to/repo --json
 cargo hive apply plan-id --json
 cargo hive explain /path/to/repo --top 20 --json
+cargo hive seed /path/to/checkout --json
 ```
 
 ## Reading a receipt
@@ -60,6 +64,8 @@ With `--json`, hive prints exactly one JSON object on stdout and its prose on st
 
 Exit codes: 0 success; 1 refusal or failure (read the receipt, or stderr if no receipt was printed); 2 unsupported operating system; 130 cancelled.
 
+A seed receipt keeps the fill counts (`fill_entries_added`, `fill_entries_held`, `fill_targets_read`, `fill_targets_skipped`) apart from the clone counts (`clone_units_chosen`, `clone_units_cloned`, `clone_units_dropped`, `clone_units_existing`, `clone_units_failed`, `clone_units_outside_window`). It carries no duration. Afterward, `status` reports `reused_fresh` (seeded, reached, and unchanged, not Cargo's printed fresh count), `seeded_unneeded`, `seeded_recompiled`, and `seeded_missing`.
+
 ## Do not
 
-When hive covers the request, do not run `cargo clean`, and do not delete a target dir, an `incremental/` dir, or `rustc*` or `rmeta*` entries yourself. Use `gc` (after `--dry-run`) for the auto tier. Closure deletion and orphan targets go through `gc --plan`, then `apply`, not by hand.
+When hive covers the request, do not run `cargo clean`, and do not delete a target dir, an `incremental/` dir, or `rustc*` or `rmeta*` entries yourself. Use `gc` (after `--dry-run`) for the auto tier. Closure deletion and orphan targets go through `gc --plan`, then `apply`, not by hand. Do not seed a checkout that already has a target, since it gets nothing. When starting several lanes, seed one lane first.

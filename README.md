@@ -6,7 +6,8 @@ It registers repositories, lists their checkouts and Cargo target dirs, and says
 hive may treat each one. `cargo hive gc` deletes superseded rustc incremental sessions
 and leftover rustc temp dirs, each under its owner's lock. `cargo hive gc --plan` writes
 a plan and deletes nothing. `cargo hive apply` deletes that plan's paths for every class.
-It compresses and seeds nothing yet.
+`cargo hive seed` copies registry output into a new checkout that has no target yet.
+The store only grows until store GC ships.
 
 ## Install from scratch
 
@@ -50,6 +51,7 @@ codex plugin add cargo-hive@cargo-hive
 | `cargo hive gc --plan [<repo>…]` | Writes a plan and deletes nothing |
 | `cargo hive apply <id>` | Deletes the plan's paths for every class |
 | `cargo hive explain [<repo>…] [-n N]` | Reports copies of one crate, feature splits, and units whose last compile failed. `-n` defaults to 10; `-n 0` shows every group |
+| `cargo hive seed <checkout>` | Copies registry output into a new secondary checkout before its first build. A checkout that already has a target gets nothing. The store only grows until store GC ships |
 
 A failure of check (g) disables failed-unit reporting only.
 
@@ -76,8 +78,9 @@ inside Cargo target dirs:
 
 - It installs no Cargo configuration, environment variable, rustc wrapper, cargo shim or
   hook. `cargo` and rust-analyzer build exactly as without hive.
-- It writes only under `~/.hive/` and doctor's temporary directory. Outside those, it
-  only deletes, through `gc` and `apply`, inside Cargo target dirs.
+- It writes under `~/.hive/` and doctor's temporary directory, and `seed` also
+  places files into a new Cargo target dir. Apart from that placement, it only
+  deletes, through `gc` and `apply`, inside Cargo target dirs.
 - It reads Cargo's internal `.fingerprint/` files only when their exact format is known
   (docs/adr/0001). Anything else is reported as unsupported.
 

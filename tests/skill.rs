@@ -528,6 +528,52 @@ fn skill_command_lines_parse_with_the_cli() {
 }
 
 #[test]
+fn the_skill_teaches_seeding_a_new_lane() {
+    let body = skill_body();
+    let version = body
+        .split("## Version first")
+        .nth(1)
+        .expect("Version first heading")
+        .split("## ")
+        .next()
+        .expect("Version first section");
+    assert!(
+        version.contains("Do not run") && version.contains("`seed`"),
+        "Version first does not hold seed back on a version mismatch"
+    );
+    for needle in [
+        "before its first build",
+        "gets nothing",
+        "one lane",
+        "fill_entries_added",
+        "fill_entries_held",
+        "fill_targets_read",
+        "fill_targets_skipped",
+        "clone_units_chosen",
+        "clone_units_cloned",
+        "clone_units_dropped",
+        "clone_units_existing",
+        "clone_units_outside_window",
+        "reused_fresh",
+        "seeded_unneeded",
+        "seeded_recompiled",
+        "seeded_missing",
+        "not Cargo's printed fresh count",
+    ] {
+        assert!(body.contains(needle), "the skill does not say {needle}");
+    }
+    let readme = repo_file("README.md");
+    assert!(
+        readme.contains("cargo hive seed"),
+        "README has no seed command line"
+    );
+    assert!(
+        readme.contains("The store only grows until store GC ships"),
+        "README does not say the store only grows until store GC ships"
+    );
+}
+
+#[test]
 fn skill_documents_every_shipped_command() {
     let mut seen: Vec<Parsed> = Vec::new();
     for (line, parsed) in skill_commands() {
@@ -556,7 +602,7 @@ fn skill_documents_every_shipped_command() {
         }
         if matches!(
             parsed,
-            Parsed::RepoAdd | Parsed::Status | Parsed::Gc { .. } | Parsed::Explain
+            Parsed::RepoAdd | Parsed::Status | Parsed::Gc { .. } | Parsed::Explain | Parsed::Seed
         ) {
             assert!(
                 path_words >= 1,
@@ -592,6 +638,7 @@ fn skill_documents_every_shipped_command() {
             plan: true,
         },
         Parsed::Explain,
+        Parsed::Seed,
     ] {
         assert!(
             seen.contains(&want),
