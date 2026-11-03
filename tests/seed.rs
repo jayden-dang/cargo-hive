@@ -3,6 +3,7 @@ mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{Read, Seek};
 use std::os::macos::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -829,7 +830,7 @@ fn before_the_first_build_a_plan_lists_old_seeds_and_apply_skips_the_target() {
 }
 
 #[test]
-fn a_plan_over_a_seed_does_not_claim_shared_bytes_as_freed() {
+fn a_plan_frees_the_bytes_the_clone_did_not_share_and_still_counts_shared_bytes() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);
     cargo_json(&hive, &repo.main, &["build"]);
@@ -854,6 +855,108 @@ fn a_plan_over_a_seed_does_not_claim_shared_bytes_as_freed() {
         "{plan} {receipt}"
     );
     assert!(still_shared > 0, "{plan}");
+}
+
+#[test]
+fn a_changed_package_cache_rustup_or_user_cache_names_that_path() {
+    let before = sample_home();
+    let package_cache = edited(&before, |home| home.package_cache = Some(9));
+    let rustup = edited(&before, |home| home.rustup = Some(9));
+    let settings = edited(&before, |home| home.rustup_settings = Some(9));
+    let cache = edited(&before, |home| home.cache = Some(9));
+    assert_eq!(
+        cargo_home_left_unchanged(&before, &package_cache).unwrap_err(),
+        "~/.cargo/.package-cache"
+    );
+    assert_eq!(
+        cargo_home_left_unchanged(&before, &rustup).unwrap_err(),
+        "~/.rustup"
+    );
+    assert_eq!(
+        cargo_home_left_unchanged(&before, &settings).unwrap_err(),
+        "~/.rustup/settings.toml"
+    );
+    assert_eq!(
+        cargo_home_left_unchanged(&before, &cache).unwrap_err(),
+        "~/.cache"
+    );
+}
+
+#[test]
+fn a_direct_child_other_than_the_global_cache_names_that_path() {
+    let before = sample_home();
+    let after = edited(&before, |home| {
+        home.cargo_children.insert("registry".to_string(), 9);
+    });
+    assert_eq!(
+        cargo_home_left_unchanged(&before, &after).unwrap_err(),
+        "~/.cargo/registry"
+    );
+}
+
+#[test]
+fn more_than_64_direct_children_of_the_cargo_home_names_that_directory() {
+    let before = edited(&sample_home(), |home| {
+        home.cargo_children = (0..65).map(|n| (format!("c{n}"), 1)).collect();
+    });
+    assert_eq!(
+        cargo_home_left_unchanged(&before, &before).unwrap_err(),
+        "~/.cargo"
+    );
+}
+
+#[test]
+fn listing_more_than_64_direct_children_returns_the_directory() {
+    let scratch = common::Scratch::new("cargo-children");
+    for n in 0..65 {
+        fs::write(scratch.path.join(format!("c{n}")), b"x").unwrap();
+    }
+    assert_eq!(
+        direct_child_mtimes(&scratch.path, "~/.cargo").unwrap_err(),
+        "~/.cargo"
+    );
+}
+
+#[test]
+fn the_global_cache_and_the_cargo_directory_may_change() {
+    let before = edited(&sample_home(), |home| {
+        home.rustup_settings = None;
+        home.cargo_children = (0..63).map(|n| (format!("c{n}"), 1)).collect();
+        home.cargo_children.insert(".global-cache".to_string(), 2);
+    });
+    assert_eq!(before.cargo_children.len(), 64);
+    let after = edited(&before, |home| {
+        home.cargo = Some(50);
+        home.global_cache = Some(60);
+        home.cargo_children.insert(".global-cache".to_string(), 60);
+    });
+    assert_eq!(cargo_home_left_unchanged(&before, &after), Ok(()));
+}
+
+#[test]
+fn listing_direct_children_does_not_enter_them() {
+    let scratch = common::Scratch::new("cargo-children-flat");
+    fs::create_dir(scratch.path.join("registry")).unwrap();
+    fs::write(scratch.path.join("registry/inner"), b"nope").unwrap();
+    fs::write(scratch.path.join(".global-cache"), b"g").unwrap();
+    let children = direct_child_mtimes(&scratch.path, "~/.cargo").unwrap();
+    assert_eq!(
+        children.keys().cloned().collect::<Vec<_>>(),
+        vec![".global-cache".to_string(), "registry".to_string()]
+    );
+}
+
+#[test]
+fn the_end_of_a_long_log_is_at_most_the_last_window() {
+    let scratch = common::Scratch::new("log-tail");
+    let path = scratch.path.join("cargo-build.err");
+    let marker = "ended-with-this-marker";
+    let mut bytes = vec![b'a'; 4_001];
+    bytes.extend_from_slice(marker.as_bytes());
+    fs::write(&path, &bytes).unwrap();
+    let end = tail(&path);
+    assert!(end.len() <= 4_000, "{}", end.len());
+    assert!(end.ends_with(marker), "{end}");
 }
 
 #[test]
@@ -1041,7 +1144,7 @@ fn seeding_a_new_worktree_of_a_real_repo_recompiles_no_cloned_unit() {
         "{} has no built source target",
         checkout.display()
     );
-    let homes_before = home_stamps();
+    let homes_before = read_home_stamps().unwrap_or_else(|err| panic!("{err}"));
     let hive = Hive::ready();
     quiet_cache(&hive);
     hive.config(&format!(
@@ -1172,7 +1275,7 @@ fn seeding_a_new_worktree_of_a_real_repo_recompiles_no_cloned_unit() {
         tail(&hive.home.path.join("status.err"))
     );
     let counts = lane_status_counts(&status_receipt, &lane.path);
-    let homes_after = home_stamps();
+    let homes_after = read_home_stamps().unwrap_or_else(|err| panic!("{err}"));
     let summary = serde_json::json!({
         "seed_secs": seed_took.as_secs(),
         "build_secs": build_took.as_secs(),
@@ -1190,14 +1293,15 @@ fn seeding_a_new_worktree_of_a_real_repo_recompiles_no_cloned_unit() {
             "cloned_recompiled": compiled.cloned_recompiled,
         },
         "status_counts": counts,
-        "homes_before": homes_before,
-        "homes_after": homes_after,
+        "homes_before": home_stamp_json(&homes_before),
+        "homes_after": home_stamp_json(&homes_after),
     });
     write_kept(
         "summary.json",
         &serde_json::to_vec_pretty(&summary).unwrap(),
     );
     eprintln!("{summary}");
+    cargo_home_left_unchanged(&homes_before, &homes_after).unwrap_or_else(|err| panic!("{err}"));
 }
 
 fn stamp_under_build(unit: &cargo_hive::seed::record::SeededUnit) -> bool {
@@ -1927,11 +2031,29 @@ fn read_capped_bytes(path: &Path, cap: u64) -> Vec<u8> {
 }
 
 fn tail(path: &Path) -> String {
-    let Ok(bytes) = fs::read(path) else {
+    let Ok(mut file) = fs::File::open(path) else {
         return String::new();
     };
-    let start = bytes.len().saturating_sub(4_000);
-    String::from_utf8_lossy(&bytes[start..]).into_owned()
+    let Ok(len) = file.metadata().map(|meta| meta.len()) else {
+        return String::new();
+    };
+    let start = len.saturating_sub(4_000);
+    if file.seek(std::io::SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    if (&mut file).take(4_000).read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    if text.len() <= 4_000 {
+        return text.into_owned();
+    }
+    let mut cut = text.len() - 4_000;
+    while cut < text.len() && !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    text[cut..].to_string()
 }
 
 fn cloned_unit_hashes(hive: &Hive, lane: &Path) -> Vec<String> {
@@ -2075,26 +2197,145 @@ fn lane_status_counts(receipt: &serde_json::Value, lane: &Path) -> BTreeMap<Stri
     out
 }
 
-fn home_stamps() -> BTreeMap<String, Option<u128>> {
-    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
-    let mut stamps = BTreeMap::new();
-    for rel in [
-        ".cargo",
-        ".cargo/.package-cache",
-        ".rustup",
-        ".rustup/settings.toml",
-        ".cache",
-    ] {
-        let modified = fs::metadata(home.join(rel)).ok().and_then(|meta| {
-            meta.modified().ok().map(|time| {
-                time.duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            })
-        });
-        stamps.insert(rel.to_string(), modified);
+#[derive(Clone)]
+struct HomeStamps {
+    cargo: Option<u128>,
+    global_cache: Option<u128>,
+    package_cache: Option<u128>,
+    rustup: Option<u128>,
+    rustup_settings: Option<u128>,
+    cache: Option<u128>,
+    cargo_children: BTreeMap<String, u128>,
+}
+
+fn sample_home() -> HomeStamps {
+    let mut cargo_children = BTreeMap::new();
+    cargo_children.insert(".global-cache".to_string(), 2);
+    cargo_children.insert(".package-cache".to_string(), 3);
+    cargo_children.insert("registry".to_string(), 4);
+    HomeStamps {
+        cargo: Some(1),
+        global_cache: Some(2),
+        package_cache: Some(3),
+        rustup: Some(4),
+        rustup_settings: Some(5),
+        cache: Some(6),
+        cargo_children,
     }
-    stamps
+}
+
+fn edited(home: &HomeStamps, edit: impl FnOnce(&mut HomeStamps)) -> HomeStamps {
+    let mut home = home.clone();
+    edit(&mut home);
+    home
+}
+
+const CARGO_CHILD_CAP: usize = 64;
+
+fn cargo_home_left_unchanged(before: &HomeStamps, after: &HomeStamps) -> Result<(), String> {
+    if before.cargo_children.len() > CARGO_CHILD_CAP || after.cargo_children.len() > CARGO_CHILD_CAP
+    {
+        return Err("~/.cargo".to_string());
+    }
+    same_stamp(
+        before.package_cache,
+        after.package_cache,
+        "~/.cargo/.package-cache",
+    )?;
+    same_stamp(before.rustup, after.rustup, "~/.rustup")?;
+    same_stamp(
+        before.rustup_settings,
+        after.rustup_settings,
+        "~/.rustup/settings.toml",
+    )?;
+    same_stamp(before.cache, after.cache, "~/.cache")?;
+    let mut names = BTreeSet::new();
+    names.extend(before.cargo_children.keys().map(String::as_str));
+    names.extend(after.cargo_children.keys().map(String::as_str));
+    for name in names {
+        if name == ".global-cache" {
+            continue;
+        }
+        if before.cargo_children.get(name) != after.cargo_children.get(name) {
+            return Err(format!("~/.cargo/{name}"));
+        }
+    }
+    Ok(())
+}
+
+fn same_stamp(before: Option<u128>, after: Option<u128>, path: &str) -> Result<(), String> {
+    if before == after {
+        Ok(())
+    } else {
+        Err(path.to_string())
+    }
+}
+
+fn direct_child_mtimes(dir: &Path, label: &str) -> Result<BTreeMap<String, u128>, String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(err) => return Err(format!("{label}: {err}")),
+    };
+    let mut children = BTreeMap::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("{label}: {err}"))?;
+        if children.len() >= CARGO_CHILD_CAP {
+            return Err(label.to_string());
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let meta = entry
+            .metadata()
+            .map_err(|err| format!("{label}/{name}: {err}"))?;
+        let modified = meta
+            .modified()
+            .map_err(|err| format!("{label}/{name}: {err}"))?;
+        children.insert(
+            name.into_owned(),
+            modified
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+        );
+    }
+    Ok(children)
+}
+
+fn mtime_ns(path: &Path) -> Option<u128> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    Some(
+        modified
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+    )
+}
+
+fn read_home_stamps() -> Result<HomeStamps, String> {
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
+    let cargo = home.join(".cargo");
+    Ok(HomeStamps {
+        cargo: mtime_ns(&cargo),
+        global_cache: mtime_ns(&cargo.join(".global-cache")),
+        package_cache: mtime_ns(&cargo.join(".package-cache")),
+        rustup: mtime_ns(&home.join(".rustup")),
+        rustup_settings: mtime_ns(&home.join(".rustup").join("settings.toml")),
+        cache: mtime_ns(&home.join(".cache")),
+        cargo_children: direct_child_mtimes(&cargo, "~/.cargo")?,
+    })
+}
+
+fn home_stamp_json(stamps: &HomeStamps) -> serde_json::Value {
+    serde_json::json!({
+        ".cargo": stamps.cargo,
+        ".cargo/.global-cache": stamps.global_cache,
+        ".cargo/.package-cache": stamps.package_cache,
+        ".rustup": stamps.rustup,
+        ".rustup/settings.toml": stamps.rustup_settings,
+        ".cache": stamps.cache,
+        "cargo_children": stamps.cargo_children,
+    })
 }
 
 fn env_lock() -> &'static Mutex<()> {

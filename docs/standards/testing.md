@@ -51,7 +51,7 @@ None — the 2026-10-28 interview ratified no rule beyond the `test-first` skill
   - `CARGO_TARGET_DIR` stays unset;
   - `HIVE_HOME` is a scratch directory under `/private/tmp/hive-it-*`;
   - the build is `cargo build --offline --locked`;
-  - the test does not write `~/.cargo`, `~/.rustup`, or `~/.cache`.
+  - the test does not write `~/.rustup` or `~/.cache`. Cargo's default home stays in use, because that is where the checkout's registry lives. The only change under `~/.cargo` the test may leave is the mtime of `~/.cargo/.global-cache`, which may also move the mtime of the `~/.cargo` directory. Every other direct child of `~/.cargo` is unchanged.
 
 ## Not a substitute for acceptance
 
