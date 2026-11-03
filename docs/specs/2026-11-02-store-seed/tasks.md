@@ -750,7 +750,7 @@ _Requirements: SEED-6.1, SEED-6.10_
 
 **Depends-on:** Task 13
 
-- [ ] **Step 1: Write the failing tests** on a hand-built `TargetDir` in `src/seed/record.rs`, table-driven, one row per bucket:
+- [x] **Step 1: Write the failing tests** on a hand-built `TargetDir` in `src/seed/record.rs`, table-driven, one row per bucket:
   - seeded, reached from a unit not in the record, same stamp: fresh;
   - seeded, reached only through another seeded unit that is itself reached: fresh;
   - seeded, not reached, same stamp: unneeded;
@@ -784,9 +784,9 @@ fn after_the_first_build_status_reports_reused_units_and_no_recompiled_ones() {
 ```
 
 Add: `a_deps_listing_over_its_cap_gives_no_counts`, with `deps_cap` 2, and the error names that directory; `status_for_a_target_with_no_record_is_unchanged`, comparing count names with the same fixture before seeding; `a_rebuilt_target_reports_no_seed_counts`, deleting `target/` and building; `an_unreadable_record_reports_no_counts_and_one_note`; `the_counts_are_as_of_each_status`: run `status` twice around a second build touching one seeded unit. Run; expect a compile failure.
-- [ ] **Step 2: Implement** (design decision 15). `counts`: read `identity` from `std::fs::symlink_metadata(target.path)`, and return `Ok(None)` on a mismatch. Index `hash_hex` over all profiles. Read each recorded stamp's modification time. List each profile's `deps/` once, bounded with `deps_cap`, `DEPS_CAP` in production. A listing that hits the cap, fails, or meets a non-UTF-8 name is `Err` naming the path; `status` adds that as one note and reports no counts. Count files the way they were cloned: walk each hash-matching `deps/` entry, directories included, still skip `.rcgu.o`, still bound the walk, and compare that file count to `deps_files`. Starts: graph units not in the record, and recorded units whose stamp differs. Walk `deps` over the index with `le_hex`. Then bucket each recorded unit in the order missing, recompiled, fresh or unneeded. In `status`: `record::read` through `read_bounded` once, an `Err` becoming one note and no counts; pass the file to `report_targets`, which adds the four `count`s when `counts` returns `Ok(Some)`.
-- [ ] **Step 3: Run.** `cargo test`; expect pass, `tests/status_targets.rs` and `tests/receipts.rs` unchanged.
-- [ ] **Step 4: Commit.** `feat(status): report what became of a target's seeded units`
+- [x] **Step 2: Implement** (design decision 15). `counts`: read `identity` from `std::fs::symlink_metadata(target.path)`, and return `Ok(None)` on a mismatch. Index `hash_hex` over all profiles. Read each recorded stamp's modification time. List each profile's `deps/` once, bounded with `deps_cap`, `DEPS_CAP` in production. A listing that hits the cap, fails, or meets a non-UTF-8 name is `Err` naming the path; `status` adds that as one note and reports no counts. Count files the way they were cloned: walk each hash-matching `deps/` entry, directories included, still skip `.rcgu.o`, still bound the walk, and compare that file count to `deps_files`. Starts: graph units not in the record, and recorded units whose stamp differs. Walk `deps` over the index with `le_hex`. Then bucket each recorded unit in the order missing, recompiled, fresh or unneeded. In `status`: `record::read` through `read_bounded` once, an `Err` becoming one note and no counts; pass the file to `report_targets`, which adds the four `count`s when `counts` returns `Ok(Some)`.
+- [x] **Step 3: Run.** `cargo test`; expect pass, `tests/status_targets.rs` and `tests/receipts.rs` unchanged.
+- [x] **Step 4: Commit.** `feat(status): report what became of a target's seeded units`
 
 _Requirements: SEED-6.2, SEED-6.3, SEED-6.4, SEED-6.5, SEED-6.6, SEED-6.8, SEED-6.9, SEED-6.11, SEED-6.12, SEED-10.2_
 
