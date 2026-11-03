@@ -3,7 +3,7 @@ mod common;
 
 use std::collections::{BTreeMap, HashSet};
 use std::io;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -2241,6 +2241,15 @@ fn a_real_clone_of_a_compressed_entry_adds_no_unshared_bytes() {
                 read_capped(dst),
                 read_capped(src),
                 "{} bytes differ from {}",
+                dst.display(),
+                src.display()
+            );
+            let store_mode = std::fs::symlink_metadata(src).unwrap().permissions().mode();
+            let placed_mode = std::fs::symlink_metadata(dst).unwrap().permissions().mode();
+            assert_eq!(
+                placed_mode,
+                store_mode,
+                "{} mode differs from {}",
                 dst.display(),
                 src.display()
             );

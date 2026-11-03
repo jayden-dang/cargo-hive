@@ -87,8 +87,9 @@ fn expand_if_compressed(fs: &dyn Fs, dst: &Path) -> io::Result<()> {
     if !fs.entry_stat(dst)?.compressed {
         return Ok(());
     }
+    let meta = std::fs::symlink_metadata(dst)?;
     let mtime = fs.mtime(dst)?;
-    let len = std::fs::symlink_metadata(dst)?.len();
+    let len = meta.len();
     if len > MAX_EXPAND_BYTES {
         return Err(io::Error::other(format!(
             "{len} bytes is over the {MAX_EXPAND_BYTES} byte cap"
@@ -103,6 +104,10 @@ fn expand_if_compressed(fs: &dyn Fs, dst: &Path) -> io::Result<()> {
     }
     let tmp = expand_sibling(dst)?;
     if let Err(err) = fs.write_file(&tmp, &bytes) {
+        let _ = fs.remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::set_permissions(&tmp, meta.permissions()) {
         let _ = fs.remove_file(&tmp);
         return Err(err);
     }
