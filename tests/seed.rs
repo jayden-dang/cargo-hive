@@ -858,12 +858,11 @@ fn a_plan_frees_the_bytes_the_clone_did_not_share_and_still_counts_shared_bytes(
 }
 
 #[test]
-fn a_changed_package_cache_rustup_or_user_cache_names_that_path() {
+fn a_changed_package_cache_or_rustup_names_that_path() {
     let before = sample_home();
     let package_cache = edited(&before, |home| home.package_cache = Some(9));
     let rustup = edited(&before, |home| home.rustup = Some(9));
     let settings = edited(&before, |home| home.rustup_settings = Some(9));
-    let cache = edited(&before, |home| home.cache = Some(9));
     assert_eq!(
         cargo_home_left_unchanged(&before, &package_cache).unwrap_err(),
         "~/.cargo/.package-cache"
@@ -876,9 +875,37 @@ fn a_changed_package_cache_rustup_or_user_cache_names_that_path() {
         cargo_home_left_unchanged(&before, &settings).unwrap_err(),
         "~/.rustup/settings.toml"
     );
+}
+
+#[test]
+fn the_user_cache_directory_mtime_may_change() {
+    let before = sample_home();
+    let after = edited(&before, |home| home.cache = Some(9));
+    assert_eq!(cargo_home_left_unchanged(&before, &after), Ok(()));
+}
+
+#[test]
+fn a_prompt_dump_under_the_user_cache_may_change() {
+    let before = edited(&sample_home(), |home| {
+        home.cache_children.insert("p10k-jayden".to_string(), 1);
+    });
+    let after = edited(&before, |home| {
+        home.cache_children.insert("p10k-jayden".to_string(), 9);
+    });
+    assert_eq!(cargo_home_left_unchanged(&before, &after), Ok(()));
+}
+
+#[test]
+fn a_changed_user_cache_child_names_that_path() {
+    let before = edited(&sample_home(), |home| {
+        home.cache_children.insert("cargo".to_string(), 1);
+    });
+    let after = edited(&before, |home| {
+        home.cache_children.insert("cargo".to_string(), 9);
+    });
     assert_eq!(
-        cargo_home_left_unchanged(&before, &cache).unwrap_err(),
-        "~/.cache"
+        cargo_home_left_unchanged(&before, &after).unwrap_err(),
+        "~/.cache/cargo"
     );
 }
 
@@ -891,6 +918,17 @@ fn a_direct_child_other_than_the_global_cache_names_that_path() {
     assert_eq!(
         cargo_home_left_unchanged(&before, &after).unwrap_err(),
         "~/.cargo/registry"
+    );
+}
+
+#[test]
+fn more_than_64_direct_children_of_the_user_cache_names_that_directory() {
+    let before = edited(&sample_home(), |home| {
+        home.cache_children = (0..65).map(|n| (format!("c{n}"), 1)).collect();
+    });
+    assert_eq!(
+        cargo_home_left_unchanged(&before, &before).unwrap_err(),
+        "~/.cache"
     );
 }
 
@@ -2206,6 +2244,7 @@ struct HomeStamps {
     rustup_settings: Option<u128>,
     cache: Option<u128>,
     cargo_children: BTreeMap<String, u128>,
+    cache_children: BTreeMap<String, u128>,
 }
 
 fn sample_home() -> HomeStamps {
@@ -2221,6 +2260,7 @@ fn sample_home() -> HomeStamps {
         rustup_settings: Some(5),
         cache: Some(6),
         cargo_children,
+        cache_children: BTreeMap::new(),
     }
 }
 
@@ -2248,7 +2288,6 @@ fn cargo_home_left_unchanged(before: &HomeStamps, after: &HomeStamps) -> Result<
         after.rustup_settings,
         "~/.rustup/settings.toml",
     )?;
-    same_stamp(before.cache, after.cache, "~/.cache")?;
     let mut names = BTreeSet::new();
     names.extend(before.cargo_children.keys().map(String::as_str));
     names.extend(after.cargo_children.keys().map(String::as_str));
@@ -2258,6 +2297,21 @@ fn cargo_home_left_unchanged(before: &HomeStamps, after: &HomeStamps) -> Result<
         }
         if before.cargo_children.get(name) != after.cargo_children.get(name) {
             return Err(format!("~/.cargo/{name}"));
+        }
+    }
+    if before.cache_children.len() > CARGO_CHILD_CAP || after.cache_children.len() > CARGO_CHILD_CAP
+    {
+        return Err("~/.cache".to_string());
+    }
+    let mut cache_names = BTreeSet::new();
+    cache_names.extend(before.cache_children.keys().map(String::as_str));
+    cache_names.extend(after.cache_children.keys().map(String::as_str));
+    for name in cache_names {
+        if name.starts_with("p10k-") {
+            continue;
+        }
+        if before.cache_children.get(name) != after.cache_children.get(name) {
+            return Err(format!("~/.cache/{name}"));
         }
     }
     Ok(())
@@ -2323,6 +2377,7 @@ fn read_home_stamps() -> Result<HomeStamps, String> {
         rustup_settings: mtime_ns(&home.join(".rustup").join("settings.toml")),
         cache: mtime_ns(&home.join(".cache")),
         cargo_children: direct_child_mtimes(&cargo, "~/.cargo")?,
+        cache_children: direct_child_mtimes(&home.join(".cache"), "~/.cache")?,
     })
 }
 
@@ -2335,6 +2390,7 @@ fn home_stamp_json(stamps: &HomeStamps) -> serde_json::Value {
         ".rustup/settings.toml": stamps.rustup_settings,
         ".cache": stamps.cache,
         "cargo_children": stamps.cargo_children,
+        "cache_children": stamps.cache_children,
     })
 }
 
