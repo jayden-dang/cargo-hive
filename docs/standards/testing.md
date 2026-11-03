@@ -50,7 +50,7 @@ None — the 2026-10-28 interview ratified no rule beyond the `test-first` skill
   - the test creates and removes its own git worktree inside that checkout;
   - `CARGO_TARGET_DIR` stays unset;
   - `HIVE_HOME` is a scratch directory under `/private/tmp/hive-it-*`;
-  - the build is `cargo build --offline --locked`;
+  - the build is `cargo build --offline --locked`, then `cargo check --all-targets --offline --locked`, `cargo clippy --all-targets --offline --locked`, `cargo test --offline --locked --no-run`, and `cargo check -p <one package> --lib --offline --locked`;
   - the test does not write `~/.rustup`. Cargo's default home stays in use, because that is where the checkout's registry lives. The only change under `~/.cargo` the test may leave is the mtime of `~/.cargo/.global-cache`, which may also move the mtime of the `~/.cargo` directory. Every other direct child of `~/.cargo` is unchanged. A direct child of `~/.cache` whose name starts with `p10k-` may be rewritten while the test runs, and that may move the `~/.cache` directory mtime. Every other direct child of `~/.cache` is unchanged.
 
 ## Not a substitute for acceptance

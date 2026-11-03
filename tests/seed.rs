@@ -262,7 +262,7 @@ fn a_store_with_no_tag_clones_nothing_with_a_finding() {
         1,
         "{receipt}"
     );
-    assert_byte_names_unmeasured(&receipt);
+    assert_early_finish_bytes(&receipt);
     assert!(!tag.exists());
     assert!(!lane.join("target").exists());
 }
@@ -294,6 +294,14 @@ fn a_store_tag_that_cannot_be_stated_names_the_error() {
             && !detail.contains("is missing")
     });
     assert!(named, "{err}; {:?}", outcome.findings);
+    assert_eq!(
+        outcome.counts.get("clone_bytes_not_shared").copied(),
+        Some(0)
+    );
+    assert!(!outcome.counts.contains_key("store_bytes"));
+    assert!(outcome.unmeasured.iter().any(|(field, reason)| {
+        field == "store_bytes" && reason.contains("the store's size was not measured")
+    }));
 }
 
 #[test]
@@ -330,6 +338,7 @@ fn an_empty_choice_clones_nothing_and_reports_why() {
     let findings = receipt["findings"].as_array().unwrap();
     assert_eq!(findings.len(), 1, "{receipt}");
     assert_eq!(findings[0]["kind"], "units.empty", "{receipt}");
+    assert_early_finish_bytes(&receipt);
     assert!(!lane.join("target").exists());
 }
 
@@ -352,7 +361,7 @@ fn no_toolchain_row_clones_nothing_with_a_finding_and_exit_zero() {
             .any(|finding| finding["kind"] == "toolchain.missing"),
         "{receipt}"
     );
-    assert_byte_names_unmeasured(&receipt);
+    assert_early_finish_bytes(&receipt);
     let stored: serde_json::Value =
         serde_json::from_slice(&fs::read(hive.home.path.join("store.db")).unwrap()).unwrap();
     assert!(
@@ -429,6 +438,8 @@ fn there_is_no_fill_command() {
     let hive = Hive::ready();
     let out = hive.run(&["fill"]);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unrecognized subcommand 'fill'"), "{err}");
 }
 
 #[test]
@@ -554,7 +565,7 @@ fn a_signal_exits_130() {
     });
     assert_eq!(receipt["command"], "seed", "{receipt}");
     assert_eq!(receipt["schema"], 2, "{receipt}");
-    assert_byte_names_unmeasured(&receipt);
+    assert_early_finish_bytes(&receipt);
     let _ = holder.kill();
     let _ = holder.wait();
 }
@@ -565,7 +576,9 @@ fn the_exit_code_follows_the_result() {
     assert_eq!(cargo_hive::seed::exit_code(&ok), 0);
     let cancelled = Ok(blank_outcome(true));
     assert_eq!(cargo_hive::seed::exit_code(&cancelled), 130);
-    let full = Err(cargo_hive::seed::Error::DiskFull("no space".into()));
+    let full = Err(cargo_hive::seed::Error::DiskFull(Box::new(
+        cargo_hive::seed::FullDisk::new("no space"),
+    )));
     assert_eq!(cargo_hive::seed::exit_code(&full), 1);
     let state = Err(cargo_hive::seed::Error::State(
         cargo_hive::state::StateError::Cancelled,
@@ -584,6 +597,7 @@ fn a_full_disk_reaches_the_caller() {
     let recording = Recording::over_real().fail_clone(&tag, libc::ENOSPC);
     let err = run_seed(&hive, recording, &lane).expect_err("a full disk is not success");
     assert!(matches!(err, Error::DiskFull(_)), "{err}");
+    assert!(err.to_string().contains("disk is full"), "{err}");
 
     let hive = Hive::ready();
     quiet_cache(&hive);
@@ -611,13 +625,15 @@ fn a_full_disk_reaches_the_caller() {
     );
     assert!(outcome.placed.is_empty());
     assert!(outcome.target.is_none());
-    for name in ["clone_bytes_not_shared", "store_bytes"] {
-        assert!(
-            outcome.unmeasured.iter().any(|(field, _)| field == name),
-            "{name} omitted from {outcome:?}"
-        );
-        assert!(!outcome.counts.contains_key(name), "{outcome:?}");
-    }
+    assert_eq!(
+        outcome.counts.get("clone_bytes_not_shared").copied(),
+        Some(0)
+    );
+    assert!(outcome.counts.get("store_bytes").copied().is_some());
+    assert!(outcome
+        .unmeasured
+        .iter()
+        .all(|(field, _)| field != "clone_bytes_not_shared" && field != "store_bytes"));
 }
 
 #[test]
@@ -1293,6 +1309,60 @@ fn seeding_a_new_worktree_of_a_real_repo_recompiles_no_cloned_unit() {
         "a cloned unit recompiled: {:?}",
         compiled.cloned_recompiled
     );
+    let package = one_lib_package(&lane.path);
+    let later = [
+        (
+            "cargo-check",
+            vec!["check", "--all-targets", "--offline", "--locked"],
+        ),
+        (
+            "cargo-clippy",
+            vec!["clippy", "--all-targets", "--offline", "--locked"],
+        ),
+        (
+            "cargo-test",
+            vec!["test", "--offline", "--locked", "--no-run"],
+        ),
+        (
+            "cargo-check-lib",
+            vec![
+                "check",
+                "-p",
+                package.as_str(),
+                "--lib",
+                "--offline",
+                "--locked",
+            ],
+        ),
+    ];
+    let mut later_counts = serde_json::Map::new();
+    for (label, args) in &later {
+        let status = cargo_locked(&lane.path, &hive.home.path, label, args);
+        copy_run(&hive, label);
+        assert!(
+            status.success(),
+            "{label} failed: {}",
+            tail(&hive.home.path.join(format!("{label}.err")))
+        );
+        let counted = cargo_artifact_counts(&hive.home.path.join(format!("{label}.out")), &hashes);
+        write_kept(
+            &format!("{label}-counts.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "cloned_recompiled": counted.cloned_recompiled,
+            }))
+            .unwrap()
+            .as_slice(),
+        );
+        assert!(
+            counted.cloned_recompiled.is_empty(),
+            "{label} recompiled a cloned unit: {:?}",
+            counted.cloned_recompiled
+        );
+        later_counts.insert(
+            (*label).to_string(),
+            serde_json::json!(counted.cloned_recompiled),
+        );
+    }
     let status_started = Instant::now();
     let status_code = real_cargo_hive(
         &hive,
@@ -1330,6 +1400,7 @@ fn seeding_a_new_worktree_of_a_real_repo_recompiles_no_cloned_unit() {
             "other_recompiled": compiled.other_recompiled,
             "cloned_recompiled": compiled.cloned_recompiled,
         },
+        "later_cargo": later_counts,
         "status_counts": counts,
         "homes_before": home_stamp_json(&homes_before),
         "homes_after": home_stamp_json(&homes_after),
@@ -1374,17 +1445,22 @@ fn ref_outcome(outcome: &cargo_hive::seed::Outcome) -> cargo_hive::seed::Outcome
     }
 }
 
-fn assert_byte_names_unmeasured(receipt: &serde_json::Value) {
+fn assert_early_finish_bytes(receipt: &serde_json::Value) {
+    assert_eq!(receipt["counts"]["clone_bytes_not_shared"], 0, "{receipt}");
+    assert!(
+        receipt["counts"]["store_bytes"].as_u64().is_some(),
+        "{receipt}"
+    );
     let fields: Vec<_> = receipt["unmeasured"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|row| row["field"].as_str())
         .collect();
-    for name in ["clone_bytes_not_shared", "store_bytes"] {
-        assert!(fields.contains(&name), "{name} omitted from {receipt}");
-        assert!(receipt["counts"].get(name).is_none(), "{receipt}");
-    }
+    assert!(
+        !fields.contains(&"clone_bytes_not_shared") && !fields.contains(&"store_bytes"),
+        "{receipt}"
+    );
 }
 
 fn quiet_cache(hive: &Hive) {
@@ -1932,24 +2008,29 @@ fn real_cargo_hive(hive: &Hive, args: &[&str], label: &str, deadline: Duration) 
 }
 
 fn cargo_build_locked(dir: &Path, scratch: &Path) -> ExitStatus {
+    cargo_locked(
+        dir,
+        scratch,
+        "cargo-build",
+        &["build", "--offline", "--locked"],
+    )
+}
+
+fn cargo_locked(dir: &Path, scratch: &Path, label: &str, args: &[&str]) -> ExitStatus {
     let mut cmd = Command::new("cargo");
-    cmd.args([
-        "build",
-        "--offline",
-        "--locked",
-        "--message-format=json-render-diagnostics",
-    ])
-    .current_dir(dir)
-    .env_remove("CARGO_HOME")
-    .env_remove("CARGO_TARGET_DIR")
-    .env_remove("CARGO_BUILD_TARGET_DIR")
-    .env_remove("CARGO_BUILD_BUILD_DIR")
-    .env_remove("CARGO_MANIFEST_DIR")
-    .env_remove("CARGO_MANIFEST_PATH")
-    .env_remove("CARGO_CRATE_NAME")
-    .env_remove("CARGO_PRIMARY_PACKAGE")
-    .env_remove("OUT_DIR")
-    .env("RUSTUP_AUTO_INSTALL", "0");
+    cmd.args(args)
+        .arg("--message-format=json-render-diagnostics")
+        .current_dir(dir)
+        .env_remove("CARGO_HOME")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .env_remove("CARGO_BUILD_BUILD_DIR")
+        .env_remove("CARGO_MANIFEST_DIR")
+        .env_remove("CARGO_MANIFEST_PATH")
+        .env_remove("CARGO_CRATE_NAME")
+        .env_remove("CARGO_PRIMARY_PACKAGE")
+        .env_remove("OUT_DIR")
+        .env("RUSTUP_AUTO_INSTALL", "0");
     // A build script that recorded these unset rebuilds when this process inherited them.
     // `CARGO`, the cargo binary path, stays.
     let mut seen = 0usize;
@@ -1960,12 +2041,94 @@ fn cargo_build_locked(dir: &Path, scratch: &Path) -> ExitStatus {
             cmd.env_remove(&key);
         }
     }
-    finish_to_files(
-        &mut cmd,
-        scratch,
-        "cargo-build",
-        Duration::from_secs(4 * 60 * 60),
-    )
+    finish_to_files(&mut cmd, scratch, label, Duration::from_secs(4 * 60 * 60))
+}
+
+fn one_lib_package(checkout: &Path) -> String {
+    let manifest = fs::read_to_string(checkout.join("Cargo.toml"))
+        .unwrap_or_else(|err| panic!("{}: {err}", checkout.display()));
+    assert!(manifest.len() < 16 * 1024 * 1024, "walk bound hit");
+    let mut members = Vec::new();
+    let mut in_members = false;
+    let mut lines = 0usize;
+    for line in manifest.lines() {
+        lines += 1;
+        assert!(lines < 100_000, "walk bound hit");
+        let trimmed = line.trim();
+        if !in_members {
+            if trimmed.starts_with("members") && trimmed.contains('[') {
+                in_members = true;
+                if let Some((_, rest)) = trimmed.split_once('[') {
+                    push_quoted(&mut members, rest);
+                    if rest.contains(']') {
+                        in_members = false;
+                    }
+                }
+            }
+            continue;
+        }
+        push_quoted(&mut members, trimmed);
+        if trimmed.contains(']') {
+            in_members = false;
+        }
+    }
+    assert!(!members.is_empty(), "the workspace names no member");
+    assert!(members.len() < 100_000, "walk bound hit");
+    for member in &members {
+        let dir = checkout.join(member);
+        let member_manifest = fs::read_to_string(dir.join("Cargo.toml")).unwrap_or_default();
+        let has_lib = dir.join("src/lib.rs").is_file()
+            || member_manifest.lines().any(|line| line.trim() == "[lib]");
+        if !has_lib {
+            continue;
+        }
+        return manifest_package_name(&member_manifest).unwrap_or_else(|| {
+            Path::new(member)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(member)
+                .to_string()
+        });
+    }
+    panic!("the workspace has no library package among {members:?}");
+}
+
+fn push_quoted(out: &mut Vec<String>, text: &str) {
+    let mut rest = text;
+    while let Some(start) = rest.find('"') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('"') else {
+            break;
+        };
+        out.push(rest[..end].to_string());
+        rest = &rest[end + 1..];
+    }
+}
+
+fn manifest_package_name(manifest: &str) -> Option<String> {
+    let mut in_package = false;
+    let mut lines = 0usize;
+    for line in manifest.lines() {
+        lines += 1;
+        assert!(lines < 100_000, "walk bound hit");
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("name") else {
+            continue;
+        };
+        let rest = rest.trim().trim_start_matches('=').trim();
+        let name = rest.trim_matches(|c| c == '"' || c == '\'');
+        if !name.is_empty() && !name.contains(' ') {
+            return Some(name.to_string());
+        }
+    }
+    None
 }
 
 fn git_in(scratch: &Path, dir: &Path, args: &[&str], label: &str, deadline: Duration) {

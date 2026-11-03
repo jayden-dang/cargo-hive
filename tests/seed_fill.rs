@@ -1776,7 +1776,65 @@ fn a_full_disk_is_an_error_not_a_finding() {
     )
     .unwrap_err();
     assert!(matches!(err, Error::DiskFull(_)), "{err}");
-    assert!(err.to_string().contains("disk is full"), "{err}");
+    let text = err.to_string();
+    let target = work.join("target");
+    assert!(target.is_dir(), "{text}");
+    assert!(
+        text.contains("disk is full") && text.contains("free space"),
+        "{text}"
+    );
+    assert!(text.contains("run the command again"), "{text}");
+    assert!(text.contains("before running seed again"), "{text}");
+    assert!(
+        text.contains(&target.canonicalize().unwrap().display().to_string()),
+        "{text}"
+    );
+    let again = run_place(
+        &filled,
+        &work,
+        &filled.rows,
+        CRATE_DIR_CAP,
+        &Recording::over_real(),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(again.cloned, 0, "{again:?}");
+    assert!(again.disk_full.is_none(), "{again:?}");
+    assert!(again.findings.iter().any(|(_, _, detail)| {
+        detail.contains("already exists") && detail.contains("untouched")
+    }));
+    assert!(target.is_dir());
+}
+
+#[test]
+fn a_full_disk_after_a_cloned_unit_names_the_directory() {
+    let filled = filled();
+    let state = open_state(&filled);
+    let rel = first_file_rel(&store::entry_dir(&state, &filled.rows[1]));
+    let work = filled.built.repo.worktree("full-later");
+    let dst = work.join("target").join(rel);
+    let recording = Recording::over_real().fail_clone(&dst, libc::ENOSPC);
+    let report = run_place(
+        &filled,
+        &work,
+        &filled.rows,
+        CRATE_DIR_CAP,
+        &recording,
+        &|| false,
+    )
+    .unwrap();
+    assert!(report.cloned >= 1, "{report:?}");
+    let why = report
+        .disk_full
+        .expect("a later full disk stays on the report");
+    let target = work.join("target");
+    assert!(target.is_dir());
+    assert!(why.contains("before running seed again"), "{why}");
+    assert!(
+        why.contains(&target.canonicalize().unwrap().display().to_string()),
+        "{why}"
+    );
+    assert!(why.contains("remove"), "{why}");
 }
 
 #[test]

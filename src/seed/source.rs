@@ -279,9 +279,10 @@ fn list_deps(fs: &dyn Fs, profile: &Path) -> Result<Vec<(String, EntryKind)>, Sk
     match fs.read_dir_bounded(&dir, DEPS_CAP) {
         Ok(entries) => Ok(entries),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(err) => Err(Skip::Bound(format!(
-            "{}: {err}; shrink the directory below its cap and build the target again",
-            dir.display()
+        Err(err) => Err(Skip::Bound(super::directory_listing(
+            &dir,
+            &err,
+            "build the target again",
         ))),
     }
 }
@@ -333,9 +334,10 @@ fn build_dep_info(
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
-            return Err(Skip::Bound(format!(
-                "{}: {err}; shrink the directory below its cap and build the target again",
-                dir.display()
+            return Err(Skip::Bound(super::directory_listing(
+                &dir,
+                &err,
+                "build the target again",
             )))
         }
     };
@@ -1396,5 +1398,29 @@ mod tests {
                 .any(|f| f.contains(&sealed.display().to_string())),
             "{findings:?}"
         );
+    }
+
+    #[test]
+    fn a_deps_listing_that_is_not_the_cap_does_not_say_shrink() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = Scratch::new("deps-perm");
+        let env = Env::new(&scratch.0);
+        let profile = scratch.0.join("debug");
+        let deps = profile.join("deps");
+        fs::create_dir_all(&deps).unwrap();
+        fs::set_permissions(&deps, fs::Permissions::from_mode(0o000)).unwrap();
+        let err = list_deps(env.ctx().fs, &profile).unwrap_err();
+        fs::set_permissions(&deps, fs::Permissions::from_mode(0o755)).unwrap();
+        let Skip::Bound(text) = err else {
+            panic!("expected the listing error, got {err}");
+        };
+        assert!(!text.contains("shrink"), "{text}");
+        assert!(text.contains(&deps.display().to_string()), "{text}");
+        assert!(
+            text.contains("Permission denied") || text.contains("os error 13"),
+            "{text}"
+        );
+        assert!(text.contains("make the directory readable"), "{text}");
+        assert!(text.contains("build the target again"), "{text}");
     }
 }

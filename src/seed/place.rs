@@ -84,21 +84,25 @@ fn accept_placed(fs: &dyn Fs, dst: &Path) -> Result<(), Stop> {
 }
 
 fn expand_if_compressed(fs: &dyn Fs, dst: &Path) -> io::Result<()> {
+    expand_capped(fs, dst, MAX_EXPAND_BYTES)
+}
+
+fn expand_capped(fs: &dyn Fs, dst: &Path, cap: u64) -> io::Result<()> {
     if !fs.entry_stat(dst)?.compressed {
         return Ok(());
     }
     let meta = std::fs::symlink_metadata(dst)?;
     let mtime = fs.mtime(dst)?;
     let len = meta.len();
-    if len > MAX_EXPAND_BYTES {
+    if len > cap {
         return Err(io::Error::other(format!(
-            "{len} bytes is over the {MAX_EXPAND_BYTES} byte cap"
+            "{len} bytes is over the {cap} byte cap"
         )));
     }
     let bytes = fs.read(dst)?;
-    if bytes.len() as u64 > MAX_EXPAND_BYTES {
+    if bytes.len() as u64 > cap {
         return Err(io::Error::other(format!(
-            "{} bytes is over the {MAX_EXPAND_BYTES} byte cap",
+            "{} bytes is over the {cap} byte cap",
             bytes.len()
         )));
     }
@@ -277,11 +281,12 @@ pub fn place(
                     .push(("unit.refused".to_string(), Some(path), detail));
             }
             Err(why) => {
+                let why = name_removal(&target, why);
                 if report.placed.is_empty() {
-                    return Err(Error::DiskFull(why));
+                    return Err(Error::disk_full(why));
                 }
                 report.disk_full = Some(why);
-                return Ok(report);
+                return finish(ctx, report, &mut added);
             }
         }
     }
@@ -551,13 +556,21 @@ fn is_full(err: &io::Error) -> bool {
     err.raw_os_error() == Some(libc::ENOSPC) || err.kind() == io::ErrorKind::StorageFull
 }
 
+fn name_removal(target: &Path, detail: impl Into<String>) -> String {
+    format!(
+        "{}; remove {} before running seed again",
+        detail.into(),
+        target.display()
+    )
+}
+
 fn io_error(path: &Path, err: &io::Error) -> Error {
     let detail = format!(
         "{path}: {err}; the target was not created, so run the command again",
         path = path.display()
     );
     if is_full(err) {
-        Error::DiskFull(detail)
+        Error::disk_full(detail)
     } else {
         Error::Failed(detail)
     }
@@ -571,7 +584,7 @@ impl Stop {
         path: &Path,
     ) -> Result<PlaceReport, Error> {
         match self {
-            Stop::Full(why) => Err(Error::DiskFull(why)),
+            Stop::Full(why) => Err(Error::disk_full(name_removal(path, why))),
             Stop::Failed(detail) => {
                 report
                     .findings
@@ -579,5 +592,85 @@ impl Stop {
                 Ok(std::mem::take(report))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_capped;
+    use crate::platform::Hooked;
+    use std::fs;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn scratch(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = PathBuf::from(format!(
+            "/private/tmp/hive-it-expand-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn pretend_compressed(inner: Box<dyn crate::platform::Fs>) -> Hooked {
+        let once = Mutex::new(std::collections::HashSet::<PathBuf>::new());
+        Hooked {
+            inner,
+            compress: None,
+            volume: None,
+            sharing: None,
+            entry_stat: Some(Box::new(move |path| {
+                let real = crate::platform::current().unwrap().fs;
+                let mut stat = real.entry_stat(path)?;
+                if once.lock().unwrap().insert(path.to_path_buf()) {
+                    stat.compressed = true;
+                }
+                Ok(stat)
+            })),
+        }
+    }
+
+    fn plant(dir: &Path, name: &str, len: usize) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, vec![7u8; len]).unwrap();
+        let when = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn a_small_cap_accepts_that_many_bytes_and_rejects_one_more() {
+        let root = scratch("cap");
+        let cap = 4u64;
+        let exact = plant(&root, "exact", cap as usize);
+        let over = plant(&root, "over", (cap + 1) as usize);
+        let over_ino = fs::symlink_metadata(&over).unwrap().ino();
+        let over_bytes = fs::read(&over).unwrap();
+        let fs = pretend_compressed(crate::platform::current().unwrap().fs);
+        expand_capped(&fs, &exact, cap).unwrap();
+        assert_eq!(fs::read(&exact).unwrap(), vec![7u8; cap as usize]);
+        assert_eq!(
+            fs::symlink_metadata(&exact).unwrap().modified().unwrap(),
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+        );
+        let err = expand_capped(&fs, &over, cap).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains(&cap.to_string()), "{text}");
+        assert!(!text.contains("1073741824"), "{text}");
+        assert_eq!(fs::read(&over).unwrap(), over_bytes);
+        assert_eq!(fs::symlink_metadata(&over).unwrap().ino(), over_ino);
+        assert!(!root.join(".hive-expand-over").exists());
+        let _ = fs::remove_dir_all(&root);
     }
 }

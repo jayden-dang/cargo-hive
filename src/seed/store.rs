@@ -643,7 +643,7 @@ mod tests {
         let sentence = format!("the disk is full ({why}); free space and run the command again");
         assert_eq!(err.to_string(), sentence);
         assert_eq!(
-            crate::seed::Error::DiskFull(why.clone()).to_string(),
+            crate::seed::Error::disk_full(why.clone()).to_string(),
             sentence
         );
         assert!(!entry_dir(&state, &row).exists());

@@ -371,9 +371,9 @@ fn rustup_which(tool: &str, cwd: &Path) -> Result<Option<PathBuf>, String> {
         .env("RUSTUP_AUTO_INSTALL", "0")
         .stdin(Stdio::null());
     drop_directory_toolchain(&mut cmd);
-    match cmd.output() {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("could not run rustup: {e}")),
+    match child_output(&mut cmd, "rustup") {
+        Err(msg) if msg.contains("os error 2") => Ok(None),
+        Err(msg) => Err(msg),
         Ok(out) if out.status.success() => Ok(Some(PathBuf::from(
             String::from_utf8_lossy(&out.stdout).trim(),
         ))),
@@ -381,6 +381,25 @@ fn rustup_which(tool: &str, cwd: &Path) -> Result<Option<PathBuf>, String> {
             "rustup which {tool} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )),
+    }
+}
+
+fn child_output(cmd: &mut Command, tool: &str) -> Result<std::process::Output, String> {
+    match crate::cargo_target::output_with_deadline(
+        cmd,
+        crate::cargo_target::METADATA_DEADLINE,
+        || false,
+    ) {
+        Ok(out) => Ok(out),
+        Err(crate::cargo_target::ChildOutputError::TimedOut) => {
+            Err(format!("{tool} exceeded its deadline"))
+        }
+        Err(crate::cargo_target::ChildOutputError::Cancelled) => {
+            Err(format!("{tool} was cancelled"))
+        }
+        Err(crate::cargo_target::ChildOutputError::Failed(msg)) => {
+            Err(format!("could not run {tool}: {msg}"))
+        }
     }
 }
 
@@ -398,13 +417,12 @@ pub fn resolve_toolchain(cwd: &Path) -> Result<Toolchain, String> {
         .filter(|dir| dir.parent().is_some_and(|p| p.ends_with("toolchains")))
         .and_then(Path::file_name)
         .map(|n| n.to_string_lossy().to_string());
-    let out = Command::new(&rustc)
-        .arg("-vV")
+    let mut cmd = Command::new(&rustc);
+    cmd.arg("-vV")
         .current_dir(cwd)
         .env("RUSTUP_AUTO_INSTALL", "0")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("could not run {}: {e}", rustc.display()))?;
+        .stdin(Stdio::null());
+    let out = child_output(&mut cmd, "rustc")?;
     if !out.status.success() {
         return Err(format!(
             "{} -vV failed: {}",
@@ -1542,6 +1560,44 @@ mod tests {
     fn the_active_toolchain_release_comes_from_rustc() {
         let t = resolve_toolchain(&std::env::temp_dir()).unwrap();
         assert!(t.release.starts_with(|c: char| c.is_ascii_digit()), "{t:?}");
+    }
+
+    #[test]
+    fn a_stuck_rustup_returns_an_error_that_names_rustup() {
+        let _serial = SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = scratch("stuck-rustup");
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let rustup = bin.join("rustup");
+        std::fs::write(&rustup, "#!/bin/sh\nsleep 90\nexit 0\n").unwrap();
+        std::fs::set_permissions(&rustup, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let old = std::env::var_os("PATH").unwrap_or_default();
+        let path = format!("{}:{}", bin.display(), old.to_string_lossy());
+        struct Restore(std::ffi::OsString);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: this test replaced PATH and must put it back before other tests spawn.
+                unsafe { std::env::set_var("PATH", &self.0) };
+            }
+        }
+        let _restore = Restore(old);
+        // SAFETY: the guard above restores PATH, including when this assertion panics.
+        unsafe { std::env::set_var("PATH", &path) };
+        let started = std::time::Instant::now();
+        let err = resolve_toolchain(&dir).unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            err.contains("rustup") && err.contains("deadline"),
+            "{err} after {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(75),
+            "rustup was still running after {elapsed:?}: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -9,7 +9,8 @@
 //! cloned plus existing plus failed plus dropped.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::discover::Checkout;
@@ -36,17 +37,45 @@ use std::fmt;
 use crate::state::StateError;
 
 #[derive(Debug)]
+pub struct FullDisk {
+    pub detail: String,
+    pub kept: Option<Outcome>,
+}
+
+impl FullDisk {
+    pub fn new(detail: impl Into<String>) -> FullDisk {
+        FullDisk {
+            detail: detail.into(),
+            kept: None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum Error {
     State(StateError),
-    DiskFull(String),
+    DiskFull(Box<FullDisk>),
     Failed(String),
+}
+
+impl Error {
+    pub(crate) fn disk_full(detail: impl Into<String>) -> Error {
+        Error::DiskFull(Box::new(FullDisk::new(detail)))
+    }
+
+    pub(crate) fn disk_full_kept(detail: impl Into<String>, outcome: Outcome) -> Error {
+        Error::DiskFull(Box::new(FullDisk {
+            detail: detail.into(),
+            kept: Some(outcome),
+        }))
+    }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::State(err) => write!(f, "{err}"),
-            Error::DiskFull(why) => f.write_str(&disk_full(why)),
+            Error::DiskFull(full) => f.write_str(&disk_full(&full.detail)),
             Error::Failed(why) => f.write_str(why),
         }
     }
@@ -54,6 +83,26 @@ impl fmt::Display for Error {
 
 pub(crate) fn disk_full(why: &str) -> String {
     format!("the disk is full ({why}); free space and run the command again")
+}
+
+pub(crate) fn directory_listing(dir: &Path, err: &io::Error, again: &str) -> String {
+    let step = if listing_is_cap(err) {
+        "shrink the directory below its cap"
+    } else if err.kind() == io::ErrorKind::PermissionDenied {
+        "make the directory readable"
+    } else if err.kind() == io::ErrorKind::NotADirectory
+        || err.raw_os_error() == Some(libc::ENOTDIR)
+    {
+        "remove the path that is not a directory"
+    } else {
+        "fix that error"
+    };
+    format!("{}: {err}; {step} and {again}", dir.display())
+}
+
+fn listing_is_cap(err: &io::Error) -> bool {
+    let text = err.to_string();
+    text.contains("has more than") && text.contains("entries")
 }
 
 impl std::error::Error for Error {
@@ -84,6 +133,49 @@ pub fn exit_code(result: &Result<Outcome, Error>) -> i32 {
     }
 }
 
+pub fn record_seed_result(
+    receipt: &mut crate::receipt::ReceiptBuilder,
+    result: &Result<Outcome, Error>,
+) {
+    match result {
+        Ok(outcome) => copy_outcome(receipt, outcome),
+        Err(Error::DiskFull(full)) => {
+            if let Some(outcome) = &full.kept {
+                copy_outcome(receipt, outcome);
+                let path = outcome.target.as_ref().map(|(path, _)| path.clone());
+                receipt.finding("error", path, result_text(result));
+            } else {
+                receipt.finding("error", None, result_text(result));
+            }
+        }
+        Err(_) => {
+            receipt.finding("error", None, result_text(result));
+        }
+    }
+}
+
+fn result_text(result: &Result<Outcome, Error>) -> String {
+    match result {
+        Ok(_) => String::new(),
+        Err(err) => err.to_string(),
+    }
+}
+
+fn copy_outcome(receipt: &mut crate::receipt::ReceiptBuilder, outcome: &Outcome) {
+    for (name, n) in &outcome.counts {
+        receipt.count(name, *n);
+    }
+    for (field, reason) in &outcome.unmeasured {
+        receipt.unmeasured(field, reason.clone());
+    }
+    for note in &outcome.notes {
+        receipt.note(note.clone());
+    }
+    for (kind, path, detail) in &outcome.findings {
+        receipt.finding(kind, path.clone(), detail.clone());
+    }
+}
+
 pub fn run(
     ctx: &Ctx<'_>,
     repo: &Repo,
@@ -97,13 +189,13 @@ pub fn run(
         findings.push(("walk.unreadable".to_string(), None, fault));
     }
     if cancel() {
-        return Ok(from_fill(&empty_fill(), findings, true, 0));
+        return Ok(from_fill(ctx, &empty_fill(), findings, true, 0));
     }
     let mut filled = fill::fill(ctx, repo, &targets, cancel)?;
     let cancelled = filled.cancelled;
     findings.append(&mut filled.findings);
     if cancelled || cancel() {
-        return Ok(from_fill(&filled, findings, true, 0));
+        return Ok(from_fill(ctx, &filled, findings, true, 0));
     }
     let days = match window_days(ctx.cfg.gc_window_days) {
         Ok(days) => days,
@@ -123,7 +215,7 @@ pub fn run(
             )
         };
         findings.push(("store.tag".to_string(), Some(tag.clone()), detail));
-        return Ok(from_fill(&filled, findings, false, 0));
+        return Ok(from_fill(ctx, &filled, findings, false, 0));
     }
     let stored = store::read(ctx.state).map_err(Error::State)?;
     let (rows, dropped) = match choose::choose(&stored, &repo.main, &toolchain.version_text) {
@@ -137,7 +229,7 @@ pub fn run(
                 )
             };
             findings.push(("toolchain.missing".to_string(), None, detail));
-            return Ok(from_fill(&filled, findings, false, 0));
+            return Ok(from_fill(ctx, &filled, findings, false, 0));
         }
         Choice::Units { rows, dropped } if rows.is_empty() => {
             findings.push((
@@ -146,7 +238,7 @@ pub fn run(
                 "the store has no unit to clone for this checkout, so nothing was created"
                     .to_string(),
             ));
-            return Ok(from_fill(&filled, findings, false, dropped));
+            return Ok(from_fill(ctx, &filled, findings, false, dropped));
         }
         Choice::Units { rows, dropped } => (rows, dropped),
     };
@@ -165,7 +257,7 @@ pub fn run(
         Some((_, _, detail)) => format!("{why}; {detail}"),
         None => why,
     };
-    Err(Error::DiskFull(why))
+    Err(Error::disk_full_kept(why, outcome))
 }
 
 fn empty_fill() -> FillReport {
@@ -180,19 +272,51 @@ fn empty_fill() -> FillReport {
 }
 
 fn from_fill(
+    ctx: &Ctx<'_>,
     filled: &FillReport,
     findings: Vec<(String, Option<PathBuf>, String)>,
     cancelled: bool,
     dropped: u64,
 ) -> Outcome {
+    let mut counts = clone_counts(filled, 0, 0, 0, dropped, 0);
+    let mut unmeasured = Vec::new();
+    if ctx.account_bytes {
+        counts.insert("clone_bytes_not_shared".to_string(), 0);
+    } else {
+        unmeasured.push((
+            "clone_bytes_not_shared".to_string(),
+            "doctor check (c) did not pass".to_string(),
+        ));
+    }
+    match measured_store(ctx) {
+        Ok(bytes) => {
+            counts.insert("store_bytes".to_string(), bytes);
+        }
+        Err(err) => unmeasured.push((
+            "store_bytes".to_string(),
+            format!("{err}; the store's size was not measured"),
+        )),
+    }
     Outcome {
-        counts: clone_counts(filled, 0, 0, 0, dropped, 0),
+        counts,
         findings,
-        unmeasured: unmeasured_bytes(),
+        unmeasured,
         notes: Vec::new(),
         cancelled,
         placed: Vec::new(),
         target: None,
+    }
+}
+
+fn measured_store(ctx: &Ctx<'_>) -> Result<u64, crate::size::SizeError> {
+    let root = store::store_dir(ctx.state);
+    match crate::size::allocated_bytes(&root, crate::size::MAX_DEPTH) {
+        Err(crate::size::SizeError::Io(path, err))
+            if path == root && err.kind() == io::ErrorKind::NotFound =>
+        {
+            Ok(0)
+        }
+        other => other,
     }
 }
 
@@ -278,19 +402,6 @@ fn epoch_secs(now: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-fn unmeasured_bytes() -> Vec<(String, String)> {
-    vec![
-        (
-            "clone_bytes_not_shared".to_string(),
-            "the bytes this clone adds were not measured".to_string(),
-        ),
-        (
-            "store_bytes".to_string(),
-            "the store's size was not measured".to_string(),
-        ),
-    ]
-}
-
 fn push_unmeasured(unmeasured: &mut Vec<(String, String)>, field: &str, reason: &str) {
     if unmeasured.iter().any(|(have, _)| have == field) {
         return;
@@ -329,4 +440,139 @@ fn clone_counts(
     counts.insert("clone_units_failed".to_string(), failed);
     counts.insert("clone_units_outside_window".to_string(), outside_window);
     counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{empty_fill, from_fill, record_seed_result, Error, Outcome};
+    use crate::plan_tier::Ctx;
+    use crate::state::{Config, State};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = PathBuf::from(format!(
+            "/private/tmp/hive-it-seed-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn ctx_at(root: &std::path::Path) -> (State, crate::platform::Platform, Config) {
+        let state = State::open_at(root.join("home")).unwrap();
+        let platform = crate::platform::current().unwrap();
+        let cfg = Config {
+            secondary_roots: Vec::new(),
+            cache_roots: Vec::new(),
+            gc_window_days: None,
+        };
+        (state, platform, cfg)
+    }
+
+    fn outcome_of(
+        state: &State,
+        platform: &crate::platform::Platform,
+        cfg: &Config,
+        account_bytes: bool,
+    ) -> Outcome {
+        let repos = [];
+        let mains = [];
+        let ctx = Ctx {
+            state,
+            fs: platform.fs.as_ref(),
+            cfg,
+            now: UNIX_EPOCH,
+            account_bytes,
+            repos: &repos,
+            mains: &mains,
+        };
+        from_fill(&ctx, &empty_fill(), Vec::new(), false, 0)
+    }
+
+    #[test]
+    fn a_finish_before_place_counts_no_clone_bytes_and_the_store() {
+        let root = scratch("early");
+        let (state, platform, cfg) = ctx_at(&root);
+        let on = outcome_of(&state, &platform, &cfg, true);
+        assert_eq!(on.counts.get("clone_bytes_not_shared").copied(), Some(0));
+        assert_eq!(on.counts.get("store_bytes").copied(), Some(0));
+        assert!(on.unmeasured.is_empty(), "{:?}", on.unmeasured);
+        let off = outcome_of(&state, &platform, &cfg, false);
+        assert!(!off.counts.contains_key("clone_bytes_not_shared"));
+        assert_eq!(off.counts.get("store_bytes").copied(), Some(0));
+        assert!(off.unmeasured.iter().any(|(field, reason)| {
+            field == "clone_bytes_not_shared" && reason == "doctor check (c) did not pass"
+        }));
+        let store = crate::seed::store::store_dir(&state);
+        std::fs::write(&store, b"not a directory").unwrap();
+        let blocked = outcome_of(&state, &platform, &cfg, true);
+        assert_eq!(
+            blocked.counts.get("clone_bytes_not_shared").copied(),
+            Some(0)
+        );
+        assert!(!blocked.counts.contains_key("store_bytes"));
+        assert!(blocked.unmeasured.iter().any(|(field, reason)| {
+            field == "store_bytes" && reason.contains("the store's size was not measured")
+        }));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_full_disk_keeps_the_counts_and_names_the_directory() {
+        let target = PathBuf::from("/private/tmp/hive-it-kept-target");
+        let mut counts = BTreeMap::new();
+        counts.insert("clone_units_cloned".to_string(), 2);
+        counts.insert("fill_entries_added".to_string(), 3);
+        let outcome = Outcome {
+            counts,
+            findings: vec![("unit.refused".to_string(), None, "left behind".to_string())],
+            unmeasured: vec![(
+                "clone_bytes_not_shared".to_string(),
+                "not measured".to_string(),
+            )],
+            notes: vec!["kept".to_string()],
+            cancelled: false,
+            placed: Vec::new(),
+            target: Some((target.clone(), (1, 2))),
+        };
+        let err = Error::disk_full_kept(
+            format!(
+                "no space left; remove {} before running seed again",
+                target.display()
+            ),
+            outcome,
+        );
+        let mut receipt = crate::receipt::Receipt::new("seed", crate::receipt::Scope::default());
+        record_seed_result(&mut receipt, &Err(err));
+        let receipt = receipt.finish();
+        assert_eq!(receipt.counts.get("clone_units_cloned").copied(), Some(2));
+        assert_eq!(receipt.counts.get("fill_entries_added").copied(), Some(3));
+        assert!(receipt
+            .unmeasured
+            .iter()
+            .any(|row| row.field == "clone_bytes_not_shared"));
+        assert_eq!(receipt.notes, vec!["kept".to_string()]);
+        assert!(receipt
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "unit.refused"));
+        let error = receipt
+            .findings
+            .iter()
+            .find(|finding| finding.kind == "error")
+            .expect("error finding");
+        assert_eq!(error.path.as_deref(), Some(target.as_path()));
+        let detail = &error.detail;
+        assert!(detail.contains("free space"), "{detail}");
+        assert!(detail.contains("run the command again"), "{detail}");
+        assert!(detail.contains("remove"), "{detail}");
+        assert!(detail.contains(&target.display().to_string()), "{detail}");
+        assert!(detail.contains("before running seed again"), "{detail}");
+    }
 }

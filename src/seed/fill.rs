@@ -187,6 +187,11 @@ fn fill_target(
             return Ok(());
         }
         Acquired::Failed(why) => {
+            *pass
+                .report
+                .targets_skipped
+                .entry("lock.failed")
+                .or_insert(0) += 1;
             pass.report.findings.push((
                 "lock.failed".to_string(),
                 Some(target.path.clone()),
@@ -442,7 +447,7 @@ fn publish_batch(
             }
             Err(PublishFailed::DiskFull(why)) => {
                 merge_rows(ctx, rows, table, cancel, report)?;
-                return Err(Error::DiskFull(why));
+                return Err(Error::disk_full(why));
             }
             Err(PublishFailed::Compress(why)) => {
                 let failed = PublishFailed::Compress(why);
@@ -456,7 +461,7 @@ fn publish_batch(
     }
     merge_rows(ctx, rows, table, cancel, report)?;
     if let Some(why) = batch.disk_full {
-        return Err(Error::DiskFull(why));
+        return Err(Error::disk_full(why));
     }
     Ok(())
 }
@@ -556,9 +561,10 @@ fn profile_listings(
             Ok(listing) => listing,
             Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(err) => {
-                return Err(format!(
-                    "{}: {err}; shrink the directory below its cap and build the target again",
-                    dir.display()
+                return Err(super::directory_listing(
+                    &dir,
+                    &err,
+                    "build the target again",
                 ));
             }
         };
@@ -657,12 +663,9 @@ fn dir_size(fs: &dyn Fs, root: &Path) -> Result<u64, String> {
                 dir.display()
             ));
         }
-        let entries = fs.read_dir_bounded(&dir, CRATE_DIR_CAP).map_err(|err| {
-            format!(
-                "{}: {err}; shrink the directory below its cap and run the command again",
-                dir.display()
-            )
-        })?;
+        let entries = fs
+            .read_dir_bounded(&dir, CRATE_DIR_CAP)
+            .map_err(|err| super::directory_listing(&dir, &err, "run the command again"))?;
         for (name, kind) in entries {
             let path = dir.join(name);
             match kind {
@@ -993,5 +996,86 @@ mod tests {
             err.contains(&target.path.join(".rustc_info.json").display().to_string()),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_listing_that_is_not_the_cap_does_not_say_shrink() {
+        let scratch = Scratch::new("not-dir");
+        let path = scratch.0.join("store");
+        std::fs::write(&path, b"x").unwrap();
+        let fs = crate::platform::current().unwrap().fs;
+        let err = super::dir_size(fs.as_ref(), &path).unwrap_err();
+        assert!(!err.contains("shrink"), "{err}");
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(
+            err.contains("remove the path that is not a directory"),
+            "{err}"
+        );
+        assert!(err.contains("run the command again"), "{err}");
+    }
+
+    #[test]
+    fn a_lock_that_cannot_be_read_is_skipped_and_fills_nothing() {
+        let scratch = Scratch::new("lock-failed");
+        let target_path = scratch.0.join("target");
+        std::fs::create_dir_all(&target_path).unwrap();
+        std::fs::write(
+            target_path.join("CACHEDIR.TAG"),
+            "# This file is a cache directory tag created by cargo.\n",
+        )
+        .unwrap();
+        let mode = std::os::unix::fs::PermissionsExt::from_mode(0o111);
+        std::fs::set_permissions(&target_path, mode).unwrap();
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(
+                    &self.0,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o755),
+                );
+            }
+        }
+        let _restore = Restore(target_path.clone());
+        let home = scratch.0.join("home");
+        let state = crate::state::State::open_at(home).unwrap();
+        let platform = crate::platform::current().unwrap();
+        let cfg = crate::state::Config {
+            secondary_roots: Vec::new(),
+            cache_roots: Vec::new(),
+            gc_window_days: None,
+        };
+        let repo = crate::registry::Repo {
+            main: scratch.0.clone(),
+            root_commits: std::collections::BTreeSet::new(),
+        };
+        let repos = [repo.clone()];
+        let mains = [scratch.0.clone()];
+        let ctx = crate::plan_tier::Ctx {
+            state: &state,
+            fs: platform.fs.as_ref(),
+            cfg: &cfg,
+            now: SystemTime::UNIX_EPOCH,
+            account_bytes: true,
+            repos: &repos,
+            mains: &mains,
+        };
+        let target = TargetDir {
+            path: target_path.clone(),
+            owner: Owner::Owned {
+                checkout: scratch.0.clone(),
+            },
+            profiles: Vec::new(),
+            size: None,
+            unreadable: None,
+        };
+        let report = super::fill(&ctx, &repo, &[target], &|| false).unwrap();
+        assert_eq!(report.targets_skipped.get("lock.failed").copied(), Some(1));
+        assert_eq!(report.entries_added, 0);
+        assert_eq!(report.entries_held, 0);
+        assert!(report
+            .findings
+            .iter()
+            .any(|(kind, _, _)| kind == "lock.failed"));
+        assert!(crate::seed::store::read(&state).unwrap().units.is_empty());
     }
 }

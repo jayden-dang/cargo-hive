@@ -1510,20 +1510,9 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
     b.scope_mut().checkouts.push(real.clone());
     let result = crate::seed::run(&ctx, &repos[0], &row, &toolchain, &cancelled);
     let code = crate::seed::exit_code(&result);
+    crate::seed::record_seed_result(&mut b, &result);
     match result {
         Ok(outcome) => {
-            for (name, n) in &outcome.counts {
-                b.count(name, *n);
-            }
-            for (field, reason) in &outcome.unmeasured {
-                b.unmeasured(field, reason.clone());
-            }
-            for note in &outcome.notes {
-                b.note(note.clone());
-            }
-            for (kind, path, detail) in &outcome.findings {
-                b.finding(kind, path.clone(), detail.clone());
-            }
             let human = format!(
                 "seed {path}\nfilled {added}, held {held}, cloned {cloned}\n",
                 path = real.display(),
@@ -1545,9 +1534,6 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
             );
             emit(state, out, b.finish(), &human, code)
         }
-        Err(err) => {
-            b.finding("error", None, err.to_string());
-            emit(state, out, b.finish(), &format!("{err}\n"), code)
-        }
+        Err(err) => emit(state, out, b.finish(), &format!("{err}\n"), code),
     }
 }
