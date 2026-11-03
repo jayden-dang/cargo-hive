@@ -1376,10 +1376,36 @@ fn names_path(report: &PlaceReport, path: &Path) {
 
 fn no_forbidden_writes(log: &[String], target: &Path) {
     for line in log {
+        if let Some(rest) = line.strip_prefix("write_file ") {
+            let path = Path::new(rest);
+            if path.starts_with(target) {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                assert!(
+                    name.starts_with(".hive-expand-") && !path.exists(),
+                    "place left a file in the target that is not the expanded replacement: {line}"
+                );
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("set_mtime ") {
+            let path = Path::new(rest);
+            if path.starts_with(target) {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                assert!(
+                    path.is_file() && !name.starts_with(".hive-expand-"),
+                    "mtime was not restored on the placed file: {line}"
+                );
+            }
+            continue;
+        }
         let rest = line
-            .strip_prefix("write_file ")
-            .or_else(|| line.strip_prefix("hardlink "))
-            .or_else(|| line.strip_prefix("set_mtime "))
+            .strip_prefix("hardlink ")
             .or_else(|| line.strip_prefix("compress "))
             .or_else(|| line.strip_prefix("remove "));
         let Some(rest) = rest else {
@@ -2085,9 +2111,10 @@ impl Fs for NamedShare {
 fn place_one_overridden(
     filled: &Filled,
     label: &str,
+    pick: impl Fn(&EntryStat) -> bool,
     sharing_of: impl Fn(&Sharing) -> Sharing,
-) -> (PlaceReport, PathBuf, Apfs) {
-    let (row, rel) = heavy_store_file(filled);
+) -> (PlaceReport, PathBuf, Apfs, Vec<(PathBuf, PathBuf)>) {
+    let (row, rel) = store_file_matching(filled, pick);
     let src = store::entry_dir(&open_state(filled), &row).join(&rel);
     let work = filled.built.repo.worktree(label);
     let dst = work.join("target").join(&rel);
@@ -2104,7 +2131,85 @@ fn place_one_overridden(
         report.cloned >= 1,
         "the overridden file's unit was cloned: {report:?}"
     );
-    (report, dst, apfs)
+    let pairs = cloned_pairs(&recording.log());
+    (report, dst, apfs, pairs)
+}
+
+fn store_file_matching(
+    filled: &Filled,
+    pick: impl Fn(&EntryStat) -> bool,
+) -> (store::Row, PathBuf) {
+    let state = open_state(filled);
+    let apfs = real_apfs();
+    for row in &filled.rows {
+        let root = store::entry_dir(&state, row);
+        if let Some(rel) = rel_matching(&root, &apfs, &pick) {
+            return (row.clone(), rel);
+        }
+    }
+    panic!("no store file matched");
+}
+
+fn rel_matching(root: &Path, apfs: &Apfs, pick: &impl Fn(&EntryStat) -> bool) -> Option<PathBuf> {
+    fn walk(
+        dir: &Path,
+        root: &Path,
+        apfs: &Apfs,
+        pick: &impl Fn(&EntryStat) -> bool,
+        depth: usize,
+    ) -> Option<PathBuf> {
+        assert!(depth < 64, "walk bound hit");
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .collect();
+        assert!(entries.len() < 100_000, "walk bound hit");
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                if let Some(found) = walk(&path, root, apfs, pick, depth + 1) {
+                    return Some(found);
+                }
+            } else if meta.is_file() {
+                let stat = apfs
+                    .entry_stat(&path)
+                    .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+                if pick(&stat) {
+                    return Some(path.strip_prefix(root).unwrap().to_path_buf());
+                }
+            }
+        }
+        None
+    }
+    walk(root, root, apfs, pick, 0)
+}
+
+fn blocks_counted_for(pairs: &[(PathBuf, PathBuf)], also: Option<&Path>, apfs: &Apfs) -> u64 {
+    let mut total = 0u64;
+    for (src, dst) in pairs {
+        let store = apfs
+            .entry_stat(src)
+            .unwrap_or_else(|err| panic!("{}: {err}", src.display()));
+        let placed = apfs
+            .entry_stat(dst)
+            .unwrap_or_else(|err| panic!("{}: {err}", dst.display()));
+        if store.compressed || also.is_some_and(|path| path == dst) {
+            total = total.saturating_add(placed.blocks.saturating_mul(512));
+        }
+    }
+    total
+}
+
+fn read_capped(path: &Path) -> Vec<u8> {
+    let meta = std::fs::symlink_metadata(path).unwrap();
+    assert!(
+        meta.len() <= 32 * 1024 * 1024,
+        "{} is larger than 32 MiB",
+        path.display()
+    );
+    std::fs::read(path).unwrap()
 }
 
 #[test]
@@ -2113,67 +2218,114 @@ fn a_real_clone_of_a_compressed_entry_adds_no_unshared_bytes() {
     let work = filled.built.repo.worktree("shared");
     let recording = Recording::over_real();
     let report = place_with(&filled, &work, &filled.rows, recording.fs(), true);
-    assert_eq!(report.bytes_not_shared, Some(0), "{report:?}");
     let apfs = real_apfs();
     let pairs = cloned_pairs(&recording.log());
     assert!(pairs.len() >= 2, "the tag and a unit file were cloned");
-    let mut occupied = 0u64;
+    let mut saw_compressed = false;
+    let mut saw_plain = false;
+    let mut still_compressed = 0u64;
+    let mut unshared = 0u64;
     for (src, dst) in &pairs {
-        let stat = apfs
+        let store = apfs
+            .entry_stat(src)
+            .unwrap_or_else(|err| panic!("{}: {err}", src.display()));
+        let placed = apfs
             .entry_stat(dst)
             .unwrap_or_else(|err| panic!("{}: {err}", dst.display()));
-        if stat.blocks == 0 {
-            continue;
+        if store.compressed {
+            saw_compressed = true;
+            if placed.compressed {
+                still_compressed += 1;
+            }
+            assert_eq!(
+                read_capped(dst),
+                read_capped(src),
+                "{} bytes differ from {}",
+                dst.display(),
+                src.display()
+            );
+            unshared = unshared.saturating_add(placed.blocks.saturating_mul(512));
+        } else if placed.blocks > 0 {
+            saw_plain = true;
+            let clone = apfs
+                .sharing(dst)
+                .unwrap_or_else(|err| panic!("{}: {err}", dst.display()));
+            let stored = apfs
+                .sharing(src)
+                .unwrap_or_else(|err| panic!("{}: {err}", src.display()));
+            assert!(
+                clone.shares_all,
+                "{} does not share every block",
+                dst.display()
+            );
+            assert_eq!(
+                clone.clone_id,
+                stored.clone_id,
+                "{} clone id differs from {}",
+                dst.display(),
+                src.display()
+            );
         }
-        occupied += 1;
-        let clone = apfs
-            .sharing(dst)
-            .unwrap_or_else(|err| panic!("{}: {err}", dst.display()));
-        let store = apfs
-            .sharing(src)
-            .unwrap_or_else(|err| panic!("{}: {err}", src.display()));
-        assert!(
-            clone.shares_all,
-            "{} does not share every block",
-            dst.display()
-        );
-        assert_eq!(
-            clone.clone_id,
-            store.clone_id,
-            "{} clone id differs from {}",
-            dst.display(),
-            src.display()
-        );
     }
-    assert!(occupied >= 1, "a cloned file allocates blocks");
+    assert!(saw_compressed, "a placed file's store file is compressed");
+    assert!(
+        saw_plain,
+        "a placed file that was not compressed and allocates blocks is missing; still_compressed {still_compressed}"
+    );
+    assert_eq!(
+        still_compressed, 0,
+        "{still_compressed} placed files are still compressed"
+    );
+    assert!(unshared > 0, "a compressed file's blocks were not counted");
+    assert_eq!(report.bytes_not_shared, Some(unshared), "{report:?}");
 }
 
 #[test]
 fn a_file_that_does_not_share_is_counted_by_its_blocks_and_never_by_private_bytes() {
     let filled = filled();
-    let (report, dst, apfs) = place_one_overridden(&filled, "not-shared", |store| Sharing {
-        private_bytes: 0,
-        clone_id: store.clone_id,
-        may_share: true,
-        shares_all: false,
-    });
+    let (report, dst, apfs, pairs) = place_one_overridden(
+        &filled,
+        "not-shared",
+        |stat| stat.blocks > 0,
+        |store| Sharing {
+            private_bytes: 0,
+            clone_id: store.clone_id,
+            may_share: true,
+            shares_all: false,
+        },
+    );
     let blocks = apfs.entry_stat(&dst).unwrap().blocks;
     assert!(blocks > 0, "{} allocates no blocks", dst.display());
-    assert_eq!(report.bytes_not_shared, Some(blocks * 512), "{report:?}");
+    let expected = blocks_counted_for(&pairs, Some(&dst), &apfs);
+    assert!(expected >= blocks * 512, "{expected} omits {dst:?}");
+    assert_eq!(report.bytes_not_shared, Some(expected), "{report:?}");
+    assert_ne!(
+        report.bytes_not_shared,
+        Some(expected - blocks * 512),
+        "the receipt used the override's private bytes of 0 for {}",
+        dst.display()
+    );
 }
 
 #[test]
 fn a_different_clone_id_is_not_shared() {
     let filled = filled();
-    let (report, dst, apfs) = place_one_overridden(&filled, "other-id", |store| Sharing {
-        private_bytes: 0,
-        clone_id: store.clone_id.wrapping_add(1),
-        may_share: true,
-        shares_all: true,
-    });
+    let (report, dst, apfs, pairs) = place_one_overridden(
+        &filled,
+        "other-id",
+        |stat| !stat.compressed && stat.blocks > 0,
+        |store| Sharing {
+            private_bytes: 0,
+            clone_id: store.clone_id.wrapping_add(1),
+            may_share: true,
+            shares_all: true,
+        },
+    );
     let blocks = apfs.entry_stat(&dst).unwrap().blocks;
     assert!(blocks > 0, "{} allocates no blocks", dst.display());
-    assert_eq!(report.bytes_not_shared, Some(blocks * 512), "{report:?}");
+    let expected = blocks_counted_for(&pairs, Some(&dst), &apfs);
+    assert!(expected >= blocks * 512, "{expected} omits {dst:?}");
+    assert_eq!(report.bytes_not_shared, Some(expected), "{report:?}");
 }
 
 #[test]

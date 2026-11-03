@@ -1,12 +1,12 @@
 #![cfg(target_os = "macos")]
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::macos::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -16,7 +16,7 @@ use common::cargo_fixture::backdate_all;
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
 use common::registry_fixture::{cargo_json, RegistryRepo};
-use common::{init_repo, wait_within, Hive};
+use common::{init_repo, register, wait_within, Hive};
 
 #[test]
 fn the_fixture_builds_a_registry_crate_with_a_build_script_offline() {
@@ -843,14 +843,17 @@ fn a_plan_over_a_seed_does_not_claim_shared_bytes_as_freed() {
     assert!(out.status.success(), "{planned}");
     let plan = plan_for(&planned, &target);
     assert!(plan["paths"].as_u64().unwrap() > 0, "{plan}");
-    assert_eq!(plan["counts"]["freed_bytes"].as_u64(), Some(0), "{plan}");
+    let not_shared = receipt["counts"]["clone_bytes_not_shared"].as_u64();
+    assert!(not_shared.unwrap_or(0) > 0, "{receipt}");
+    let freed = plan["counts"]["freed_bytes"].as_u64().unwrap();
+    let still_shared = plan["counts"]["deleted_bytes_still_shared"]
+        .as_u64()
+        .unwrap();
     assert!(
-        plan["counts"]["deleted_bytes_still_shared"]
-            .as_u64()
-            .unwrap()
-            > 0,
-        "{plan}"
+        freed > 0 && freed <= not_shared.unwrap(),
+        "{plan} {receipt}"
     );
+    assert!(still_shared > 0, "{plan}");
 }
 
 #[test]
@@ -1019,6 +1022,184 @@ fn gc_still_lists_rcgu_objects_of_a_dead_unit() {
     );
 }
 
+#[test]
+#[ignore = "seeds and builds the checkout named by HIVE_SEED_CHECKOUT; it does not run by default"]
+fn seeding_a_new_worktree_of_a_real_repo_recompiles_no_cloned_unit() {
+    let checkout = PathBuf::from(
+        std::env::var_os("HIVE_SEED_CHECKOUT").expect("HIVE_SEED_CHECKOUT names the checkout"),
+    );
+    let checkout = checkout
+        .canonicalize()
+        .unwrap_or_else(|err| panic!("{}: {err}", checkout.display()));
+    assert!(
+        checkout.join("Cargo.toml").is_file(),
+        "{} has no Cargo.toml",
+        checkout.display()
+    );
+    assert!(
+        source_target_is_built(&checkout),
+        "{} has no built source target",
+        checkout.display()
+    );
+    let homes_before = home_stamps();
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    hive.config(&format!(
+        r#"{{"secondary_roots":["{}"]}}"#,
+        hive.home.path.display()
+    ));
+    register(&hive, &checkout);
+    let lane_path = checkout
+        .join(".worktrees")
+        .join(format!("hive-seed-{}", std::process::id()));
+    assert!(
+        !lane_path.exists(),
+        "{} already exists",
+        lane_path.display()
+    );
+    let lane = LinkedWorktree::prepare(&checkout, &lane_path);
+    git_in(
+        &hive.home.path,
+        &checkout,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            lane.path.to_str().unwrap(),
+            "HEAD",
+        ],
+        "worktree-add",
+        Duration::from_secs(30 * 60),
+    );
+    assert!(
+        !lane.path.join("target").exists(),
+        "the new worktree already has a target"
+    );
+    let seed_started = Instant::now();
+    let seed_status = real_cargo_hive(
+        &hive,
+        &["seed", lane.path.to_str().unwrap(), "--json"],
+        "seed",
+        Duration::from_secs(8 * 60 * 60),
+    );
+    let seed_took = seed_started.elapsed();
+    copy_run(&hive, "seed");
+    let receipt = json_file(&hive.home.path.join("seed.out"), 32 * 1024 * 1024);
+    write_kept(
+        "seed-receipt.json",
+        &serde_json::to_vec_pretty(&receipt).unwrap(),
+    );
+    assert!(
+        seed_status.success(),
+        "seed refused ({}): {}",
+        seed_status,
+        tail(&hive.home.path.join("seed.err"))
+    );
+    assert!(
+        receipt["counts"]["clone_bytes_not_shared"]
+            .as_u64()
+            .is_some(),
+        "{receipt}"
+    );
+    let rmeta = placed_deps_rmeta(&lane.path.join("target"));
+    assert!(
+        !rmeta.is_empty(),
+        "no rmeta file was placed under {}",
+        lane.path.join("target").display()
+    );
+    let compressed: Vec<_> = rmeta
+        .iter()
+        .filter(|(_, flags)| flags & libc::UF_COMPRESSED != 0)
+        .map(|(path, _)| path.display().to_string())
+        .collect();
+    assert!(
+        compressed.is_empty(),
+        "a placed rmeta still has the compressed-file flag: {compressed:?}"
+    );
+    assert!(
+        receipt["counts"]["clone_units_cloned"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "{receipt}"
+    );
+    let hashes = cloned_unit_hashes(&hive, &lane.path);
+    assert!(!hashes.is_empty(), "the seed record lists no unit");
+    let build_started = Instant::now();
+    let build_status = cargo_build_locked(&lane.path, &hive.home.path);
+    let build_took = build_started.elapsed();
+    copy_run(&hive, "cargo-build");
+    assert!(
+        build_status.success(),
+        "cargo build failed: {}",
+        tail(&hive.home.path.join("cargo-build.err"))
+    );
+    let compiled = cargo_artifact_counts(&hive.home.path.join("cargo-build.out"), &hashes);
+    write_kept(
+        "cargo-counts.json",
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "registry_fresh": compiled.registry_fresh,
+            "registry_recompiled": compiled.registry_recompiled,
+            "other_fresh": compiled.other_fresh,
+            "other_recompiled": compiled.other_recompiled,
+            "cloned_recompiled": compiled.cloned_recompiled,
+        }))
+        .unwrap()
+        .as_slice(),
+    );
+    assert!(
+        compiled.cloned_recompiled.is_empty(),
+        "a cloned unit recompiled: {:?}",
+        compiled.cloned_recompiled
+    );
+    let status_started = Instant::now();
+    let status_code = real_cargo_hive(
+        &hive,
+        &["status", checkout.to_str().unwrap(), "--no-sizes", "--json"],
+        "status",
+        Duration::from_secs(2 * 60 * 60),
+    );
+    let status_took = status_started.elapsed();
+    copy_run(&hive, "status");
+    let status_receipt = json_file(&hive.home.path.join("status.out"), 64 * 1024 * 1024);
+    write_kept(
+        "status-receipt.json",
+        &serde_json::to_vec_pretty(&status_receipt).unwrap(),
+    );
+    assert!(
+        status_code.success(),
+        "status failed: {}",
+        tail(&hive.home.path.join("status.err"))
+    );
+    let counts = lane_status_counts(&status_receipt, &lane.path);
+    let homes_after = home_stamps();
+    let summary = serde_json::json!({
+        "seed_secs": seed_took.as_secs(),
+        "build_secs": build_took.as_secs(),
+        "status_secs": status_took.as_secs(),
+        "receipt_counts": receipt["counts"],
+        "receipt_unmeasured": receipt["unmeasured"],
+        "findings": receipt["findings"].as_array().map(Vec::len).unwrap_or(0),
+        "clone_units_dropped": receipt["counts"]["clone_units_dropped"],
+        "name_metas_with_several_fingerprints": name_metas_with_several_fingerprints(&hive),
+        "cargo": {
+            "registry_fresh": compiled.registry_fresh,
+            "registry_recompiled": compiled.registry_recompiled,
+            "other_fresh": compiled.other_fresh,
+            "other_recompiled": compiled.other_recompiled,
+            "cloned_recompiled": compiled.cloned_recompiled,
+        },
+        "status_counts": counts,
+        "homes_before": homes_before,
+        "homes_after": homes_after,
+    });
+    write_kept(
+        "summary.json",
+        &serde_json::to_vec_pretty(&summary).unwrap(),
+    );
+    eprintln!("{summary}");
+}
+
 fn stamp_under_build(unit: &cargo_hive::seed::record::SeededUnit) -> bool {
     let Some((rel, _)) = &unit.stamp else {
         return false;
@@ -1066,6 +1247,36 @@ fn assert_byte_names_unmeasured(receipt: &serde_json::Value) {
 
 fn quiet_cache(hive: &Hive) {
     fs::create_dir_all(hive.home.path.join("no-cache")).unwrap();
+}
+
+fn placed_deps_rmeta(target: &Path) -> Vec<(PathBuf, u32)> {
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, u32)>, depth: usize) {
+        assert!(depth <= 16, "walk bound hit");
+        assert!(out.len() < 100_000, "walk bound hit");
+        let mut seen = 0usize;
+        for entry in fs::read_dir(dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display())) {
+            seen += 1;
+            assert!(seen < 100_000, "walk bound hit");
+            let path = entry.unwrap().path();
+            let meta = fs::symlink_metadata(&path)
+                .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+            if meta.is_dir() {
+                walk(&path, out, depth + 1);
+                continue;
+            }
+            if meta.is_file()
+                && path.extension().is_some_and(|ext| ext == "rmeta")
+                && path
+                    .components()
+                    .any(|component| component.as_os_str() == "deps")
+            {
+                out.push((path, meta.st_flags()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(target, &mut out, 0);
+    out
 }
 
 fn nothing_filled(hive: &Hive) -> bool {
@@ -1490,6 +1701,385 @@ fn run_seed_until(
         mains: &lib.mains,
     };
     cargo_hive::seed::run(&ctx, &repos[0], &checkout, &toolchain, cancel)
+}
+
+struct LinkedWorktree {
+    main: PathBuf,
+    path: PathBuf,
+}
+
+impl LinkedWorktree {
+    fn prepare(main: &Path, path: &Path) -> LinkedWorktree {
+        LinkedWorktree {
+            main: main.to_path_buf(),
+            path: path.to_path_buf(),
+        }
+    }
+}
+
+impl Drop for LinkedWorktree {
+    fn drop(&mut self) {
+        let mut remove = Command::new("git");
+        remove
+            .args([
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .arg("-C")
+            .arg(&self.main)
+            .args(["worktree", "remove", "--force", "--"])
+            .arg(&self.path);
+        let _ = status_within(&mut remove, Duration::from_secs(10 * 60));
+        let _ = fs::remove_dir_all(&self.path);
+        let mut prune = Command::new("git");
+        prune
+            .args(["-c", "core.fsmonitor=false"])
+            .arg("-C")
+            .arg(&self.main)
+            .args(["worktree", "prune"]);
+        let _ = status_within(&mut prune, Duration::from_secs(60));
+    }
+}
+
+struct CargoArtifacts {
+    registry_fresh: u64,
+    registry_recompiled: u64,
+    other_fresh: u64,
+    other_recompiled: u64,
+    cloned_recompiled: Vec<String>,
+}
+
+fn source_target_is_built(checkout: &Path) -> bool {
+    let Ok(profiles) = fs::read_dir(checkout.join("target")) else {
+        return false;
+    };
+    let mut seen = 0usize;
+    for profile in profiles {
+        seen += 1;
+        assert!(seen < 100_000, "walk bound hit");
+        let Ok(profile) = profile else {
+            continue;
+        };
+        let Ok(units) = fs::read_dir(profile.path().join(".fingerprint")) else {
+            continue;
+        };
+        let mut units_seen = 0usize;
+        for unit in units {
+            units_seen += 1;
+            assert!(units_seen < 100_000, "walk bound hit");
+            if unit.is_ok() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn real_cargo_hive(hive: &Hive, args: &[&str], label: &str, deadline: Duration) -> ExitStatus {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cargo-hive"));
+    cmd.args(args)
+        .env("HIVE_HOME", &hive.home.path)
+        .env_remove("CARGO_HOME")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .env_remove("CARGO_BUILD_BUILD_DIR")
+        .env("RUSTUP_AUTO_INSTALL", "0");
+    finish_to_files(&mut cmd, &hive.home.path, label, deadline)
+}
+
+fn cargo_build_locked(dir: &Path, scratch: &Path) -> ExitStatus {
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "build",
+        "--offline",
+        "--locked",
+        "--message-format=json-render-diagnostics",
+    ])
+    .current_dir(dir)
+    .env_remove("CARGO_HOME")
+    .env_remove("CARGO_TARGET_DIR")
+    .env_remove("CARGO_BUILD_TARGET_DIR")
+    .env_remove("CARGO_BUILD_BUILD_DIR")
+    .env("RUSTUP_AUTO_INSTALL", "0");
+    finish_to_files(
+        &mut cmd,
+        scratch,
+        "cargo-build",
+        Duration::from_secs(4 * 60 * 60),
+    )
+}
+
+fn git_in(scratch: &Path, dir: &Path, args: &[&str], label: &str, deadline: Duration) {
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+    ])
+    .arg("-C")
+    .arg(dir)
+    .args(args)
+    .env("GIT_TERMINAL_PROMPT", "0");
+    let status = finish_to_files(&mut cmd, scratch, label, deadline);
+    assert!(
+        status.success(),
+        "{label} failed: {}",
+        tail(&scratch.join(format!("{label}.err")))
+    );
+}
+
+fn finish_to_files(cmd: &mut Command, dir: &Path, label: &str, deadline: Duration) -> ExitStatus {
+    let stdout = fs::File::create(dir.join(format!("{label}.out"))).unwrap();
+    let stderr = fs::File::create(dir.join(format!("{label}.err"))).unwrap();
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+        .unwrap_or_else(|err| panic!("cannot start {label}: {err}"));
+    wait_within(child, deadline).status
+}
+
+fn status_within(cmd: &mut Command, limit: Duration) -> Option<ExitStatus> {
+    let mut child = match cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return None,
+    };
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if started.elapsed() > limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => return None,
+        }
+    }
+}
+
+fn kept_dir() -> PathBuf {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/klynt-run");
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn write_kept(name: &str, bytes: &[u8]) {
+    assert!(
+        bytes.len() <= 512 * 1024 * 1024,
+        "{name} is over the write bound"
+    );
+    fs::write(kept_dir().join(name), bytes).unwrap();
+}
+
+fn copy_run(hive: &Hive, label: &str) {
+    for ext in ["out", "err"] {
+        let name = format!("{label}.{ext}");
+        let bytes = read_capped_bytes(&hive.home.path.join(&name), 512 * 1024 * 1024);
+        write_kept(&name, &bytes);
+    }
+}
+
+fn json_file(path: &Path, cap: u64) -> serde_json::Value {
+    let bytes = read_capped_bytes(path, cap);
+    serde_json::from_slice(&bytes).unwrap_or_else(|err| {
+        panic!(
+            "{} is not one JSON value ({err}): {}",
+            path.display(),
+            tail(path)
+        )
+    })
+}
+
+fn read_capped_bytes(path: &Path, cap: u64) -> Vec<u8> {
+    let len = fs::metadata(path).unwrap().len();
+    assert!(
+        len <= cap,
+        "{} is {len} bytes, over the {cap} byte cap",
+        path.display()
+    );
+    fs::read(path).unwrap()
+}
+
+fn tail(path: &Path) -> String {
+    let Ok(bytes) = fs::read(path) else {
+        return String::new();
+    };
+    let start = bytes.len().saturating_sub(4_000);
+    String::from_utf8_lossy(&bytes[start..]).into_owned()
+}
+
+fn cloned_unit_hashes(hive: &Hive, lane: &Path) -> Vec<String> {
+    let value = json_file(&hive.home.path.join("seeds.json"), 16 * 1024 * 1024);
+    let targets = value["targets"].as_object().unwrap();
+    assert!(targets.len() < 100_000, "walk bound hit");
+    let mut hashes = Vec::new();
+    for (target, record) in targets {
+        if !Path::new(target).starts_with(lane) {
+            continue;
+        }
+        let units = record["units"].as_array().unwrap();
+        assert!(units.len() < 100_000, "walk bound hit");
+        for unit in units {
+            let Some(dir_name) = unit["dir_name"].as_str() else {
+                continue;
+            };
+            let Some(hash) = cargo_hive::fingerprint::unit_hash(dir_name) else {
+                continue;
+            };
+            if !hashes.iter().any(|seen| seen == hash) {
+                hashes.push(hash.to_string());
+            }
+        }
+    }
+    hashes
+}
+
+fn name_metas_with_several_fingerprints(hive: &Hive) -> usize {
+    let value = json_file(&hive.home.path.join("store.db"), 32 * 1024 * 1024);
+    let units = value["units"].as_array().unwrap();
+    assert!(units.len() < 1_000_000, "walk bound hit");
+    let mut grouped: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for unit in units {
+        let Some(name) = unit["name_meta"].as_str() else {
+            continue;
+        };
+        let Some(hash) = unit["fingerprint_hash"].as_str() else {
+            continue;
+        };
+        grouped
+            .entry(name.to_string())
+            .or_default()
+            .insert(hash.to_string());
+    }
+    grouped.values().filter(|hashes| hashes.len() > 1).count()
+}
+
+fn cargo_artifact_counts(path: &Path, hashes: &[String]) -> CargoArtifacts {
+    let text = String::from_utf8(read_capped_bytes(path, 512 * 1024 * 1024))
+        .unwrap_or_else(|err| panic!("{} is not utf-8: {err}", path.display()));
+    let mut compiled = CargoArtifacts {
+        registry_fresh: 0,
+        registry_recompiled: 0,
+        other_fresh: 0,
+        other_recompiled: 0,
+        cloned_recompiled: Vec::new(),
+    };
+    for (n, line) in text.lines().enumerate() {
+        assert!(n < 500_000, "walk bound hit");
+        if line.is_empty() {
+            continue;
+        }
+        let message: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|err| panic!("{} line {} is not JSON ({err})", path.display(), n + 1));
+        if message["reason"].as_str() != Some("compiler-artifact") {
+            continue;
+        }
+        let package_id = message["package_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("compiler-artifact has no package_id"));
+        let fresh = message["fresh"]
+            .as_bool()
+            .unwrap_or_else(|| panic!("compiler-artifact has no fresh flag"));
+        let mut files = Vec::new();
+        if let Some(names) = message["filenames"].as_array() {
+            assert!(names.len() < 10_000, "walk bound hit");
+            for name in names {
+                if let Some(name) = name.as_str() {
+                    files.push(name.to_string());
+                }
+            }
+        }
+        if let Some(executable) = message["executable"].as_str() {
+            files.push(executable.to_string());
+        }
+        let cloned = files
+            .iter()
+            .any(|file| hashes.iter().any(|hash| file_has_hash(file, hash)));
+        if !fresh && cloned && compiled.cloned_recompiled.len() < 32 {
+            compiled.cloned_recompiled.push(package_id.to_string());
+        } else if !fresh && cloned && compiled.cloned_recompiled.len() == 32 {
+            compiled.cloned_recompiled.push("and more".to_string());
+        }
+        match (package_id.starts_with("registry+"), fresh) {
+            (true, true) => compiled.registry_fresh += 1,
+            (true, false) => compiled.registry_recompiled += 1,
+            (false, true) => compiled.other_fresh += 1,
+            (false, false) => compiled.other_recompiled += 1,
+        }
+    }
+    compiled
+}
+
+fn file_has_hash(file: &str, hash: &str) -> bool {
+    file.match_indices(hash).any(|(at, _)| {
+        let before = at > 0 && file.as_bytes()[at - 1] == b'-';
+        let after = at + hash.len();
+        let boundary = after == file.len()
+            || matches!(
+                file.as_bytes().get(after).copied(),
+                Some(b'.' | b'/' | b'-')
+            );
+        before && boundary
+    })
+}
+
+fn lane_status_counts(receipt: &serde_json::Value, lane: &Path) -> BTreeMap<String, u64> {
+    let counts = receipt["counts"].as_object().unwrap();
+    assert!(counts.len() < 100_000, "walk bound hit");
+    let mut out = BTreeMap::new();
+    for (key, value) in counts {
+        let Some((name, path)) = key.split_once(':') else {
+            continue;
+        };
+        if !matches!(
+            name,
+            "reused_fresh" | "seeded_unneeded" | "seeded_recompiled" | "seeded_missing"
+        ) {
+            continue;
+        }
+        if Path::new(path).starts_with(lane) {
+            out.insert(
+                key.clone(),
+                value
+                    .as_u64()
+                    .unwrap_or_else(|| panic!("{key} is not a count")),
+            );
+        }
+    }
+    out
+}
+
+fn home_stamps() -> BTreeMap<String, Option<u128>> {
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
+    let mut stamps = BTreeMap::new();
+    for rel in [
+        ".cargo",
+        ".cargo/.package-cache",
+        ".rustup",
+        ".rustup/settings.toml",
+        ".cache",
+    ] {
+        let modified = fs::metadata(home.join(rel)).ok().and_then(|meta| {
+            meta.modified().ok().map(|time| {
+                time.duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            })
+        });
+        stamps.insert(rel.to_string(), modified);
+    }
+    stamps
 }
 
 fn env_lock() -> &'static Mutex<()> {

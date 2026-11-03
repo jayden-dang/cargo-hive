@@ -1,10 +1,12 @@
 //! Clones chosen store entries into a checkout whose Cargo target does not exist yet.
 //! An empty set creates nothing. A target path that already exists, a missing parent,
 //! or a build directory that is not the target directory is one finding and clones nothing.
-//! Each file is cloned on its own, `deps/` then `build/` then `.fingerprint/`, and only
-//! through `create_dir` and `clone_file`. A clone counts as shared only when it reports
-//! `shares_all` and the same clone id as its store file; anything else adds that file's
-//! allocated blocks. `private_bytes` is not read. The store's size is its allocated blocks.
+//! Each file is cloned on its own, `deps/` then `build/` then `.fingerprint/`. A clone that
+//! still has the compressed-file flag is replaced in the same directory by a new regular file
+//! of the same bytes, and that file gets the clone's mtime back, before sharing is read. The
+//! store entry stays compressed. A clone counts as shared only when it reports `shares_all`
+//! and the same clone id as its store file; anything else adds that file's allocated blocks.
+//! `private_bytes` is not read. The store's size is its allocated blocks.
 
 use std::collections::HashSet;
 use std::io;
@@ -63,6 +65,65 @@ impl Added {
             ),
         ));
     }
+}
+
+const MAX_EXPAND_BYTES: u64 = 1024 * 1024 * 1024;
+
+fn accept_placed(fs: &dyn Fs, dst: &Path) -> Result<(), Stop> {
+    match expand_if_compressed(fs, dst) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let shown = format!("{}: {err}", dst.display());
+            if is_full(&err) {
+                Err(Stop::Full(shown))
+            } else {
+                Err(Stop::Failed(shown))
+            }
+        }
+    }
+}
+
+fn expand_if_compressed(fs: &dyn Fs, dst: &Path) -> io::Result<()> {
+    if !fs.entry_stat(dst)?.compressed {
+        return Ok(());
+    }
+    let mtime = fs.mtime(dst)?;
+    let len = std::fs::symlink_metadata(dst)?.len();
+    if len > MAX_EXPAND_BYTES {
+        return Err(io::Error::other(format!(
+            "{len} bytes is over the {MAX_EXPAND_BYTES} byte cap"
+        )));
+    }
+    let bytes = fs.read(dst)?;
+    if bytes.len() as u64 > MAX_EXPAND_BYTES {
+        return Err(io::Error::other(format!(
+            "{} bytes is over the {MAX_EXPAND_BYTES} byte cap",
+            bytes.len()
+        )));
+    }
+    let tmp = expand_sibling(dst)?;
+    if let Err(err) = fs.write_file(&tmp, &bytes) {
+        let _ = fs.remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&tmp, dst) {
+        let _ = fs.remove_file(&tmp);
+        return Err(err);
+    }
+    fs.set_mtime(dst, mtime)?;
+    if fs.entry_stat(dst)?.compressed {
+        return Err(io::Error::other("the file is still compressed"));
+    }
+    Ok(())
+}
+
+fn expand_sibling(dst: &Path) -> io::Result<PathBuf> {
+    let name = dst.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "the placed file has no name")
+    })?;
+    let mut tmp = std::ffi::OsString::from(".hive-expand-");
+    tmp.push(name);
+    Ok(dst.with_file_name(tmp))
 }
 
 fn charge(fs: &dyn Fs, added: &mut Added, src: &Path, dst: &Path) {
@@ -276,6 +337,15 @@ fn place_unit(
         let src = entry.join(rel);
         match ctx.fs.clone_file(&src, &dst) {
             Ok(()) => {
+                if let Err(stop) = accept_placed(ctx.fs, &dst) {
+                    return match stop {
+                        Stop::Full(why) => Err(why),
+                        Stop::Failed(detail) => Ok(UnitOutcome::Failed(
+                            dst,
+                            format!("{detail}; this unit was not cloned"),
+                        )),
+                    };
+                }
                 if ctx.account_bytes {
                     charge(ctx.fs, added, &src, &dst);
                 }
@@ -317,6 +387,14 @@ fn clone_tag(ctx: &Ctx<'_>, added: &mut Added, target: &Path) -> Result<(), Stop
     let dst = target.join("CACHEDIR.TAG");
     match ctx.fs.clone_file(&src, &dst) {
         Ok(()) => {
+            if let Err(stop) = accept_placed(ctx.fs, &dst) {
+                return Err(match stop {
+                    Stop::Full(why) => Stop::Full(why),
+                    Stop::Failed(detail) => Stop::Failed(format!(
+                        "{detail}; the target tag was not cloned, so no unit was cloned"
+                    )),
+                });
+            }
             if ctx.account_bytes {
                 charge(ctx.fs, added, &src, &dst);
             }
