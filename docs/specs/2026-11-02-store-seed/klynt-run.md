@@ -66,3 +66,16 @@ Spike 7, beside those numbers and not as a pass mark: 466 needed and 31 compiled
 ## Home
 
 `~/.cargo/.global-cache` stayed at mtime `1793675342995573416`, which the check may allow to move along with the `~/.cargo` directory, and the allowed `p10k-` cache files `p10k-dump-jayden.zsh`, `p10k-dump-jayden.zsh.zwc`, `p10k-instant-prompt-jayden.zsh`, `p10k-instant-prompt-jayden.zsh.zwc`, and `p10k-jayden` did not change.
+
+## Commands after the seed
+
+Date: 2026-11-03. Hive `78e1f3620c52b5cfda183e51f395b9d52b9cf6cd`. Checkout `/Users/jayden/Developer/klynt/klynt` at `0bdae577810ed2634874443a27a636fa03ee4e83`. The same ignored test, after `cargo build --offline --locked` exited 0, ran four more commands in that worktree. Each used `--message-format=json-render-diagnostics` so `cloned_recompiled` is read from compiler-artifact lines. `CARGO_TARGET_DIR` stayed unset. The library package was the first workspace member with `src/lib.rs`, `base`.
+
+| Command | Exit | cloned_recompiled |
+|---|---|---|
+| `cargo check --all-targets --offline --locked` | 0 | empty |
+| `cargo clippy --all-targets --offline --locked` | 0 | empty |
+| `cargo test --offline --locked --no-run` | 0 | empty |
+| `cargo check -p base --lib --offline --locked` | 0 | empty |
+
+The count files `target/klynt-run/cargo-check-counts.json`, `cargo-clippy-counts.json`, `cargo-test-counts.json`, and `cargo-check-lib-counts.json` are the same 29 bytes, sha256 `da0cbaadf9fc46a9690ae16b48f95b6e419cbd8e608becbf6e61056db0cecd6b`. `summary.json` sha256 `02acdad458923080d27325cf3e57fb2c88e5272f093d09ceef99e167437aa1c8`. The test finished in 424.23s. Seed 116s, build 100s, status 3s. The home comparison passed. The worktree `.worktrees/hive-seed-71383` was removed.
