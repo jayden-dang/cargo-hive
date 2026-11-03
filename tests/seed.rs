@@ -1802,7 +1802,22 @@ fn cargo_build_locked(dir: &Path, scratch: &Path) -> ExitStatus {
     .env_remove("CARGO_TARGET_DIR")
     .env_remove("CARGO_BUILD_TARGET_DIR")
     .env_remove("CARGO_BUILD_BUILD_DIR")
+    .env_remove("CARGO_MANIFEST_DIR")
+    .env_remove("CARGO_MANIFEST_PATH")
+    .env_remove("CARGO_CRATE_NAME")
+    .env_remove("CARGO_PRIMARY_PACKAGE")
+    .env_remove("OUT_DIR")
     .env("RUSTUP_AUTO_INSTALL", "0");
+    // A build script that recorded these unset rebuilds when this process inherited them.
+    // `CARGO`, the cargo binary path, stays.
+    let mut seen = 0usize;
+    for (key, _) in std::env::vars_os() {
+        seen += 1;
+        assert!(seen < 100_000, "walk bound hit");
+        if key.to_string_lossy().starts_with("CARGO_PKG_") {
+            cmd.env_remove(&key);
+        }
+    }
     finish_to_files(
         &mut cmd,
         scratch,
