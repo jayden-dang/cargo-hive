@@ -834,11 +834,11 @@ _Requirements: SEED-10.4, SEED-10.6, SEED-10.15_
 
 **Depends-on:** Task 12, Task 14
 
-- [ ] **Step 1: Write the failing test.** Add `Parsed::Seed` to `want` in `skill_documents_every_shipped_command`, and `Parsed::Seed` to the arm that requires a path word. Run `cargo test --test skill`; expect the documented-command test to fail.
-- [ ] **Step 2: Edit the skill,** inside its seven headings and under the 150-line budget: a `Which command` row; a `Command lines` line; `seed` added to the `Version first` bullet of commands not to run on a mismatch; `Reading a receipt`: the fill and clone counts, and the four `status` counts, `reused_fresh` meaning seeded, reached and unchanged, and not Cargo's printed fresh count; `Do not`: do not seed a checkout that has a target, since it gets nothing, and seed one lane first when starting several. No `.md` text and no stray `cargo hive` outside a command line, as the tests require. Add a `README.md` command line and the note that the store only grows until store GC ships.
-- [ ] **Step 3: Record one eval.** Run the skill once on a real prompt, record it as a `## ` section in `skills/hive/TESTS.md`, then add the matching `eval.json` entry with `derived_from` naming that heading. Update any `eval.json` contract quote whose skill text moved.
-- [ ] **Step 4: Run.** `cargo test --test skill`, then `cargo test`; expect pass.
-- [ ] **Step 5: Commit.** `docs(skill): teach agents to seed a new lane`
+- [x] **Step 1: Write the failing test.** Add `Parsed::Seed` to `want` in `skill_documents_every_shipped_command`, and `Parsed::Seed` to the arm that requires a path word. Run `cargo test --test skill`; expect the documented-command test to fail.
+- [x] **Step 2: Edit the skill,** inside its seven headings and under the 150-line budget: a `Which command` row; a `Command lines` line; `seed` added to the `Version first` bullet of commands not to run on a mismatch; `Reading a receipt`: the fill and clone counts, and the four `status` counts, `reused_fresh` meaning seeded, reached and unchanged, and not Cargo's printed fresh count; `Do not`: do not seed a checkout that has a target, since it gets nothing, and seed one lane first when starting several. No `.md` text and no stray `cargo hive` outside a command line, as the tests require. Add a `README.md` command line and the note that the store only grows until store GC ships.
+- [x] **Step 3: Record one eval.** Run the skill once on a real prompt, record it as a `## ` section in `skills/hive/TESTS.md`, then add the matching `eval.json` entry with `derived_from` naming that heading. Update any `eval.json` contract quote whose skill text moved.
+- [x] **Step 4: Run.** `cargo test --test skill`, then `cargo test`; expect pass.
+- [x] **Step 5: Commit.** `docs(skill): teach agents to seed a new lane`
 
 _Requirements: SEED-8.1, SEED-8.2, SEED-8.3, SEED-10.13_
 
