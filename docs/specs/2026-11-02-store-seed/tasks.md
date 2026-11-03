@@ -805,14 +805,14 @@ _Requirements: SEED-6.2, SEED-6.3, SEED-6.4, SEED-6.5, SEED-6.6, SEED-6.8, SEED-
 
 **Depends-on:** Task 2, Task 12
 
-- [ ] **Step 1: Write the tests** in `tests/seed.rs`. These guard existing behavior, so they are expected to pass at once; a failure is a real defect, reported, not a test to adjust.
+- [x] **Step 1: Write the tests** in `tests/seed.rs`. These guard existing behavior, so they are expected to pass at once; a failure is a real defect, reported, not a test to adjust.
   - `before_the_first_build_a_plan_lists_old_seeds_and_apply_skips_the_target`: seed, backdate every stamp 30 days, `gc --plan` lists paths, `apply` exits 0 with outcome `partial` and reason `all_targets_skipped`, the file count is unchanged, and the first build recompiles no registry unit. Measured once by hand on 2026-11-02 (`.skills/SEED/decisions.md`).
   - `a_plan_over_a_seed_does_not_claim_shared_bytes_as_freed`: the plan's `freed_bytes` is 0 and its `deleted_bytes_still_shared` above 0. Another value is a finding, not a threshold to tune.
   - `after_the_first_build_liveness_keeps_every_unit_that_build_needed`: `gc --plan` lists no unit the build used.
   - `liveness_reports_a_seed_with_fresh_stamps_as_live_before_its_first_build`: `gc --plan` gives no plan.
   - `gc_still_lists_rcgu_objects_of_a_dead_unit`, on a source with a dead unit: the stored plan in `plans.json` lists a `.rcgu.o`, read the way `Planned::plans_json` reads it, since the receipt carries only a path count.
-- [ ] **Step 2: Run.** `cargo test --test seed`; expect pass. Any failure goes to `root-cause`.
-- [ ] **Step 3: Commit.** `test(seed): gc treats a seeded target as it treats any other`
+- [x] **Step 2: Run.** `cargo test --test seed`; expect pass. Any failure goes to `root-cause`.
+- [x] **Step 3: Commit.** `test(seed): gc treats a seeded target as it treats any other`
 
 _Requirements: SEED-10.4, SEED-10.6, SEED-10.15_
 
