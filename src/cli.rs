@@ -632,7 +632,14 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
         }
         b.count("bytes", bytes);
     }
-    report_targets(&mut b, &mut human, &scan);
+    let seeds = match crate::seed::record::read(state) {
+        Ok(file) => Some(file),
+        Err(err) => {
+            b.note(err.to_string());
+            None
+        }
+    };
+    report_targets(&mut b, &mut human, &scan, seeds.as_ref());
     let wrote = match state.locked_or_cancelled(cancelled, |tx| {
         if cancelled() {
             return Ok(false);
@@ -659,7 +666,12 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
     emit(state, out, b.finish(), &human, code)
 }
 
-fn report_targets(b: &mut ReceiptBuilder, human: &mut String, scan: &crate::discover::TargetScan) {
+fn report_targets(
+    b: &mut ReceiptBuilder,
+    human: &mut String,
+    scan: &crate::discover::TargetScan,
+    seeds: Option<&crate::seed::record::SeedsFile>,
+) {
     use crate::cargo_target::Owner;
     use crate::fingerprint::Format;
     let (mut owned, mut orphans, mut unresolved, mut unreadable, mut unsupported) =
@@ -721,6 +733,23 @@ fn report_targets(b: &mut ReceiptBuilder, human: &mut String, scan: &crate::disc
                     b.finding("profile.unsupported", Some(p.path.clone()), why.clone());
                 }
                 (Format::Supported, None) => {}
+            }
+        }
+        if let Some(seeds) = seeds {
+            if let Some(record) = seeds.targets.get(&t.path) {
+                match crate::seed::record::counts(t, record, crate::gc::DEPS_CAP) {
+                    Ok(Some(counts)) => {
+                        let path = t.path.display();
+                        b.count(&format!("reused_fresh:{path}"), counts.fresh)
+                            .count(&format!("seeded_unneeded:{path}"), counts.unneeded)
+                            .count(&format!("seeded_recompiled:{path}"), counts.recompiled)
+                            .count(&format!("seeded_missing:{path}"), counts.missing);
+                    }
+                    Ok(None) => {}
+                    Err(why) => {
+                        b.note(why);
+                    }
+                }
             }
         }
     }

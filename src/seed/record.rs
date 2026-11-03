@@ -1,14 +1,21 @@
 //! The seed record in `seeds.json`. One target keeps one record. A write drops
 //! records whose target is gone, then the oldest, until the file fits its cap.
-//! A file that cannot be read is replaced, and the note says so.
+//! A file that cannot be read is replaced, and the note says so. `counts`
+//! reports what became of that record's units in the target as it stands now.
+//! A `deps/` listing that hits its bound or cannot be read is an error, not a count.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cargo_target::TargetDir;
+use crate::fingerprint::{self, DepEdge};
+use crate::liveness;
 use crate::state::{State, StateError};
 
 pub const SEEDS_FILE: &str = "seeds.json";
@@ -68,6 +75,279 @@ pub fn read(state: &State) -> Result<SeedsFile, StateError> {
     state.read_bounded(SEEDS_FILE, MAX_SEEDS_BYTES)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeedCounts {
+    pub fresh: u64,
+    pub unneeded: u64,
+    pub recompiled: u64,
+    pub missing: u64,
+}
+
+pub fn counts(
+    target: &TargetDir,
+    record: &SeedRecord,
+    deps_cap: usize,
+) -> Result<Option<SeedCounts>, String> {
+    let Some(identity) = dir_identity(&target.path) else {
+        return Ok(None);
+    };
+    if identity != record.identity {
+        return Ok(None);
+    }
+    let deps = dep_listings(target, record, deps_cap)?;
+    let reached = reached_units(target, record);
+    let mut fresh = 0u64;
+    let mut unneeded = 0u64;
+    let mut recompiled = 0u64;
+    let mut missing = 0u64;
+    for unit in &record.units {
+        let names = names_for(&deps, &target.path, &unit.rel_profile);
+        let key = (unit.rel_profile.clone(), unit.dir_name.clone());
+        if unit_missing(&target.path, unit, names, deps_cap)? {
+            missing += 1;
+        } else if stamp_differs(&target.path, unit) {
+            recompiled += 1;
+        } else if reached.contains(&key) {
+            fresh += 1;
+        } else {
+            unneeded += 1;
+        }
+    }
+    Ok(Some(SeedCounts {
+        fresh,
+        unneeded,
+        recompiled,
+        missing,
+    }))
+}
+
+fn dir_identity(path: &Path) -> Option<(u64, u64)> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
+fn dep_listings(
+    target: &TargetDir,
+    record: &SeedRecord,
+    cap: usize,
+) -> Result<BTreeMap<PathBuf, Vec<String>>, String> {
+    let mut dirs = BTreeSet::new();
+    for profile in &target.profiles {
+        dirs.insert(profile.path.join("deps"));
+    }
+    for unit in &record.units {
+        dirs.insert(target.path.join(&unit.rel_profile).join("deps"));
+    }
+    let mut listed = BTreeMap::new();
+    for dir in dirs {
+        let names = list_dir_names(&dir, cap)?;
+        if let Some(profile) = dir.parent() {
+            listed.insert(profile.to_path_buf(), names);
+        }
+    }
+    Ok(listed)
+}
+
+fn list_dir_names(dir: &Path, cap: usize) -> Result<Vec<String>, String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(readable(dir, &err)),
+    };
+    let mut names = Vec::new();
+    for (seen, entry) in entries.enumerate() {
+        if seen >= cap {
+            return Err(format!(
+                "{} has more than {cap} entries; shrink the directory below its cap and build the target again",
+                dir.display()
+            ));
+        }
+        let entry = entry.map_err(|err| readable(dir, &err))?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            format!(
+                "{} has a name that is not valid UTF-8; rename that entry to valid UTF-8 and build the target again",
+                dir.display()
+            )
+        })?;
+        names.push(name);
+    }
+    Ok(names)
+}
+
+fn readable(path: &Path, err: &io::Error) -> String {
+    format!(
+        "{}: {err}; make it readable and build the target again",
+        path.display()
+    )
+}
+
+fn names_for<'a>(
+    listings: &'a BTreeMap<PathBuf, Vec<String>>,
+    target: &Path,
+    rel: &Path,
+) -> &'a [String] {
+    listings
+        .get(&target.join(rel))
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn unit_missing(
+    target: &Path,
+    unit: &SeededUnit,
+    deps: &[String],
+    cap: usize,
+) -> Result<bool, String> {
+    let profile = target.join(&unit.rel_profile);
+    let present = counted_deps(&profile.join("deps"), deps, &unit.dir_name, cap)?;
+    let unit_dir_gone = !is_dir(&profile.join(".fingerprint").join(&unit.dir_name));
+    let build_gone = unit.has_build && !is_dir(&profile.join("build").join(&unit.dir_name));
+    Ok(unit_dir_gone || build_gone || present < unit.deps_files)
+}
+
+fn is_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+}
+
+fn counted_deps(
+    deps_dir: &Path,
+    names: &[String],
+    dir_name: &str,
+    cap: usize,
+) -> Result<u32, String> {
+    let Some(meta) = fingerprint::unit_hash(dir_name) else {
+        return Ok(0);
+    };
+    let mut count = 0u32;
+    for name in names {
+        if name.ends_with(".rcgu.o") || !liveness::embedded_hashes(name).any(|hash| hash == meta) {
+            continue;
+        }
+        count = count.saturating_add(count_files(&deps_dir.join(name), cap, 0)?);
+    }
+    Ok(count)
+}
+
+/// Regular files at `path`. A directory is walked down to `depth`; `.rcgu.o` is skipped.
+fn count_files(path: &Path, cap: usize, depth: usize) -> Result<u32, String> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(readable(path, &err)),
+    };
+    if meta.file_type().is_symlink() {
+        return Ok(0);
+    }
+    if meta.is_file() {
+        return Ok(1);
+    }
+    if !meta.is_dir() {
+        return Ok(0);
+    }
+    if depth > crate::size::MAX_DEPTH {
+        return Err(format!(
+            "{} is deeper than {} levels; remove directories past that depth and build the target again",
+            path.display(),
+            crate::size::MAX_DEPTH
+        ));
+    }
+    let mut count = 0u32;
+    for name in list_dir_names(path, cap)? {
+        if name.ends_with(".rcgu.o") {
+            continue;
+        }
+        count = count.saturating_add(count_files(&path.join(name), cap, depth + 1)?);
+    }
+    Ok(count)
+}
+
+fn stamp_differs(target: &Path, unit: &SeededUnit) -> bool {
+    match &unit.stamp {
+        Some((rel, recorded)) => file_mtime_ns(&target.join(rel)) != Some(*recorded),
+        None => stamp_present(target, unit),
+    }
+}
+
+fn stamp_present(target: &Path, unit: &SeededUnit) -> bool {
+    let profile = target.join(&unit.rel_profile);
+    [".fingerprint", "build"].into_iter().any(|base| {
+        fs::metadata(
+            profile
+                .join(base)
+                .join(&unit.dir_name)
+                .join(fingerprint::INVOKED_TIMESTAMP),
+        )
+        .is_ok()
+    })
+}
+
+fn file_mtime_ns(path: &Path) -> Option<u64> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    u64::try_from(modified.duration_since(UNIX_EPOCH).ok()?.as_nanos()).ok()
+}
+
+struct GraphNode {
+    rel: PathBuf,
+    dir_name: String,
+    deps: Vec<DepEdge>,
+}
+
+fn reached_units(target: &TargetDir, record: &SeedRecord) -> BTreeSet<(PathBuf, String)> {
+    let mut nodes = Vec::new();
+    let mut by_hash: HashMap<String, Vec<usize>> = HashMap::new();
+    for profile in &target.profiles {
+        let Some(graph) = &profile.graph else {
+            continue;
+        };
+        let rel = profile
+            .path
+            .strip_prefix(&target.path)
+            .unwrap_or(profile.path.as_path())
+            .to_path_buf();
+        for unit in &graph.units {
+            let idx = nodes.len();
+            by_hash.entry(unit.hash_hex.clone()).or_default().push(idx);
+            nodes.push(GraphNode {
+                rel: rel.clone(),
+                dir_name: unit.dir_name.clone(),
+                deps: unit.deps.clone(),
+            });
+        }
+    }
+    let mut queue = VecDeque::new();
+    let mut seen = HashSet::new();
+    for (idx, node) in nodes.iter().enumerate() {
+        let recorded = record
+            .units
+            .iter()
+            .find(|unit| unit.rel_profile == node.rel && unit.dir_name == node.dir_name);
+        let start = match recorded {
+            None => true,
+            Some(unit) => stamp_differs(&target.path, unit),
+        };
+        if start && seen.insert(idx) {
+            queue.push_back(idx);
+        }
+    }
+    let mut reached = BTreeSet::new();
+    while let Some(idx) = queue.pop_front() {
+        let edges: Vec<u64> = nodes[idx].deps.iter().map(|dep| dep.fingerprint).collect();
+        for edge in edges {
+            let Some(nexts) = by_hash.get(&fingerprint::le_hex(edge)) else {
+                continue;
+            };
+            for &next in nexts {
+                if seen.insert(next) {
+                    queue.push_back(next);
+                    let node = &nodes[next];
+                    reached.insert((node.rel.clone(), node.dir_name.clone()));
+                }
+            }
+        }
+    }
+    reached
+}
+
 fn replaced(err: &StateError) -> String {
     format!("{err}; this seed replaced the record file")
 }
@@ -119,10 +399,14 @@ fn oldest_other(file: &SeedsFile, inserted: &Path) -> Option<PathBuf> {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
+    use std::time::UNIX_EPOCH;
 
     use super::*;
 
+    use crate::cargo_target::{Owner, TargetDir};
+    use crate::fingerprint::{Coverage, DepEdge, Format, ProfileReport, Unit, UnitGraph};
     use crate::state::State;
 
     fn scratch(label: &str) -> (State, PathBuf) {
@@ -301,5 +585,462 @@ mod tests {
         let file = read(&state).unwrap();
         assert_eq!(file.targets.len(), 1, "{file:?}");
         assert!(file.targets.contains_key(&kept), "{file:?}");
+    }
+
+    #[derive(Clone, Copy)]
+    enum Stamp {
+        Same,
+        Differ,
+        Appeared,
+    }
+
+    #[derive(Clone)]
+    struct Spec {
+        id: u64,
+        recorded: bool,
+        in_graph: bool,
+        deps: Vec<u64>,
+        stamp: Stamp,
+        fingerprint: bool,
+        has_build: bool,
+        build_dir: bool,
+        files: u32,
+        recorded_files: u32,
+        rcgu: bool,
+        dir_files: u32,
+    }
+
+    fn seeded(id: u64) -> Spec {
+        Spec {
+            id,
+            recorded: true,
+            in_graph: true,
+            deps: Vec::new(),
+            stamp: Stamp::Same,
+            fingerprint: true,
+            has_build: false,
+            build_dir: false,
+            files: 1,
+            recorded_files: 1,
+            rcgu: false,
+            dir_files: 0,
+        }
+    }
+
+    fn outside(id: u64, deps: &[u64]) -> Spec {
+        let mut spec = seeded(id);
+        spec.recorded = false;
+        spec.deps = deps.to_vec();
+        spec.files = 0;
+        spec.recorded_files = 0;
+        spec
+    }
+
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn mtime_ns(path: &Path) -> Option<u64> {
+        let modified = fs::metadata(path).ok()?.modified().ok()?;
+        u64::try_from(modified.duration_since(UNIX_EPOCH).ok()?.as_nanos()).ok()
+    }
+
+    fn build(label: &str, specs: &[Spec]) -> (Scratch, TargetDir, SeedRecord) {
+        let root = PathBuf::from(format!(
+            "/private/tmp/hive-it-seedcnt-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let target = root.join("target");
+        let profile = target.join("debug");
+        fs::create_dir_all(profile.join("deps")).unwrap();
+        let mut graph_units = Vec::new();
+        let mut recorded = Vec::new();
+        for spec in specs {
+            let hex = crate::fingerprint::le_hex(spec.id);
+            let dir_name = format!("unit-{hex}");
+            if spec.fingerprint {
+                let dir = profile.join(".fingerprint").join(&dir_name);
+                fs::create_dir_all(&dir).unwrap();
+                if matches!(spec.stamp, Stamp::Same | Stamp::Differ | Stamp::Appeared) {
+                    fs::write(dir.join("invoked.timestamp"), b"t").unwrap();
+                }
+            }
+            if spec.build_dir {
+                fs::create_dir_all(profile.join("build").join(&dir_name)).unwrap();
+            }
+            for n in 0..spec.files {
+                fs::write(profile.join("deps").join(format!("f{n}-{hex}.rlib")), b"d").unwrap();
+            }
+            if spec.dir_files > 0 {
+                let bundle = profile.join("deps").join(format!("bundle-{hex}"));
+                fs::create_dir_all(&bundle).unwrap();
+                for n in 0..spec.dir_files {
+                    fs::write(bundle.join(format!("part{n}")), b"d").unwrap();
+                }
+                fs::write(bundle.join("noise.rcgu.o"), b"o").unwrap();
+            }
+            if spec.rcgu {
+                fs::write(
+                    profile.join("deps").join(format!("extra-{hex}.rcgu.o")),
+                    b"o",
+                )
+                .unwrap();
+            }
+            if spec.in_graph {
+                graph_units.push(Unit {
+                    dir_name: dir_name.clone(),
+                    kind: "lib".to_string(),
+                    hash_hex: hex.clone(),
+                    deps: spec
+                        .deps
+                        .iter()
+                        .map(|fingerprint| DepEdge {
+                            package: 0,
+                            fingerprint: *fingerprint,
+                        })
+                        .collect(),
+                    stem: "unit".to_string(),
+                    features: std::sync::Arc::from(""),
+                    coverage: Coverage::NotRecorded,
+                    profile: 0,
+                    target: 0,
+                    path: 0,
+                    toolchain_value: 0,
+                });
+            }
+            if spec.recorded {
+                let rel = PathBuf::from(format!("debug/.fingerprint/{dir_name}/invoked.timestamp"));
+                let stamp = match spec.stamp {
+                    Stamp::Appeared => None,
+                    Stamp::Same | Stamp::Differ => {
+                        let ns = mtime_ns(&target.join(&rel)).unwrap_or(1);
+                        let recorded_ns = match spec.stamp {
+                            Stamp::Differ => ns.wrapping_add(1),
+                            _ => ns,
+                        };
+                        Some((rel, recorded_ns))
+                    }
+                };
+                recorded.push(SeededUnit {
+                    rel_profile: PathBuf::from("debug"),
+                    dir_name,
+                    stamp,
+                    has_build: spec.has_build,
+                    deps_files: spec.recorded_files,
+                });
+            }
+        }
+        let meta = fs::symlink_metadata(&target).unwrap();
+        let target_dir = TargetDir {
+            path: target,
+            owner: Owner::Unresolved {
+                reason: "fixture".to_string(),
+            },
+            profiles: vec![ProfileReport {
+                path: profile,
+                format: Format::Supported,
+                units: graph_units.len(),
+                not_current: 0,
+                not_current_units: Vec::new(),
+                edges: None,
+                graph: Some(UnitGraph {
+                    units: graph_units,
+                    edges: Vec::new(),
+                }),
+            }],
+            size: None,
+            unreadable: None,
+        };
+        let record = SeedRecord {
+            identity: (meta.dev(), meta.ino()),
+            written_at: 1,
+            units: recorded,
+        };
+        (Scratch(root), target_dir, record)
+    }
+
+    fn assert_buckets(label: &str, specs: &[Spec], expect: SeedCounts) {
+        let (_scratch, target, record) = build(label, specs);
+        let got = counts(&target, &record, 1_000)
+            .unwrap_or_else(|err| panic!("{label}: {err}"))
+            .unwrap_or_else(|| panic!("{label}: no counts"));
+        let recorded = record.units.len() as u64;
+        assert_eq!(
+            got.fresh + got.unneeded + got.recompiled + got.missing,
+            recorded,
+            "{label}: every seeded unit is in one bucket, got {got:?}"
+        );
+        assert_eq!(got, expect, "{label}");
+    }
+
+    #[test]
+    fn each_seeded_unit_lands_in_one_bucket() {
+        let mut direct = seeded(2);
+        direct.has_build = true;
+        direct.build_dir = true;
+        let mut through = seeded(2);
+        through.deps = vec![3];
+        let mut restamped = seeded(5);
+        restamped.stamp = Stamp::Differ;
+        restamped.deps = vec![6];
+        let mut born = seeded(7);
+        born.stamp = Stamp::Appeared;
+        born.deps = vec![8];
+        let mut no_fingerprint = seeded(9);
+        no_fingerprint.fingerprint = false;
+        let mut no_build = seeded(10);
+        no_build.has_build = true;
+        no_build.build_dir = false;
+        let mut short = seeded(11);
+        short.files = 1;
+        short.recorded_files = 2;
+        short.rcgu = true;
+        let mut only_rcgu = seeded(12);
+        only_rcgu.files = 0;
+        only_rcgu.recorded_files = 1;
+        only_rcgu.rcgu = true;
+        let mut aside = seeded(13);
+        aside.in_graph = false;
+        let mut bundled = seeded(14);
+        bundled.files = 0;
+        bundled.dir_files = 2;
+        bundled.recorded_files = 2;
+        let rows: Vec<(&str, Vec<Spec>, SeedCounts)> = vec![
+            (
+                "reached from a unit outside the record",
+                vec![outside(1, &[2]), direct],
+                SeedCounts {
+                    fresh: 1,
+                    unneeded: 0,
+                    recompiled: 0,
+                    missing: 0,
+                },
+            ),
+            (
+                "reached only through another seeded unit",
+                vec![outside(1, &[2]), through, seeded(3)],
+                SeedCounts {
+                    fresh: 2,
+                    unneeded: 0,
+                    recompiled: 0,
+                    missing: 0,
+                },
+            ),
+            (
+                "not reached",
+                vec![seeded(4)],
+                SeedCounts {
+                    fresh: 0,
+                    unneeded: 1,
+                    recompiled: 0,
+                    missing: 0,
+                },
+            ),
+            (
+                "stamp differs and starts the walk",
+                vec![restamped, seeded(6)],
+                SeedCounts {
+                    fresh: 1,
+                    unneeded: 0,
+                    recompiled: 1,
+                    missing: 0,
+                },
+            ),
+            (
+                "no stamp at seed and a stamp now",
+                vec![born, seeded(8)],
+                SeedCounts {
+                    fresh: 1,
+                    unneeded: 0,
+                    recompiled: 1,
+                    missing: 0,
+                },
+            ),
+            (
+                "fingerprint directory gone",
+                vec![no_fingerprint],
+                SeedCounts {
+                    fresh: 0,
+                    unneeded: 0,
+                    recompiled: 0,
+                    missing: 1,
+                },
+            ),
+            (
+                "build directory gone",
+                vec![no_build],
+                SeedCounts {
+                    fresh: 0,
+                    unneeded: 0,
+                    recompiled: 0,
+                    missing: 1,
+                },
+            ),
+            (
+                "fewer dep files than recorded",
+                vec![short],
+                SeedCounts {
+                    fresh: 0,
+                    unneeded: 0,
+                    recompiled: 0,
+                    missing: 1,
+                },
+            ),
+            (
+                "a new rcgu object does not hide a missing file",
+                vec![only_rcgu],
+                SeedCounts {
+                    fresh: 0,
+                    unneeded: 0,
+                    recompiled: 0,
+                    missing: 1,
+                },
+            ),
+            (
+                "absent from the graph",
+                vec![aside],
+                SeedCounts {
+                    fresh: 0,
+                    unneeded: 1,
+                    recompiled: 0,
+                    missing: 0,
+                },
+            ),
+            (
+                "a dep directory counts the files inside it",
+                vec![bundled],
+                SeedCounts {
+                    fresh: 0,
+                    unneeded: 1,
+                    recompiled: 0,
+                    missing: 0,
+                },
+            ),
+        ];
+        for (label, specs, expect) in &rows {
+            assert_buckets(label, specs, *expect);
+        }
+
+        let mut through = seeded(2);
+        through.deps = vec![3];
+        let through_again = through.clone();
+        let mut restamped = seeded(5);
+        restamped.stamp = Stamp::Differ;
+        restamped.deps = vec![6];
+        let mut born = seeded(7);
+        born.stamp = Stamp::Appeared;
+        born.deps = vec![8];
+        let mut no_fingerprint = seeded(9);
+        no_fingerprint.fingerprint = false;
+        let mut no_build = seeded(10);
+        no_build.has_build = true;
+        no_build.build_dir = false;
+        let mut short = seeded(11);
+        short.files = 1;
+        short.recorded_files = 2;
+        short.rcgu = true;
+        let mut only_rcgu = seeded(12);
+        only_rcgu.files = 0;
+        only_rcgu.recorded_files = 1;
+        only_rcgu.rcgu = true;
+        let mut aside = seeded(13);
+        aside.in_graph = false;
+        let mut bundled = seeded(14);
+        bundled.files = 0;
+        bundled.dir_files = 2;
+        bundled.recorded_files = 2;
+        assert_buckets(
+            "together",
+            &[
+                outside(1, &[2]),
+                through_again,
+                seeded(3),
+                seeded(4),
+                restamped,
+                seeded(6),
+                born,
+                seeded(8),
+                no_fingerprint,
+                no_build,
+                short,
+                only_rcgu,
+                aside,
+                bundled,
+            ],
+            SeedCounts {
+                fresh: 4,
+                unneeded: 3,
+                recompiled: 2,
+                missing: 4,
+            },
+        );
+    }
+
+    #[test]
+    fn counts_are_absent_when_the_target_identity_differs() {
+        let (_scratch, target, mut record) = build("identity", &[seeded(1)]);
+        record.identity = (
+            record.identity.0.wrapping_add(1),
+            record.identity.1.wrapping_add(1),
+        );
+        assert_eq!(counts(&target, &record, 1_000), Ok(None));
+    }
+
+    #[test]
+    fn a_deps_listing_over_its_cap_gives_no_counts() {
+        let (scratch, mut target, record) = build("cap", &[seeded(1)]);
+        let deps = scratch.0.join("target/debug/deps");
+        fs::write(deps.join("extra-a"), b"a").unwrap();
+        fs::write(deps.join("extra-b"), b"b").unwrap();
+        fs::write(deps.join("extra-c"), b"c").unwrap();
+        target.profiles[0].path = scratch.0.join("target/debug");
+        let err = counts(&target, &record, 2).expect_err("a listing past its cap");
+        let shown = deps.display().to_string();
+        assert!(
+            err.contains(&shown) && err.contains("shrink the directory"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn deleting_one_file_inside_a_dep_directory_makes_the_unit_missing() {
+        let mut bundled = seeded(14);
+        bundled.files = 0;
+        bundled.dir_files = 2;
+        bundled.recorded_files = 2;
+        let (scratch, target, record) = build("depdir", &[bundled]);
+        let kept = counts(&target, &record, 1_000)
+            .unwrap()
+            .expect("two files inside the directory");
+        assert_eq!(kept.missing, 0, "{kept:?}");
+        assert_eq!(kept.unneeded, 1, "{kept:?}");
+        let hex = crate::fingerprint::le_hex(14);
+        let part = scratch
+            .0
+            .join("target/debug/deps")
+            .join(format!("bundle-{hex}"))
+            .join("part0");
+        fs::remove_file(&part).unwrap();
+        let gone = counts(&target, &record, 1_000)
+            .unwrap()
+            .expect("one file left inside the directory");
+        assert_eq!(
+            gone,
+            SeedCounts {
+                fresh: 0,
+                unneeded: 0,
+                recompiled: 0,
+                missing: 1,
+            }
+        );
     }
 }
