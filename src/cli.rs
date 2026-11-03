@@ -1473,12 +1473,23 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
     let toolchain = match doctor::resolve_toolchain(&real) {
         Ok(toolchain) => toolchain,
         Err(err) => {
-            let detail = format!(
-                "{path}: {err}; install the toolchain that checkout selects and run the command again",
-                path = real.display()
-            );
-            b.finding("refusal", Some(real), detail.clone());
-            return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
+            let code = doctor::toolchain_failure_exit(&err);
+            let detail = if code == 130 {
+                format!("{path}: {err}", path = real.display())
+            } else {
+                format!(
+                    "{path}: {err}; install the toolchain that checkout selects and run the command again",
+                    path = real.display()
+                )
+            };
+            let kind = if code == 130 { "error" } else { "refusal" };
+            b.finding(kind, Some(real), detail.clone());
+            let human = if code == 130 {
+                format!("{detail}\n")
+            } else {
+                format!("refused: {detail}\n")
+            };
+            return emit(state, out, b.finish(), &human, code);
         }
     };
     for cap in [

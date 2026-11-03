@@ -364,16 +364,51 @@ pub(crate) fn drop_directory_toolchain(cmd: &mut Command) {
     }
 }
 
-fn rustup_which(tool: &str, cwd: &Path) -> Result<Option<PathBuf>, String> {
-    let mut cmd = Command::new("rustup");
+/// `NotFound` is `(os error 2)` with the closing parenthesis. `(os error 20)` contains
+/// the shorter text and is a different failure.
+fn rustup_is_missing(msg: &str) -> bool {
+    msg.contains("(os error 2)")
+}
+
+fn tool_error(tool: &str, err: crate::cargo_target::ChildOutputError) -> String {
+    match err {
+        crate::cargo_target::ChildOutputError::TimedOut => {
+            format!("{tool} exceeded its deadline")
+        }
+        crate::cargo_target::ChildOutputError::Cancelled => format!("{tool} was cancelled"),
+        crate::cargo_target::ChildOutputError::Failed(msg) => {
+            format!("could not run {tool}: {msg}")
+        }
+    }
+}
+
+/// Seed maps a cancelled `rustup` or `rustc -vV` to exit 130. Any other toolchain
+/// failure stays a refusal.
+pub(crate) fn toolchain_failure_exit(message: &str) -> i32 {
+    if message == "rustup was cancelled" || message == "rustc was cancelled" {
+        130
+    } else {
+        1
+    }
+}
+
+fn rustup_which(
+    rustup: &Path,
+    tool: &str,
+    cwd: &Path,
+    cancel: impl Fn() -> bool + Copy,
+) -> Result<Option<PathBuf>, String> {
+    let mut cmd = Command::new(rustup);
     cmd.args(["which", tool])
         .current_dir(cwd)
         .env("RUSTUP_AUTO_INSTALL", "0")
         .stdin(Stdio::null());
     drop_directory_toolchain(&mut cmd);
-    match child_output(&mut cmd, "rustup") {
-        Err(msg) if msg.contains("os error 2") => Ok(None),
-        Err(msg) => Err(msg),
+    match child_output(&mut cmd, cancel) {
+        Err(crate::cargo_target::ChildOutputError::Failed(msg)) if rustup_is_missing(&msg) => {
+            Ok(None)
+        }
+        Err(err) => Err(tool_error("rustup", err)),
         Ok(out) if out.status.success() => Ok(Some(PathBuf::from(
             String::from_utf8_lossy(&out.stdout).trim(),
         ))),
@@ -384,29 +419,32 @@ fn rustup_which(tool: &str, cwd: &Path) -> Result<Option<PathBuf>, String> {
     }
 }
 
-fn child_output(cmd: &mut Command, tool: &str) -> Result<std::process::Output, String> {
-    match crate::cargo_target::output_with_deadline(
-        cmd,
-        crate::cargo_target::METADATA_DEADLINE,
-        || false,
-    ) {
-        Ok(out) => Ok(out),
-        Err(crate::cargo_target::ChildOutputError::TimedOut) => {
-            Err(format!("{tool} exceeded its deadline"))
-        }
-        Err(crate::cargo_target::ChildOutputError::Cancelled) => {
-            Err(format!("{tool} was cancelled"))
-        }
-        Err(crate::cargo_target::ChildOutputError::Failed(msg)) => {
-            Err(format!("could not run {tool}: {msg}"))
-        }
-    }
+fn child_output(
+    cmd: &mut Command,
+    cancel: impl FnMut() -> bool,
+) -> Result<std::process::Output, crate::cargo_target::ChildOutputError> {
+    crate::cargo_target::output_with_deadline(cmd, crate::cargo_target::METADATA_DEADLINE, cancel)
+}
+
+fn process_cancel() -> bool {
+    CANCEL.load(Ordering::SeqCst)
 }
 
 /// The toolchain a build started in `cwd` would use: rustup's real binaries, or the
 /// `cargo` and `rustc` on PATH when rustup is absent.
 pub fn resolve_toolchain(cwd: &Path) -> Result<Toolchain, String> {
-    let (cargo, rustc) = match (rustup_which("cargo", cwd)?, rustup_which("rustc", cwd)?) {
+    resolve_toolchain_with(cwd, Path::new("rustup"), process_cancel)
+}
+
+fn resolve_toolchain_with(
+    cwd: &Path,
+    rustup: &Path,
+    cancel: impl Fn() -> bool + Copy,
+) -> Result<Toolchain, String> {
+    let (cargo, rustc) = match (
+        rustup_which(rustup, "cargo", cwd, cancel)?,
+        rustup_which(rustup, "rustc", cwd, cancel)?,
+    ) {
         (Some(c), Some(r)) => (c, r),
         _ => (PathBuf::from("cargo"), PathBuf::from("rustc")),
     };
@@ -422,7 +460,7 @@ pub fn resolve_toolchain(cwd: &Path) -> Result<Toolchain, String> {
         .current_dir(cwd)
         .env("RUSTUP_AUTO_INSTALL", "0")
         .stdin(Stdio::null());
-    let out = child_output(&mut cmd, "rustc")?;
+    let out = child_output(&mut cmd, cancel).map_err(|err| tool_error("rustc", err))?;
     if !out.status.success() {
         return Err(format!(
             "{} -vV failed: {}",
@@ -1563,31 +1601,54 @@ mod tests {
     }
 
     #[test]
+    fn an_os_error_20_is_not_a_missing_rustup() {
+        let missing = "could not spawn: No such file or directory (os error 2)";
+        assert!(rustup_is_missing(missing), "{missing}");
+        for code in 20..=29 {
+            let msg = format!("could not spawn: Not a directory (os error {code})");
+            assert!(!rustup_is_missing(&msg), "{msg}");
+        }
+    }
+
+    #[test]
+    fn a_cancel_that_is_already_true_returns_cancelled_without_the_deadline() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("90");
+        let started = std::time::Instant::now();
+        let err = child_output(&mut cmd, || true).unwrap_err();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "still waiting after {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(err, crate::cargo_target::ChildOutputError::Cancelled),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_toolchain_lookup_exits_130() {
+        assert_eq!(toolchain_failure_exit("rustup was cancelled"), 130);
+        assert_eq!(toolchain_failure_exit("rustc was cancelled"), 130);
+        assert_eq!(toolchain_failure_exit("rustup exceeded its deadline"), 1);
+        assert_eq!(
+            toolchain_failure_exit(
+                "could not run rustup: could not spawn: Not a directory (os error 20)"
+            ),
+            1
+        );
+    }
+
+    #[test]
     fn a_stuck_rustup_returns_an_error_that_names_rustup() {
-        let _serial = SERIAL
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = scratch("stuck-rustup");
-        let bin = dir.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let rustup = bin.join("rustup");
+        let rustup = dir.join("rustup");
         std::fs::write(&rustup, "#!/bin/sh\nsleep 90\nexit 0\n").unwrap();
         std::fs::set_permissions(&rustup, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
-        let old = std::env::var_os("PATH").unwrap_or_default();
-        let path = format!("{}:{}", bin.display(), old.to_string_lossy());
-        struct Restore(std::ffi::OsString);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                // SAFETY: this test replaced PATH and must put it back before other tests spawn.
-                unsafe { std::env::set_var("PATH", &self.0) };
-            }
-        }
-        let _restore = Restore(old);
-        // SAFETY: the guard above restores PATH, including when this assertion panics.
-        unsafe { std::env::set_var("PATH", &path) };
         let started = std::time::Instant::now();
-        let err = resolve_toolchain(&dir).unwrap_err();
+        let err = resolve_toolchain_with(&dir, &rustup, || false).unwrap_err();
         let elapsed = started.elapsed();
         assert!(
             err.contains("rustup") && err.contains("deadline"),
