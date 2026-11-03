@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cargo_hive::plan_tier::Ctx;
 use cargo_hive::seed::Error;
+use common::cargo_fixture::backdate_all;
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
 use common::registry_fixture::{cargo_json, RegistryRepo};
@@ -774,6 +775,250 @@ fn a_seed_that_cloned_nothing_writes_no_record() {
     assert!(!path.exists(), "{}", path.display());
 }
 
+#[test]
+fn before_the_first_build_a_plan_lists_old_seeds_and_apply_skips_the_target() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("old-seeds");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0);
+    let target = lane.join("target");
+    backdate_all(&target, Duration::from_secs(30 * 86_400));
+    let (out, planned) = hive.json(&["gc", "--plan"]);
+    assert!(out.status.success(), "{planned}");
+    let plan = plan_for(&planned, &target);
+    assert!(plan["paths"].as_u64().unwrap() > 0, "{planned}");
+    let before = file_count(&target);
+    let id = plan["id"].as_str().unwrap();
+    let (out, applied) = hive.json(&["apply", id]);
+    assert_eq!(out.status.code(), Some(0), "{applied}");
+    let applied_plan = &applied["plans"][0];
+    assert_eq!(applied_plan["outcome"], "partial", "{applied}");
+    assert_eq!(applied_plan["reason"], "all_targets_skipped", "{applied}");
+    assert_eq!(
+        applied_plan["counts"]["targets_skipped_lock_missing"],
+        serde_json::json!(1),
+        "{applied}"
+    );
+    for key in [
+        "targets_skipped_held",
+        "targets_skipped_lock_unopenable",
+        "targets_skipped_lock_unsupported",
+        "targets_skipped_profile_set",
+    ] {
+        assert_eq!(
+            applied_plan["counts"][key],
+            serde_json::json!(0),
+            "{key} {applied}"
+        );
+    }
+    assert_eq!(file_count(&target), before, "{applied}");
+    let built = cargo_json(&hive, &lane, &["build"]);
+    assert!(
+        built.registry_recompiled.is_empty(),
+        "{:?}",
+        built.registry_recompiled
+    );
+    assert!(
+        !built.registry_fresh.is_empty(),
+        "{:?}",
+        built.registry_fresh
+    );
+}
+
+#[test]
+fn a_plan_over_a_seed_does_not_claim_shared_bytes_as_freed() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("shared-bytes");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0);
+    let target = lane.join("target");
+    backdate_all(&target, Duration::from_secs(30 * 86_400));
+    let (out, planned) = hive.json(&["gc", "--plan"]);
+    assert!(out.status.success(), "{planned}");
+    let plan = plan_for(&planned, &target);
+    assert!(plan["paths"].as_u64().unwrap() > 0, "{plan}");
+    assert_eq!(plan["counts"]["freed_bytes"].as_u64(), Some(0), "{plan}");
+    assert!(
+        plan["counts"]["deleted_bytes_still_shared"]
+            .as_u64()
+            .unwrap()
+            > 0,
+        "{plan}"
+    );
+}
+
+#[test]
+fn after_the_first_build_liveness_keeps_every_unit_that_build_needed() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("kept-live");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let target = lane.join("target");
+    let seeded = seeded_dir_names(&hive, &target);
+    assert!(!seeded.is_empty(), "{receipt}");
+    backdate_all(&target, Duration::from_secs(30 * 86_400));
+    let built = cargo_json(&hive, &lane, &["build"]);
+    assert!(
+        built.registry_recompiled.is_empty(),
+        "{:?}",
+        built.registry_recompiled
+    );
+    assert!(
+        !built.registry_fresh.is_empty(),
+        "{:?}",
+        built.registry_fresh
+    );
+    let mut used = seeded;
+    used.extend(dirs_stamped_within(
+        &target,
+        Duration::from_secs(7 * 86_400),
+    ));
+    let target = target.canonicalize().unwrap();
+    let (out, planned) = hive.json(&["gc", "--plan"]);
+    assert!(out.status.success(), "{planned}");
+    assert!(
+        planned["undecided"].as_array().unwrap().iter().all(|item| {
+            item.get("target")
+                .and_then(|path| path.as_str())
+                .is_none_or(|path| Path::new(path) != target)
+        }),
+        "{planned}"
+    );
+    let stored = plans_stored(&hive);
+    let under: Vec<String> = stored_paths(&stored)
+        .into_iter()
+        .filter(|path| path_under(path, &target))
+        .collect();
+    let hits: Vec<String> = under
+        .iter()
+        .filter(|path| path_names_unit(path, &used))
+        .cloned()
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "plan listed a unit the build used: {hits:?}\n{planned}"
+    );
+    let kept = planned["nothing_to_do"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item.as_str().is_some_and(|path| Path::new(path) == target));
+    assert!(
+        kept || !under.is_empty(),
+        "neither nothing_to_do nor a stored plan names {}\n{planned}",
+        target.display()
+    );
+}
+
+#[test]
+fn liveness_reports_a_seed_with_fresh_stamps_as_live_before_its_first_build() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("fresh-stamps");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0);
+    let target = lane.join("target").canonicalize().unwrap();
+    let (out, planned) = hive.json(&["gc", "--plan"]);
+    assert!(out.status.success(), "{planned}");
+    assert!(planned["plans"].as_array().unwrap().is_empty(), "{planned}");
+    assert!(
+        planned["undecided"].as_array().unwrap().is_empty(),
+        "{planned}"
+    );
+    let nothing = planned["nothing_to_do"].as_array().unwrap();
+    assert!(
+        nothing
+            .iter()
+            .any(|item| item.as_str().is_some_and(|path| Path::new(path) == target)),
+        "{planned}"
+    );
+}
+
+#[test]
+fn gc_still_lists_rcgu_objects_of_a_dead_unit() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let target = repo.main.join("target");
+    let before = fingerprint_units(&target);
+    backdate_all(&target, Duration::from_secs(30 * 86_400));
+    let manifest = repo.main.join("Cargo.toml");
+    let text = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        &manifest,
+        text.replace("version = \"0.1.0\"", "version = \"0.1.1\""),
+    )
+    .unwrap();
+    let built = cargo_json(&hive, &repo.main, &["build"]);
+    assert!(
+        !built.registry_fresh.is_empty(),
+        "{:?}",
+        built.registry_fresh
+    );
+    let after = fingerprint_units(&target);
+    let current = hashes_of(&after, "app", true);
+    let left: Vec<String> = hashes_of(&before, "app", false)
+        .into_iter()
+        .filter(|hash| !current.contains(hash))
+        .collect();
+    assert!(
+        !left.is_empty(),
+        "version bump left no app unit hash\nbefore={before:?}\nafter={after:?}"
+    );
+    let fresh_hashes = hashes_named(&after, &built.registry_fresh);
+    assert!(
+        !fresh_hashes.is_empty(),
+        "no fingerprint hash for {:?}\nafter={after:?}",
+        built.registry_fresh
+    );
+    let (out, planned) = hive.json(&["gc", "--plan"]);
+    assert!(out.status.success(), "{planned}");
+    assert!(
+        planned["plans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|plan| plan["paths"].as_u64().unwrap_or(0) > 0),
+        "{planned}"
+    );
+    let stored = plans_stored(&hive);
+    let rcgu: Vec<StoredEntry> = stored_entries(&stored)
+        .into_iter()
+        .filter(|entry| path_under(&entry.path, &target) && entry.path.ends_with(".rcgu.o"))
+        .collect();
+    assert!(
+        rcgu.iter().any(|entry| {
+            label_hash(&entry.unit).is_some_and(|hash| left.iter().any(|left| left == hash))
+                && file_embeds_any(&entry.path, &left)
+        }),
+        "stored plan listed no .rcgu.o of a unit the version bump left behind ({left:?}) among {:?}",
+        rcgu.iter().map(|entry| &entry.path).collect::<Vec<_>>()
+    );
+    let live: Vec<&str> = rcgu
+        .iter()
+        .filter(|entry| {
+            label_hash(&entry.unit)
+                .is_some_and(|hash| fresh_hashes.iter().any(|fresh| fresh == hash))
+                || file_embeds_any(&entry.path, &fresh_hashes)
+        })
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert!(
+        live.is_empty(),
+        "plan listed a .rcgu.o of a unit still fresh: {live:?}"
+    );
+}
+
 fn stamp_under_build(unit: &cargo_hive::seed::record::SeededUnit) -> bool {
     let Some((rel, _)) = &unit.stamp else {
         return false;
@@ -825,6 +1070,255 @@ fn quiet_cache(hive: &Hive) {
 
 fn nothing_filled(hive: &Hive) -> bool {
     !hive.home.path.join("store").exists() && !hive.home.path.join("store.db").exists()
+}
+
+fn plan_for<'a>(receipt: &'a serde_json::Value, target: &Path) -> &'a serde_json::Value {
+    let want = target.canonicalize().unwrap();
+    receipt["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plan| {
+            plan["targets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|path| path.as_str().is_some_and(|path| Path::new(path) == want))
+        })
+        .unwrap_or_else(|| panic!("no plan for {} in {receipt}", want.display()))
+}
+
+/// The stored plans file, read the way `Planned::plans_json` reads it.
+fn plans_stored(hive: &Hive) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(hive.home.path.join("plans.json")).unwrap()).unwrap()
+}
+
+fn stored_paths(stored: &serde_json::Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    let plans = stored["plans"].as_array().unwrap();
+    assert!(plans.len() < 100_000, "walk bound hit");
+    for plan in plans {
+        let targets = plan["targets"].as_array().unwrap();
+        assert!(targets.len() < 100_000, "walk bound hit");
+        for target in targets {
+            let entries = target["entries"].as_array().unwrap();
+            assert!(entries.len() < 100_000, "walk bound hit");
+            for entry in entries {
+                paths.push(
+                    entry["path"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("entry path is not a string: {entry}"))
+                        .to_string(),
+                );
+            }
+        }
+    }
+    paths
+}
+
+fn seeded_dir_names(hive: &Hive, target: &Path) -> Vec<String> {
+    let target = target.canonicalize().unwrap();
+    let state = cargo_hive::state::State::open_at(hive.home.path.clone()).unwrap();
+    let file = cargo_hive::seed::record::read(&state).unwrap();
+    let record = file
+        .targets
+        .get(&target)
+        .unwrap_or_else(|| panic!("no seed record for {}", target.display()));
+    record
+        .units
+        .iter()
+        .map(|unit| unit.dir_name.clone())
+        .collect()
+}
+
+fn path_under(path: &str, root: &Path) -> bool {
+    let root = root.canonicalize().unwrap();
+    Path::new(path).starts_with(&root)
+}
+
+fn path_names_unit(path: &str, dir_names: &[String]) -> bool {
+    Path::new(path).components().any(|part| {
+        dir_names
+            .iter()
+            .any(|dir_name| part.as_os_str() == dir_name.as_str())
+    })
+}
+
+fn dirs_stamped_within(target: &Path, window: Duration) -> Vec<String> {
+    let cutoff = SystemTime::now().checked_sub(window).unwrap_or(UNIX_EPOCH);
+    let mut names = Vec::new();
+    for profile in common::cargo_fixture::profile_dirs(target) {
+        for sub in [".fingerprint", "build"] {
+            let dir = profile.join(sub);
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut seen = 0usize;
+            for entry in entries {
+                seen += 1;
+                assert!(seen < 100_000, "walk bound hit");
+                let path = entry.unwrap().path();
+                let stamp = path.join("invoked.timestamp");
+                let Ok(meta) = fs::metadata(&stamp) else {
+                    continue;
+                };
+                if meta.modified().unwrap() >= cutoff {
+                    names.push(path.file_name().unwrap().to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    names
+}
+
+#[derive(Debug)]
+struct FingerprintUnit {
+    name: String,
+    fresh: bool,
+}
+
+fn fingerprint_units(target: &Path) -> Vec<FingerprintUnit> {
+    let cutoff = SystemTime::now()
+        .checked_sub(Duration::from_secs(7 * 86_400))
+        .unwrap_or(UNIX_EPOCH);
+    let mut units = Vec::new();
+    for profile in common::cargo_fixture::profile_dirs(target) {
+        let dir = profile.join(".fingerprint");
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut seen = 0usize;
+        for entry in entries {
+            seen += 1;
+            assert!(seen < 100_000, "walk bound hit");
+            let path = entry.unwrap().path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let fresh = fs::metadata(path.join("invoked.timestamp"))
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|modified| modified >= cutoff);
+            units.push(FingerprintUnit { name, fresh });
+        }
+    }
+    units
+}
+
+fn package_name(dir_name: &str) -> Option<String> {
+    dir_name
+        .rsplit_once('-')
+        .map(|(name, _)| name.replace('-', "_"))
+}
+
+fn hashes_of(units: &[FingerprintUnit], package: &str, fresh_only: bool) -> Vec<String> {
+    let mut hashes = Vec::new();
+    for unit in units {
+        if fresh_only && !unit.fresh {
+            continue;
+        }
+        if package_name(&unit.name).as_deref() != Some(package) {
+            continue;
+        }
+        let Some(hash) = cargo_hive::fingerprint::unit_hash(&unit.name) else {
+            continue;
+        };
+        if !hashes.iter().any(|seen| seen == hash) {
+            hashes.push(hash.to_string());
+        }
+    }
+    hashes
+}
+
+fn hashes_named(units: &[FingerprintUnit], packages: &[String]) -> Vec<String> {
+    let mut hashes = Vec::new();
+    for package in packages {
+        for hash in hashes_of(units, package, false) {
+            if !hashes.contains(&hash) {
+                hashes.push(hash);
+            }
+        }
+    }
+    hashes
+}
+
+struct StoredEntry {
+    path: String,
+    unit: String,
+}
+
+fn stored_entries(stored: &serde_json::Value) -> Vec<StoredEntry> {
+    let mut entries = Vec::new();
+    let plans = stored["plans"].as_array().unwrap();
+    assert!(plans.len() < 100_000, "walk bound hit");
+    for plan in plans {
+        let targets = plan["targets"].as_array().unwrap();
+        assert!(targets.len() < 100_000, "walk bound hit");
+        for target in targets {
+            let rows = target["entries"].as_array().unwrap();
+            assert!(rows.len() < 100_000, "walk bound hit");
+            for entry in rows {
+                entries.push(StoredEntry {
+                    path: entry["path"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("entry path is not a string: {entry}"))
+                        .to_string(),
+                    unit: entry["unit"]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("entry unit is not a string: {entry}"))
+                        .to_string(),
+                });
+            }
+        }
+    }
+    entries
+}
+
+fn label_hash(unit: &str) -> Option<&str> {
+    let name = Path::new(unit).file_name()?.to_str()?;
+    cargo_hive::fingerprint::unit_hash(name)
+}
+
+fn embedded_hashes(name: &str) -> impl Iterator<Item = &str> {
+    name.match_indices('-').filter_map(move |(at, _)| {
+        let tail = &name[at + 1..];
+        let hash = tail.get(..16)?;
+        let rest = &tail[16..];
+        let boundary = rest.is_empty() || rest.starts_with('.');
+        (boundary
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        .then_some(hash)
+    })
+}
+
+fn file_embeds_any(path: &str, hashes: &[String]) -> bool {
+    let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    embedded_hashes(name).any(|hash| hashes.iter().any(|want| want == hash))
+}
+
+fn file_count(root: &Path) -> usize {
+    fn walk(dir: &Path, count: &mut usize, depth: usize) {
+        assert!(depth < 64, "walk bound hit");
+        let mut seen = 0usize;
+        for entry in fs::read_dir(dir).unwrap() {
+            seen += 1;
+            assert!(seen < 100_000, "walk bound hit");
+            let entry = entry.unwrap();
+            let meta = fs::symlink_metadata(entry.path()).unwrap();
+            if meta.is_dir() {
+                walk(&entry.path(), count, depth + 1);
+            } else {
+                *count += 1;
+            }
+        }
+    }
+    let mut count = 0usize;
+    walk(root, &mut count, 0);
+    count
 }
 
 fn store_units(hive: &Hive) -> Vec<serde_json::Value> {
