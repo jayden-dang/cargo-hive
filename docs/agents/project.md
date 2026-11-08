@@ -89,7 +89,7 @@ Single test file: `cargo test --test <file>` for `tests/<file>.rs`, or
 `cargo test --lib <module>::` for the unit tests in `src/<module>.rs`. Both build only
 that test target.
 
-Task gate (changed units + their dependents; `none` when the whole suite is fast):
+Task gate (tests of the changed units and the dependents that call what changed, plus a compile of every other dependent; `none` when the whole suite is fast):
 none — one crate, and the whole suite takes about a minute.
 
 Wave gate (compile + lint every target after a parallel merge; `none` = typecheck + lint):
