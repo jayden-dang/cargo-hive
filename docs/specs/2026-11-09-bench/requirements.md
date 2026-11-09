@@ -313,3 +313,7 @@ Files this change touches, and what each guards:
   `docs/standards/code.md:14`. bench inherits that through `discover::checkouts`. Found at design review,
   2026-11-09; it is outside ROAD-11 and needs its own fix. Owner: the project owner — 2026-11-09 — not
   guessed here.
+- Still-open S2: whether BENCH-7.3 should also stop when `choose::choose` (src/seed/choose.rs:17) finds no
+  units for the plan's toolchain. Today, a toolchain that differs from the one main was built with puts that
+  toolchain's first fill inside seeded_1 — operator — 2026-11-09 — bench-interpret leans yes, as a later
+  amend; not guessed here.
