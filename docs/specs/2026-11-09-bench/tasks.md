@@ -15,6 +15,7 @@ Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
+Delivered-by: PR #7
 
 **Goal:** Add `cargo hive bench --cold <checkout>... --seeded <checkout>...`, which primes the store, then
 times cold and seeded first builds of fresh secondary checkouts in fixed ABBA order, and reports per sample
