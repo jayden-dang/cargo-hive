@@ -80,6 +80,28 @@ fn millis(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 
+const DETAIL_STDERR_CAP: usize = 4 * 1024;
+
+fn stderr_for_detail(tail: &[u8]) -> String {
+    let start = tail.len().saturating_sub(DETAIL_STDERR_CAP);
+    String::from_utf8_lossy(&tail[start..]).into_owned()
+}
+
+fn mark_remaining_failed(report: &mut Report, from_position: u64, sample_count: u64) {
+    for position in from_position..=sample_count {
+        report.unmeasured.push((
+            format!("sample.{position}"),
+            "not run: an earlier step failed".into(),
+        ));
+    }
+}
+
+fn fail_run(report: &mut Report, from_position: u64, sample_count: u64, finding: Finding) {
+    report.end = End::Failed;
+    report.findings.push(finding);
+    mark_remaining_failed(report, from_position, sample_count);
+}
+
 fn push_seed_finding(report: &mut Report, checkout: &Checkout, kind: &str, detail: String) {
     report.findings.push(Finding {
         kind: kind.to_string(),
@@ -159,6 +181,7 @@ pub fn run(
         findings: Vec::new(),
         unmeasured: Vec::new(),
     };
+    let sample_count = (plan.cold.len() + plan.seeded.len()) as u64;
 
     let prime_started = std::time::Instant::now();
     match seed::run_fill(ctx, &plan.repo, cancel) {
@@ -186,15 +209,44 @@ pub fn run(
             return report;
         }
         Err(err) => {
-            report.end = End::Failed;
-            report.findings.push(Finding {
-                kind: "bench.failed".into(),
-                path: None,
-                detail: format!("prime: {err}"),
-                measured: BTreeMap::new(),
-            });
+            fail_run(
+                &mut report,
+                1,
+                sample_count,
+                Finding {
+                    kind: "bench.failed".into(),
+                    path: None,
+                    detail: format!("prime: {err}"),
+                    measured: BTreeMap::new(),
+                },
+            );
             return report;
         }
+    }
+
+    let store_lists_repo = seed::store::read(ctx.state).ok().is_some_and(|store| {
+        store
+            .units
+            .iter()
+            .any(|row| row.repos.iter().any(|p| p == &plan.repo.main))
+    });
+    if !store_lists_repo {
+        fail_run(
+            &mut report,
+            1,
+            sample_count,
+            Finding {
+                kind: "bench.nothing_to_seed".into(),
+                path: None,
+                detail: format!(
+                    "no stored unit lists {}; build it once with {}, then bench again",
+                    plan.repo.main.display(),
+                    plan.build.command_line()
+                ),
+                measured: BTreeMap::new(),
+            },
+        );
+        return report;
     }
 
     let n = plan.cold.len();
@@ -265,13 +317,17 @@ pub fn run(
                                     }
                                 }
                             }
-                            report.end = End::Failed;
-                            report.findings.push(Finding {
-                                kind: "bench.failed".into(),
-                                path: Some(checkout.path.clone()),
-                                detail: format!("seed of {}: {err}", checkout.path.display()),
-                                measured: BTreeMap::new(),
-                            });
+                            fail_run(
+                                &mut report,
+                                position + 1,
+                                sample_count,
+                                Finding {
+                                    kind: "bench.failed".into(),
+                                    path: Some(checkout.path.clone()),
+                                    detail: format!("seed of {}: {err}", checkout.path.display()),
+                                    measured: BTreeMap::new(),
+                                },
+                            );
                             return report;
                         }
                     }
@@ -281,13 +337,17 @@ pub fn run(
                     return report;
                 }
                 Err(err) => {
-                    report.end = End::Failed;
-                    report.findings.push(Finding {
-                        kind: "bench.failed".into(),
-                        path: Some(checkout.path.clone()),
-                        detail: format!("seed of {}: {err}", checkout.path.display()),
-                        measured: BTreeMap::new(),
-                    });
+                    fail_run(
+                        &mut report,
+                        position + 1,
+                        sample_count,
+                        Finding {
+                            kind: "bench.failed".into(),
+                            path: Some(checkout.path.clone()),
+                            detail: format!("seed of {}: {err}", checkout.path.display()),
+                            measured: BTreeMap::new(),
+                        },
+                    );
                     return report;
                 }
             }
@@ -308,17 +368,21 @@ pub fn run(
             Ok(ran) => {
                 if !ran.status.success() {
                     let code = ran.status.code().unwrap_or(-1);
-                    let tail = String::from_utf8_lossy(&ran.stderr_tail);
-                    report.end = End::Failed;
-                    report.findings.push(Finding {
-                        kind: "bench.failed".into(),
-                        path: Some(checkout.path.clone()),
-                        detail: format!(
-                            "build of {}: exit code {code}; {tail}",
-                            checkout.path.display()
-                        ),
-                        measured: BTreeMap::new(),
-                    });
+                    let tail = stderr_for_detail(&ran.stderr_tail);
+                    fail_run(
+                        &mut report,
+                        position + 1,
+                        sample_count,
+                        Finding {
+                            kind: "bench.failed".into(),
+                            path: Some(checkout.path.clone()),
+                            detail: format!(
+                                "build of {}: exit code {code}; {tail}",
+                                checkout.path.display()
+                            ),
+                            measured: BTreeMap::new(),
+                        },
+                    );
                     return report;
                 }
                 millis(ran.exited_after)
@@ -328,27 +392,35 @@ pub fn run(
                 return report;
             }
             Err(ChildOutputError::TimedOut) => {
-                report.end = End::Failed;
-                report.findings.push(Finding {
-                    kind: "bench.failed".into(),
-                    path: Some(checkout.path.clone()),
-                    detail: format!(
-                        "build of {}: past its deadline of {} ms",
-                        checkout.path.display(),
-                        millis(limits.build_deadline)
-                    ),
-                    measured: BTreeMap::new(),
-                });
+                fail_run(
+                    &mut report,
+                    position + 1,
+                    sample_count,
+                    Finding {
+                        kind: "bench.failed".into(),
+                        path: Some(checkout.path.clone()),
+                        detail: format!(
+                            "build of {}: past its deadline of {} ms",
+                            checkout.path.display(),
+                            millis(limits.build_deadline)
+                        ),
+                        measured: BTreeMap::new(),
+                    },
+                );
                 return report;
             }
             Err(ChildOutputError::Failed(message)) => {
-                report.end = End::Failed;
-                report.findings.push(Finding {
-                    kind: "bench.failed".into(),
-                    path: Some(checkout.path.clone()),
-                    detail: format!("build of {}: {message}", checkout.path.display()),
-                    measured: BTreeMap::new(),
-                });
+                fail_run(
+                    &mut report,
+                    position + 1,
+                    sample_count,
+                    Finding {
+                        kind: "bench.failed".into(),
+                        path: Some(checkout.path.clone()),
+                        detail: format!("build of {}: {message}", checkout.path.display()),
+                        measured: BTreeMap::new(),
+                    },
+                );
                 return report;
             }
         };

@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use cargo_hive::bench::check::{check, Checked, Unfair};
 use cargo_hive::bench::command::{env_map, BuildCmd};
@@ -14,6 +14,7 @@ use cargo_hive::bench::{run, End, Limits, Plan, Report, BUILD_DEADLINE};
 use cargo_hive::plan_tier::Ctx;
 use cargo_hive::receipt::Measured;
 use cargo_hive::registry::Registry;
+use cargo_hive::seed::{self, Fill};
 use cargo_hive::state::{Config, State};
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
@@ -75,6 +76,26 @@ fn run_bench_cfg(
         mains: &lib.mains,
     };
     run(&ctx, plan, limits, cancel)
+}
+
+fn prime_store(hive: &Hive, plan: &Plan) {
+    let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let _home = CargoHomeGuard::set(&hive.cargo_home.path);
+    let lib = LibCtx::open(hive, Recording::over_real().fs());
+    let repos = [plan.repo.clone()];
+    let ctx = Ctx {
+        state: &lib.state,
+        fs: lib.fs.as_ref(),
+        cfg: &lib.cfg,
+        now: SystemTime::now(),
+        account_bytes: true,
+        repos: &repos,
+        mains: &lib.mains,
+    };
+    match seed::run_fill(&ctx, &repos[0], &|| false).expect("prime fill") {
+        Fill::Continue(_) => {}
+        Fill::Stopped(_) => panic!("prime fill stopped"),
+    }
 }
 
 fn checked(hive: &Hive, cold: &[PathBuf], seeded: &[PathBuf]) -> Result<Checked, Vec<Unfair>> {
@@ -422,4 +443,133 @@ fn a_seed_that_clones_nothing_still_builds_and_leaves_its_counts_unmeasured() {
         .unmeasured
         .iter()
         .any(|(field, _)| field.ends_with(".seed_counts")));
+}
+
+#[test]
+fn a_build_that_fails_stops_the_run_and_reports_no_summary() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let mut plan = bench_plan(&hive, &repo, 2);
+    plan.build = "check-lib=no_such_package".parse().unwrap();
+    let report = run_bench(
+        &hive,
+        &plan,
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &|| false,
+    );
+    assert!(matches!(report.end, End::Failed));
+    assert_eq!(report.exit_code(), 1);
+    let failed = report
+        .findings
+        .iter()
+        .find(|f| f.kind == "bench.failed")
+        .unwrap();
+    assert!(failed.detail.contains("exit"), "{}", failed.detail);
+    assert!(!report.counts.keys().any(|k| k.ends_with("_median")));
+    assert_eq!(
+        report
+            .unmeasured
+            .iter()
+            .filter(|(f, _)| f.starts_with("sample."))
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn a_build_past_its_deadline_is_killed_and_ends_the_run() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let plan = bench_plan(&hive, &repo, 2);
+    let report = run_bench(
+        &hive,
+        &plan,
+        Limits {
+            build_deadline: Duration::from_millis(1),
+        },
+        &|| false,
+    );
+    assert!(matches!(report.end, End::Failed));
+    let failed = report
+        .findings
+        .iter()
+        .find(|f| f.kind == "bench.failed")
+        .unwrap();
+    assert!(failed.detail.contains("deadline"), "{}", failed.detail);
+    for c in plan.cold.iter().chain(&plan.seeded) {
+        assert!(c.path.exists());
+    }
+}
+
+#[test]
+fn a_seed_that_errors_stops_the_run() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let plan = bench_plan(&hive, &repo, 2);
+    // Fill the store under a valid window first. A bad window makes fill store
+    // nothing (src/seed/fill.rs), which would trip nothing_to_seed before clone;
+    // run_clone is what returns Err on the bad window (src/seed/mod.rs:242-244).
+    prime_store(&hive, &plan);
+    let report = run_bench_cfg(
+        &hive,
+        &plan,
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &|| false,
+        |cfg| cfg.gc_window_days = Some(0),
+    );
+    assert!(matches!(report.end, End::Failed));
+    let failed = report
+        .findings
+        .iter()
+        .find(|f| f.kind == "bench.failed")
+        .unwrap();
+    assert!(failed.detail.contains("seed"), "{}", failed.detail);
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .filter(|f| f.kind == "bench.sample")
+            .count(),
+        1
+    ); // cold_1 only
+}
+
+#[test]
+fn an_empty_store_for_the_repo_after_the_prime_stops_before_any_sample() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive); // main never built: the prime fills nothing
+    let plan = bench_plan(&hive, &repo, 2);
+    let report = run_bench(
+        &hive,
+        &plan,
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &|| false,
+    );
+    assert!(matches!(report.end, End::Failed));
+    assert_eq!(report.exit_code(), 1);
+    assert!(report.counts.contains_key("prime_ms"));
+    assert!(report
+        .findings
+        .iter()
+        .any(|f| f.kind == "bench.nothing_to_seed"));
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .filter(|f| f.kind == "bench.sample")
+            .count(),
+        0
+    );
+    for c in plan.cold.iter().chain(&plan.seeded) {
+        assert!(!c.path.join("target").exists());
+    }
 }
