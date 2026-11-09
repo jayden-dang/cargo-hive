@@ -222,11 +222,11 @@ _Requirements: STOREGC-1.5, STOREGC-2.3, STOREGC-10.4, STOREGC-10.5_
 - Produces:
   - `pub(crate) fn holds(fs: &dyn Fs, targets: &[TargetDir], now: SystemTime, window: Duration) -> Holds`, with `Holds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String>, whole_store: Vec<Finding>, findings: Vec<Finding>, by_reason: BTreeMap<&'static str, u64> }`. In this task an unreadable target or any non-Decided verdict goes to `whole_store`; Task 5 narrows that.
   - `pub fn run(ctx: &EvictCtx<'_>, limits: Limits, dry_run: bool, cancel: &dyn Fn() -> bool) -> EvictOutcome` in `seed::evict`.
-  - `pub struct EvictCtx<'a> { pub state: &'a State, pub fs: &'a dyn Fs, pub targets: &'a [TargetDir], pub checkouts: &'a [Checkout], pub checkout_faults: &'a [WalkFault], pub scan_faults: &'a [WalkFault], pub cache_roots: &'a [PathBuf], pub window: Duration, pub account_bytes: bool, pub now: SystemTime, pub caller_toolchain: Option<Toolchain> }`.
+  - `pub struct EvictCtx<'a> { pub state: &'a State, pub fs: &'a dyn Fs, pub targets: &'a [TargetDir], pub checkouts: &'a [Checkout], pub checkout_faults: &'a [WalkFault], pub scan_faults: &'a [WalkFault], pub cache_roots: &'a [PathBuf], pub window: Duration, pub account_bytes: bool, pub now: SystemTime, pub caller_toolchain: Option<Toolchain>, pub rustup: &'a Path }`. `gc_cmd` passes `Path::new("rustup")`; tests pass a fake script, as `resolve_toolchain_with` already takes a rustup path (`src/doctor.rs:439,447`).
   - `pub struct Limits { pub cap_bytes: u64, pub max_age_secs: u64 }`.
   - `pub struct EvictOutcome { pub counts: Vec<(String, u64)>, pub findings: Vec<Finding>, pub notes: Vec<String>, pub unmeasured: Vec<(String, String)>, pub cancelled: bool }`.
   - In `cli.rs`: `const CAP_BYTES: u64 = 40_000_000_000;` and `const MAX_AGE_SECS: u64 = 30 * 86_400;`.
-  - In `tests/common/store_fixture.rs`:
+  - In `tests/common/store_fixture.rs` (every `store.db` write goes through `cargo_hive::state::State::open_at(hive.home.path.clone())` and `State::locked` with `Tx::write_bounded`, so a fixture write never races a seed's `merge`):
     - `seeded_store(hive: &Hive) -> RegistryRepo`
     - `rows(hive: &Hive) -> Vec<serde_json::Value>`
     - `set_last_live_at(hive: &Hive, name_meta_prefix: &str, secs_ago: u64)`
@@ -248,7 +248,7 @@ _Requirements: STOREGC-1.5, STOREGC-2.3, STOREGC-10.4, STOREGC-10.5_
   - `eviction_touches_nothing_outside_the_store`: a snapshot of the repo, its targets, a seeded checkout, `CARGO_HOME`, `seeds.json`, `plans.json` and `config.json` is unchanged.
 
   Run `cargo test --test store_gc`; expect a compile failure.
-- [ ] **Step 2: Implement** `holds` for Decided targets: live refs map through `unit_key` to keys, and a live ref with no graph unit maps to its name-meta. Then implement `evict::run` for the age rule (design decisions 3, 4, 11):
+- [ ] **Step 2: Implement** `holds` for Decided targets: live refs map through `unit_key` to keys, and a live ref with no graph unit maps to its name-meta. Every walk fault `split_checkout_faults` or `faults_that_can_hide_an_owner` keeps also goes to `whole_store`, so no intermediate commit evicts past a fault. Then implement `evict::run` for the age rule (design decisions 3, 4, 11). When `try_store_exclusive` returns `None`, evict nothing, rename nothing and write nothing (Task 9 adds the finding, the count and the tests):
   - Plan: holds, `inventory`, candidates.
   - Commit: `try_store_exclusive`, remove stale `store/.tmp/evict-*`, `commit_eviction` with `rename_out` into `evict_dir(std::process::id(), seq)`, then remove emptied `store/<value>/`.
   - Removal: `remove_counted` on each renamed tree, still under the store lock, then release.
@@ -315,7 +315,7 @@ _Requirements: STOREGC-4.1, STOREGC-4.2, STOREGC-4.3, STOREGC-4.4, STOREGC-4.5, 
 **Interfaces:**
 - Consumes: `caller_toolchain_kept` (Task 1); `evict::run`, `EvictCtx.checkouts`, `EvictCtx.caller_toolchain` (Task 4); `commit_eviction`'s text drop (Task 3); `choose::choose` (`src/seed/choose.rs:18`)
 - Produces:
-  - `pub fn resolve_toolchain_own_dir_until(cwd: &Path, cancel: &dyn Fn() -> bool) -> Result<Toolchain, String>`. It calls `resolve_toolchain_with` in a mode that removes `RUSTUP_TOOLCHAIN` and `RUSTUP_TOOLCHAIN_SOURCE` from every child, `rustup` and `rustc -vV` alike, whatever their source, and keeps `RUSTUP_AUTO_INSTALL=0`.
+  - `pub fn resolve_toolchain_own_dir_until(cwd: &Path, rustup: &Path, cancel: &dyn Fn() -> bool) -> Result<Toolchain, String>`. It calls `resolve_toolchain_with` in a mode that removes `RUSTUP_TOOLCHAIN` and `RUSTUP_TOOLCHAIN_SOURCE` from every child, `rustup` and `rustc -vV` alike, whatever their source, and keeps `RUSTUP_AUTO_INSTALL=0`.
   - Counts `store_entries_evicted_toolchain` and `store_toolchains_dropped`; finding `store.toolchain_unresolved`; note `store.no_checkout_resolved`.
 
 **Depends-on:** Task 5
@@ -328,10 +328,11 @@ _Requirements: STOREGC-4.1, STOREGC-4.2, STOREGC-4.3, STOREGC-4.4, STOREGC-4.5, 
     - `held_entries_of_a_dropped_value_keep_its_text_until_none_remain`.
     - `a_checkout_whose_toolchain_cannot_resolve_blocks_every_drop_but_age_still_runs`: the checkout's `rust-toolchain.toml` names an uninstalled toolchain.
     - `no_registered_repo_drops_no_value`.
-    - `an_empty_store_runs_no_own_dir_lookup`: a library call with a fake rustup path whose log stays empty.
+    - `an_empty_store_runs_no_own_dir_lookup`: a library call with `EvictCtx.rustup` set to a fake script that logs each call; the log stays empty.
+    - `no_caller_toolchain_while_it_is_kept_blocks_every_drop`: a library call with `caller_toolchain: None` while the test process's own `RUSTUP_TOOLCHAIN_SOURCE` is `default`, which `cargo test` run through the rustup proxy sets; skip with a printed reason when it is unset. The finding is `store.toolchain_unresolved`, no value is dropped, and age still runs.
 
   Run; expect failures.
-- [ ] **Step 2: Implement** lookups (a) and (b) as design decision 9 describes. (b) is `ctx.caller_toolchain` when `caller_toolchain_kept()`, else it is (a) per checkout. The generation step runs after age, and only when the inventory is non-empty.
+- [ ] **Step 2: Implement** lookups (a) and (b) as design decision 9 describes, with `ctx.rustup` as the rustup path. (b) is `ctx.caller_toolchain` when `caller_toolchain_kept()`, else it is (a) per checkout. When (b) is needed and `ctx.caller_toolchain` is `None`, that is a failed lookup (b): `store.toolchain_unresolved`, and no value is dropped (STOREGC-2.4). The generation step runs after age, and only when the inventory is non-empty.
 - [ ] **Step 3: Run.** `cargo test`; expect pass, tests/capability_gate.rs and tests/doctor.rs included.
 - [ ] **Step 4: Commit.** `feat(gc): drop store entries of a toolchain no checkout selects`
 

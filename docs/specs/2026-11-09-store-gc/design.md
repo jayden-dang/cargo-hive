@@ -180,7 +180,7 @@ Surface:
 - `resolve_toolchain`, `resolve_toolchain_until` callers (`src/cli.rs:369, 533, 849, 1012, 1118, 1279, 1474`; `src/seed/fill.rs:740`; `src/doctor.rs:1661`; tests/capability_gate.rs): `leave`. Same results, same environment handling.
 - `drop_directory_toolchain` body: `replace`. Its keep/drop predicate is extracted into the pure `caller_toolchain_kept_from(source)` and the env-reading `caller_toolchain_kept()`, which it calls, with the same behavior.
 Interface:
-- `doctor::resolve_toolchain_own_dir_until(cwd, cancel) -> Result<Toolchain, String>`, lookup (a).
+- `doctor::resolve_toolchain_own_dir_until(cwd, rustup, cancel) -> Result<Toolchain, String>`, lookup (a).
 - `doctor::caller_toolchain_kept() -> bool`, which reports whether (b) is one lookup.
 Depth: n/a — extends `doctor`.
 Locality: extend `src/doctor.rs`; neighbors leave.
@@ -191,7 +191,7 @@ Satisfies: STOREGC-1.1, STOREGC-1.4, STOREGC-1.7, STOREGC-1.8, STOREGC-2.2, STOR
 Reuse: none — new code (rung 7), because no module orders evictions or phases a store commit. Inside it: rung 2 for `gc::measure` (per-entry freeable), `gc::account::remove_counted` with `Ledger` (removal and freed bytes), `split_checkout_faults` and `faults_that_can_hide_an_owner` (`src/plan_tier/mod.rs:50-64`), and `Receipt` builders.
 Respects: ARCH-2, ARCH-4, ARCH-8, ARCH-10, ARCH-11, ARCH-15, ARCH-16, ARCH-18
 Interface: `seed::evict::run(ctx: &EvictCtx, limits: Limits, dry_run: bool, cancel: &dyn Fn() -> bool) -> EvictOutcome`.
-- `EvictCtx { state, fs, targets, checkouts, checkout_faults, scan_faults, cache_roots, window, account_bytes, now, caller_toolchain }`, where `caller_toolchain` is the whole `Toolchain` `gc_cmd` already resolves at `src/cli.rs:849`, lookup (b)'s single result.
+- `EvictCtx { state, fs, targets, checkouts, checkout_faults, scan_faults, cache_roots, window, account_bytes, now, caller_toolchain, rustup }`, where `caller_toolchain` is the whole `Toolchain` `gc_cmd` already resolves at `src/cli.rs:849`, lookup (b)'s single result (`None` when (b) is needed is a failed lookup, STOREGC-2.4), and `rustup` is the rustup path (`gc_cmd` passes `rustup`; tests pass a fake script).
 - `Limits { cap_bytes, max_age_secs }`.
 - `EvictOutcome { counts: Vec<(String, u64)>, findings, notes, unmeasured, cancelled }`.
 Depth: if this module vanished, its one caller would still need to know only that eviction takes the scanned targets, the checkouts, a cap and a max age, and returns counts and findings. The phase order, hold rules, sort, lock protocol and commit stay hidden behind that interface. With one caller, the module earns its place as the locality of every STOREGC rule and as the one test seam for the cap (W10).
