@@ -185,7 +185,7 @@ _Requirements: STOREGC-10.3_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing tests** in `src/seed/store.rs`, on scratch state roots with hand-written `store.db` and entry directories:
+- [x] **Step 1: Write the failing tests** in `src/seed/store.rs`, on scratch state roots with hand-written `store.db` and entry directories:
   - `inventory_lists_rows_rowless_dirs_and_tmp_bytes_and_skips_other_names`.
   - `commit_drops_a_renamed_row_and_raises_a_refreshed_one`.
   - `commit_keeps_a_candidate_whose_last_live_at_rose_since_the_plan`.
@@ -195,9 +195,9 @@ _Requirements: STOREGC-10.3_
   - `a_failed_rename_keeps_that_entry_and_its_row`.
 
   Run `cargo test --lib seed::store::`; expect a compile failure.
-- [ ] **Step 2: Implement** the interfaces above. `rename_out` is `std::fs::rename(entry_dir, to)` after `create_dir_all(store/.tmp)`.
-- [ ] **Step 3: Run.** `cargo test`; expect pass, with tests/seed.rs and tests/seed_fill.rs unchanged.
-- [ ] **Step 4: Commit.** `feat(seed): list, rename out and commit store entries for eviction`
+- [x] **Step 2: Implement** the interfaces above. `rename_out` is `std::fs::rename(entry_dir, to)` after `create_dir_all(store/.tmp)`.
+- [x] **Step 3: Run.** `cargo test`; expect pass, with tests/seed.rs and tests/seed_fill.rs unchanged.
+- [x] **Step 4: Commit.** `feat(seed): list, rename out and commit store entries for eviction`
 
 _Requirements: STOREGC-1.5, STOREGC-2.3, STOREGC-10.4, STOREGC-10.5_
 
