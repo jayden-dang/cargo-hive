@@ -47,7 +47,7 @@ runner, two read-only git readers, a load-average reading, sample order and inte
    `Outcome` unchanged (R4).
 3. **The per-checkout locate-and-gate block of `seed_cmd` is extracted** into `cli::locate_checkout`. It
    covers canonicalize, the repo match, the protected refusal, the toolchain and the capabilities
-   (src/cli.rs:1432-1506). It returns a `Refusal { kind, path, detail, code }` that keeps seed's two
+   (src/cli.rs:1433-1506). It returns a `Refusal { kind, path, detail, code }` that keeps seed's two
    finding paths: the argument as given on a canonicalize failure (:1436-1442), the real path elsewhere.
    Seed's findings, order and exit codes stay byte-identical (BENCH-9.1, R2).
 4. **Bench's own children use a new bounded runner** in `cargo_target`. It captures stdout and stderr each
@@ -113,7 +113,8 @@ pub struct Limits { pub build_deadline: Duration }          // BUILD_DEADLINE = 
 pub fn run(ctx: &Ctx<'_>, plan: &Plan, limits: Limits,
            cancel: &(dyn Fn() -> bool + Sync)) -> Report
 pub enum End { Finished, Failed, Cancelled }
-pub struct Report { pub end: End, /* counts, findings, unmeasured */ }
+pub struct Report { pub end: End, pub counts: BTreeMap<String, u64>,
+                    pub findings: Vec<receipt::Finding>, pub unmeasured: Vec<(String, String)> }
 impl Report { pub fn write_into(&self, b: &mut ReceiptBuilder);
               pub fn exit_code(&self) -> i32 }  // Finished 0, Failed 1, Cancelled 130
 ```
@@ -134,7 +135,7 @@ for (arm, i) in order::abba(n):                                        (section 
   seeded: t0 → run_fill → t1 → run_clone(f) → t2
      Stopped(o) / o.cancelled → Cancelled
      Err(DiskFull{kept}) → kept findings copied, Failed · Err(other) → Failed
-     fill_ms=t1-t0, clone_ms=t2-t1, seed_ms=t2-t0; seed findings copied (kind kept, path = checkout)
+     fill_ms=ms(t1-t0), clone_ms=ms(t2-t1), seed_ms=fill_ms+clone_ms; seed findings copied (kind kept, path = checkout)
   run_bounded(build cmd, limits.build_deadline) → Ran{exited_after, status, stderr_tail}
      Cancelled → Cancelled · TimedOut → Failed (names the deadline) · status≠0 → Failed (exit code, tail)
      build_ms = exited_after
@@ -182,8 +183,9 @@ text, arm sizes, duplicates, a shared target) are new code (rung 7).
 Respects: ARCH-4, ARCH-5, ARCH-7, ARCH-8, ARCH-14
 Interface:
 ```rust
-pub fn check(state: &State, cfg: &Config, cold: &[PathBuf], seeded: &[PathBuf], cancel: …)
-    -> Result<Checked /* repo, rows, toolchain */, Vec<Refusal>>
+pub struct Unfair { pub path: Option<PathBuf>, pub reason: String }
+pub fn check(reg: &Registry, cfg: &Config, caps: &Capabilities, cold: &[PathBuf], seeded: &[PathBuf],
+             cancel: &(dyn Fn() -> bool + Sync)) -> Result<Checked /* repo, cold, seeded, toolchain */, Vec<Unfair>>
 ```
 Depth: callers know "paths in, a fair plan or a list of reasons out". The order of checks, the repo match
 and the HEAD, dirty and target probes are hidden.
@@ -208,10 +210,11 @@ Interface:
 ```rust
 pub enum BuildCmd { Build, CheckAll, ClippyAll, TestNoRun, CheckLib(String) }  // clap value parser
 impl BuildCmd { pub fn args(&self) -> Vec<String> }   // always ends "--offline", "--locked"
-pub struct EnvMap { vars: BTreeMap<OsString, OsString>, overridden: Vec<(String, String)> }
-pub fn env_map(caller: impl Iterator<Item = (OsString, OsString)>, tc: &Toolchain) -> EnvMap
-impl EnvMap { pub fn command(&self, tc: &Toolchain, dir: &Path, b: &BuildCmd) -> Command;
-              pub fn findings(&self) -> impl Iterator<Item = (&'static str, String)> }
+pub struct EnvMap { vars: BTreeMap<OsString, OsString>, overridden: Vec<(&'static str, String, String)> }
+pub fn env_map(caller: impl IntoIterator<Item = (OsString, OsString)>, tc: &Toolchain) -> EnvMap
+impl EnvMap { pub fn vars(&self) -> &BTreeMap<OsString, OsString>;
+              pub fn command(&self, tc: &Toolchain, dir: &Path, b: &BuildCmd) -> Command;
+              pub fn findings(&self) -> Vec<(&'static str, String)> }
 ```
 Depth: callers know "a build shape plus the caller's env gives a Command and a list of what was
 overridden". The variable list, the empty-string overrides and the toolchain pin are hidden.
@@ -261,13 +264,13 @@ in `_ms`, `_x100` or is a plain count name, so none contains `seconds`, `duratio
 
 Satisfies: BENCH-9.1, BENCH-9.2
 Reuse: rung 2 — extract from the existing `seed::run` (src/seed/mod.rs:179-261) and `seed_cmd`
-(src/cli.rs:1432-1506).
+(src/cli.rs:1433-1506).
 Respects: ARCH-5, ARCH-19
 Surface:
 - `seed::run` callers: `seed_cmd` (src/cli.rs:1523) and `tests/seed.rs:1933` (in process): **frozen**. The
   design builds around the contract: `run` keeps its signature and `Outcome`, composing `run_fill` then
   `run_clone` with the same early returns.
-- `seed_cmd`'s inline locate-and-gate block (src/cli.rs:1432-1506): **replace**, now calling
+- `seed_cmd`'s inline locate-and-gate block (src/cli.rs:1433-1506): **replace**, now calling
   `locate_checkout`. The `window_days` check and signal install (:1420-1431) stay inline before it. The
   refusal findings (kind, path, detail), their order and the exit codes are byte-identical, and
   tests/seed.rs's refusal tests check that.
@@ -303,7 +306,7 @@ Surface:
 Interface:
 ```rust
 pub struct Capture { pub stdout_cap: usize, pub stderr_cap: usize }   // 0 = Stdio::null()
-pub struct Ran { pub status: ExitStatus, pub exited_after: Duration,
+#[derive(Debug)] pub struct Ran { pub status: ExitStatus, pub exited_after: Duration,
                  pub stdout: Vec<u8>, pub stderr_tail: Vec<u8> }        // each ≤ its cap
 pub fn run_bounded(cmd: &mut Command, deadline: Duration, capture: Capture,
                    cancel: impl FnMut() -> bool) -> Result<Ran, ChildOutputError>
@@ -411,6 +414,12 @@ Every ID in requirements.md appears in exactly one `Satisfies:` line:
 §9 is infrastructure (the load average for BENCH-1.6). Deliberately unmapped: none.
 
 ## Upstream sync
+
+Changed at plan review (2026-11-09, `.skills/_pending-bench/auto/plan-review.md`): the interfaces of §1
+(`Report` fields, `seed_ms` defined as `fill_ms + clone_ms`), §3 (`check` takes the registry, config and
+capabilities; `Unfair` replaces `Refusal` in its result so it is not confused with `seed::source::Refused`), §4
+(`env_map` takes `IntoIterator`; `EnvMap::vars`; `findings` returns a `Vec`) and §7 (`Ran` derives `Debug`)
+now match tasks.md, the version that compiles with the planned tests. No decision changed.
 
 Requirements changed at design (already applied to requirements.md, re-surfaced with this file):
 - The scrub citation is now `src/cargo_target.rs:352-359`, not 350-358 or 353-360 (R5). Story 9's file list
