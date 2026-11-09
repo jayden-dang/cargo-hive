@@ -24,5 +24,5 @@ Repo config the skills read:
 - verify commands, release steps, Remote environments: `docs/agents/project.md`
 - cold-start drive (Launch / Doctor / Drive / Evidence): `docs/agents/verify.md`
 - Team composition (roster, ownership notes, workflow band): `docs/agents/project.md` (`## Team`)
-- Issue tracker operations: `docs/agents/issue-tracker.md`
+- Issue tracker operations: `docs/agents/issue-tracker.md`. Read its **Issue format** before creating any issue. It has none: name `/configure-repo`, show the draft, create nothing.
 - Triage label mapping: `docs/agents/triage-labels.md`
