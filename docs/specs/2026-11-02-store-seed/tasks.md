@@ -8,12 +8,13 @@
 > The chosen skill writes `Execution-mode:`. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 Feature code: SEED
-Status: In-progress
+Status: Approved
 Date: 2026-11-02
 Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
+Delivered-by: d40451f88e22794c0300a8230581dd205c083d40
 
 **Goal:** Add a compressed, hive-owned store of registry units and `cargo hive seed <checkout>`, which fills the store from live targets and clones into a new secondary checkout whose first build then recompiles none of the cloned units, with per-target counts in `status` and a plan that no longer claims shared bytes as freed.
 

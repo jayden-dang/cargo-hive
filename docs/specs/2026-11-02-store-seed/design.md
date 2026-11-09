@@ -1,7 +1,7 @@
 # Design: Store and seed (a compressed store of registry units, cloned into a new secondary checkout)
 
 Feature code: SEED
-Status: In-progress
+Status: Approved
 Date: 2026-11-02
 Requirements: ./requirements.md
 
