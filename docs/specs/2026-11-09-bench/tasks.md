@@ -199,7 +199,7 @@ _Requirements: BENCH-9.1_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in a new `#[cfg(test)] mod tests` at the end of `src/cli.rs` (it has none
+- [x] **Step 1: Write the failing test** in a new `#[cfg(test)] mod tests` at the end of `src/cli.rs` (it has none
   today):
 
 ```rust
@@ -219,13 +219,13 @@ fn locating_a_missing_path_refuses_with_the_path_as_given() {
 
   Run: `cargo test --lib cli::`. Expect: a compile error, because `locate_checkout` does not exist.
   (`Registry` and `Capabilities` derive `Default`; `Config` does not, src/state.rs:192-199.)
-- [ ] **Step 2: Implement.** Move lines 1433 to 1506 into `locate_checkout`. `seed_cmd` keeps the
+- [x] **Step 2: Implement.** Move lines 1433 to 1506 into `locate_checkout`. `seed_cmd` keeps the
   `window_days` check and the signal install (1420 to 1431), calls `locate_checkout`, and on `Err(r)` does
   `b.finding(r.kind, r.path, r.detail.clone())` and `emit(state, out, b.finish(), &format!("refused: {}\n", r.detail), r.code)`.
   The text, order and codes stay as today.
-- [ ] **Step 3: Run** `cargo test --test seed` and `cargo test --lib cli::`. Expect the refusal tests at
+- [x] **Step 3: Run** `cargo test --test seed` and `cargo test --lib cli::`. Expect the refusal tests at
   tests/seed.rs:119, 164, 173, 187 and 212 to pass unchanged, plus the new one.
-- [ ] **Step 4: Commit** `refactor(cli): locate and gate a checkout in one place`
+- [x] **Step 4: Commit** `refactor(cli): locate and gate a checkout in one place`
 
 _Requirements: BENCH-9.1_
 
