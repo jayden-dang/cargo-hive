@@ -321,6 +321,19 @@ pub fn run(
             return outcome;
         }
     }) else {
+        let busy = candidates.len() as u64;
+        push_count(&mut outcome, "store_entries_held_busy", busy);
+        push_count(
+            &mut outcome,
+            "store_entries_held",
+            held_total.saturating_add(busy),
+        );
+        outcome.findings.push(Finding {
+            kind: "store.busy".into(),
+            path: Some(ctx.state.root().join("store.lock")),
+            detail: "run `gc` again when no seed runs".into(),
+            measured: BTreeMap::new(),
+        });
         return outcome;
     };
 

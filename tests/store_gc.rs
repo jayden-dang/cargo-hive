@@ -4,6 +4,7 @@ mod common;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cargo_hive::cargo_target::{Owner, TargetDir, TAG_LINE};
@@ -22,7 +23,7 @@ use common::store_fixture::{
     count, drop_row, entry_dirs, has_finding, plant_rowless, rows, seeded_store, set_last_live_at,
     synth_entry, tree_files,
 };
-use common::{crate_dirs, plant_session, Hive};
+use common::{crate_dirs, plant_session, wait_within, Hive};
 
 const DAY: u64 = 86_400;
 const CAP_BYTES: u64 = 40_000_000_000;
@@ -1522,4 +1523,225 @@ fn a_scoped_gc_reads_and_writes_no_store_state_and_says_why() {
         db_mtime,
         "{receipt}"
     );
+}
+
+#[test]
+fn while_a_seed_holds_the_store_gc_evicts_nothing_and_keeps_its_exit_code() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let main_target = repo.main.join("target");
+    let session_parent = hive.home.path.join("session-cache");
+    let session_target = session_parent.join("session-target");
+    fs::create_dir_all(&session_parent).unwrap();
+    let status = std::process::Command::new("cp")
+        .args([
+            "-R",
+            main_target.to_str().unwrap(),
+            session_target.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let session_target = session_target.canonicalize().unwrap();
+    let krate = crate_dirs(&session_target)
+        .into_iter()
+        .next()
+        .expect("incremental crate dir");
+    let (session, _) = plant_session(&krate, 3600, "svh0", false);
+    assert!(krate.join(&session).is_dir());
+    remove_all_targets(&repo);
+    set_last_live_at(&hive, "", 31 * DAY);
+    synth_entry(
+        &hive,
+        (99_020, "busyage-aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        &[],
+        &[("blob", vec![7u8; 32])],
+        31 * DAY,
+    );
+    hive.config(&format!(
+        r#"{{"secondary_roots": ["{}"], "cache_roots": ["{}"]}}"#,
+        repo.scratch.path.display(),
+        session_parent.display()
+    ));
+    let before_rows = rows(&hive);
+    let before_dirs = entry_dirs(&hive);
+    assert!(
+        before_rows
+            .iter()
+            .any(|row| row["name_meta"].as_str() == Some("busyage-aaaaaaaaaaaaaaaa")),
+        "{before_rows:?}"
+    );
+    assert!(!before_dirs.is_empty());
+
+    let state = State::open_at(hive.home.path.clone()).unwrap();
+    let held = state.store_shared_or_cancelled(|| false).unwrap();
+    let child = hive
+        .command(&["gc", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let busy_out = wait_within(child, Duration::from_secs(180));
+    drop(held);
+    let busy: serde_json::Value = serde_json::from_slice(&busy_out.stdout).unwrap_or_else(|err| {
+        panic!(
+            "busy gc did not print a receipt ({err}): stdout {} stderr {}",
+            String::from_utf8_lossy(&busy_out.stdout),
+            String::from_utf8_lossy(&busy_out.stderr)
+        )
+    });
+    assert!(
+        has_finding(&busy, "store.busy"),
+        "expected store.busy: {busy}"
+    );
+    let detail = busy["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["kind"] == "store.busy")
+        .unwrap()["detail"]
+        .as_str()
+        .unwrap();
+    assert!(
+        detail.contains("run `gc` again when no seed runs"),
+        "{detail}"
+    );
+    assert!(count(&busy, "store_entries_held_busy") >= 1, "{busy}");
+    assert_eq!(count(&busy, "store_entries_evicted_age"), 0, "{busy}");
+    assert_eq!(rows(&hive), before_rows, "{busy}");
+    assert_eq!(entry_dirs(&hive), before_dirs, "{busy}");
+    assert!(
+        count(&busy, "sessions_deleted") >= 1,
+        "sessions not deleted: {busy}"
+    );
+    assert!(!krate.join(&session).exists(), "{busy}");
+
+    let (session2, _) = plant_session(&krate, 3600, "svh1", false);
+    assert!(krate.join(&session2).is_dir());
+    let (free_out, free) = hive.json(&["gc"]);
+    assert_eq!(
+        busy_out.status.code(),
+        free_out.status.code(),
+        "busy={busy}\nfree={free}"
+    );
+    assert!(free_out.status.success(), "{free}");
+}
+
+#[test]
+fn seeds_and_gcs_in_a_loop_leave_no_partial_unit() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    for cycle in 0..12 {
+        set_last_live_at(&hive, "", 31 * DAY);
+        let lane = repo.worktree(&format!("loop-{cycle}"));
+        let lane_s = lane.to_str().unwrap().to_string();
+        let (seed_out, seed_receipt, gc_out, _gc_receipt) = std::thread::scope(|scope| {
+            let seed = scope.spawn(|| hive.json(&["seed", lane_s.as_str()]));
+            let gc = scope.spawn(|| hive.json(&["gc"]));
+            let (seed_out, seed_receipt) = seed.join().unwrap();
+            let (gc_out, gc_receipt) = gc.join().unwrap();
+            (seed_out, seed_receipt, gc_out, gc_receipt)
+        });
+        assert!(
+            seed_out.status.success(),
+            "cycle {cycle} seed: {seed_receipt}"
+        );
+        assert!(
+            !seed_receipt["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| finding["kind"] == "unit.refused"),
+            "cycle {cycle} unit.refused: {seed_receipt}"
+        );
+        assert!(gc_out.status.success(), "cycle {cycle} gc failed");
+        assert_seeded_units_whole_or_absent(&hive, &lane);
+    }
+}
+
+#[test]
+fn a_stale_evict_tree_leaves_seed_store_bytes_working_and_the_next_gc_removes_it() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let stale = hive.home.path.join("store/.tmp/evict-1-0");
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("leftover"), b"stale-evict").unwrap();
+    assert!(stale.is_dir());
+    let lane = repo.worktree("stale-evict");
+    let (seed_out, seed) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(seed_out.status.success(), "{seed}");
+    assert!(
+        seed["counts"]["store_bytes"].as_u64().is_some(),
+        "store_bytes missing: {seed}"
+    );
+    assert!(
+        seed["unmeasured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["field"] != "store_bytes"),
+        "{seed}"
+    );
+    assert!(
+        stale.is_dir(),
+        "fill must keep a current-mtime evict tree for the next gc"
+    );
+    let (gc_out, gc) = hive.json(&["gc"]);
+    assert!(gc_out.status.success(), "{gc}");
+    assert!(
+        !stale.exists(),
+        "bare gc must remove store/.tmp/evict-*: {gc}"
+    );
+}
+
+fn assert_seeded_units_whole_or_absent(hive: &Hive, lane: &Path) {
+    let target = lane.join("target");
+    if !target.is_dir() {
+        return;
+    }
+    let state = State::open_at(hive.home.path.clone()).unwrap();
+    let Ok(file) = store::read(&state) else {
+        return;
+    };
+    for row in &file.units {
+        let fp = target
+            .join(&row.rel_profile)
+            .join(".fingerprint")
+            .join(&row.name_meta);
+        if !fp.exists() {
+            continue;
+        }
+        let entry = store::entry_dir(&state, row);
+        for rel in entry_relative_files(&entry) {
+            let placed = target.join(&rel);
+            assert!(
+                placed.exists(),
+                "partial unit {} missing {} under {}",
+                row.name_meta,
+                rel.display(),
+                target.display()
+            );
+        }
+    }
+}
+
+fn entry_relative_files(entry: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![entry.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for item in entries {
+            let path = item.unwrap().path();
+            let meta = fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                out.push(path.strip_prefix(entry).unwrap().to_path_buf());
+            }
+        }
+    }
+    out
 }
