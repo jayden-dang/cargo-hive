@@ -674,7 +674,7 @@ text, arm sizes, duplicates, a shared target) are new code (rung 7).
 
 **Depends-on:** Task 1, Task 2, Task 4, Task 6
 
-- [ ] **Step 1: Write the failing tests** in `tests/bench.rs`, one table-driven test over the refusals. Each
+- [x] **Step 1: Write the failing tests** in `tests/bench.rs`, one table-driven test over the refusals. Each
   row builds its own `RegistryRepo` worktrees and expects `Err` with a reason containing its word:
 
 ```rust
@@ -730,13 +730,13 @@ fn an_unfair_set_of_checkouts_is_refused_with_a_reason_for_each() {
   committed before the worktrees were added, refused with `has no Cargo.lock` (2.12). The config file is committed in the fixture, so the trees
   stay clean. Run: `cargo test --test bench`. Expect: a compile error, because
   `bench::check` does not exist.
-- [ ] **Step 2: Implement** `check` in the order design §3 gives: arm sizes and duplicates from the arguments,
+- [x] **Step 2: Implement** `check` in the order design §3 gives: arm sizes and duplicates from the arguments,
   `locate_checkout` per path, one repo `main`, one `head()`, no `has_tracked_changes()`, one `version_text`,
   then `resolve` per checkout for an existing target, `target.split`, a shared target, and a `Cargo.lock` at
   its `workspace_root`. Collect every
   failure before returning.
-- [ ] **Step 3: Run** `cargo test --test bench`. Expect pass.
-- [ ] **Step 4: Commit** `feat(bench): refuse an unfair set of checkouts before anything builds`
+- [x] **Step 3: Run** `cargo test --test bench`. Expect pass.
+- [x] **Step 4: Commit** `feat(bench): refuse an unfair set of checkouts before anything builds`
 
 _Requirements: BENCH-2.1, BENCH-2.2, BENCH-2.3, BENCH-2.4, BENCH-2.5, BENCH-2.6, BENCH-2.7, BENCH-2.8, BENCH-2.11, BENCH-2.12_
 
