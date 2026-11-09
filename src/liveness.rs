@@ -623,7 +623,7 @@ fn claimants(name: &str, kept: &HashSet<&str>, dead: &HashMap<&str, Vec<usize>>)
 
 /// The `<hash>` of every `-<hash>` in `name` where `<hash>` is 16 lowercase hex digits and is
 /// followed by `.` or the end of the name.
-fn embedded_hashes(name: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn embedded_hashes(name: &str) -> impl Iterator<Item = &str> {
     name.match_indices('-').filter_map(move |(at, _)| {
         let tail = &name[at + 1..];
         let hash = tail.get(..16)?;
@@ -1599,6 +1599,9 @@ mod tests {
         }
         fn clone_file(&self, src: &Path, dst: &Path) -> io::Result<()> {
             self.real.clone_file(src, dst)
+        }
+        fn create_dir(&self, path: &Path) -> io::Result<()> {
+            self.real.create_dir(path)
         }
         fn sharing(&self, path: &Path) -> io::Result<crate::platform::Sharing> {
             self.real.sharing(path)

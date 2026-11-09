@@ -663,6 +663,9 @@ mod tests {
         fn clone_file(&self, src: &Path, dst: &Path) -> std::io::Result<()> {
             self.inner.clone_file(src, dst)
         }
+        fn create_dir(&self, path: &Path) -> std::io::Result<()> {
+            self.inner.create_dir(path)
+        }
         fn sharing(&self, path: &Path) -> std::io::Result<crate::platform::Sharing> {
             self.inner.sharing(path)
         }

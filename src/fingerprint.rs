@@ -93,6 +93,8 @@ pub struct Unit {
     pub target: u64,
     #[serde(skip)]
     pub path: u64,
+    #[serde(skip)]
+    pub toolchain_value: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,6 +304,7 @@ fn read_unit(
         path: obj["path"]
             .as_u64()
             .ok_or("`path` is not an unsigned integer")?,
+        toolchain_value: obj["rustc"].as_u64().expect("`rustc` is a u64"),
     }))
 }
 
@@ -659,6 +662,23 @@ mod tests {
             "This file has an mtime of when this was started.",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_unit_keeps_the_toolchain_value_of_its_json() {
+        let p = scratch();
+        write_unit(&p, "dep-0000000000000001", "lib-dep", 1, &[]);
+        let json = p.join(".fingerprint/dep-0000000000000001/lib-dep.json");
+        let body = fs::read_to_string(&json).unwrap().replacen(
+            "11722972603611519644",
+            "776363091828236830",
+            1,
+        );
+        fs::write(&json, body).unwrap();
+        let report = read_profile(&p);
+        let graph = report.graph.expect("a known unit stays readable");
+        assert_eq!(graph.units[0].toolchain_value, 776363091828236830);
+        fs::remove_dir_all(p).unwrap();
     }
 
     #[test]

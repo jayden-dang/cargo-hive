@@ -33,7 +33,7 @@ The canonical sources (`docs/standards/` is the SSOT). Read them; do not restate
 | `docs/standards/INDEX.md` | `80cd41328c0f7652` |
 | `docs/standards/code.md` (bounds on every walk, read and child process; no new deps; no requirement IDs in code, comments or test names; `//!` module comments) | `afdcc8b89136f573` |
 | `docs/standards/errors-logging.md` (typed errors with hand-written `Display`; expected refusals are data; exit codes) | `48f5baac3b52a552` |
-| `docs/standards/testing.md` (merge gate; scratch-only fixtures under `/private/tmp/hive-it-*`; `HIVE_HOME` is the only test-only environment variable; no test-only branches in production paths) | `2f60a5b234124d90` |
+| `docs/standards/testing.md` (merge gate; scratch-only fixtures under `/private/tmp/hive-it-*`; `HIVE_HOME` and `HIVE_SEED_CHECKOUT` are the only test-only environment variables; no test-only branches in production paths) | `5c18796a371c6a49` |
 | `docs/architecture/INDEX.md`: this feature relies on ARCH-1 to 11, 13 to 17, 19 | `36f62957f3f4ca1b` |
 | `docs/specs/2026-11-02-store-seed/design.md` (Decisions 1 to 18) | see git |
 | `.skills/SEED/decisions.md` (the owner's locks 1 to 13, and every measurement), `.skills/SEED/design-scan.md`, `.skills/SEED/design-review.md` | not in git |
@@ -119,9 +119,9 @@ Retrieval: `blast_radius` on these paths names CORE, AUTOGC, EXPLAIN, LIVE, GCPL
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests.** In `src/fingerprint.rs`, `a_unit_keeps_the_toolchain_value_of_its_json`: write one unit dir whose JSON is the file's `unit_json(&[])` with its fixed `rustc` value replaced by `776363091828236830`, call `read_profile`, and assert `graph.units[0].toolchain_value == 776363091828236830`. Also `a_file_outside_the_known_shape_stays_unsupported`, if the file's existing table does not already pin it, with an extra JSON key. In `src/doctor.rs`, `a_resolved_toolchain_keeps_the_whole_version_text`: `resolve_toolchain(scratch)`, assert `version_text` starts with `rustc ` and contains both `host: ` and `release: {release}`. Run `cargo test --lib fingerprint:: doctor::`; expect a compile failure on the missing fields.
-- [ ] **Step 2: Implement.** Add the fields. In `read_unit`, set `toolchain_value` from `obj["rustc"].as_u64()`, which `check_types` has already proved is a `u64`; `check_types` keeps the same 11 keys. In `resolve_toolchain`, keep `text.to_string()` before the existing `release` parse. Set `toolchain_value: 0` in the `explain.rs` helper. Run `cargo test`; expect pass, with no receipt change since both fields are skipped.
-- [ ] **Step 3: Commit.** `feat(fingerprint): keep each unit's toolchain value and the whole rustc version text`
+- [x] **Step 1: Write the failing tests.** In `src/fingerprint.rs`, `a_unit_keeps_the_toolchain_value_of_its_json`: write one unit dir whose JSON is the file's `unit_json(&[])` with its fixed `rustc` value replaced by `776363091828236830`, call `read_profile`, and assert `graph.units[0].toolchain_value == 776363091828236830`. Also `a_file_outside_the_known_shape_stays_unsupported`, if the file's existing table does not already pin it, with an extra JSON key. In `src/doctor.rs`, `a_resolved_toolchain_keeps_the_whole_version_text`: `resolve_toolchain(scratch)`, assert `version_text` starts with `rustc ` and contains both `host: ` and `release: {release}`. Run `cargo test --lib fingerprint:: doctor::`; expect a compile failure on the missing fields.
+- [x] **Step 2: Implement.** Add the fields. In `read_unit`, set `toolchain_value` from `obj["rustc"].as_u64()`, which `check_types` has already proved is a `u64`; `check_types` keeps the same 11 keys. In `resolve_toolchain`, keep `text.to_string()` before the existing `release` parse. Set `toolchain_value: 0` in the `explain.rs` helper. Run `cargo test`; expect pass, with no receipt change since both fields are skipped.
+- [x] **Step 3: Commit.** `feat(fingerprint): keep each unit's toolchain value and the whole rustc version text`
 
 _Requirements: SEED-10.10, SEED-10.11_
 
@@ -141,7 +141,7 @@ _Requirements: SEED-10.10, SEED-10.11_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test.** Add table rows, using the file's `stat` helper and a new `shares_all_flagged(private)` helper beside `clone_flagged` that sets `may_share: true, shares_all: true, clone_id: 7`:
+- [x] **Step 1: Write the failing test.** Add table rows, using the file's `stat` helper and a new `shares_all_flagged(private)` helper beside `clone_flagged` that sets `may_share: true, shares_all: true, clone_id: 7`:
 
 ```rust
 (
@@ -157,7 +157,7 @@ _Requirements: SEED-10.10, SEED-10.11_
 ```
 
 Run `cargo test --lib gc::ledger`; expect the first row to fail with `freed: 4096`. The existing row `compressed: private size is not trusted` must keep passing: it sets `shares_all: false`.
-- [ ] **Step 2: Implement.** Replace the condition at line 66, so that the rule is the flag and not a measured zero:
+- [x] **Step 2: Implement.** Replace the condition at line 66, so that the rule is the flag and not a measured zero:
 
 ```rust
 if s.shares_all && stat.compressed {
@@ -168,7 +168,7 @@ if s.shares_all && stat.compressed {
 ```
 
 Run `cargo test`; expect pass.
-- [ ] **Step 3: Commit.** `fix(gc): do not count a compressed file that shares all its blocks as freed`
+- [x] **Step 3: Commit.** `fix(gc): do not count a compressed file that shares all its blocks as freed`
 
 _Requirements: SEED-5.1, SEED-10.7_
 
@@ -190,7 +190,7 @@ _Requirements: SEED-5.1, SEED-10.7_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests** in the existing test module of `src/platform/apfs.rs`, using its helpers `apfs()` and `tmp(label)`:
+- [x] **Step 1: Write the failing tests** in the existing test module of `src/platform/apfs.rs`, using its helpers `apfs()` and `tmp(label)`:
 
 ```rust
 #[test]
@@ -225,9 +225,9 @@ fn create_dir_refuses_an_existing_path_and_a_missing_parent() {
 ```
 
 Run `cargo test --lib platform::`; expect a compile failure.
-- [ ] **Step 2: Implement.** `Apfs::create_dir` is `std::fs::create_dir(path)`. In `Watch` and `WatchTask`, add `incompressible: Arc<AtomicBool>`, set by `file_skipped` for `SkipReason::EmptyFile` and by `Task::not_compressible_enough` in place of the failure text. `compress` checks it before the `UF_COMPRESSED` test and returns `Incompressible`. Every other skip stays `Failed`, `SkipReason::AlreadyCompressed` included. `Display` gains a line. In each other `impl Fs`: wrappers (`FailStat`, `Volumes`, `Recording`) forward to `inner`, and `liveness::FakeFs` to `self.real`; `DirListFs` returns `Unsupported`, as its other methods do; `doctor::FakeFs`, `explain::FakeFs` and `gc/run.rs` `Rec` follow their neighbors. Non-macOS builds compile, since `Apfs` is already gated.
-- [ ] **Step 3: Run.** `cargo test`; expect pass, doctor's check b included: it compares with `==`. `cargo check --target x86_64-unknown-linux-gnu`.
-- [ ] **Step 4: Commit.** `feat(platform): Fs::create_dir, and a compression outcome for files it cannot shrink`
+- [x] **Step 2: Implement.** `Apfs::create_dir` is `std::fs::create_dir(path)`. In `Watch` and `WatchTask`, add `incompressible: Arc<AtomicBool>`, set by `file_skipped` for `SkipReason::EmptyFile` and by `Task::not_compressible_enough` in place of the failure text. `compress` checks it before the `UF_COMPRESSED` test and returns `Incompressible`. Every other skip stays `Failed`, `SkipReason::AlreadyCompressed` included. `Display` gains a line. In each other `impl Fs`: wrappers (`FailStat`, `Volumes`, `Recording`) forward to `inner`, and `liveness::FakeFs` to `self.real`; `DirListFs` returns `Unsupported`, as its other methods do; `doctor::FakeFs`, `explain::FakeFs` and `gc/run.rs` `Rec` follow their neighbors. Non-macOS builds compile, since `Apfs` is already gated.
+- [x] **Step 3: Run.** `cargo test`; expect pass, doctor's check b included: it compares with `==`. `cargo check --target x86_64-unknown-linux-gnu`.
+- [x] **Step 4: Commit.** `feat(platform): Fs::create_dir, and a compression outcome for files it cannot shrink`
 
 _Requirements: SEED-2.23_
 
@@ -249,7 +249,7 @@ _Requirements: SEED-2.23_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in `tests/seed.rs`:
+- [x] **Step 1: Write the failing test** in `tests/seed.rs`:
 
 ```rust
 #![cfg(target_os = "macos")]
@@ -279,7 +279,7 @@ fn the_fixture_builds_a_registry_crate_with_a_build_script_offline() {
 ```
 
 Run `cargo test --test seed`; expect a compile failure.
-- [ ] **Step 2: Implement the fixture,** exactly as probed in plan review (`.skills/SEED/plan-review.md`, M-5):
+- [x] **Step 2: Implement the fixture,** exactly as probed in plan review (`.skills/SEED/plan-review.md`, M-5):
   - `<reg>/leafcrate-1.0.0.crate` and `<reg>/depcrate-1.0.0.crate`, each packed with `COPYFILE_DISABLE=1 tar -czf <reg>/<name>-1.0.0.crate <name>-1.0.0` from the crate's parent directory. `cksum` is the first field of `shasum -a 256 <file>`.
   - `leafcrate`: `pub fn leaf() -> u32 { 1 }`. `depcrate`: `build = "build.rs"`, `[dependencies] leafcrate = "1"`; `build.rs` writes `$OUT_DIR/generated.rs` holding `pub const G: u32 = 7;`; `src/lib.rs` is `include!(concat!(env!("OUT_DIR"), "/generated.rs")); pub fn dep() -> u32 { leafcrate::leaf() + G }`. Both edition 2021.
   - `<reg>/index/le/af/leafcrate`: `{"name":"leafcrate","vers":"1.0.0","deps":[],"cksum":"<sha256>","features":{},"yanked":false}`
@@ -290,8 +290,8 @@ Run `cargo test --test seed`; expect a compile failure.
   - `write_capabilities` is the body of `write_ready_capabilities` with `"disabled": disabled`, `"lock_check": 1` and `"failed_marker_check": 1`. Disabling looks like `{"seeding": ["a"]}`, `{"store_compression": ["b"]}`, `{"deletion": ["d"]}`.
   - `LibCtx::open` is the body of `Planned::library_ctx_with`, reading `hive.home.path`, and `library_ctx_with` delegates to it.
   - `hold_state_lock` is `self.hold_lock_child("flock", &self.home.path.join(".lock"))`. That file exists once any command has run.
-- [ ] **Step 3: Run.** `cargo test --test seed`; expect pass.
-- [ ] **Step 4: Commit.** `test(seed): a local-registry fixture with a build script, and a state-lock holder`
+- [x] **Step 3: Run.** `cargo test --test seed`; expect pass.
+- [x] **Step 4: Commit.** `test(seed): a local-registry fixture with a build script, and a state-lock holder`
 
 _Requirements: SEED-1.9_
 
@@ -314,7 +314,7 @@ _Requirements: SEED-1.9_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing tests** in `src/seed/source.rs`:
+- [x] **Step 1: Write the failing tests** in `src/seed/source.rs`:
 
 ```rust
 #[test]
@@ -337,9 +337,9 @@ fn the_first_input_decides_whether_a_unit_is_a_registry_unit() {
 ```
 
 Add, on hand-built target dirs: `a_unit_with_no_dep_info_needs_a_resolved_edge_and_only_registry_edges` (a run-build-script unit with zero edges is not registry; with one registry edge is; with one workspace edge is not); `a_live_unit_with_an_unresolved_edge_is_left_out_and_named`; `a_not_current_unit_is_not_filled`; `an_undecided_or_unsupported_target_is_a_skip_with_its_reason`; `unit_files_takes_the_whole_unit_dirs_and_hash_named_deps_but_no_rcgu_objects`; `unit_files_walks_a_dsym_directory_within_its_bound`; `a_symlink_in_a_unit_refuses_the_whole_unit`; `a_deps_listing_over_its_cap_is_a_skip`; `a_unit_dir_at_its_cap_lists_and_one_past_it_refuses`, with `dir_cap` 2 and 3; `a_dep_info_file_over_its_read_bound_skips_the_target`. Run `cargo test --lib seed::source`; expect a compile failure.
-- [ ] **Step 2: Implement.** `is_registry_dep_info`: take the text after the first `: `, read the first input up to the first space not preceded by a backslash, undo `\ `, and test `starts_with(<cargo_home>/registry/src/)`. `cargo_home` is `CARGO_HOME` else `$HOME/.cargo`. `live_registry_units` (design decisions 10 and 11): call `liveness()`; `Undecided` and `Format::Unsupported` map to `Skip`. List each profile's `deps/` with `DEPS_CAP`. For each live unit, find its record in `profiles[].graph.units`; a unit absent from the graph has an empty hash file and is filtered. Classify from its `.d` (`deps/<stem>-<hash>.d`, or `build/<dir>/*-<hash>.d`, each read stops at 1 MiB), then iterate to a fixpoint for units with no `.d`, following `le_hex(dep.fingerprint)` to `hash_hex` over all profiles. Record `registry_deps` as the fingerprint hashes of edges that resolved to registry units. An edge that resolves to nothing leaves the unit out. `rel_profile` is the profile path relative to `target.path`. `owned_targets` calls `checkout_walk(ctx)`, whose `ctx.repos` holds the one repo, then `discover::targets(&checkouts, ctx.cfg, false, &mut Snapshot::default(), cancel)`, keeps `Owner::Owned`, and reports the rest. `unit_files` recurses under `.fingerprint/<dir>/` and `build/<dir>/` with `dir_cap` per directory and `size::MAX_DEPTH` as a depth bound, and picks `deps_listing` names for which `embedded_hashes(name)` yields `fingerprint::unit_hash(dir_name)`, leaving out `.rcgu.o`, recursing into a directory such as a `.dSYM`; any entry whose `entry_stat` kind is not `File` or `Dir` is `Refused`; a non-UTF-8 name under `build/<dir>/` is `Refused` too.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): read a target's live registry units and one unit's files`
+- [x] **Step 2: Implement.** `is_registry_dep_info`: take the text after the first `: `, read the first input up to the first space not preceded by a backslash, undo `\ `, and test `starts_with(<cargo_home>/registry/src/)`. `cargo_home` is `CARGO_HOME` else `$HOME/.cargo`. `live_registry_units` (design decisions 10 and 11): call `liveness()`; `Undecided` and `Format::Unsupported` map to `Skip`. List each profile's `deps/` with `DEPS_CAP`. For each live unit, find its record in `profiles[].graph.units`; a unit absent from the graph has an empty hash file and is filtered. Classify from its `.d` (`deps/<crate>-<metadata>.d`, `<crate>` the package name and `<metadata>` `fingerprint::unit_hash` of the unit directory, not the fingerprint-file stem, or `build/<dir>/*-<hash>.d`, each read stops at 1 MiB), then iterate to a fixpoint for units with no `.d`, following `le_hex(dep.fingerprint)` to `hash_hex` over all profiles. Record `registry_deps` as the fingerprint hashes of edges that resolved to registry units. An edge that resolves to nothing leaves the unit out. `rel_profile` is the profile path relative to `target.path`. `owned_targets` calls `checkout_walk(ctx)`, whose `ctx.repos` holds the one repo, then `discover::targets(&checkouts, ctx.cfg, false, &mut Snapshot::default(), cancel)`, keeps `Owner::Owned`, and reports the rest. `unit_files` recurses under `.fingerprint/<dir>/` and `build/<dir>/` with `dir_cap` per directory and `size::MAX_DEPTH` as a depth bound, and picks `deps_listing` names for which `embedded_hashes(name)` yields `fingerprint::unit_hash(dir_name)`, leaving out `.rcgu.o`, recursing into a directory such as a `.dSYM`; any entry whose `entry_stat` kind is not `File` or `Dir` is `Refused`; a non-UTF-8 name under `build/<dir>/` is `Refused` too.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): read a target's live registry units and one unit's files`
 
 _Requirements: SEED-2.2, SEED-2.3, SEED-2.4, SEED-2.24, SEED-9.7_
 
@@ -357,11 +357,11 @@ _Requirements: SEED-2.2, SEED-2.3, SEED-2.4, SEED-2.24, SEED-9.7_
 
 **Interfaces:**
 - Consumes: `CompressOutcome::Incompressible` (Task 3), `State`, `Tx`, `Fs`
-- Produces: `pub const STORE_FILE: &str = "store.db"`; `pub const MAX_STORE_BYTES: u64 = 32 * 1024 * 1024`; `pub enum Error { State(StateError), DiskFull(String) }` in `src/seed/mod.rs`, with `Debug` and a hand-written `Display` and `Error`; `State::read_bounded<T: DeserializeOwned + Default>(&self, name: &str, max: u64) -> Result<T, StateError>`, taking no lock, safe because writes replace the file by rename; `pub struct StoreFile { pub units: Vec<Row>, pub toolchains: BTreeMap<String, u64> }`; `pub struct Row { pub toolchain_value: u64, pub name_meta: String, pub fingerprint_hash: String, pub kind: String, pub rel_profile: PathBuf, pub size: u64, pub filled_at: u64, pub last_live_at: u64, pub repos: Vec<PathBuf>, pub registry_deps: Vec<String> }`; `pub fn store_dir(state: &State) -> PathBuf`; `pub fn entry_dir(state: &State, row: &Row) -> PathBuf`; `pub fn tag_path(state: &State) -> PathBuf`; `pub fn tmp_dir(state: &State, key: &str) -> PathBuf`; `pub fn sweep_tmp(state: &State, now: SystemTime)`; `pub fn read(state: &State) -> Result<StoreFile, StateError>` (available rows only); `pub enum Published { Added, Held }`; `pub enum PublishFailed { Compress(String), DiskFull(String), Stopped }`; `pub fn compress_and_publish(fs: &dyn Fs, state: &State, tmp: &Path, row: &Row, cancel: &(dyn Fn() -> bool + Sync)) -> Result<Published, PublishFailed>`; `pub fn merge(state: &State, rows: Vec<Row>, table: BTreeMap<String, u64>, cancel: &(dyn Fn() -> bool + Sync)) -> Result<(), StateError>`
+- Produces: `pub const STORE_FILE: &str = "store.db"`; `pub const MAX_STORE_BYTES: u64 = 32 * 1024 * 1024`; `pub enum Error { State(StateError), DiskFull(String) }` in `src/seed/mod.rs`, with `Debug` and a hand-written `Display` and `Error`; `State::read_bounded<T: DeserializeOwned + Default>(&self, name: &str, max: u64) -> Result<T, StateError>`, taking no lock, safe because writes replace the file by rename; `pub struct StoreFile { pub units: Vec<Row>, pub toolchains: BTreeMap<String, u64> }`; `pub struct Row { pub toolchain_value: u64, pub name_meta: String, pub fingerprint_hash: String, pub kind: String, pub rel_profile: PathBuf, pub size: u64, pub filled_at: u64, pub last_live_at: u64, pub repos: Vec<PathBuf>, pub registry_deps: Vec<String> }`; `pub fn store_dir(state: &State) -> PathBuf`; `pub fn entry_dir(state: &State, row: &Row) -> PathBuf`; `pub fn tag_path(state: &State) -> PathBuf`; `pub fn tmp_dir(state: &State, key: &str) -> PathBuf`; `pub fn sweep_tmp(state: &State, now: SystemTime) -> Result<(), String>`; `pub fn read(state: &State) -> Result<StoreFile, StateError>` (available rows only); `pub enum Published { Added, Held }`; `pub enum PublishFailed { Compress(String), DiskFull(String), Stopped(String) }`; `pub fn compress_and_publish(fs: &dyn Fs, state: &State, tmp: &Path, row: &Row, cancel: &(dyn Fn() -> bool + Sync)) -> Result<Published, PublishFailed>`; `pub fn merge(state: &State, rows: Vec<Row>, table: BTreeMap<String, u64>, cancel: &(dyn Fn() -> bool + Sync)) -> Result<(), StateError>`
 
 **Depends-on:** Task 3
 
-- [ ] **Step 1: Write the failing tests** in `src/seed/store.rs`, on a scratch state root, `platform::current()`, and `platform::Hooked` for injected failures. A test-local `three_file_entry(state, fs) -> (PathBuf, Row)` writes into `tmp_dir` one 4 KiB `debug/deps/libd-0123456789abcdef.rlib`, one 16-byte `debug/.fingerprint/d-0123456789abcdef/lib-d` and one empty `debug/.fingerprint/d-0123456789abcdef/invoked.timestamp`.
+- [x] **Step 1: Write the failing tests** in `src/seed/store.rs`, on a scratch state root, `platform::current()`, and `platform::Hooked` for injected failures. A test-local `three_file_entry(state, fs) -> (PathBuf, Row)` writes into `tmp_dir` one 4 KiB `debug/deps/libd-0123456789abcdef.rlib`, one 16-byte `debug/.fingerprint/d-0123456789abcdef/lib-d` and one empty `debug/.fingerprint/d-0123456789abcdef/invoked.timestamp`.
 
 ```rust
 #[test]
@@ -386,9 +386,9 @@ fn a_stop_at_any_step_leaves_nothing_available_and_a_later_attempt_finishes() {
 ```
 
 Add: `a_directory_with_no_row_is_adopted_by_merge_without_cloning`, the hand-built "renamed, no row" state; `a_row_whose_directory_is_gone_is_not_read_and_is_pruned_at_the_next_merge`; `a_rename_that_finds_the_entry_present_counts_as_held_and_discards_its_copy`; `merge_adds_a_repo_and_moves_last_live_at_for_a_held_key`; `a_compress_failure_other_than_too_small_leaves_the_entry_unavailable`; `a_failure_with_little_free_space_is_disk_full`, with `Hooked` returning `Failed` and a low `available_bytes`; `a_file_already_compressed_is_finished`; `a_store_over_its_cap_reports_the_failure_and_leaves_the_file_unchanged`, comparing bytes; `read_bounded_refuses_a_file_over_its_bound_and_takes_no_lock`, in `src/state.rs`. The binary half of the state-lock proof needs the command, so it is in Task 12. Run `cargo test --lib seed::store`; expect a compile failure.
-- [ ] **Step 2: Implement** (design decisions 1, 2, 5, 6, 16, 17). `read` uses `State::read_bounded`, then filters by one `entry_stat` per row. `fill` removes a stale `tmp_dir` for its own key before cloning into it; a stopped publish leaves its tmp for `sweep_tmp`. `compress_and_publish` polls `cancel` before each file and before the rename; for each regular file under `tmp` with `nlink` 1 and not already compressed, calls `Fs::compress`; `Compressed` and `Incompressible` continue; `SkippedHardLink` and `Failed` end the entry, and after `Failed` it reads `Fs::volume(tmp).available_bytes`, returning `DiskFull` when that is below the file's size. Create the parent `store/<toolchain_value>/` with `std::fs::create_dir_all`, then `std::fs::rename(tmp, entry_dir)`. `EEXIST` or `ENOTEMPTY` removes `tmp` and returns `Held`. `merge` runs inside `locked_or_cancelled`: `tx.read_bounded`, drop rows whose directory is gone, upsert by store key, adding `repos` and taking the later `last_live_at`, insert table rows, `write_bounded` with `MAX_STORE_BYTES`. `sweep_tmp` removes `.tmp` entries older than one day. Every error names its path.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): a store of complete, compressed entries with an atomic publish`
+- [x] **Step 2: Implement** (design decisions 1, 2, 5, 6, 16, 17). `read` uses `State::read_bounded`, then filters by one `entry_stat` per row. `fill` removes a stale `tmp_dir` for its own key before cloning into it; a stopped publish leaves its tmp for `sweep_tmp`. `compress_and_publish` polls `cancel` before each file and before the rename; for each regular file under `tmp` with `nlink` 1 and not already compressed, calls `Fs::compress`; `Compressed` and `Incompressible` continue; `SkippedHardLink` and `Failed` end the entry, and after `Failed` it reads `Fs::volume(tmp).available_bytes`, returning `DiskFull` when that is below the file's size. Create the parent `store/<toolchain_value>/` with `std::fs::create_dir_all`, then `std::fs::rename(tmp, entry_dir)`. `EEXIST` or `ENOTEMPTY` removes `tmp` and returns `Held`. `merge` runs inside `locked_or_cancelled`: `tx.read_bounded`, drop rows whose directory is gone, upsert by store key, adding `repos` and taking the later `last_live_at`, insert table rows, `write_bounded` with `MAX_STORE_BYTES`. `sweep_tmp` removes `.tmp` entries older than one day, and returns an error naming the path when the listing hits its cap or a stat or removal fails. A missing `.tmp` directory is success. Every error names its path.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): a store of complete, compressed entries with an atomic publish`
 
 _Requirements: SEED-2.9, SEED-2.10, SEED-2.12, SEED-2.13, SEED-2.20, SEED-2.21, SEED-2.22, SEED-9.3, SEED-9.4_
 
@@ -409,7 +409,7 @@ _Requirements: SEED-2.9, SEED-2.10, SEED-2.12, SEED-2.13, SEED-2.20, SEED-2.21, 
 
 **Depends-on:** Task 4, Task 5, Task 6
 
-- [ ] **Step 1: Write the failing tests** in `tests/seed_fill.rs`, each building `RegistryRepo`, and calling `seed::fill::fill` with `LibCtx::open(&hive, recording.fs())`, whose `repos` it narrows to one:
+- [x] **Step 1: Write the failing tests** in `tests/seed_fill.rs`, each building `RegistryRepo`, and calling `seed::fill::fill` with `LibCtx::open(&hive, recording.fs())`, whose `repos` it narrows to one:
   - `a_new_unit_is_cloned_under_the_locks_and_compressed_after_they_are_dropped`: in the `Recording` log, every `clone` line sits between the `lock` lines and the first `unlock`, and every `compress` line after the last `unlock`; `on_compress` calls `Fs::try_lock_elsewhere(LockKind::Flock, &lock)` and records `LockState::Free`.
   - `a_held_lock_skips_the_target_and_waits_for_nothing`, with `hive.hold_lock_child("flock", &target.join("debug/.cargo-build-lock"))`; the report counts `targets_skipped_held`; the store gains nothing.
   - `a_target_with_nothing_new_takes_no_lock`: the log from its length before the second fill holds no `lock` line.
@@ -422,9 +422,9 @@ _Requirements: SEED-2.9, SEED-2.10, SEED-2.12, SEED-2.13, SEED-2.20, SEED-2.21, 
   - `a_cancelled_fill_merges_what_it_published`, with a closure that stops after the first entry.
 
   `locks.rs` does not change, so the existing cases at `tests/plan_tier.rs:132-148` are the guard for `Skipped(Missing)`. Run `cargo test --test seed_fill`; expect a compile failure.
-- [ ] **Step 2: Implement** (design decisions 6, 7, 8). `fill`: `sweep_tmp`; `read` the store; for each target: `live_registry_units` (a `Skip` is one finding and `targets_skipped`); split units into held and new, where held means a row or a final directory exists; if new is empty and the tag exists, go on. Otherwise `acquire(ctx.fs, &target.path, false)`; a `Skipped(reason)` adds `reason.count_name()`, a `Failed` is one finding. Under the lock: list `deps/` once per profile with `DEPS_CAP`, the listing the clones use, then for each new unit, poll `cancel`, re-read its hash file at `.fingerprint/<dir_name>/<stem>`, bounded at 64 bytes, and skip it if it changed; `unit_files`; `create_dir_all` under `tmp_dir`, removing a stale one first, then `clone_file` each file. `EXDEV` ends this target. Clone the tag when absent. Drop `Locked` explicitly. Then for each cloned unit, `compress_and_publish`. Merge rows per target, also when cancelled, with `size` summed from `entry_stat.blocks * 512`, `filled_at` and `last_live_at` from `ctx.now` in epoch seconds, and `repos: vec![repo.main.clone()]`.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): fill the store under Cargo's locks, compressing after they are dropped`
+- [x] **Step 2: Implement** (design decisions 6, 7, 8). `fill`: `sweep_tmp`, and a sweep error is one finding that stops the fill; `read` the store; for each target: `live_registry_units` (a `Skip` is one finding and `targets_skipped`; a non-empty left-out list is one finding naming the target and those units, and the other units are still filled); split units into held and new, where held means a row or a final directory exists; if new is empty and the tag exists, go on. Otherwise `acquire(ctx.fs, &target.path, false)`; a `Skipped(reason)` adds `reason.count_name()`, a `Failed` is one finding. Under the lock: list `deps/` once per profile with `DEPS_CAP`, the listing the clones use, then for each new unit, poll `cancel`, re-read its hash file at `.fingerprint/<dir_name>/<stem>`, bounded at 64 bytes, and skip it if it changed; `unit_files`; `create_dir_all` under `tmp_dir`, removing a stale one first, then `clone_file` each file. `EXDEV` ends this target. Clone the tag when absent. Drop `Locked` explicitly. Then for each cloned unit, `compress_and_publish`. Merge rows per target, also when cancelled, with `size` summed from `entry_stat.blocks * 512`, `filled_at` and `last_live_at` from `ctx.now` in epoch seconds, and `repos: vec![repo.main.clone()]`.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): fill the store under Cargo's locks, compressing after they are dropped`
 
 _Requirements: SEED-2.5, SEED-2.6, SEED-2.7, SEED-2.8, SEED-2.14, SEED-2.19, SEED-9.8, SEED-10.8_
 
@@ -444,14 +444,14 @@ _Requirements: SEED-2.5, SEED-2.6, SEED-2.7, SEED-2.8, SEED-2.14, SEED-2.19, SEE
 
 **Depends-on:** Task 7
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - In `src/seed/fill.rs`, `rustc_info_version` table: one `outputs` entry whose `stdout` has `release:` gives that stdout; none is an error; two are an error; not JSON is an error; JSON with no `outputs` is an error.
   - In `tests/seed_fill.rs`: `a_clean_target_writes_a_row_matching_its_toolchain`: the table's key equals `resolve_toolchain(main).version_text` and its value equals the units' value; `a_target_with_two_toolchain_values_writes_no_row_and_one_finding`: rewrite one unit JSON's `rustc` in a copy; `a_malformed_rustc_info_writes_no_row_and_one_finding`; `a_missing_rustc_info_writes_no_row_and_one_finding`; `text_that_differs_from_the_source_checkout_writes_no_row`; `two_targets_with_one_toolchain_share_one_row`, where the table has one key after both fill.
 
   Run; expect a compile failure.
-- [ ] **Step 2: Implement.** `toolchain_row` reads `<target>/.rustc_info.json`, bounded at 1 MiB, takes `rustc_info_version`, compares it with `resolve_toolchain(source_checkout)?.version_text`, and checks one distinct `toolchain_value` over all units of all profiles. `fill` calls it for each target with `Owner::Owned { checkout }`, using that checkout, whether or not there are new keys, and adds the row to the per-target merge. Any `Err` is one finding naming the target. Rows of a `BTreeMap<String, u64>` give SEED-2.18 by construction.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): learn which toolchain value each rustc version text carries`
+- [x] **Step 2: Implement.** `toolchain_row` reads `<target>/.rustc_info.json`, bounded at 1 MiB, takes `rustc_info_version`, compares it with `resolve_toolchain(source_checkout)?.version_text`, and checks one distinct `toolchain_value` over all units of all profiles. `fill` calls it for each target with `Owner::Owned { checkout }`, using that checkout, whether or not there are new keys, and adds the row to the per-target merge. Any `Err` is one finding naming the target. Rows of a `BTreeMap<String, u64>` give SEED-2.18 by construction.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): learn which toolchain value each rustc version text carries`
 
 _Requirements: SEED-2.15, SEED-2.16, SEED-2.17, SEED-2.18_
 
@@ -472,7 +472,7 @@ _Requirements: SEED-2.15, SEED-2.16, SEED-2.17, SEED-2.18_
 
 **Depends-on:** Task 6
 
-- [ ] **Step 1: Write the failing tests** in `src/seed/choose.rs`:
+- [x] **Step 1: Write the failing tests** in `src/seed/choose.rs`:
 
 ```rust
 fn row(name_meta: &str, fp: &str, value: u64, repo: &str, live: u64, deps: &[&str]) -> Row {
@@ -555,9 +555,9 @@ fn a_dependent_of_a_fingerprint_not_chosen_is_dropped_and_the_drop_repeats() {
 ```
 
 A workspace dependency is simply absent from `registry_deps`, which the last case shows by `f2` having none. Run `cargo test --lib seed::choose`; expect a compile failure.
-- [ ] **Step 2: Implement** the pure function: look up `store.toolchains.get(version_text)`, else `NoRow` with the `release:` line of the text; filter by value and `repos.contains(repo)`; group by `name_meta` and take `max_by_key((last_live_at, fingerprint_hash))`; then loop: a set of chosen fingerprint hashes, retain rows whose every `registry_deps` entry is in the set, until no row leaves; `dropped` is the count removed by this loop.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): choose one consistent set of units for a repo and toolchain`
+- [x] **Step 2: Implement** the pure function: look up `store.toolchains.get(version_text)`, else `NoRow` with the `release:` line of the text; filter by value and `repos.contains(repo)`; group by `name_meta` and take `max_by_key((last_live_at, fingerprint_hash))`; then loop: a set of chosen fingerprint hashes, retain rows whose every `registry_deps` entry is in the set, until no row leaves; `dropped` is the count removed by this loop.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): choose one consistent set of units for a repo and toolchain`
 
 _Requirements: SEED-3.1, SEED-3.2, SEED-3.3, SEED-3.4, SEED-3.5, SEED-3.6, SEED-3.7_
 
@@ -578,7 +578,7 @@ _Requirements: SEED-3.1, SEED-3.2, SEED-3.3, SEED-3.4, SEED-3.5, SEED-3.6, SEED-
 
 **Depends-on:** Task 3, Task 4, Task 6, Task 7
 
-- [ ] **Step 1: Write the failing tests** in `tests/seed_fill.rs`, each with a filled store from `RegistryRepo` and a new worktree:
+- [x] **Step 1: Write the failing tests** in `tests/seed_fill.rs`, each with a filled store from `RegistryRepo` and a new worktree:
   - `an_empty_set_creates_nothing`: no `target/` afterward.
   - `an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it`: `cargo_target::identify(&target)` is `Some` before any build; files keep the store's mtimes.
   - `an_existing_path_gets_nothing_whatever_it_holds`, table: an empty directory, a file, a dangling symlink; contents unchanged; one finding naming the path.
@@ -594,9 +594,9 @@ _Requirements: SEED-3.1, SEED-3.2, SEED-3.3, SEED-3.4, SEED-3.5, SEED-3.6, SEED-
   - `units_outside_the_window_are_counted`: backdate a store stamp.
 
   Run `cargo test --test seed_fill`; expect a compile failure.
-- [ ] **Step 2: Implement** (design decisions 8, 9). Return at once for an empty `units`. `cargo_target::resolve(checkout, cancel)`; an `Err` or a differing `build_directory` is one finding. `fs.create_dir(target_directory)`: `AlreadyExists` and `NotFound` are one finding each, and anything else is an `Error`. Clone the tag, then create inner directories per component with a set of made paths, tolerating `AlreadyExists`. For each row, poll `cancel`; walk `entry_dir(row)` with `CRATE_DIR_CAP`, group files by `deps/`, `build/`, `.fingerprint/`, and clone in that order. Each relative path must hold only `Component::Normal`; `rel_profile` too. `AlreadyExists` from `clone_file` adds `existing` and ends that unit; `ENOSPC` is `Error::DiskFull`; any other error adds `failed` with one finding and ends that unit. Record `SeededUnit`: the stamp through `liveness::unit_timestamp(profile, dir_name, kind)` and `Fs::mtime`, as nanoseconds; `has_build`; `deps_files`. `outside_window` counts units with no stamp or a stamp older than `window`; `seed_cmd` resolves it through `state::window_days(cfg.gc_window_days)` and a bad value is a `refusal` before anything runs, as in `plan_cmd`. `target_identity` is the `dev` and `ino` of `entry_stat(target_directory)`.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): place chosen units into a target that does not exist yet`
+- [x] **Step 2: Implement** (design decisions 8, 9). Return at once for an empty `units`. `cargo_target::resolve(checkout, cancel)`; an `Err` or a differing `build_directory` is one finding. `fs.create_dir(target_directory)`: `AlreadyExists` and `NotFound` are one finding each, and anything else is an `Error`. Clone the tag, then create inner directories per component with a set of made paths, tolerating `AlreadyExists`. For each row, poll `cancel`; walk `entry_dir(row)` with `CRATE_DIR_CAP`, group files by `deps/`, `build/`, `.fingerprint/`, and clone in that order. Each relative path must hold only `Component::Normal`; `rel_profile` too. `AlreadyExists` from `clone_file` adds `existing` and ends that unit; `ENOSPC` is `Error::DiskFull`; any other error adds `failed` with one finding and ends that unit. Record `SeededUnit`: the stamp through `liveness::unit_timestamp(profile, dir_name, kind)` and `Fs::mtime`, as nanoseconds; `has_build`; `deps_files`. `outside_window` counts units with no stamp or a stamp older than `window`; `seed_cmd` resolves it through `state::window_days(cfg.gc_window_days)` and a bad value is a `refusal` before anything runs, as in `plan_cmd`. `target_identity` is the `dev` and `ino` of `entry_stat(target_directory)`.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): place chosen units into a target that does not exist yet`
 
 _Requirements: SEED-1.3, SEED-1.4, SEED-1.5, SEED-1.6, SEED-1.7, SEED-1.8, SEED-1.12, SEED-1.16, SEED-1.18, SEED-1.19, SEED-7.2, SEED-9.2, SEED-9.5, SEED-10.9_
 
@@ -616,7 +616,7 @@ _Requirements: SEED-1.3, SEED-1.4, SEED-1.5, SEED-1.6, SEED-1.7, SEED-1.8, SEED-
 
 **Depends-on:** Task 10
 
-- [ ] **Step 1: Write the failing tests** in `tests/seed_fill.rs`:
+- [x] **Step 1: Write the failing tests** in `tests/seed_fill.rs`:
   - `a_real_clone_of_a_compressed_entry_adds_no_unshared_bytes`: `bytes_not_shared == Some(0)`, with a real `Apfs`; every cloned file with `blocks > 0` reads `shares_all` and the store file's `clone_id`.
   - `a_file_that_does_not_share_is_counted_by_its_blocks_and_never_by_private_bytes`, overriding `sharing` for one named clone with `shares_all: false, private_bytes: 0`: `bytes_not_shared == Some(entry_stat(that clone).blocks * 512)`.
   - `a_different_clone_id_is_not_shared`, overriding `sharing` for one named clone.
@@ -625,9 +625,9 @@ _Requirements: SEED-1.3, SEED-1.4, SEED-1.5, SEED-1.6, SEED-1.7, SEED-1.8, SEED-
   - `store_bytes_counts_allocated_blocks`: it is at least one compressed entry's blocks, above 0 while every store file's `private_bytes` is 0.
 
   Run; expect failure on the unset fields.
-- [ ] **Step 2: Implement.** After each cloned file, when `ctx.account_bytes`: `Fs::sharing` for the clone and the store file; shared only with `shares_all` and equal `clone_id`; otherwise add `entry_stat.blocks * 512`. `store_bytes` is `size::allocated_bytes(&store_dir, size::MAX_DEPTH)`; a walk error is an `unmeasured` row. Nothing reads `private_bytes`.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): count the bytes a seed adds by real sharing, and report the store's size`
+- [x] **Step 2: Implement.** After each cloned file, when `ctx.account_bytes`: `Fs::sharing` for the clone and the store file; shared only with `shares_all` and equal `clone_id`; otherwise add `entry_stat.blocks * 512`. `store_bytes` is `size::allocated_bytes(&store_dir, size::MAX_DEPTH)`; a walk error is an `unmeasured` row. Nothing reads `private_bytes`.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): count the bytes a seed adds by real sharing, and report the store's size`
 
 _Requirements: SEED-4.1, SEED-4.2, SEED-4.3, SEED-4.4_
 
@@ -649,7 +649,7 @@ _Requirements: SEED-4.1, SEED-4.2, SEED-4.3, SEED-4.4_
 
 **Depends-on:** Task 4, Task 5, Task 6, Task 7, Task 8, Task 9, Task 11
 
-- [ ] **Step 1: Write the failing tests** in `tests/seed.rs`:
+- [x] **Step 1: Write the failing tests** in `tests/seed.rs`:
 
 ```rust
 #[test]
@@ -697,10 +697,10 @@ Add, all through the binary:
   - The other commands' receipts stay guarded by `tests/receipts.rs`, `tests/status_targets.rs`, `tests/gc.rs`, `tests/plan_apply.rs` and `tests/explain.rs`, which this task must leave unedited.
 
   Run `cargo test --test seed`; expect a compile failure.
-- [ ] **Step 2: Implement `seed_cmd`.** Load registry, config and capabilities; resolve the window, a bad value being a `refusal` with exit 1; `doctor::install_signal_handlers`; canonicalize the argument. No path means SEED-1.11's refusal. Loop `reg.repos` and `discover::checkouts`, matching `row.path == real && !row.missing`. No match: `refusal`, exit 1. `Class::Protected`: `refusal`, exit 1. `resolve_toolchain(&real)`: an `Err` is a `refusal`, exit 1. `doctor::require` for `Seeding`, `StoreCompression` and `Deletion` with that release, each failure a `refusal`, exit 1. Build `Ctx` with `repos: std::slice::from_ref(repo)`, `mains: &registered_mains`, `account_bytes` from `EvictionAccounting`. `b.toolchain(Some(release))`; `scope_mut().checkouts.push(real)`. Call `seed::run`. Copy `Outcome` into the builder. The code comes from `seed::exit_code`. Add `Parsed::Seed` and its `parse` arm to `tests/skill.rs` in this commit.
-- [ ] **Step 3: Implement `seed::run`:** `owned_targets`, its walk faults becoming findings; `fill`; if cancelled, return; `store::read`; no tag means one finding and no clone; `choose`; `NoRow` means one finding and no clone; `place`; assemble the counts of decision 13.
-- [ ] **Step 4: Run.** `cargo test --test seed`, then `cargo test`; expect pass. If `the_first_build_...` fails for a command, stop and report it: this is the slice's core claim, and it reopens the owner's lock on the file set.
-- [ ] **Step 5: Commit.** `feat(seed): cargo hive seed fills the store and clones into a new secondary checkout`
+- [x] **Step 2: Implement `seed_cmd`.** Load registry, config and capabilities; resolve the window, a bad value being a `refusal` with exit 1; `doctor::install_signal_handlers`; canonicalize the argument. No path means SEED-1.11's refusal. Loop `reg.repos` and `discover::checkouts`, matching `row.path == real && !row.missing`. No match: `refusal`, exit 1. `Class::Protected`: `refusal`, exit 1. `resolve_toolchain(&real)`: an `Err` is a `refusal`, exit 1. `doctor::require` for `Seeding`, `StoreCompression` and `Deletion` with that release, each failure a `refusal`, exit 1. Build `Ctx` with `repos: std::slice::from_ref(repo)`, `mains: &registered_mains`, `account_bytes` from `EvictionAccounting`. `b.toolchain(Some(release))`; `scope_mut().checkouts.push(real)`. Call `seed::run`. Copy `Outcome` into the builder. The code comes from `seed::exit_code`. Add `Parsed::Seed` and its `parse` arm to `tests/skill.rs` in this commit.
+- [x] **Step 3: Implement `seed::run`:** `owned_targets`, its walk faults becoming findings; `fill`; if cancelled, return; `store::read`; no tag means one finding and no clone; `choose`; `NoRow` means one finding and no clone; `place`; assemble the counts of decision 13.
+- [x] **Step 4: Run.** `cargo test --test seed`, then `cargo test`; expect pass. If `the_first_build_...` fails for a command, stop and report it: this is the slice's core claim, and it reopens the owner's lock on the file set.
+- [x] **Step 5: Commit.** `feat(seed): cargo hive seed fills the store and clones into a new secondary checkout`
 
 _Requirements: SEED-1.1, SEED-1.2, SEED-2.1, SEED-1.9, SEED-1.10, SEED-1.11, SEED-1.14, SEED-1.15, SEED-1.17, SEED-3.8, SEED-7.1, SEED-7.3, SEED-7.4, SEED-7.5, SEED-10.1, SEED-10.3, SEED-10.12_
 
@@ -722,14 +722,14 @@ _Requirements: SEED-1.1, SEED-1.2, SEED-2.1, SEED-1.9, SEED-1.10, SEED-1.11, SEE
 
 **Depends-on:** Task 12
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `src/seed/record.rs`: `a_write_drops_records_whose_target_is_gone`; `a_write_over_the_cap_drops_the_oldest_records_until_it_fits`, with a `write_capped` seam taking the cap; `the_newest_record_survives_the_cap`.
   - `tests/seed.rs`: `seed_writes_a_record_holding_each_cloned_unit_and_its_stamp`: `seeds.json` names the lane's target and a run-build-script unit's stamp under `build/<dir>/`; `seeds_receipt_holds_none_of_the_four_counts`; `a_cancelled_seed_records_what_it_cloned`, at the `seed::run` seam; `a_seed_that_cloned_nothing_writes_no_record`.
 
   Run; expect a compile failure.
-- [ ] **Step 2: Implement** (design decision 4). `write` runs inside `locked_or_cancelled`: read with `read_bounded`, treat unreadable as empty with a note, insert, drop records whose path is gone, sort by `written_at`, and encode; while over the cap, drop the oldest; `write_bounded`. `seed::run` calls it after `place` on every path that placed anything, a cancel and `DiskFull` included. A failure is a finding and leaves the exit code 0, since `status` then reports nothing for the target, as SEED-6.8 allows.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(seed): record what a seed cloned`
+- [x] **Step 2: Implement** (design decision 4). `write` runs inside `locked_or_cancelled`: read with `read_bounded`, treat unreadable as empty with a note, insert, drop records whose path is gone, sort by `written_at`, and encode; while over the cap, drop the oldest; `write_bounded`. `seed::run` calls it after `place` on every path that placed anything, a cancel and `DiskFull` included. A failure is a finding and leaves the exit code 0, since `status` then reports nothing for the target, as SEED-6.8 allows.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(seed): record what a seed cloned`
 
 _Requirements: SEED-6.1, SEED-6.10_
 
@@ -746,11 +746,11 @@ _Requirements: SEED-6.1, SEED-6.10_
 
 **Interfaces:**
 - Consumes: `record::{read, SeedRecord, SeededUnit}` (Task 13), `TargetDir`, `Unit`, `fingerprint::le_hex`, `liveness::embedded_hashes` (Task 5)
-- Produces: `pub struct SeedCounts { pub fresh: u64, pub unneeded: u64, pub recompiled: u64, pub missing: u64 }`; `pub fn counts(target: &TargetDir, record: &SeedRecord, deps_cap: usize) -> Option<SeedCounts>`; status counts `reused_fresh:<path>`, `seeded_unneeded:<path>`, `seeded_recompiled:<path>`, `seeded_missing:<path>`
+- Produces: `pub struct SeedCounts { pub fresh: u64, pub unneeded: u64, pub recompiled: u64, pub missing: u64 }`; `pub fn counts(target: &TargetDir, record: &SeedRecord, deps_cap: usize) -> Result<Option<SeedCounts>, String>`; status counts `reused_fresh:<path>`, `seeded_unneeded:<path>`, `seeded_recompiled:<path>`, `seeded_missing:<path>`
 
 **Depends-on:** Task 13
 
-- [ ] **Step 1: Write the failing tests** on a hand-built `TargetDir` in `src/seed/record.rs`, table-driven, one row per bucket:
+- [x] **Step 1: Write the failing tests** on a hand-built `TargetDir` in `src/seed/record.rs`, table-driven, one row per bucket:
   - seeded, reached from a unit not in the record, same stamp: fresh;
   - seeded, reached only through another seeded unit that is itself reached: fresh;
   - seeded, not reached, same stamp: unneeded;
@@ -783,10 +783,10 @@ fn after_the_first_build_status_reports_reused_units_and_no_recompiled_ones() {
 }
 ```
 
-Add: `a_deps_listing_over_its_cap_gives_no_counts`, with `deps_cap` 2; `status_for_a_target_with_no_record_is_unchanged`, comparing count names with the same fixture before seeding; `a_rebuilt_target_reports_no_seed_counts`, deleting `target/` and building; `an_unreadable_record_reports_no_counts_and_one_note`; `the_counts_are_as_of_each_status`: run `status` twice around a second build touching one seeded unit. Run; expect a compile failure.
-- [ ] **Step 2: Implement** (design decision 15). `counts`: read `identity` from `std::fs::symlink_metadata(target.path)`, and return `None` on a mismatch. Index `hash_hex` over all profiles. Read each recorded stamp's modification time. List each profile's `deps/` once, bounded with `deps_cap`, `DEPS_CAP` in production, counting names per metadata hash, `fingerprint::unit_hash(dir_name)`, through `embedded_hashes`, leaving out `.rcgu.o`. Starts: graph units not in the record, and recorded units whose stamp differs. Walk `deps` over the index with `le_hex`. Then bucket each recorded unit in the order missing, recompiled, fresh or unneeded. In `status`: `record::read` through `read_bounded` once, an `Err` becoming one note and no counts; pass the file to `report_targets`, which adds the four `count`s when `counts` returns `Some`.
-- [ ] **Step 3: Run.** `cargo test`; expect pass, `tests/status_targets.rs` and `tests/receipts.rs` unchanged.
-- [ ] **Step 4: Commit.** `feat(status): report what became of a target's seeded units`
+Add: `a_deps_listing_over_its_cap_gives_no_counts`, with `deps_cap` 2, and the error names that directory; `status_for_a_target_with_no_record_is_unchanged`, comparing count names with the same fixture before seeding; `a_rebuilt_target_reports_no_seed_counts`, deleting `target/` and building; `an_unreadable_record_reports_no_counts_and_one_note`; `the_counts_are_as_of_each_status`: run `status` twice around a second build touching one seeded unit. Run; expect a compile failure.
+- [x] **Step 2: Implement** (design decision 15). `counts`: read `identity` from `std::fs::symlink_metadata(target.path)`, and return `Ok(None)` on a mismatch. Index `hash_hex` over all profiles. Read each recorded stamp's modification time. List each profile's `deps/` once, bounded with `deps_cap`, `DEPS_CAP` in production. A listing that hits the cap, fails, or meets a non-UTF-8 name is `Err` naming the path; `status` adds that as one note and reports no counts. Count files the way they were cloned: walk each hash-matching `deps/` entry, directories included, still skip `.rcgu.o`, still bound the walk, and compare that file count to `deps_files`. Starts: graph units not in the record, and recorded units whose stamp differs. Walk `deps` over the index with `le_hex`. Then bucket each recorded unit in the order missing, recompiled, fresh or unneeded. In `status`: `record::read` through `read_bounded` once, an `Err` becoming one note and no counts; pass the file to `report_targets`, which adds the four `count`s when `counts` returns `Ok(Some)`.
+- [x] **Step 3: Run.** `cargo test`; expect pass, `tests/status_targets.rs` and `tests/receipts.rs` unchanged.
+- [x] **Step 4: Commit.** `feat(status): report what became of a target's seeded units`
 
 _Requirements: SEED-6.2, SEED-6.3, SEED-6.4, SEED-6.5, SEED-6.6, SEED-6.8, SEED-6.9, SEED-6.11, SEED-6.12, SEED-10.2_
 
@@ -805,14 +805,14 @@ _Requirements: SEED-6.2, SEED-6.3, SEED-6.4, SEED-6.5, SEED-6.6, SEED-6.8, SEED-
 
 **Depends-on:** Task 2, Task 12
 
-- [ ] **Step 1: Write the tests** in `tests/seed.rs`. These guard existing behavior, so they are expected to pass at once; a failure is a real defect, reported, not a test to adjust.
+- [x] **Step 1: Write the tests** in `tests/seed.rs`. These guard existing behavior, so they are expected to pass at once; a failure is a real defect, reported, not a test to adjust.
   - `before_the_first_build_a_plan_lists_old_seeds_and_apply_skips_the_target`: seed, backdate every stamp 30 days, `gc --plan` lists paths, `apply` exits 0 with outcome `partial` and reason `all_targets_skipped`, the file count is unchanged, and the first build recompiles no registry unit. Measured once by hand on 2026-11-02 (`.skills/SEED/decisions.md`).
-  - `a_plan_over_a_seed_does_not_claim_shared_bytes_as_freed`: the plan's `freed_bytes` is 0 and its `deleted_bytes_still_shared` above 0. Another value is a finding, not a threshold to tune.
+  - `a_plan_frees_the_bytes_the_clone_did_not_share_and_still_counts_shared_bytes`: the plan's `freed_bytes` is above 0 and no greater than that seed's `clone_bytes_not_shared`, and its `deleted_bytes_still_shared` is above 0. Another value is a finding, not a threshold to tune.
   - `after_the_first_build_liveness_keeps_every_unit_that_build_needed`: `gc --plan` lists no unit the build used.
   - `liveness_reports_a_seed_with_fresh_stamps_as_live_before_its_first_build`: `gc --plan` gives no plan.
   - `gc_still_lists_rcgu_objects_of_a_dead_unit`, on a source with a dead unit: the stored plan in `plans.json` lists a `.rcgu.o`, read the way `Planned::plans_json` reads it, since the receipt carries only a path count.
-- [ ] **Step 2: Run.** `cargo test --test seed`; expect pass. Any failure goes to `root-cause`.
-- [ ] **Step 3: Commit.** `test(seed): gc treats a seeded target as it treats any other`
+- [x] **Step 2: Run.** `cargo test --test seed`; expect pass. Any failure goes to `root-cause`.
+- [x] **Step 3: Commit.** `test(seed): gc treats a seeded target as it treats any other`
 
 _Requirements: SEED-10.4, SEED-10.6, SEED-10.15_
 
@@ -834,11 +834,11 @@ _Requirements: SEED-10.4, SEED-10.6, SEED-10.15_
 
 **Depends-on:** Task 12, Task 14
 
-- [ ] **Step 1: Write the failing test.** Add `Parsed::Seed` to `want` in `skill_documents_every_shipped_command`, and `Parsed::Seed` to the arm that requires a path word. Run `cargo test --test skill`; expect the documented-command test to fail.
-- [ ] **Step 2: Edit the skill,** inside its seven headings and under the 150-line budget: a `Which command` row; a `Command lines` line; `seed` added to the `Version first` bullet of commands not to run on a mismatch; `Reading a receipt`: the fill and clone counts, and the four `status` counts, `reused_fresh` meaning seeded, reached and unchanged, and not Cargo's printed fresh count; `Do not`: do not seed a checkout that has a target, since it gets nothing, and seed one lane first when starting several. No `.md` text and no stray `cargo hive` outside a command line, as the tests require. Add a `README.md` command line and the note that the store only grows until store GC ships.
-- [ ] **Step 3: Record one eval.** Run the skill once on a real prompt, record it as a `## ` section in `skills/hive/TESTS.md`, then add the matching `eval.json` entry with `derived_from` naming that heading. Update any `eval.json` contract quote whose skill text moved.
-- [ ] **Step 4: Run.** `cargo test --test skill`, then `cargo test`; expect pass.
-- [ ] **Step 5: Commit.** `docs(skill): teach agents to seed a new lane`
+- [x] **Step 1: Write the failing test.** Add `Parsed::Seed` to `want` in `skill_documents_every_shipped_command`, and `Parsed::Seed` to the arm that requires a path word. Run `cargo test --test skill`; expect the documented-command test to fail.
+- [x] **Step 2: Edit the skill,** inside its seven headings and under the 150-line budget: a `Which command` row; a `Command lines` line; `seed` added to the `Version first` bullet of commands not to run on a mismatch; `Reading a receipt`: the fill and clone counts, and the four `status` counts, `reused_fresh` meaning seeded, reached and unchanged, and not Cargo's printed fresh count; `Do not`: do not seed a checkout that has a target, since it gets nothing, and seed one lane first when starting several. No `.md` text and no stray `cargo hive` outside a command line, as the tests require. Add a `README.md` command line and the note that the store only grows until store GC ships.
+- [x] **Step 3: Record one eval.** Run the skill once on a real prompt, record it as a `## ` section in `skills/hive/TESTS.md`, then add the matching `eval.json` entry with `derived_from` naming that heading. Update any `eval.json` contract quote whose skill text moved.
+- [x] **Step 4: Run.** `cargo test --test skill`, then `cargo test`; expect pass.
+- [x] **Step 5: Commit.** `docs(skill): teach agents to seed a new lane`
 
 _Requirements: SEED-8.1, SEED-8.2, SEED-8.3, SEED-10.13_
 
@@ -859,10 +859,10 @@ _Requirements: SEED-8.1, SEED-8.2, SEED-8.3, SEED-10.13_
 
 **Depends-on:** Task 15, Task 16
 
-- [ ] **Step 1: Stop and ask the owner to approve a testing-standard exception.** `docs/standards/testing.md` says tests never write under the real `~/.cargo` or any repo outside their scratch dir, and this run does: `git worktree add` writes `.git/worktrees/` in klynt, and the build runs klynt's build scripts. Proposed terms, in the shape of the two approved exceptions: ignored by default; the checkout named by `HIVE_SEED_CHECKOUT`, with no default; the test creates and removes its own worktree; `CARGO_TARGET_DIR` unset; `HIVE_HOME` a scratch; `--offline --locked`. Without the approval, stop here. With it, write the exception into `docs/standards/testing.md` and update its hash in this plan.
-- [ ] **Step 1b: Write the ignored test** `seeding_a_new_worktree_of_a_real_repo_recompiles_no_cloned_unit`: it reads `HIVE_SEED_CHECKOUT`, needs a built source target there, uses a scratch `HIVE_HOME`, makes a new worktree, seeds it, asserts `clone_bytes_not_shared == 0`, runs `cargo build --offline --message-format=json-render-diagnostics` to a file, asserts no unit it cloned recompiled, then removes the worktree and the scratch home.
-- [ ] **Step 2: Run it once on klynt, with the owner's agreement, since it takes real time and disk,** and write `klynt-run.md`: date, commit, the seed receipt's counts, Cargo's compiled counts, the four `status` counts, and, beside them, the comparison with spike 7's 466 needed and 31 compiled. Neither that comparison nor Cargo's printed fresh count is an expected value for the four counts. If a lock's reopen trigger fired (`.skills/SEED/decisions.md`), say so and stop for the owner.
-- [ ] **Step 3: Check the dependency guard.** `git diff main -- Cargo.toml` shows no new dependency.
-- [ ] **Step 4: Commit.** `docs(SEED): record the klynt seed run`
+- [x] **Step 1: Stop and ask the owner to approve a testing-standard exception.** `docs/standards/testing.md` says tests never write under the real `~/.cargo` or any repo outside their scratch dir, and this run does: `git worktree add` writes `.git/worktrees/` in klynt, and the build runs klynt's build scripts. Proposed terms, in the shape of the two approved exceptions: ignored by default; the checkout named by `HIVE_SEED_CHECKOUT`, with no default; the test creates and removes its own worktree; `CARGO_TARGET_DIR` unset; `HIVE_HOME` a scratch; `--offline --locked`. Without the approval, stop here. With it, write the exception into `docs/standards/testing.md` and update its hash in this plan.
+- [x] **Step 1b: Write the ignored test** `seeding_a_new_worktree_of_a_real_repo_recompiles_no_cloned_unit`: it reads `HIVE_SEED_CHECKOUT`, needs a built source target there, uses a scratch `HIVE_HOME`, makes a new worktree, seeds it, asserts clone_bytes_not_shared is present and that every placed deps rmeta lacks the compressed-file flag, runs `cargo build --offline --message-format=json-render-diagnostics` to a file, asserts no unit it cloned recompiled, then removes the worktree and the scratch home.
+- [x] **Step 2: Run it once on klynt, with the owner's agreement, since it takes real time and disk,** and write `klynt-run.md`: date, commit, the seed receipt's counts, Cargo's compiled counts, the four `status` counts, and, beside them, the comparison with spike 7's 466 needed and 31 compiled. Neither that comparison nor Cargo's printed fresh count is an expected value for the four counts. If a lock's reopen trigger fired (`.skills/SEED/decisions.md`), say so and stop for the owner.
+- [x] **Step 3: Check the dependency guard.** `git diff main -- Cargo.toml` shows no new dependency.
+- [x] **Step 4: Commit.** `docs(SEED): record the klynt seed run`
 
 _Requirements: SEED-9.6, SEED-10.14_

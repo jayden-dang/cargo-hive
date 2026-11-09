@@ -609,6 +609,9 @@ mod tests {
         fn clone_file(&self, _: &Path, _: &Path) -> io::Result<()> {
             Err(io::Error::other("not used by gc"))
         }
+        fn create_dir(&self, _: &Path) -> io::Result<()> {
+            Err(io::Error::other("not used by gc"))
+        }
         fn compress(&self, _: &Path) -> CompressOutcome {
             CompressOutcome::Failed("not used by gc".into())
         }

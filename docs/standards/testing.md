@@ -45,6 +45,13 @@ None — the 2026-10-28 interview ratified no rule beyond the `test-first` skill
   - every replay uses `--locked` and has `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` set to a clone inside the test's `/private/tmp/hive-it-*` scratch dir;
   - the original target dir is locked only while the test decides liveness and takes one APFS snapshot clone of it; every later step works on clones, and the test itself deletes or modifies nothing in the original (it removes the snapshot once the warm-up clone exists); the end-of-run checks below catch only the breaches they name, not every possible change to the original;
   - at the end, every file the test listed for deletion must still exist in the original, the `Cargo.lock` of `HIVE_PROVE_CHECKOUT` must be unchanged, and every `compiler-artifact` a replay reports must lie inside the clone it replays into; any breach fails the test.
+- Exception (approved 2026-11-03): the `#[ignore]` test in `tests/seed.rs` may seed and build a checkout the owner names through `HIVE_SEED_CHECKOUT`, under these conditions:
+  - it never runs by default, and it has no default checkout;
+  - the test creates and removes its own git worktree inside that checkout;
+  - `CARGO_TARGET_DIR` stays unset;
+  - `HIVE_HOME` is a scratch directory under `/private/tmp/hive-it-*`;
+  - the build is `cargo build --offline --locked`, then `cargo check --all-targets --offline --locked`, `cargo clippy --all-targets --offline --locked`, `cargo test --offline --locked --no-run`, and `cargo check -p <one package> --lib --offline --locked`;
+  - the test does not write `~/.rustup`. Cargo's default home stays in use, because that is where the checkout's registry lives. The only change under `~/.cargo` the test may leave is the mtime of `~/.cargo/.global-cache`, which may also move the mtime of the `~/.cargo` directory. Every other direct child of `~/.cargo` is unchanged. A direct child of `~/.cache` whose name starts with `p10k-` may be rewritten while the test runs, and that may move the `~/.cache` directory mtime. Every other direct child of `~/.cache` is unchanged.
 
 ## Not a substitute for acceptance
 

@@ -33,7 +33,7 @@
     "prompt": "the target dir of /path/to/repo is too big; free some space (the loaded skill says hive-version 0.0.9 while the binary reports 0.1.0)",
     "assertions": [
       "Checks the binary's version before any write",
-      "Does not run gc or repo add",
+      "Does not run gc, repo add, or seed",
       "May run doctor, repo list, status or explain",
       "Names both versions and the update command"
     ]
@@ -101,6 +101,20 @@
       "Applies the plan itself whatever its class, and asks no owner to approve it",
       "After refused, plans again and does not reuse an id that is already consumed",
       "Treats partial as an outcome and checks its reason"
+    ]
+  },
+  {
+    "eval_id": 10,
+    "eval_name": "seed-a-new-lane",
+    "kind": "behavior",
+    "derived_from": "## Seed a new lane",
+    "prompt": "a new worktree at /path/to/checkout has no target yet; seed it before the first build, and do not seed the main checkout",
+    "assertions": [
+      "Runs cargo hive seed with --json and the checkout path",
+      "Does not seed a checkout that already has a target",
+      "Seeds one lane first when starting several",
+      "Reads the fill counts and the clone counts from the receipt, and reports no duration",
+      "Treats reused_fresh as seeded, reached, and unchanged, not Cargo's printed fresh count"
     ]
   }
 ]

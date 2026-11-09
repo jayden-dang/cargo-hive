@@ -126,6 +126,7 @@ pub struct Sharing {
 pub enum CompressOutcome {
     Compressed,
     SkippedHardLink,
+    Incompressible,
     Failed(String),
 }
 
@@ -134,6 +135,7 @@ impl std::fmt::Display for CompressOutcome {
         match self {
             CompressOutcome::Compressed => write!(f, "compressed"),
             CompressOutcome::SkippedHardLink => write!(f, "skipped: hard link"),
+            CompressOutcome::Incompressible => write!(f, "incompressible"),
             CompressOutcome::Failed(why) => write!(f, "failed: {why}"),
         }
     }
@@ -300,6 +302,7 @@ pub trait Fs {
     fn mtime(&self, path: &Path) -> io::Result<SystemTime>;
     fn inode(&self, path: &Path) -> io::Result<u64>;
     fn clone_file(&self, src: &Path, dst: &Path) -> io::Result<()>;
+    fn create_dir(&self, path: &Path) -> io::Result<()>;
     fn sharing(&self, path: &Path) -> io::Result<Sharing>;
     /// Applesauce LZFSE compression of one file. A file with other hard links is skipped.
     fn compress(&self, path: &Path) -> CompressOutcome;
@@ -320,6 +323,109 @@ pub trait Fs {
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     /// `statfs` of the volume holding `path`.
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo>;
+}
+
+#[cfg(test)]
+type Hook<T> = Box<dyn Fn(&Path) -> T + Send + Sync>;
+
+#[cfg(test)]
+pub(crate) struct Hooked {
+    pub inner: Box<dyn Fs>,
+    pub compress: Option<Hook<CompressOutcome>>,
+    pub volume: Option<Hook<io::Result<VolumeInfo>>>,
+    pub sharing: Option<Hook<io::Result<Sharing>>>,
+    pub entry_stat: Option<Hook<io::Result<EntryStat>>>,
+}
+
+#[cfg(test)]
+impl Fs for Hooked {
+    fn temp_dir(&self, parent: &Path, prefix: &str) -> io::Result<TempDir> {
+        self.inner.temp_dir(parent, prefix)
+    }
+
+    fn write_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write_file(path, bytes)
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.inner.read(path)
+    }
+
+    fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {
+        self.inner.hardlink(src, dst)
+    }
+
+    fn set_mtime(&self, path: &Path, t: SystemTime) -> io::Result<()> {
+        self.inner.set_mtime(path, t)
+    }
+
+    fn mtime(&self, path: &Path) -> io::Result<SystemTime> {
+        self.inner.mtime(path)
+    }
+
+    fn inode(&self, path: &Path) -> io::Result<u64> {
+        self.inner.inode(path)
+    }
+
+    fn clone_file(&self, src: &Path, dst: &Path) -> io::Result<()> {
+        self.inner.clone_file(src, dst)
+    }
+
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.inner.create_dir(path)
+    }
+
+    fn sharing(&self, path: &Path) -> io::Result<Sharing> {
+        match &self.sharing {
+            Some(f) => f(path),
+            None => self.inner.sharing(path),
+        }
+    }
+
+    fn compress(&self, path: &Path) -> CompressOutcome {
+        match &self.compress {
+            Some(f) => f(path),
+            None => self.inner.compress(path),
+        }
+    }
+
+    fn hold_lock(&self, kind: LockKind, path: &Path) -> io::Result<LockHolder> {
+        self.inner.hold_lock(kind, path)
+    }
+
+    fn try_lock_exclusive(&self, path: &Path) -> TryLock {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState> {
+        self.inner.try_lock_elsewhere(kind, path)
+    }
+
+    fn entry_stat(&self, path: &Path) -> io::Result<EntryStat> {
+        match &self.entry_stat {
+            Some(f) => f(path),
+            None => self.inner.entry_stat(path),
+        }
+    }
+
+    fn read_dir_bounded(&self, dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>> {
+        self.inner.read_dir_bounded(dir, cap)
+    }
+
+    fn remove_tree(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_tree(path)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
+        match &self.volume {
+            Some(f) => f(path),
+            None => self.inner.volume(path),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,6 +473,117 @@ mod tests {
     #[test]
     fn lock_children_get_five_seconds_to_answer() {
         assert_eq!(CHILD_DEADLINE.as_secs(), 5);
+    }
+
+    struct Refuse;
+
+    fn refused() -> io::Error {
+        io::Error::other("refused")
+    }
+
+    impl Fs for Refuse {
+        fn temp_dir(&self, _: &Path, _: &str) -> io::Result<TempDir> {
+            Err(refused())
+        }
+        fn write_file(&self, _: &Path, _: &[u8]) -> io::Result<()> {
+            Err(refused())
+        }
+        fn read(&self, _: &Path) -> io::Result<Vec<u8>> {
+            Err(refused())
+        }
+        fn hardlink(&self, _: &Path, _: &Path) -> io::Result<()> {
+            Err(refused())
+        }
+        fn set_mtime(&self, _: &Path, _: SystemTime) -> io::Result<()> {
+            Err(refused())
+        }
+        fn mtime(&self, _: &Path) -> io::Result<SystemTime> {
+            Err(refused())
+        }
+        fn inode(&self, _: &Path) -> io::Result<u64> {
+            Err(refused())
+        }
+        fn clone_file(&self, _: &Path, _: &Path) -> io::Result<()> {
+            Err(refused())
+        }
+        fn create_dir(&self, path: &Path) -> io::Result<()> {
+            std::fs::create_dir(path)
+        }
+        fn sharing(&self, _: &Path) -> io::Result<Sharing> {
+            Err(refused())
+        }
+        fn compress(&self, _: &Path) -> CompressOutcome {
+            CompressOutcome::Failed("refused".into())
+        }
+        fn hold_lock(&self, _: LockKind, _: &Path) -> io::Result<LockHolder> {
+            Err(refused())
+        }
+        fn try_lock_exclusive(&self, _: &Path) -> TryLock {
+            TryLock::Unopenable(refused())
+        }
+        fn try_lock_elsewhere(&self, _: LockKind, _: &Path) -> io::Result<LockState> {
+            Err(refused())
+        }
+        fn entry_stat(&self, _: &Path) -> io::Result<EntryStat> {
+            Err(refused())
+        }
+        fn read_dir_bounded(&self, _: &Path, _: usize) -> io::Result<Vec<(String, EntryKind)>> {
+            Err(refused())
+        }
+        fn remove_tree(&self, _: &Path) -> io::Result<()> {
+            Err(refused())
+        }
+        fn remove_file(&self, _: &Path) -> io::Result<()> {
+            Err(refused())
+        }
+        fn volume(&self, _: &Path) -> io::Result<VolumeInfo> {
+            Err(refused())
+        }
+    }
+
+    #[test]
+    fn a_hooked_filesystem_uses_the_closure_when_one_is_set() {
+        let root = PathBuf::from(format!(
+            "/private/tmp/hive-it-hooked-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let fs = Hooked {
+            inner: Box::new(Refuse),
+            compress: Some(Box::new(|_| CompressOutcome::Incompressible)),
+            volume: Some(Box::new(|_| {
+                Ok(VolumeInfo {
+                    fs_type: "apfs".into(),
+                    container: "disk9".into(),
+                    mount: PathBuf::from("/"),
+                    available_bytes: 3,
+                })
+            })),
+            sharing: Some(Box::new(|_| {
+                Ok(Sharing {
+                    private_bytes: 1,
+                    clone_id: 9,
+                    may_share: false,
+                    shares_all: false,
+                })
+            })),
+            entry_stat: Some(Box::new(|_| {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected"))
+            })),
+        };
+        let path = root.join("missing");
+        assert_eq!(fs.compress(&path), CompressOutcome::Incompressible);
+        assert_eq!(fs.volume(&path).unwrap().available_bytes, 3);
+        assert_eq!(fs.sharing(&path).unwrap().clone_id, 9);
+        assert_eq!(
+            fs.entry_stat(&path).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        let made = root.join("made");
+        fs.create_dir(&made).unwrap();
+        assert!(made.is_dir());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

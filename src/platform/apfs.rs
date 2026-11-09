@@ -89,6 +89,10 @@ impl Fs for Apfs {
         }
     }
 
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        fs::create_dir(path)
+    }
+
     fn sharing(&self, path: &Path) -> io::Result<Sharing> {
         let p = c_path(path)?;
         let mut list = libc::attrlist {
@@ -151,6 +155,9 @@ impl Fs for Apfs {
         }
         if watch.hard_link.load(Ordering::SeqCst) {
             return CompressOutcome::SkippedHardLink;
+        }
+        if watch.incompressible.load(Ordering::SeqCst) {
+            return CompressOutcome::Incompressible;
         }
         match fs::symlink_metadata(path) {
             Ok(m) if m.st_flags() & libc::UF_COMPRESSED != 0 => CompressOutcome::Compressed,
@@ -333,11 +340,13 @@ fn record(slot: &Mutex<Option<String>>, why: String) {
 #[derive(Default)]
 struct Watch {
     hard_link: AtomicBool,
+    incompressible: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<String>>>,
 }
 
 struct WatchTask {
     failure: Arc<Mutex<Option<String>>>,
+    incompressible: Arc<AtomicBool>,
 }
 
 impl Progress for Watch {
@@ -350,6 +359,7 @@ impl Progress for Watch {
     fn file_skipped(&self, _path: &Path, why: SkipReason) {
         match why {
             SkipReason::HardLink => self.hard_link.store(true, Ordering::SeqCst),
+            SkipReason::EmptyFile => self.incompressible.store(true, Ordering::SeqCst),
             other => record(&self.failure, format!("skipped: {other}")),
         }
     }
@@ -357,6 +367,7 @@ impl Progress for Watch {
     fn file_task(&self, _path: &Path, _size: u64) -> WatchTask {
         WatchTask {
             failure: Arc::clone(&self.failure),
+            incompressible: Arc::clone(&self.incompressible),
         }
     }
 }
@@ -369,7 +380,7 @@ impl Task for WatchTask {
     }
 
     fn not_compressible_enough(&self, _path: &Path) {
-        record(&self.failure, "not compressible enough".to_string());
+        self.incompressible.store(true, Ordering::SeqCst);
     }
 }
 
@@ -690,5 +701,45 @@ mod tests {
         if let Ok(s) = apfs().sharing(&link) {
             assert_ne!(s.private_bytes, 1 << 20);
         }
+    }
+
+    #[test]
+    fn a_file_too_small_or_empty_is_incompressible_not_failed() {
+        let fs = apfs();
+        let t = tmp("incompressible");
+        let dir = t.path();
+        for (name, bytes) in [("empty", &b""[..]), ("hash", &b"ca2ffbab1cb52c6f"[..])] {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                fs.compress(&path),
+                CompressOutcome::Incompressible,
+                "{name}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn create_dir_refuses_an_existing_path_and_a_missing_parent() {
+        let fs = apfs();
+        let t = tmp("create-dir");
+        let dir = t.path();
+        let made = dir.join("made");
+        fs.create_dir(&made).unwrap();
+        assert_eq!(
+            fs.create_dir(&made).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            fs.create_dir(&dir.join("absent/child")).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        let link = dir.join("dangling");
+        std::os::unix::fs::symlink(dir.join("nowhere"), &link).unwrap();
+        assert_eq!(
+            fs.create_dir(&link).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
     }
 }

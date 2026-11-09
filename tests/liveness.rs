@@ -214,6 +214,9 @@ fn the_cli_has_no_new_subcommand_or_flag() {
         "cargo-hive repo add --path",
         "cargo-hive repo list",
         "cargo-hive repo list --json",
+        "cargo-hive seed",
+        "cargo-hive seed --checkout",
+        "cargo-hive seed --json",
         "cargo-hive status",
         "cargo-hive status --json",
         "cargo-hive status --no_sizes",
@@ -989,6 +992,9 @@ impl platform::Fs for Volumes {
     }
     fn clone_file(&self, s: &Path, d: &Path) -> std::io::Result<()> {
         self.inner.clone_file(s, d)
+    }
+    fn create_dir(&self, p: &Path) -> std::io::Result<()> {
+        self.inner.create_dir(p)
     }
     fn sharing(&self, p: &Path) -> std::io::Result<platform::Sharing> {
         self.inner.sharing(p)

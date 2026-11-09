@@ -11,6 +11,8 @@ use std::time::SystemTime;
 
 use cargo_hive::platform::{self, Fs, HeldLock, TryLock};
 
+type OnCompress = Arc<dyn Fn(&Path) + Send + Sync>;
+
 #[derive(Default)]
 struct Opts {
     unlockable: HashSet<PathBuf>,
@@ -22,6 +24,11 @@ struct Opts {
     fail_remove: HashSet<PathBuf>,
     fail_sharing: HashSet<PathBuf>,
     fail_stat: HashSet<PathBuf>,
+    fail_clone: HashMap<PathBuf, i32>,
+    plant_before_clone: HashMap<PathBuf, Vec<u8>>,
+    /// After the first `entry_stat` of this path, replace the file with a symlink to the value.
+    symlink_after_stat: HashMap<PathBuf, PathBuf>,
+    on_compress: Option<OnCompress>,
     /// Create `child` just before the 1-based `nth` bounded listing of `parent`.
     create_before_listing: Vec<(PathBuf, PathBuf, u64)>,
 }
@@ -32,6 +39,7 @@ struct State {
     opts: Mutex<Opts>,
     removes: Mutex<u64>,
     listings: Mutex<HashMap<PathBuf, u64>>,
+    stated: Mutex<HashSet<PathBuf>>,
 }
 
 #[derive(Clone)]
@@ -48,6 +56,7 @@ impl Recording {
                 opts: Mutex::new(Opts::default()),
                 removes: Mutex::new(0),
                 listings: Mutex::new(HashMap::new()),
+                stated: Mutex::new(HashSet::new()),
             }),
         }
     }
@@ -115,6 +124,42 @@ impl Recording {
             .unwrap()
             .fail_stat
             .insert(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// The first `entry_stat` still sees the real file. It is then replaced with a symlink.
+    pub fn symlink_after_stat(self, path: impl AsRef<Path>, dest: impl AsRef<Path>) -> Recording {
+        self.state
+            .opts
+            .lock()
+            .unwrap()
+            .symlink_after_stat
+            .insert(path.as_ref().to_path_buf(), dest.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn fail_clone(self, dst: impl AsRef<Path>, errno: i32) -> Recording {
+        self.state
+            .opts
+            .lock()
+            .unwrap()
+            .fail_clone
+            .insert(dst.as_ref().to_path_buf(), errno);
+        self
+    }
+
+    pub fn plant_before_clone(self, dst: impl AsRef<Path>, bytes: &[u8]) -> Recording {
+        self.state
+            .opts
+            .lock()
+            .unwrap()
+            .plant_before_clone
+            .insert(dst.as_ref().to_path_buf(), bytes.to_vec());
+        self
+    }
+
+    pub fn on_compress(self, f: impl Fn(&Path) + Send + Sync + 'static) -> Recording {
+        self.state.opts.lock().unwrap().on_compress = Some(Arc::new(f));
         self
     }
 
@@ -188,10 +233,13 @@ impl Recording {
 
 impl Fs for Recording {
     fn temp_dir(&self, parent: &Path, prefix: &str) -> io::Result<platform::TempDir> {
-        self.state.fs.temp_dir(parent, prefix)
+        let dir = self.state.fs.temp_dir(parent, prefix)?;
+        self.push(format!("temp_dir {}", dir.path().display()));
+        Ok(dir)
     }
 
     fn write_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.push(format!("write_file {}", path.display()));
         self.state.fs.write_file(path, bytes)
     }
 
@@ -201,10 +249,12 @@ impl Fs for Recording {
     }
 
     fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {
+        self.push(format!("hardlink {}", dst.display()));
         self.state.fs.hardlink(src, dst)
     }
 
     fn set_mtime(&self, path: &Path, t: SystemTime) -> io::Result<()> {
+        self.push(format!("set_mtime {}", path.display()));
         self.state.fs.set_mtime(path, t)
     }
 
@@ -218,7 +268,26 @@ impl Fs for Recording {
     }
 
     fn clone_file(&self, src: &Path, dst: &Path) -> io::Result<()> {
+        self.push(format!("clone {} -> {}", src.display(), dst.display()));
+        let (errno, planted) = {
+            let opts = self.state.opts.lock().unwrap();
+            (
+                opts.fail_clone.get(dst).copied(),
+                opts.plant_before_clone.get(dst).cloned(),
+            )
+        };
+        if let Some(errno) = errno {
+            return Err(io::Error::from_raw_os_error(errno));
+        }
+        if let Some(bytes) = planted {
+            std::fs::write(dst, bytes)?;
+        }
         self.state.fs.clone_file(src, dst)
+    }
+
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.push(format!("create_dir {}", path.display()));
+        self.state.fs.create_dir(path)
     }
 
     fn sharing(&self, path: &Path) -> io::Result<platform::Sharing> {
@@ -229,6 +298,11 @@ impl Fs for Recording {
     }
 
     fn compress(&self, path: &Path) -> platform::CompressOutcome {
+        self.push(format!("compress {}", path.display()));
+        let hook = self.state.opts.lock().unwrap().on_compress.clone();
+        if let Some(hook) = hook {
+            hook(path);
+        }
         self.state.fs.compress(path)
     }
 
@@ -253,10 +327,16 @@ impl Fs for Recording {
         for dir in &dirs {
             std::fs::create_dir_all(dir).unwrap();
         }
-        if no_identity {
-            TryLock::Acquired(HeldLock::new(move || drop(held)))
-        } else {
-            TryLock::Acquired(held)
+        let shown = path.display().to_string();
+        let log = Arc::clone(&self.state.log);
+        let identity = if no_identity { None } else { held.identity() };
+        let release = move || {
+            log.lock().unwrap().push(format!("unlock {shown}"));
+            drop(held);
+        };
+        match identity {
+            Some((dev, ino)) => TryLock::Acquired(HeldLock::with_identity(dev, ino, release)),
+            None => TryLock::Acquired(HeldLock::new(release)),
         }
     }
 
@@ -276,7 +356,25 @@ impl Fs for Recording {
                 format!("injected stat failure for {}", path.display()),
             ));
         }
-        self.state.fs.entry_stat(path)
+        let stat = self.state.fs.entry_stat(path)?;
+        let dest = self
+            .state
+            .opts
+            .lock()
+            .unwrap()
+            .symlink_after_stat
+            .get(path)
+            .cloned();
+        if let Some(dest) = dest {
+            let mut stated = self.state.stated.lock().unwrap();
+            if stated.insert(path.to_path_buf()) {
+                std::fs::remove_file(path)
+                    .unwrap_or_else(|err| panic!("replace {} after stat: {err}", path.display()));
+                std::os::unix::fs::symlink(&dest, path)
+                    .unwrap_or_else(|err| panic!("symlink {} after stat: {err}", path.display()));
+            }
+        }
+        Ok(stat)
     }
 
     fn read_dir_bounded(

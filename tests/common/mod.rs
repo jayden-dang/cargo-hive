@@ -77,12 +77,16 @@ impl Hive {
     }
 
     pub fn write_ready_capabilities(&self) {
+        self.write_capabilities(serde_json::json!({}));
+    }
+
+    pub fn write_capabilities(&self, disabled: serde_json::Value) {
         let release = cargo_hive::doctor::resolve_toolchain(&self.home.path)
             .expect("the proof machine has a Rust toolchain")
             .release;
         let caps = serde_json::json!({
             "toolchain_release": release,
-            "disabled": {},
+            "disabled": disabled,
             "lock_check": 1,
             "failed_marker_check": 1
         });
@@ -219,6 +223,11 @@ impl Hive {
         .unwrap();
         assert_eq!(line.trim(), "held");
         child
+    }
+
+    /// Holds the hive state lock until the child is killed. `.lock` exists once any command has run.
+    pub fn hold_state_lock(&self) -> Child {
+        self.hold_lock_child("flock", &self.home.path.join(".lock"))
     }
 }
 
@@ -366,3 +375,4 @@ pub mod cargo_fixture;
 pub mod plan_fixture;
 pub mod prove;
 pub mod recording_fs;
+pub mod registry_fixture;

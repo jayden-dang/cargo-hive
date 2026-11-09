@@ -127,6 +127,16 @@ impl State {
         read_json(&state_file(&self.root, name)?)
     }
 
+    /// Reads at most `max` bytes and takes no state lock. A writer replaces the
+    /// file by rename, so this sees the previous file or the new one.
+    pub fn read_bounded<T: DeserializeOwned + Default>(
+        &self,
+        name: &str,
+        max: u64,
+    ) -> Result<T, StateError> {
+        read_json_limited(&state_file(&self.root, name)?, max)
+    }
+
     /// Runs `body` while holding the exclusive state lock (`$root/.lock`).
     pub fn locked<T>(
         &self,
@@ -592,6 +602,61 @@ mod tests {
 
         assert!(state.locked(|tx| tx.write("", &Counter { n: 1 })).is_err());
         assert!(state.read::<Counter>(&abs).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn read_bounded_refuses_a_file_over_its_bound_and_takes_no_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        let root = scratch("read-bounded");
+        let state = State::open_at(root.clone()).unwrap();
+        let name = "counter.json";
+        let path = root.join(name);
+        let max = 16u64;
+        let mut exact = br#"{"n":1}"#.to_vec();
+        exact.resize(max as usize, b' ');
+        fs::write(&path, &exact).unwrap();
+
+        let held = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let holder = State::open_at(root.clone()).unwrap();
+        let held_flag = Arc::clone(&held);
+        let release_flag = Arc::clone(&release);
+        let thread = std::thread::spawn(move || {
+            holder
+                .locked(|_| {
+                    held_flag.store(true, Ordering::SeqCst);
+                    let start = Instant::now();
+                    while !release_flag.load(Ordering::SeqCst)
+                        && start.elapsed() < Duration::from_secs(3)
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        });
+        while !held.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let started = Instant::now();
+        let got: Counter = state.read_bounded(name, max).unwrap();
+        assert_eq!(got, Counter { n: 1 });
+        let mut over = exact;
+        over.push(b' ');
+        fs::write(&path, &over).unwrap();
+        let err = state.read_bounded::<Counter>(name, max).unwrap_err();
+        assert!(matches!(err, StateError::Malformed { .. }), "{err}");
+        assert!(err.to_string().contains("larger than 16 bytes"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "read waited on the state lock"
+        );
+        release.store(true, Ordering::SeqCst);
+        thread.join().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
