@@ -320,7 +320,7 @@ _Requirements: STOREGC-4.1, STOREGC-4.2, STOREGC-4.3, STOREGC-4.4, STOREGC-4.5, 
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - In `src/doctor.rs`, `own_dir_mode_passes_no_rustup_toolchain_to_its_children`. Run the own-directory mode of `resolve_toolchain_with` against a fake rustup script (the pattern at `src/doctor.rs:1656`) that writes `${RUSTUP_TOOLCHAIN-unset}` to a file and prints a fake path. The file reads `unset` while the test's own environment has `RUSTUP_TOOLCHAIN` set, as `cargo test` sets it.
   - In `tests/store_gc.rs`:
     - `entries_of_a_value_no_checkout_maps_to_are_dropped_with_their_table_text`. Synthesize entries of a fake value `V'` with a table text `T'` that no checkout resolves. After `gc`, the `V'` entries and `T'` are gone, the fixture's real entries stay, and `choose::choose` on the stored file with `T'` returns `NoRow`.
@@ -332,9 +332,9 @@ _Requirements: STOREGC-4.1, STOREGC-4.2, STOREGC-4.3, STOREGC-4.4, STOREGC-4.5, 
     - `no_caller_toolchain_while_it_is_kept_blocks_every_drop`: a library call with `caller_toolchain_kept: true` and `caller_toolchain: None`. The finding is `store.toolchain_unresolved`, no value is dropped, and age still runs.
 
   Run; expect failures.
-- [ ] **Step 2: Implement** lookups (a) and (b) as design decision 9 describes, with `ctx.rustup` as the rustup path. (b) is `ctx.caller_toolchain` when `ctx.caller_toolchain_kept`, else it is (a) per checkout. When (b) is needed and `ctx.caller_toolchain` is `None`, that is a failed lookup (b): `store.toolchain_unresolved`, and no value is dropped (STOREGC-2.4). The generation step runs after age, and only when the inventory is non-empty.
-- [ ] **Step 3: Run.** `cargo test`; expect pass, tests/capability_gate.rs and tests/doctor.rs included.
-- [ ] **Step 4: Commit.** `feat(gc): drop store entries of a toolchain no checkout selects`
+- [x] **Step 2: Implement** lookups (a) and (b) as design decision 9 describes, with `ctx.rustup` as the rustup path. (b) is `ctx.caller_toolchain` when `ctx.caller_toolchain_kept`, else it is (a) per checkout. When (b) is needed and `ctx.caller_toolchain` is `None`, that is a failed lookup (b): `store.toolchain_unresolved`, and no value is dropped (STOREGC-2.4). The generation step runs after age, and only when the inventory is non-empty.
+- [x] **Step 3: Run.** `cargo test`; expect pass, tests/capability_gate.rs and tests/doctor.rs included.
+- [x] **Step 4: Commit.** `feat(gc): drop store entries of a toolchain no checkout selects`
 
 _Requirements: STOREGC-2.1, STOREGC-2.2, STOREGC-2.4, STOREGC-2.5, STOREGC-10.8_
 
