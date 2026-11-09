@@ -176,27 +176,69 @@ fn copy_outcome(receipt: &mut crate::receipt::ReceiptBuilder, outcome: &Outcome)
     }
 }
 
-pub fn run(
+pub enum Fill {
+    Continue(Filled),
+    Stopped(Outcome),
+}
+
+pub struct Filled {
+    report: FillReport,
+    findings: Vec<(String, Option<PathBuf>, String)>,
+}
+
+impl Filled {
+    pub fn report(&self) -> &fill::FillReport {
+        &self.report
+    }
+
+    pub fn findings(&self) -> &[(String, Option<PathBuf>, String)] {
+        &self.findings
+    }
+}
+
+pub fn run_fill(
     ctx: &Ctx<'_>,
     repo: &Repo,
-    checkout: &Checkout,
-    toolchain: &Toolchain,
     cancel: &(dyn Fn() -> bool + Sync),
-) -> Result<Outcome, Error> {
+) -> Result<Fill, Error> {
     let (targets, faults) = source::owned_targets(ctx, cancel);
     let mut findings = Vec::new();
     for fault in faults {
         findings.push(("walk.unreadable".to_string(), None, fault));
     }
     if cancel() {
-        return Ok(from_fill(ctx, &empty_fill(), findings, true, 0));
+        return Ok(Fill::Stopped(from_fill(
+            ctx,
+            &empty_fill(),
+            findings,
+            true,
+            0,
+        )));
     }
     let mut filled = fill::fill(ctx, repo, &targets, cancel)?;
     let cancelled = filled.cancelled;
     findings.append(&mut filled.findings);
     if cancelled || cancel() {
-        return Ok(from_fill(ctx, &filled, findings, true, 0));
+        return Ok(Fill::Stopped(from_fill(ctx, &filled, findings, true, 0)));
     }
+    Ok(Fill::Continue(Filled {
+        report: filled,
+        findings,
+    }))
+}
+
+pub fn run_clone(
+    ctx: &Ctx<'_>,
+    repo: &Repo,
+    checkout: &Checkout,
+    toolchain: &Toolchain,
+    filled: Filled,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Outcome, Error> {
+    let Filled {
+        report: filled,
+        mut findings,
+    } = filled;
     let days = match window_days(ctx.cfg.gc_window_days) {
         Ok(days) => days,
         Err(err) => return Err(Error::Failed(err.to_string())),
@@ -258,6 +300,19 @@ pub fn run(
         None => why,
     };
     Err(Error::disk_full_kept(why, outcome))
+}
+
+pub fn run(
+    ctx: &Ctx<'_>,
+    repo: &Repo,
+    checkout: &Checkout,
+    toolchain: &Toolchain,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Outcome, Error> {
+    match run_fill(ctx, repo, cancel)? {
+        Fill::Stopped(outcome) => Ok(outcome),
+        Fill::Continue(filled) => run_clone(ctx, repo, checkout, toolchain, filled, cancel),
+    }
 }
 
 fn empty_fill() -> FillReport {
