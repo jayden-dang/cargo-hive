@@ -418,15 +418,15 @@ _Requirements: STOREGC-5.1, STOREGC-5.2, STOREGC-5.3_
 
 **Depends-on:** Task 8
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `while_a_seed_holds_the_store_gc_evicts_nothing_and_keeps_its_exit_code`. The test process holds `store_shared_or_cancelled` on the fixture's `HIVE_HOME` while it runs the `gc` binary. Age candidates exist, yet nothing is evicted. `store.busy` is present, session deletion still happens, and the exit code equals that of a run with no lock held.
   - `seeds_and_gcs_in_a_loop_leave_no_partial_unit`. Run 12 cycles, with `seed` on a new lane in one thread and bare `gc` in another, backdating the store's rows each cycle. Every seeded unit has every file its entry holds, or has no `.fingerprint/<name-meta>/`. No `seed` exits non-zero, and no seed receipt has a `unit.refused` finding.
   - `a_stale_evict_tree_leaves_seed_store_bytes_working_and_the_next_gc_removes_it`. Create a `store/.tmp/evict-1-0/` tree with current mtimes, so fill's one-day sweep keeps it. `seed` exits 0 with `store_bytes` measured, and the next bare `gc` removes the tree.
 
   Run; expect failures.
-- [ ] **Step 2: Implement** the busy path: when `try_store_exclusive` returns `None`, report the `store.busy` finding, whose text says to run `gc` again when no seed runs, and the count; rename nothing and write nothing.
-- [ ] **Step 3: Run.** `cargo test --test store_gc`, then `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(gc): skip store eviction while a seed uses the store`
+- [x] **Step 2: Implement** the busy path: when `try_store_exclusive` returns `None`, report the `store.busy` finding, whose text says to run `gc` again when no seed runs, and the count; rename nothing and write nothing.
+- [x] **Step 3: Run.** `cargo test --test store_gc`, then `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(gc): skip store eviction while a seed uses the store`
 
 _Requirements: STOREGC-6.1, STOREGC-6.2, STOREGC-9.4, STOREGC-10.13_
 
