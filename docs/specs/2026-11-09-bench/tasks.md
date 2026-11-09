@@ -1017,7 +1017,7 @@ sequences builds and seeds.
 
 **Depends-on:** Task 12
 
-- [ ] **Step 1: Write the failing test** in `tests/bench.rs`:
+- [x] **Step 1: Write the failing test** in `tests/bench.rs`:
 
 ```rust
 #[test]
@@ -1043,11 +1043,11 @@ fn a_cancel_after_the_first_sample_keeps_it_and_lists_the_rest() {
 ```
 
   Run: `cargo test --test bench a_cancel_after`. Expect: a failure.
-- [ ] **Step 2: Implement** the Cancelled paths: `cancel()` before a sample, `Fill::Stopped`, an outcome with
+- [x] **Step 2: Implement** the Cancelled paths: `cancel()` before a sample, `Fill::Stopped`, an outcome with
   `cancelled`, and `ChildOutputError::Cancelled`. Each records the finished samples, lists every unfinished
   one as `cancelled`, and reports no summary. Nothing is removed on any path.
-- [ ] **Step 3: Run** `cargo test --test bench`. Expect pass.
-- [ ] **Step 4: Commit** `feat(bench): a cancel keeps finished samples and removes nothing`
+- [x] **Step 3: Run** `cargo test --test bench`. Expect pass.
+- [x] **Step 4: Commit** `feat(bench): a cancel keeps finished samples and removes nothing`
 
 _Requirements: BENCH-6.2, BENCH-6.4, BENCH-9.7_
 
