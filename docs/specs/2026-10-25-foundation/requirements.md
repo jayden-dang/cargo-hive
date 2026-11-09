@@ -90,6 +90,8 @@ Roadmap item: ROAD-1 (MILE-1, docs/roadmap/INDEX.md). Sources: `.skills/CORE/clo
 - **CORE-4.15** WHEN the build directory Cargo resolves for a known checkout's workspace lies outside every search root THE SYSTEM SHALL still report it as a Cargo target dir owned by that checkout.
 - **CORE-4.16** WHEN a directory under `.fingerprint/` holds only `invoked.timestamp` and `output-*` files, or holds an empty hash file beside a fingerprint JSON in the exact format signature, THE SYSTEM SHALL count it as a unit that is not current, apart from the units of CORE-4.7, resolve no edge from it, and SHALL NOT mark the profile directory unsupported because of it.
 - **CORE-4.17** (guard) WHEN a directory under `.fingerprint/` deviates from the format signature in any other way, including a directory that holds only `invoked.timestamp`, THE SYSTEM SHALL CONTINUE TO mark the whole profile directory unsupported.
+- **CORE-4.18** (fix, 2026-11-09) WHEN a known checkout lies inside the workspace root of another known checkout and status reuses cached `cargo metadata` results THE SYSTEM SHALL resolve that checkout's own workspace and mark its target dir owned by it, as on a run with no cached results.
+- **CORE-4.19** (guard, 2026-11-09) WHEN a directory below a checkout lies inside a workspace root resolved at a shallower level THE SYSTEM SHALL CONTINUE TO skip querying it, whether that root came from the cache or from `cargo metadata`.
 
 ## 5. Get a machine-readable receipt from every command
 

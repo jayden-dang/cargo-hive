@@ -417,13 +417,16 @@ fn resolve_workspaces(
     let mut out = Vec::new();
     for dirs in by_depth.into_values() {
         let mut uncached = Vec::new();
+        // Roots found at this depth skip only deeper dirs, whether they came from the
+        // cache or from cargo metadata, so a cache hit cannot hide a nested checkout.
+        let mut found_here = Vec::new();
         for dir in dirs {
             if roots.iter().any(|r| dir.starts_with(r)) {
                 continue;
             }
             match cached(snapshot, &dir) {
                 Some(r) => {
-                    roots.push(r.workspace_root.clone());
+                    found_here.push(r.workspace_root.clone());
                     out.push(Resolution {
                         dir,
                         result: Ok(r),
@@ -433,6 +436,7 @@ fn resolve_workspaces(
                 None => uncached.push(dir),
             }
         }
+        roots.extend(found_here);
         for chunk in uncached.chunks(4) {
             if cancel() {
                 break;

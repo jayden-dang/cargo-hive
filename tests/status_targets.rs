@@ -1,5 +1,5 @@
 mod common;
-use common::{init_repo, register, Hive, Scratch};
+use common::{git, init_repo, register, Hive, Scratch};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -383,6 +383,40 @@ fn metadata_results_are_cached_until_a_stamped_file_changes() {
         .unwrap();
     let third = status(&hive, &[repo.to_str().unwrap()]);
     assert_eq!(count(&third, "metadata_calls"), Some(1));
+}
+
+#[test]
+fn a_worktree_inside_its_main_checkout_keeps_its_target_on_a_cache_hit() {
+    let hive = Hive::ready();
+    let s = Scratch::new("nested-worktree");
+    hive.config(&format!(
+        r#"{{"secondary_roots":["{}"]}}"#,
+        s.path.join("no-secondary").display()
+    ));
+    let repo = init_repo(&s.path.join("app"), "");
+    git(&repo, &["worktree", "add", "-q", ".worktrees/lane"]);
+    let lane = repo.join(".worktrees/lane").canonicalize().unwrap();
+    hive.build_crate(&repo, None);
+    hive.build_crate(&lane, None);
+    register(&hive, &repo);
+    let lane_target = lane.join("target");
+    for run in ["first", "second"] {
+        let receipt = status(&hive, &[repo.to_str().unwrap()]);
+        assert_eq!(
+            target_kind(&receipt, &lane_target).map(|(kind, _)| kind),
+            Some("target.owned".to_string()),
+            "{run} run: {receipt}"
+        );
+    }
+    let receipt = status(&hive, &[repo.to_str().unwrap()]);
+    assert_eq!(
+        (
+            count(&receipt, "metadata_calls"),
+            count(&receipt, "metadata_cache_hits")
+        ),
+        (Some(0), Some(2)),
+        "{receipt}"
+    );
 }
 
 #[test]
