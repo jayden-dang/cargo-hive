@@ -250,7 +250,7 @@ _Requirements: BENCH-9.1_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests** in `src/cargo_target.rs`'s test module:
+- [x] **Step 1: Write the failing tests** in `src/cargo_target.rs`'s test module:
 
 ```rust
 fn sh(script: &str) -> Command {
@@ -312,7 +312,7 @@ fn a_grandchild_holding_stderr_open_does_not_delay_the_result() {
 ```
 
   Run: `cargo test --lib cargo_target::`. Expect: a compile error, because `run_bounded` does not exist.
-- [ ] **Step 2: Implement.** `run_bounded` sets stdin null, sets each stream to `Stdio::null()` for a 0 cap or
+- [x] **Step 2: Implement.** `run_bounded` sets stdin null, sets each stream to `Stdio::null()` for a 0 cap or
   piped otherwise, and calls `process_group(0)`. It takes an `Instant` just before `spawn`. A waiter thread
   owns the `Child`, calls `wait()`, and sends `(status, start.elapsed())` on an `mpsc` channel. The main loop
   does `recv_timeout(20 ms)`, checking `cancel()` and the deadline between slices, and calls `kill_pgid(pid)`
@@ -320,9 +320,9 @@ fn a_grandchild_holding_stderr_open_does_not_delay_the_result() {
   first `cap` bytes for stdout, and keep reading so the pipe never blocks the child. After exit, each reader
   gets 1 s to finish and is then left detached. `kill_group(child)` becomes `kill_pgid(child.id())`.
   Module and function comments describe the bound.
-- [ ] **Step 3: Run** `cargo test --lib cargo_target::`. Expect pass, including the existing
+- [x] **Step 3: Run** `cargo test --lib cargo_target::`. Expect pass, including the existing
   `output_with_deadline` tests.
-- [ ] **Step 4: Commit** `feat(cargo_target): run a child to a deadline with capped output and its exit time`
+- [x] **Step 4: Commit** `feat(cargo_target): run a child to a deadline with capped output and its exit time`
 
 _Requirements: BENCH-9.6, BENCH-10.2_
 
