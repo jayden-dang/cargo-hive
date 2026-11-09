@@ -483,6 +483,11 @@ fn pid_alive(pid: u32) -> bool {
 fn an_interrupted_status_exits_130_and_kills_cargo_metadata() {
     let hive = Hive::ready();
     let s = Scratch::new("status-signal");
+    // A deadline test: walking the machine's real /private/tmp can outlast the deadline.
+    hive.config(&format!(
+        r#"{{"secondary_roots":["{}"]}}"#,
+        s.path.join("no-secondary").display()
+    ));
     let repo = init_repo(&s.path.join("app"), "");
     register(&hive, &repo);
     let bin = s.path.join("bin");
@@ -698,6 +703,11 @@ fn wait_until_open(pid: u32, path: &Path) {
 fn an_interrupted_status_waiting_for_the_state_lock_exits_130_without_waiting_for_the_holder() {
     let hive = Hive::ready();
     let s = Scratch::new("status-lock-signal");
+    // A deadline test: walking the machine's real /private/tmp can outlast the deadline.
+    hive.config(&format!(
+        r#"{{"secondary_roots":["{}"]}}"#,
+        s.path.join("no-secondary").display()
+    ));
     let repo = init_repo(&s.path.join("app"), "");
     register(&hive, &repo);
     let _holder = hold_state_lock(&hive);

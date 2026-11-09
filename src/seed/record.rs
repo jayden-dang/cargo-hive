@@ -409,7 +409,23 @@ mod tests {
     use crate::fingerprint::{Coverage, DepEdge, Format, ProfileReport, Unit, UnitGraph};
     use crate::state::State;
 
-    fn scratch(label: &str) -> (State, PathBuf) {
+    /// A scratch root under /private/tmp, removed when the test drops it.
+    struct Root(PathBuf);
+
+    impl std::ops::Deref for Root {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(label: &str) -> (State, Root) {
         let root = PathBuf::from(format!(
             "/private/tmp/hive-it-seedrec-{label}-{}",
             std::process::id()
@@ -417,7 +433,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let state = State::open_at(root.join("state")).unwrap();
-        (state, root)
+        (state, Root(root))
     }
 
     fn target(root: &Path, name: &str) -> PathBuf {

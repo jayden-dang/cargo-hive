@@ -235,13 +235,29 @@ fn prune(plans: &mut Vec<Plan>, now: u64) {
 mod tests {
     use super::*;
 
-    fn state(label: &str) -> State {
+    /// A state root under /private/tmp, removed when the test drops it.
+    struct ScratchState(State);
+
+    impl std::ops::Deref for ScratchState {
+        type Target = State;
+        fn deref(&self) -> &State {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchState {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.0.root());
+        }
+    }
+
+    fn state(label: &str) -> ScratchState {
         let d = std::path::PathBuf::from(format!(
             "/private/tmp/hive-it-{label}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&d);
-        State::open_at(d).unwrap()
+        ScratchState(State::open_at(d).unwrap())
     }
 
     fn plan(id: &str, class: PlanClass, now: u64) -> Plan {

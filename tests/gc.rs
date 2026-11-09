@@ -485,6 +485,11 @@ fn killing_gc_at_any_point_never_costs_a_rebuild() {
 fn an_interrupted_gc_exits_130() {
     let hive = Hive::ready();
     let s = Scratch::new("gc-signal");
+    // A deadline test: walking the machine's real /private/tmp can outlast the deadline.
+    hive.config(&format!(
+        r#"{{"secondary_roots":["{}"]}}"#,
+        s.path.join("no-secondary").display()
+    ));
     let repo = init_repo(&s.path.join("app"), "");
     hive.build_with_sessions(&repo, None);
     register(&hive, &repo);
