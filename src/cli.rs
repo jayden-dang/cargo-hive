@@ -367,6 +367,7 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
         tmp_parent: std::env::temp_dir(),
         macos: macos.clone(),
         toolchain: doctor::resolve_toolchain(state.root()),
+        cancel: doctor::process_cancel,
     };
     if let Err(e) = doctor::install_signal_handlers() {
         return emit_failure(

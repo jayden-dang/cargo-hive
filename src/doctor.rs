@@ -143,6 +143,8 @@ pub struct DoctorEnv {
     pub tmp_parent: PathBuf,
     pub macos: Option<String>,
     pub toolchain: Result<Toolchain, String>,
+    /// Polled between steps and while checks f and g build.
+    pub cancel: fn() -> bool,
 }
 
 #[derive(Debug, Clone)]
@@ -196,8 +198,8 @@ pub fn install_signal_handlers() -> io::Result<()> {
     Ok(())
 }
 
-fn checkpoint() -> Result<(), DoctorError> {
-    if CANCEL.load(Ordering::SeqCst) {
+fn checkpoint(cancel: fn() -> bool) -> Result<(), DoctorError> {
+    if cancel() {
         Err(DoctorError::Cancelled)
     } else {
         Ok(())
@@ -426,7 +428,8 @@ fn child_output(
     crate::cargo_target::output_with_deadline(cmd, crate::cargo_target::METADATA_DEADLINE, cancel)
 }
 
-fn process_cancel() -> bool {
+/// The process cancel flag that `install_signal_handlers` sets.
+pub fn process_cancel() -> bool {
     CANCEL.load(Ordering::SeqCst)
 }
 
@@ -434,6 +437,14 @@ fn process_cancel() -> bool {
 /// `cargo` and `rustc` on PATH when rustup is absent.
 pub fn resolve_toolchain(cwd: &Path) -> Result<Toolchain, String> {
     resolve_toolchain_with(cwd, Path::new("rustup"), process_cancel)
+}
+
+/// `resolve_toolchain`, stopping its `rustup` and `rustc -vV` runs when `cancel` returns true.
+pub fn resolve_toolchain_until(
+    cwd: &Path,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Toolchain, String> {
+    resolve_toolchain_with(cwd, Path::new("rustup"), cancel)
 }
 
 fn resolve_toolchain_with(
@@ -720,6 +731,7 @@ fn check_format(
     fs: &dyn Fs,
     dir: &Path,
     toolchain: &Result<Toolchain, String>,
+    cancel: fn() -> bool,
 ) -> Result<Check, DoctorError> {
     let tc = match toolchain {
         Ok(t) => t,
@@ -745,9 +757,7 @@ fn check_format(
         std::fs::create_dir_all(&cargo_home)?;
         let mut cmd = probe_command(tc, &krate, &target, &cargo_home);
         let output =
-            match crate::cargo_target::output_with_deadline(&mut cmd, PROBE_DEADLINE, || {
-                CANCEL.load(Ordering::SeqCst)
-            }) {
+            match crate::cargo_target::output_with_deadline(&mut cmd, PROBE_DEADLINE, cancel) {
                 Err(crate::cargo_target::ChildOutputError::Cancelled) => {
                     return Ok(Err(DoctorError::Cancelled));
                 }
@@ -894,6 +904,7 @@ fn check_failed_marker(
     fs: &dyn Fs,
     dir: &Path,
     toolchain: &Result<Toolchain, String>,
+    cancel: fn() -> bool,
 ) -> Result<Check, DoctorError> {
     let tc = match toolchain {
         Ok(t) => t,
@@ -908,9 +919,7 @@ fn check_failed_marker(
         return Ok(unavailable_g(e));
     }
     let mut cmd = probe_command(tc, &krate, &target, &cargo_home);
-    let output = match crate::cargo_target::output_with_deadline(&mut cmd, PROBE_DEADLINE, || {
-        CANCEL.load(Ordering::SeqCst)
-    }) {
+    let output = match crate::cargo_target::output_with_deadline(&mut cmd, PROBE_DEADLINE, cancel) {
         Err(crate::cargo_target::ChildOutputError::Cancelled) => {
             return Err(DoctorError::Cancelled);
         }
@@ -958,13 +967,13 @@ pub fn run(fs: &dyn Fs, env: &DoctorEnv) -> Result<DoctorReport, DoctorError> {
     ];
     let mut checks = Vec::new();
     for step in steps {
-        checkpoint()?;
+        checkpoint(env.cancel)?;
         checks.push(step());
     }
-    checkpoint()?;
-    checks.push(check_format(fs, dir, &env.toolchain)?);
-    checkpoint()?;
-    checks.push(check_failed_marker(fs, dir, &env.toolchain)?);
+    checkpoint(env.cancel)?;
+    checks.push(check_format(fs, dir, &env.toolchain, env.cancel)?);
+    checkpoint(env.cancel)?;
+    checks.push(check_failed_marker(fs, dir, &env.toolchain, env.cancel)?);
     Ok(DoctorReport {
         macos: env.macos.clone(),
         below_floor: env
@@ -1203,6 +1212,7 @@ mod tests {
             tmp_parent: parent.to_path_buf(),
             macos: Some(macos.into()),
             toolchain: Err("not used by this test".into()),
+            cancel: || false,
         }
     }
 
@@ -1717,10 +1727,16 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let parent = scratch("cancel");
-        CANCEL.store(true, Ordering::SeqCst);
-        let result = run(&FakeFs::new(Knobs::default()), &env(&parent, "27.0.1"));
-        CANCEL.store(false, Ordering::SeqCst);
+        let cancelled = DoctorEnv {
+            cancel: || true,
+            ..env(&parent, "27.0.1")
+        };
+        let result = run(&FakeFs::new(Knobs::default()), &cancelled);
         assert!(matches!(result, Err(DoctorError::Cancelled)));
+        assert!(
+            !CANCEL.load(Ordering::SeqCst),
+            "the test cancels through its own env, not the process flag"
+        );
         assert_eq!(leftovers(&parent), Vec::<String>::new());
         std::fs::remove_dir_all(parent).unwrap();
     }

@@ -1088,7 +1088,7 @@ fn a_clean_target_writes_a_row_matching_its_toolchain() {
         .unwrap()
         .version_text;
     assert_eq!(
-        cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main).unwrap(),
+        cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false).unwrap(),
         (text.clone(), value)
     );
     let recording = Recording::over_real();
@@ -1116,7 +1116,8 @@ fn a_target_with_two_toolchain_values_writes_no_row_and_one_finding() {
     std::fs::write(&json, serde_json::to_vec(&parsed).unwrap()).unwrap();
     let mut target = built.target.clone();
     reread(&mut target);
-    let err = cargo_hive::seed::fill::toolchain_row(&target, &built.repo.main).unwrap_err();
+    let err =
+        cargo_hive::seed::fill::toolchain_row(&target, &built.repo.main, &|| false).unwrap_err();
     assert!(
         err.contains(&built.target_path.display().to_string()),
         "{err}"
@@ -1137,7 +1138,8 @@ fn a_malformed_rustc_info_writes_no_row_and_one_finding() {
     let built = built();
     let path = built.target_path.join(".rustc_info.json");
     std::fs::write(&path, b"not json").unwrap();
-    let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main).unwrap_err();
+    let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false)
+        .unwrap_err();
     assert!(err.contains(&path.display().to_string()), "{err}");
     let recording = Recording::over_real();
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
@@ -1152,7 +1154,8 @@ fn a_missing_rustc_info_writes_no_row_and_one_finding() {
     let built = built();
     let path = built.target_path.join(".rustc_info.json");
     std::fs::remove_file(&path).unwrap();
-    let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main).unwrap_err();
+    let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false)
+        .unwrap_err();
     assert!(err.contains(&path.display().to_string()), "{err}");
     let recording = Recording::over_real();
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
@@ -1189,7 +1192,8 @@ fn text_that_differs_from_the_source_checkout_writes_no_row() {
         cargo_hive::seed::fill::rustc_info_version(&std::fs::read_to_string(&path).unwrap())
             .unwrap();
     assert_ne!(parsed_text, checkout);
-    let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main).unwrap_err();
+    let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false)
+        .unwrap_err();
     assert!(
         err.contains(&built.target_path.display().to_string()),
         "{err}"
@@ -1229,11 +1233,11 @@ fn two_targets_with_one_toolchain_share_one_row() {
         .unwrap()
         .version_text;
     assert_eq!(
-        cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main).unwrap(),
+        cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false).unwrap(),
         (text.clone(), value)
     );
     assert_eq!(
-        cargo_hive::seed::fill::toolchain_row(&copy, &built.repo.main).unwrap(),
+        cargo_hive::seed::fill::toolchain_row(&copy, &built.repo.main, &|| false).unwrap(),
         (text.clone(), value)
     );
     let recording = Recording::over_real();

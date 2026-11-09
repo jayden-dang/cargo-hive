@@ -173,7 +173,7 @@ fn fill_target(
     if new_units.is_empty() && tag_present {
         pass.report.targets_read += 1;
         pass.report.entries_held += held_rows.len() as u64;
-        let table = toolchain_table(target, pass.report);
+        let table = toolchain_table(target, pass.cancel, pass.report);
         return merge_rows(pass.ctx, held_rows, table, pass.cancel, pass.report);
     }
     let locked = match locks::acquire(pass.ctx.fs, &target.path, false) {
@@ -419,7 +419,7 @@ fn publish_batch(
 ) -> Result<(), Error> {
     report.targets_read += 1;
     report.entries_held += held_rows.len() as u64;
-    let table = toolchain_table(target, report);
+    let table = toolchain_table(target, cancel, report);
     let mut rows = held_rows;
     for item in batch.cloned {
         if cancel() {
@@ -728,16 +728,25 @@ pub fn rustc_info_version(text: &str) -> Result<String, String> {
     })
 }
 
-pub fn toolchain_row(target: &TargetDir, source_checkout: &Path) -> Result<(String, u64), String> {
+pub fn toolchain_row(
+    target: &TargetDir,
+    source_checkout: &Path,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<(String, u64), String> {
     let path = target.path.join(".rustc_info.json");
     let text = read_capped(&path, RUSTC_INFO_CAP)?;
     let version = rustc_info_version(&text).map_err(|err| format!("{}: {err}", path.display()))?;
-    let resolved = crate::doctor::resolve_toolchain(source_checkout).map_err(|err| {
-        format!(
-            "{}: {err}; install the toolchain that checkout selects and run the command again",
-            source_checkout.display()
-        )
-    })?;
+    let resolved =
+        crate::doctor::resolve_toolchain_until(source_checkout, cancel).map_err(|err| {
+            if crate::doctor::toolchain_failure_exit(&err) == 130 {
+                format!("{}: {err}", source_checkout.display())
+            } else {
+                format!(
+                    "{}: {err}; install the toolchain that checkout selects and run the command again",
+                    source_checkout.display()
+                )
+            }
+        })?;
     if version != resolved.version_text {
         return Err(format!(
             "{}: toolchain text does not match {}; build the target with that checkout's toolchain and run the command again",
@@ -748,12 +757,20 @@ pub fn toolchain_row(target: &TargetDir, source_checkout: &Path) -> Result<(Stri
     Ok((version, one_toolchain_value(target)?))
 }
 
-fn toolchain_table(target: &TargetDir, report: &mut FillReport) -> BTreeMap<String, u64> {
+fn toolchain_table(
+    target: &TargetDir,
+    cancel: &(dyn Fn() -> bool + Sync),
+    report: &mut FillReport,
+) -> BTreeMap<String, u64> {
     let Owner::Owned { checkout } = &target.owner else {
         return BTreeMap::new();
     };
-    match toolchain_row(target, checkout) {
+    match toolchain_row(target, checkout, cancel) {
         Ok((text, value)) => BTreeMap::from([(text, value)]),
+        Err(_) if cancel() => {
+            report.cancelled = true;
+            BTreeMap::new()
+        }
         Err(detail) => {
             report.findings.push((
                 "toolchain.row".to_string(),
@@ -974,9 +991,43 @@ mod tests {
         let target = owned_with(&scratch.0, 9);
         std::fs::write(target.path.join(".rustc_info.json"), &exact).unwrap();
         assert_eq!(
-            super::toolchain_row(&target, &scratch.0).unwrap(),
+            super::toolchain_row(&target, &scratch.0, &|| false).unwrap(),
             (version, 9)
         );
+    }
+
+    #[test]
+    fn a_cancelled_toolchain_lookup_marks_the_fill_cancelled_and_says_nothing_about_installing() {
+        let scratch = Scratch::new("cancel");
+        let version = resolve_toolchain(&scratch.0).unwrap().version_text;
+        let target = owned_with(&scratch.0, 9);
+        std::fs::write(
+            target.path.join(".rustc_info.json"),
+            rustc_info_text(&version, 0),
+        )
+        .unwrap();
+        let mut report = super::FillReport {
+            entries_added: 0,
+            entries_held: 0,
+            targets_read: 0,
+            targets_skipped: std::collections::BTreeMap::new(),
+            findings: Vec::new(),
+            cancelled: false,
+        };
+        let table = super::toolchain_table(&target, &|| true, &mut report);
+        assert!(table.is_empty(), "{table:?}");
+        assert!(report.cancelled, "{report:?}");
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|(_, _, d)| !d.contains("install")),
+            "{:?}",
+            report.findings
+        );
+        let err = super::toolchain_row(&target, &scratch.0, &|| true).unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        assert!(!err.contains("install"), "{err}");
     }
 
     #[test]
@@ -990,7 +1041,7 @@ mod tests {
         assert_eq!(over.len(), 1024 * 1024 + 1);
         let target = owned_with(&scratch.0, 9);
         std::fs::write(target.path.join(".rustc_info.json"), &over).unwrap();
-        let err = super::toolchain_row(&target, &scratch.0).unwrap_err();
+        let err = super::toolchain_row(&target, &scratch.0, &|| false).unwrap_err();
         assert!(err.contains("1 MiB"), "{err}");
         assert!(
             err.contains(&target.path.join(".rustc_info.json").display().to_string()),
