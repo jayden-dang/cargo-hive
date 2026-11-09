@@ -41,7 +41,7 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
-    /// Delete superseded incremental sessions and leftover rustc temp dirs. A session with a lock file is deleted under that lock
+    /// Delete superseded incremental sessions and leftover rustc temp dirs. A session with a lock file is deleted under that lock, and evicts from the store when given no repo
     Gc {
         /// Registered repos to clean; none means every target hive knows
         repos: Vec<std::path::PathBuf>,

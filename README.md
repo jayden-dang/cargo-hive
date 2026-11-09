@@ -4,10 +4,10 @@ Cargo build artifacts across agent worktrees on macOS, with measured receipts.
 
 It registers repositories, lists their checkouts and Cargo target dirs, and says how
 hive may treat each one. `cargo hive gc` deletes superseded rustc incremental sessions
-and leftover rustc temp dirs, each under its owner's lock. `cargo hive gc --plan` writes
-a plan and deletes nothing. `cargo hive apply` deletes that plan's paths for every class.
-`cargo hive seed` copies registry output into a new checkout that has no target yet.
-The store only grows until store GC ships.
+and leftover rustc temp dirs, each under its owner's lock, and bare `gc` also bounds the
+store. `cargo hive gc --plan` writes a plan and deletes nothing. `cargo hive apply`
+deletes that plan's paths for every class. `cargo hive seed` copies registry output into
+a new checkout that has no target yet. Bare `cargo hive gc` keeps the store under 40 GB.
 
 ## Install from scratch
 
@@ -51,7 +51,7 @@ codex plugin add cargo-hive@cargo-hive
 | `cargo hive gc --plan [<repo>…]` | Writes a plan and deletes nothing |
 | `cargo hive apply <id>` | Deletes the plan's paths for every class |
 | `cargo hive explain [<repo>…] [-n N]` | Reports copies of one crate, feature splits, and units whose last compile failed. `-n` defaults to 10; `-n 0` shows every group |
-| `cargo hive seed <checkout>` | Copies registry output into a new secondary checkout before its first build. A checkout that already has a target gets nothing. The store only grows until store GC ships |
+| `cargo hive seed <checkout>` | Copies registry output into a new secondary checkout before its first build. A checkout that already has a target gets nothing. Bare `cargo hive gc` keeps the store under 40 GB |
 
 A failure of check (g) disables failed-unit reporting only.
 

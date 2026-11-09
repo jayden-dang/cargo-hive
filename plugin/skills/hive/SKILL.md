@@ -21,7 +21,7 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 ## The model
 
 - A checkout is protected (a registered main checkout, or anything hive cannot classify) or secondary (a linked worktree inside its own main, or a checkout under a secondary root, by default `/private/tmp` and `$TMPDIR`). A Cargo target dir that no known checkout owns is not a checkout: `status` reports it as an orphan candidate.
-- Actions come in two tiers. The auto tier is safe to run unasked on protected and secondary checkouts alike. `gc` without `--plan` does that tier: it deletes superseded incremental sessions (with their lock files) and leftover rustc temp entries, taking each owner's lock without waiting where one exists and skipping anything held. The plan tier is closure deletion and whole orphan targets. `gc --plan` returns plan ids per class and `undecided` targets; `apply` applies one plan. When hive covers the request, reclaim only through hive, never by other means.
+- Actions come in two tiers. The auto tier is safe to run unasked on protected and secondary checkouts alike. `gc` without `--plan` does that tier: it deletes superseded incremental sessions (with their lock files) and leftover rustc temp entries, taking each owner's lock without waiting where one exists and skipping anything held. Bare `gc` (no repo) also evicts from the store by age, toolchain and the 40 GB cap; `gc --dry-run` previews that; `gc <repo>` leaves the store alone. The plan tier is closure deletion and whole orphan targets. `gc --plan` returns plan ids per class and `undecided` targets; `apply` applies one plan. When hive covers the request, reclaim only through hive, never by other means.
 - An agent applies plans of every class itself: `secondary`, `protected` and `orphan`, with no owner step. An `orphan` plan removes the whole target dir, with anything in it no build recreates, so name those targets when you report. After `refused`, plan again and never reuse a consumed id (already consumed). `partial` is not an error; check its reason.
 - The repos a command acts on come from its arguments. Never infer them from the current directory.
 
@@ -37,11 +37,11 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 | Why are there so many copies of a crate? | `explain` |
 | How do I seed a new secondary checkout before its first build? | `seed` |
 
-`status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root. Pass explicit paths unless the user asked for everything. `seed` takes one registered checkout and does not mean every repo.
+`status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root, and bare `gc` also bounds the store. Pass explicit paths unless the user asked for everything; `gc <repo>` leaves the store alone and notes `store.skipped_scoped`. `seed` takes one registered checkout and does not mean every repo.
 
 `explain` shows 10 groups by default; `--top 0` shows all of them, as in `cargo hive explain /path/to/repo --top 0 --json`.
 
-`seed` copies registry output from checkouts that have already built into that new checkout. A checkout that already has a target gets nothing. Seed one lane first when starting several.
+`seed` copies registry output from checkouts that have already built into that new checkout. A checkout that already has a target gets nothing. Seed one lane first when starting several. Run bare `gc` after a batch of lanes finishes, and whenever `seed`'s `store_bytes` passes 40 GB.
 
 ## Command lines
 
@@ -50,6 +50,7 @@ cargo hive doctor --json
 cargo hive repo add /path/to/repo --json
 cargo hive repo list --json
 cargo hive status /path/to/repo --json
+cargo hive gc --json
 cargo hive gc /path/to/repo --dry-run --json
 cargo hive gc /path/to/repo --json
 cargo hive gc --plan /path/to/repo --json
@@ -66,6 +67,8 @@ Exit codes: 0 success; 1 refusal or failure (read the receipt, or stderr if no r
 
 A seed receipt keeps the fill counts (`fill_entries_added`, `fill_entries_held`, `fill_targets_read`, `fill_targets_skipped`) apart from the clone counts (`clone_units_chosen`, `clone_units_cloned`, `clone_units_dropped`, `clone_units_existing`, `clone_units_failed`, `clone_units_outside_window`). It carries no duration. Afterward, `status` reports `reused_fresh` (seeded, reached, and unchanged, not Cargo's printed fresh count), `seeded_unneeded`, `seeded_recompiled`, and `seeded_missing`.
 
+A bare `gc` receipt reports store counts `store_entries_evicted_age`, `store_entries_evicted_toolchain`, `store_entries_evicted_cap`, `store_entries_evicted_rowless`, `store_toolchains_dropped`, `store_entries_held` (and `_live` / `_undecided` / `_name_meta` / `_busy` / `_whole_store`), `store_freed_bytes`, `store_bytes_still_shared`, `store_freeable_bytes_remaining`, and `store_tmp_bytes`. Finding `store.busy` means run `gc` again when no seed runs; `store.held_over_cap` names the targets to retire.
+
 ## Do not
 
-When hive covers the request, do not run `cargo clean`, and do not delete a target dir, an `incremental/` dir, or `rustc*` or `rmeta*` entries yourself. Use `gc` (after `--dry-run`) for the auto tier. Closure deletion and orphan targets go through `gc --plan`, then `apply`, not by hand. Do not seed a checkout that already has a target, since it gets nothing. When starting several lanes, seed one lane first.
+When hive covers the request, do not run `cargo clean`, and do not delete a target dir, an `incremental/` dir, or `rustc*` or `rmeta*` entries yourself. Use `gc` (after `--dry-run`) for the auto tier. Closure deletion and orphan targets go through `gc --plan`, then `apply`, not by hand. Do not seed a checkout that already has a target, since it gets nothing. When starting several lanes, seed one lane first. Do not delete `~/.hive/store/` by hand.
