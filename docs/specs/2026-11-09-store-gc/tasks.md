@@ -551,11 +551,11 @@ _Requirements: STOREGC-8.1, STOREGC-8.2, STOREGC-10.11_
 
 **Depends-on:** Task 4
 
-- [ ] **Step 1: Edit.**
+- [x] **Step 1: Edit.**
   - Add to SEED design decision 6: "(2026-11-09, STOREGC: never modified; store eviction may remove a published directory whole.)"
   - Add to SEED-10.1 and GCPLAN-9.1: "(2026-11-09: STOREGC adds store counts to bare `gc`; target-deletion counts are unchanged, STOREGC-10.1.)"
   - Change no ID and no other words.
-- [ ] **Step 2: Check.** Run the `audit-trace` skill over `docs/specs/`; expect no new finding.
-- [ ] **Step 3: Commit.** `docs(specs): note where store GC narrows SEED and GCPLAN guards`
+- [x] **Step 2: Check.** Run the `audit-trace` skill over `docs/specs/`; expect no new finding.
+- [x] **Step 3: Commit.** `docs(specs): note where store GC narrows SEED and GCPLAN guards`
 
 _Requirements: STOREGC-10.1, STOREGC-10.4_
