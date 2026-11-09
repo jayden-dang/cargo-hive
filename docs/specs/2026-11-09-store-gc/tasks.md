@@ -357,7 +357,7 @@ _Requirements: STOREGC-2.1, STOREGC-2.2, STOREGC-2.4, STOREGC-2.5, STOREGC-10.8_
 
 **Depends-on:** Task 6
 
-- [ ] **Step 1: Write the failing tests.** Each builds `EvictCtx` from a scratch `State`, `Apfs::new`, an empty target list, and entries made with `synth_entry` from 256 KiB files of random bytes, so each frees more than 0 bytes:
+- [x] **Step 1: Write the failing tests.** Each builds `EvictCtx` from a scratch `State`, `Apfs::new`, an empty target list, and entries made with `synth_entry` from 256 KiB files of random bytes, so each frees more than 0 bytes:
   - `the_cap_evicts_unheld_entries_oldest_first_until_under`: three age cohorts and a cap between their sums.
   - `within_one_last_live_at_an_entry_goes_before_the_entries_its_registry_deps_name`. One cohort holds `aaa-dep`, which `zzz-user`'s `registry_deps` names, so alphabetical order would evict the dependency first. The cap is set to stop after one eviction. `zzz-user` goes and `aaa-dep` stays.
   - `held_entries_over_the_cap_are_kept_and_reported`: one target holds entries by key and a second, Undecided target holds another entry only by name-meta. The finding gives the held total and the cap, and names both targets, larger first, each with the exact freeable bytes of the held entries it holds; one entry held by both counts toward each.
@@ -365,12 +365,12 @@ _Requirements: STOREGC-2.1, STOREGC-2.2, STOREGC-2.4, STOREGC-2.5, STOREGC-10.8_
   - `with_accounting_off_the_cap_evicts_nothing_and_says_so`: age still evicts.
 
   Run; expect failures.
-- [ ] **Step 2: Implement** design decisions 6 and 7.
+- [x] **Step 2: Implement** design decisions 6 and 7.
   - Measure each remaining entry with `gc::measure(fs, &dir, &[dir.clone()], account_bytes)` and sum every remaining entry's freeable bytes.
   - Sort unheld candidates by `last_live_at`, then reverse-topologically over the cohort's `registry_deps` (dependents first), then by `StoreKey`.
   - Evict while the sum exceeds `cap_bytes`, skipping entries that free 0 bytes.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(gc): keep the store under its cap, evicting dependents before what they need`
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(gc): keep the store under its cap, evicting dependents before what they need`
 
 _Requirements: STOREGC-3.1, STOREGC-3.2, STOREGC-3.3, STOREGC-3.4_
 
