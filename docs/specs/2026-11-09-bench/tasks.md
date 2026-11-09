@@ -411,7 +411,7 @@ _Requirements: BENCH-2.10, BENCH-9.5_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in `src/platform/apfs.rs`'s test module, using its `apfs()` helper:
+- [x] **Step 1: Write the failing test** in `src/platform/apfs.rs`'s test module, using its `apfs()` helper:
 
 ```rust
 #[test]
@@ -422,12 +422,12 @@ fn the_load_average_reads_as_hundredths() {
 ```
 
   Run: `cargo test --lib platform::`. Expect: a compile error, because the method does not exist.
-- [ ] **Step 2: Implement.** Add the defaulted method to `Fs`. In `Apfs`, call `libc::getloadavg` with a
+- [x] **Step 2: Implement.** Add the defaulted method to `Fs`. In `Apfs`, call `libc::getloadavg` with a
   one-element `[f64; 1]` and `nelem = 1`, under a `// SAFETY:` comment naming the buffer length. A return
   other than 1 is `io::Error::last_os_error()`. Then compute `(value * 100.0).floor() as u64`. `Recording`
   forwards to `self.state.fs` and logs nothing for it, so existing log assertions do not change. No other `Fs` impl changes.
-- [ ] **Step 3: Run** `cargo test` and `cargo check --target x86_64-unknown-linux-gnu`. Expect pass.
-- [ ] **Step 4: Commit** `feat(platform): read the 1-minute load average`
+- [x] **Step 3: Run** `cargo test` and `cargo check --target x86_64-unknown-linux-gnu`. Expect pass.
+- [x] **Step 4: Commit** `feat(platform): read the 1-minute load average`
 
 _Requirements: BENCH-1.6_
 
