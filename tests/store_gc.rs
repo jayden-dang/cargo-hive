@@ -2,9 +2,17 @@
 mod common;
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cargo_hive::classify::{CheckoutKind, Class};
+use cargo_hive::discover::Checkout;
+use cargo_hive::platform::apfs::Apfs;
+use cargo_hive::seed::choose::{self, Choice};
+use cargo_hive::seed::evict::{self, EvictCtx, Limits};
+use cargo_hive::seed::store;
+use cargo_hive::state::State;
 use common::store_fixture::{
     count, drop_row, entry_dirs, has_finding, plant_rowless, rows, seeded_store, set_last_live_at,
     synth_entry, tree_files,
@@ -12,6 +20,8 @@ use common::store_fixture::{
 use common::{crate_dirs, plant_session, Hive};
 
 const DAY: u64 = 86_400;
+const CAP_BYTES: u64 = 40_000_000_000;
+const MAX_AGE_SECS: u64 = 30 * DAY;
 
 #[test]
 fn an_entry_no_target_holds_for_31_days_is_evicted_with_its_row() {
@@ -492,4 +502,426 @@ fn remove_all_targets(repo: &common::registry_fixture::RegistryRepo) {
             fs::remove_dir_all(&target).unwrap();
         }
     }
+}
+
+fn toolchains(hive: &Hive) -> serde_json::Map<String, serde_json::Value> {
+    let path = hive.home.path.join("store.db");
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["toolchains"].as_object().cloned().unwrap_or_default()
+}
+
+fn has_note(receipt: &serde_json::Value, text: &str) -> bool {
+    receipt["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|note| note.as_str() == Some(text))
+}
+
+fn apfs() -> Apfs {
+    Apfs::new(env!("CARGO_BIN_EXE_cargo-hive").into())
+}
+
+fn limits() -> Limits {
+    Limits {
+        cap_bytes: CAP_BYTES,
+        max_age_secs: MAX_AGE_SECS,
+    }
+}
+
+fn checkout_at(path: &Path) -> Checkout {
+    Checkout {
+        path: path.to_path_buf(),
+        kind: CheckoutKind::Main,
+        class: Class::Protected,
+        reason: "test checkout".into(),
+        missing: false,
+    }
+}
+
+fn fake_rustup_logger(dir: &Path) -> (PathBuf, PathBuf) {
+    let log = dir.join("rustup-calls");
+    let rustup = dir.join("fake-rustup");
+    fs::write(
+        &rustup,
+        format!(
+            "#!/bin/sh\nprintf 'call\\n' >> '{}'\necho 'rustup which should not run' >&2\nexit 1\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).unwrap();
+    (rustup, log)
+}
+
+#[test]
+fn entries_of_a_value_no_checkout_maps_to_are_dropped_with_their_table_text() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let real_before = rows(&hive).len();
+    assert!(real_before > 0);
+    let unused = 99_001u64;
+    let text = format!("synth-{unused}");
+    synth_entry(
+        &hive,
+        (unused, "goneunit-aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        &[],
+        &[("blob", vec![1u8; 32])],
+        0,
+    );
+    assert!(toolchains(&hive).contains_key(&text));
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        count(&receipt, "store_entries_evicted_toolchain") >= 1,
+        "{receipt}"
+    );
+    assert!(
+        count(&receipt, "store_toolchains_dropped") >= 1,
+        "{receipt}"
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .all(|row| row["toolchain_value"].as_u64() != Some(unused)),
+        "{:?}",
+        rows(&hive)
+    );
+    assert!(
+        !toolchains(&hive).contains_key(&text),
+        "{:?}",
+        toolchains(&hive)
+    );
+    assert_eq!(rows(&hive).len(), real_before, "{receipt}");
+    let state = State::open_at(hive.home.path.clone()).unwrap();
+    let file = store::read(&state).unwrap();
+    assert!(matches!(
+        choose::choose(&file, &repo.main, &text),
+        Choice::NoRow { .. }
+    ));
+}
+
+#[test]
+fn a_value_still_used_by_one_checkout_is_kept() {
+    let hive = Hive::ready();
+    let _repo = seeded_store(&hive);
+    let before_rows = rows(&hive);
+    let before_n = before_rows.len();
+    assert!(before_n > 0);
+    let value = before_rows[0]["toolchain_value"].as_u64().unwrap();
+    let texts_before: Vec<_> = toolchains(&hive)
+        .iter()
+        .filter(|(_, v)| v.as_u64() == Some(value))
+        .map(|(k, _)| k.clone())
+        .collect();
+    assert!(!texts_before.is_empty());
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(rows(&hive).len(), before_n, "{receipt}");
+    for text in &texts_before {
+        assert!(
+            toolchains(&hive).contains_key(text),
+            "missing {text}: {:?}",
+            toolchains(&hive)
+        );
+    }
+}
+
+#[test]
+fn held_entries_of_a_dropped_value_keep_its_text_until_none_remain() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let unused = 99_002u64;
+    let text = format!("synth-{unused}");
+    let held_meta = "stuck-1111111111111111";
+    let profile = repo.main.join("target/debug");
+    let nc = profile.join(format!(".fingerprint/{held_meta}"));
+    fs::create_dir_all(&nc).unwrap();
+    fs::write(nc.join("output-lib-stuck"), "").unwrap();
+    let stamp = nc.join("invoked.timestamp");
+    fs::write(&stamp, "").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&stamp)
+        .unwrap()
+        .set_modified(SystemTime::now())
+        .unwrap();
+    synth_entry(
+        &hive,
+        (unused, held_meta, "cccccccccccccccc"),
+        &[],
+        &[("blob", vec![2u8; 16])],
+        0,
+    );
+    synth_entry(
+        &hive,
+        (unused, "freeunit-dddddddddddddddd", "eeeeeeeeeeeeeeee"),
+        &[],
+        &[("blob", vec![3u8; 16])],
+        0,
+    );
+    assert!(toolchains(&hive).contains_key(&text));
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        count(&receipt, "store_entries_evicted_toolchain") >= 1,
+        "{receipt}"
+    );
+    let after = rows(&hive);
+    assert!(
+        after.iter().any(|row| {
+            row["toolchain_value"].as_u64() == Some(unused)
+                && row["name_meta"].as_str() == Some(held_meta)
+        }),
+        "{after:?}"
+    );
+    assert!(
+        after.iter().all(|row| {
+            !(row["toolchain_value"].as_u64() == Some(unused)
+                && row["name_meta"].as_str() == Some("freeunit-dddddddddddddddd"))
+        }),
+        "{after:?}"
+    );
+    assert!(
+        toolchains(&hive).contains_key(&text),
+        "text dropped while a held entry remains: {:?}",
+        toolchains(&hive)
+    );
+}
+
+#[test]
+fn a_checkout_whose_toolchain_cannot_resolve_blocks_every_drop_but_age_still_runs() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let unused = 99_003u64;
+    let text = format!("synth-{unused}");
+    synth_entry(
+        &hive,
+        (unused, "blockunit-aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        &[],
+        &[("blob", vec![4u8; 16])],
+        0,
+    );
+    let sample = rows(&hive)
+        .into_iter()
+        .find(|row| row["toolchain_value"].as_u64() != Some(unused))
+        .expect("seeded row");
+    synth_entry(
+        &hive,
+        (
+            sample["toolchain_value"].as_u64().unwrap(),
+            "agedunit-ffffffffffffffff",
+            "0123456789abcdef",
+        ),
+        &[],
+        &[("blob", vec![5u8; 16])],
+        31 * DAY,
+    );
+    fs::write(
+        repo.main.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.0.0-hive-missing\"\n",
+    )
+    .unwrap();
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        has_finding(&receipt, "store.toolchain_unresolved"),
+        "{receipt}"
+    );
+    assert_eq!(
+        count(&receipt, "store_entries_evicted_toolchain"),
+        0,
+        "{receipt}"
+    );
+    assert!(
+        toolchains(&hive).contains_key(&text),
+        "{:?}",
+        toolchains(&hive)
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .any(|row| row["toolchain_value"].as_u64() == Some(unused)),
+        "{:?}",
+        rows(&hive)
+    );
+    assert!(
+        count(&receipt, "store_entries_evicted_age") >= 1,
+        "{receipt}"
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .all(|row| row["name_meta"].as_str() != Some("agedunit-ffffffffffffffff")),
+        "{:?}",
+        rows(&hive)
+    );
+}
+
+#[test]
+fn no_registered_repo_drops_no_value() {
+    let hive = Hive::ready();
+    let _repo = seeded_store(&hive);
+    let unused = 99_004u64;
+    let text = format!("synth-{unused}");
+    synth_entry(
+        &hive,
+        (unused, "orphanunit-aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        &[],
+        &[("blob", vec![6u8; 16])],
+        0,
+    );
+    fs::write(hive.home.path.join("registry.json"), r#"{"repos":[]}"#).unwrap();
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        has_note(&receipt, "store.no_checkout_resolved"),
+        "{receipt}"
+    );
+    assert_eq!(
+        count(&receipt, "store_entries_evicted_toolchain"),
+        0,
+        "{receipt}"
+    );
+    assert!(
+        toolchains(&hive).contains_key(&text),
+        "{:?}",
+        toolchains(&hive)
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .any(|row| row["toolchain_value"].as_u64() == Some(unused)),
+        "{:?}",
+        rows(&hive)
+    );
+}
+
+#[test]
+fn an_empty_store_runs_no_own_dir_lookup() {
+    let hive = Hive::ready();
+    let state = State::open_at(hive.home.path.clone()).unwrap();
+    let fs = apfs();
+    let scratch = hive.home.path.join("empty-lookup");
+    fs::create_dir_all(&scratch).unwrap();
+    let (rustup, log) = fake_rustup_logger(&scratch);
+    let checkout = checkout_at(&scratch);
+    let outcome = evict::run(
+        &EvictCtx {
+            state: &state,
+            fs: &fs,
+            targets: &[],
+            checkouts: &[checkout],
+            checkout_faults: &[],
+            scan_faults: &[],
+            cache_roots: &[],
+            window: Duration::from_secs(7 * DAY),
+            account_bytes: true,
+            now: SystemTime::now(),
+            caller_toolchain: None,
+            caller_toolchain_kept: false,
+            rustup: &rustup,
+        },
+        limits(),
+        false,
+        &|| false,
+    );
+    assert!(
+        !outcome.cancelled,
+        "empty store should not cancel: {:?}",
+        outcome.findings
+    );
+    assert!(
+        !log.exists() || fs::read_to_string(&log).unwrap().is_empty(),
+        "own-dir lookup ran on an empty store: {}",
+        fs::read_to_string(&log).unwrap_or_default()
+    );
+}
+
+#[test]
+fn no_caller_toolchain_while_it_is_kept_blocks_every_drop() {
+    let hive = Hive::ready();
+    let unused = 99_005u64;
+    let text = format!("synth-{unused}");
+    synth_entry(
+        &hive,
+        (unused, "keptblock-aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        &[],
+        &[("blob", vec![7u8; 16])],
+        0,
+    );
+    synth_entry(
+        &hive,
+        (unused + 1, "agedblock-cccccccccccccccc", "dddddddddddddddd"),
+        &[],
+        &[("blob", vec![8u8; 16])],
+        31 * DAY,
+    );
+    let state = State::open_at(hive.home.path.clone()).unwrap();
+    let fs = apfs();
+    let cwd = hive.home.path.join("caller-kept");
+    fs::create_dir_all(&cwd).unwrap();
+    let checkout = checkout_at(&cwd);
+    let rustup = PathBuf::from("rustup");
+    let outcome = evict::run(
+        &EvictCtx {
+            state: &state,
+            fs: &fs,
+            targets: &[],
+            checkouts: &[checkout],
+            checkout_faults: &[],
+            scan_faults: &[],
+            cache_roots: &[],
+            window: Duration::from_secs(7 * DAY),
+            account_bytes: true,
+            now: SystemTime::now(),
+            caller_toolchain: None,
+            caller_toolchain_kept: true,
+            rustup: &rustup,
+        },
+        limits(),
+        false,
+        &|| false,
+    );
+    assert!(
+        outcome
+            .findings
+            .iter()
+            .any(|f| f.kind == "store.toolchain_unresolved"),
+        "{:?}",
+        outcome.findings
+    );
+    let toolchain_evicted = outcome
+        .counts
+        .iter()
+        .find(|(n, _)| n == "store_entries_evicted_toolchain")
+        .map(|(_, n)| *n)
+        .unwrap_or(0);
+    assert_eq!(toolchain_evicted, 0, "{:?}", outcome.counts);
+    assert!(
+        toolchains(&hive).contains_key(&text),
+        "{:?}",
+        toolchains(&hive)
+    );
+    let age_evicted = outcome
+        .counts
+        .iter()
+        .find(|(n, _)| n == "store_entries_evicted_age")
+        .map(|(_, n)| *n)
+        .unwrap_or(0);
+    assert!(age_evicted >= 1, "{:?}", outcome.counts);
+    assert!(
+        rows(&hive)
+            .iter()
+            .any(|row| row["toolchain_value"].as_u64() == Some(unused)),
+        "{:?}",
+        rows(&hive)
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .all(|row| row["name_meta"].as_str() != Some("agedblock-cccccccccccccccc")),
+        "{:?}",
+        rows(&hive)
+    );
 }

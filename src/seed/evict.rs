@@ -1,14 +1,15 @@
 //! Store eviction for bare `cargo hive gc`: hold keys from live targets, then
-//! rename out and remove unheld entries older than the age limit.
+//! rename out and remove unheld entries older than the age limit or belonging to
+//! a toolchain generation no checkout selects.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cargo_target::TargetDir;
 use crate::discover::{Checkout, WalkFault};
-use crate::doctor::Toolchain;
+use crate::doctor::{self, Toolchain};
 use crate::gc::{self, Ledger};
 use crate::plan_tier::{faults_that_can_hide_an_owner, split_checkout_faults};
 use crate::platform::Fs;
@@ -168,14 +169,70 @@ pub fn run(
         push_count(&mut outcome, "store_entries_held_name_meta", held_name_meta);
     }
 
+    let age_keys: BTreeSet<_> = age_candidates.iter().map(|(k, _)| k.clone()).collect();
+    let rowless_keys: BTreeSet<_> = rowless_candidates.iter().map(|(k, _)| k.clone()).collect();
     let mut candidates = age_candidates;
     let age_n = candidates.len() as u64;
     let rowless_n = rowless_candidates.len() as u64;
     candidates.extend(rowless_candidates);
 
+    let mut toolchain_keys = BTreeSet::new();
+    let inventory_nonempty = !inv.rows.is_empty() || !inv.rowless.is_empty();
+    if inventory_nonempty {
+        match toolchains_in_use(ctx, cancel) {
+            ToolchainsInUse::Cancelled => {
+                outcome.cancelled = true;
+                return outcome;
+            }
+            ToolchainsInUse::Blocked { findings, note } => {
+                outcome.findings.extend(findings);
+                if let Some(note) = note {
+                    outcome.notes.push(note);
+                }
+            }
+            ToolchainsInUse::Resolved(texts) => {
+                let used_values = values_for_texts(ctx.state, &texts);
+                let already: BTreeSet<_> = candidates.iter().map(|(k, _)| k.clone()).collect();
+                for row in &inv.rows {
+                    let key = StoreKey {
+                        toolchain_value: row.toolchain_value,
+                        name_meta: row.name_meta.clone(),
+                        fingerprint_hash: row.fingerprint_hash.clone(),
+                    };
+                    if used_values.contains(&row.toolchain_value) {
+                        continue;
+                    }
+                    if held.hold_reason(&key).is_some() {
+                        continue;
+                    }
+                    if already.contains(&key) {
+                        continue;
+                    }
+                    toolchain_keys.insert(key.clone());
+                    candidates.push((key, Some(row.last_live_at)));
+                }
+                for (key, _) in &inv.rowless {
+                    if used_values.contains(&key.toolchain_value) {
+                        continue;
+                    }
+                    if held.hold_reason(key).is_some() {
+                        continue;
+                    }
+                    if already.contains(key) {
+                        continue;
+                    }
+                    toolchain_keys.insert(key.clone());
+                    candidates.push((key.clone(), None));
+                }
+            }
+        }
+    }
+    let toolchain_n = toolchain_keys.len() as u64;
+
     if dry_run {
         push_count(&mut outcome, "store_entries_evicted_age", age_n);
         push_count(&mut outcome, "store_entries_evicted_rowless", rowless_n);
+        push_count(&mut outcome, "store_entries_evicted_toolchain", toolchain_n);
         return outcome;
     }
 
@@ -249,14 +306,16 @@ pub fn run(
 
     let mut age_evicted = 0u64;
     let mut rowless_evicted = 0u64;
-    let planned: BTreeMap<_, _> = candidates.into_iter().collect();
+    let mut toolchain_evicted = 0u64;
     let mut ledger = Ledger::new();
     let store_root = store_dir(ctx.state);
     for (key, path) in &committed.renamed {
-        match planned.get(key) {
-            Some(Some(_)) => age_evicted += 1,
-            Some(None) => rowless_evicted += 1,
-            None => {}
+        if age_keys.contains(key) {
+            age_evicted += 1;
+        } else if rowless_keys.contains(key) {
+            rowless_evicted += 1;
+        } else if toolchain_keys.contains(key) {
+            toolchain_evicted += 1;
         }
         if let Err(err) = gc::remove_counted(
             ctx.fs,
@@ -281,8 +340,94 @@ pub fn run(
         "store_entries_evicted_rowless",
         rowless_evicted,
     );
+    push_count(
+        &mut outcome,
+        "store_entries_evicted_toolchain",
+        toolchain_evicted,
+    );
+    push_count(
+        &mut outcome,
+        "store_toolchains_dropped",
+        committed.dropped_values.len() as u64,
+    );
     drop(store_lock);
     outcome
+}
+
+enum ToolchainsInUse {
+    Cancelled,
+    Blocked {
+        findings: Vec<Finding>,
+        note: Option<String>,
+    },
+    Resolved(Vec<String>),
+}
+
+fn toolchains_in_use(ctx: &EvictCtx<'_>, cancel: &dyn Fn() -> bool) -> ToolchainsInUse {
+    let mut texts = Vec::new();
+    let mut findings = Vec::new();
+    let mut saw_checkout = false;
+
+    for checkout in ctx.checkouts.iter().filter(|c| !c.missing) {
+        saw_checkout = true;
+        if cancel() {
+            return ToolchainsInUse::Cancelled;
+        }
+        match doctor::resolve_toolchain_own_dir_until(&checkout.path, ctx.rustup, cancel) {
+            Ok(toolchain) => texts.push(toolchain.version_text),
+            Err(_) if cancel() => return ToolchainsInUse::Cancelled,
+            Err(err) => {
+                findings.push(Finding {
+                    kind: "store.toolchain_unresolved".into(),
+                    path: Some(checkout.path.clone()),
+                    detail: err,
+                    measured: BTreeMap::new(),
+                });
+            }
+        }
+    }
+
+    if !saw_checkout {
+        return ToolchainsInUse::Blocked {
+            findings,
+            note: Some("store.no_checkout_resolved".into()),
+        };
+    }
+
+    if ctx.caller_toolchain_kept {
+        match &ctx.caller_toolchain {
+            Some(toolchain) => texts.push(toolchain.version_text.clone()),
+            None => {
+                findings.push(Finding {
+                    kind: "store.toolchain_unresolved".into(),
+                    path: Some(ctx.state.root().to_path_buf()),
+                    detail: "caller toolchain was kept but not resolved".into(),
+                    measured: BTreeMap::new(),
+                });
+            }
+        }
+    }
+
+    if !findings.is_empty() {
+        return ToolchainsInUse::Blocked {
+            findings,
+            note: None,
+        };
+    }
+    ToolchainsInUse::Resolved(texts)
+}
+
+fn values_for_texts(state: &State, texts: &[String]) -> BTreeSet<u64> {
+    let Ok(file) = store::read(state) else {
+        return BTreeSet::new();
+    };
+    let mut values = BTreeSet::new();
+    for text in texts {
+        if let Some(&value) = file.toolchains.get(text) {
+            values.insert(value);
+        }
+    }
+    values
 }
 
 fn push_count(outcome: &mut EvictOutcome, name: &str, n: u64) {
