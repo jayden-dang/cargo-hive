@@ -571,13 +571,36 @@ fn a_unit_that_became_dead_after_the_plan_is_left_alone() {
 }
 
 #[test]
+fn a_directory_that_cannot_be_entered_under_a_secondary_root_does_not_refuse_apply() {
+    let p = Planned::new("apply-cannot-enter");
+    let id = Planned::id_of(&p.plan(), "secondary");
+    let before = tree(&p.worktree_target());
+    // The mode a semaphore directory under /private/tmp was found with.
+    let sealed = p.scratch.path.join("sealed");
+    std::fs::create_dir_all(&sealed).unwrap();
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o222)).unwrap();
+    let (out, r) = p.hive.json(&["apply", &id]);
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    assert_eq!(r["plans"][0]["outcome"], "applied", "{r}");
+    assert_ne!(tree(&p.worktree_target()), before, "nothing was deleted");
+    assert!(
+        r["findings"].as_array().unwrap().iter().any(|f| {
+            f["kind"] == "walk.unreadable" && f["path"].as_str().unwrap_or("").contains("sealed")
+        }),
+        "{r}"
+    );
+}
+
+#[test]
 fn a_checkout_walk_fault_refuses_apply_before_any_delete() {
     let p = Planned::new("apply-walk-fault");
     let id = Planned::id_of(&p.plan(), "secondary");
     let before = tree(&p.worktree_target());
+    // Enterable but not listable: a build can still run in a checkout inside it.
     let blocked = p.scratch.path.join("blocked-checkouts");
     std::fs::create_dir_all(&blocked).unwrap();
-    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o111)).unwrap();
     let (out, r) = p.hive.json(&["apply", &id]);
     std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(out.status.code(), Some(1), "{r}");

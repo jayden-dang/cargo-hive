@@ -44,6 +44,13 @@ pub(crate) fn checkout_walk(
     (checkouts, faults)
 }
 
+/// Splits checkout-walk faults into those that can hide an owner and those that cannot.
+/// A directory under a secondary root that this user cannot enter holds no checkout that
+/// any build of this user runs in, so it is only reported. Any other fault can hide one.
+pub(crate) fn split_checkout_faults(faults: Vec<WalkFault>) -> (Vec<WalkFault>, Vec<WalkFault>) {
+    faults.into_iter().partition(|fault| !fault.cannot_enter)
+}
+
 /// A configured cache root that is not on disk is how a home says "do not scan a
 /// cache". That absence does not hide an owner. Any other scan fault can.
 pub(crate) fn faults_that_can_hide_an_owner(

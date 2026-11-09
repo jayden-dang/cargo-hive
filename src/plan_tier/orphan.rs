@@ -33,7 +33,13 @@ pub enum Removal {
     Failed(FailedRemoval),
 }
 
-pub fn remove(ctx: &Ctx, target: &PlannedTarget, cancel: &(dyn Fn() -> bool + Sync)) -> Removal {
+/// Walk faults that did not stop the removal are added to `noted`.
+pub fn remove(
+    ctx: &Ctx,
+    target: &PlannedTarget,
+    cancel: &(dyn Fn() -> bool + Sync),
+    noted: &mut Vec<WalkFault>,
+) -> Removal {
     let Some(scope) = recorded(target) else {
         return Removal::Refused("entry_changed".to_string());
     };
@@ -52,7 +58,7 @@ pub fn remove(ctx: &Ctx, target: &PlannedTarget, cancel: &(dyn Fn() -> bool + Sy
     if let Err(removal) = profiles_match_plan(ctx.fs, &target.path, scope.dirs) {
         return removal;
     }
-    if let Err(reason) = still_orphan(ctx, &target.path, cancel) {
+    if let Err(reason) = still_orphan(ctx, &target.path, cancel, noted) {
         return match reason {
             Stop::Cancelled => Removal::Skipped("cancelled".to_string()),
             Stop::Refused(reason) => Removal::Refused(reason),
@@ -155,7 +161,12 @@ enum Stop {
     Unreadable(Vec<WalkFault>),
 }
 
-fn still_orphan(ctx: &Ctx, target: &Path, cancel: &(dyn Fn() -> bool + Sync)) -> Result<(), Stop> {
+fn still_orphan(
+    ctx: &Ctx,
+    target: &Path,
+    cancel: &(dyn Fn() -> bool + Sync),
+    noted: &mut Vec<WalkFault>,
+) -> Result<(), Stop> {
     if cancel() {
         return Err(Stop::Cancelled);
     }
@@ -163,6 +174,8 @@ fn still_orphan(ctx: &Ctx, target: &Path, cancel: &(dyn Fn() -> bool + Sync)) ->
     if cancel() {
         return Err(Stop::Cancelled);
     }
+    let (faults, cannot_enter) = super::split_checkout_faults(faults);
+    noted.extend(cannot_enter);
     if !faults.is_empty() {
         return Err(Stop::Unreadable(faults));
     }

@@ -55,12 +55,16 @@ impl Scope {
 pub struct WalkFault {
     pub path: PathBuf,
     pub detail: String,
+    /// The directory holding `path` cannot be entered by this user, so no build this
+    /// user runs can work inside it.
+    pub cannot_enter: bool,
 }
 
 fn record_walk(faults: &mut Vec<WalkFault>, path: &Path, err: &std::io::Error) {
     faults.push(WalkFault {
         path: path.to_path_buf(),
         detail: err.to_string(),
+        cannot_enter: false,
     });
 }
 
@@ -110,6 +114,15 @@ pub fn git_checkouts_within(
             Ok(_) => found.push(dir),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 found.extend(git_checkouts_within(&dir, depth - 1, faults));
+            }
+            // `dir` was listed, so a denied stat of a name inside it means `dir` cannot
+            // be entered.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                faults.push(WalkFault {
+                    path: dir.join(".git"),
+                    detail: e.to_string(),
+                    cannot_enter: true,
+                });
             }
             Err(e) => record_walk(faults, &dir.join(".git"), &e),
         }

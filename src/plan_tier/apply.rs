@@ -141,12 +141,15 @@ pub fn apply(
     if plan.class == PlanClass::Orphan {
         return Ok(apply_orphan(ctx, &plan, cancel));
     }
-    let resolved = match resolve(ctx, &plan, cancel) {
+    let mut noted = Vec::new();
+    let resolved = match resolve(ctx, &plan, cancel, &mut noted) {
         Ok(resolved) => resolved,
         Err(ResolveStop::Cancelled) => return Ok(cancelled_before_delete(&plan)),
         Err(ResolveStop::Refusal(refusal)) => return Ok(refuse(&plan, refusal, BTreeMap::new())),
     };
-    Ok(execute(ctx, plan, &resolved, cancel))
+    let mut done = execute(ctx, plan, &resolved, cancel);
+    note_faults(&mut done.findings, noted);
+    Ok(done)
 }
 
 fn apply_orphan(ctx: &Ctx, plan: &Plan, cancel: &(dyn Fn() -> bool + Sync)) -> Applied {
@@ -175,7 +178,10 @@ fn apply_orphan(ctx: &Ctx, plan: &Plan, cancel: &(dyn Fn() -> bool + Sync)) -> A
             cancelled = true;
             break;
         }
-        match orphan::remove(ctx, target, cancel) {
+        let mut noted = Vec::new();
+        let removal = orphan::remove(ctx, target, cancel, &mut noted);
+        note_faults(&mut findings, noted);
+        match removal {
             Removal::Removed(counted) => {
                 paths_deleted += 1;
                 applied_targets += 1;
@@ -535,15 +541,37 @@ enum ResolveStop {
     Cancelled,
 }
 
+/// Reports walk faults that did not stop the plan, each path once.
+fn note_faults(
+    findings: &mut Vec<(String, Option<PathBuf>, String)>,
+    faults: Vec<crate::discover::WalkFault>,
+) {
+    for fault in faults {
+        let seen = findings
+            .iter()
+            .any(|(kind, path, _)| kind == "walk.unreadable" && path.as_ref() == Some(&fault.path));
+        if !seen {
+            findings.push((
+                "walk.unreadable".to_string(),
+                Some(fault.path),
+                fault.detail,
+            ));
+        }
+    }
+}
+
 fn resolve(
     ctx: &Ctx,
     plan: &Plan,
     cancel: &(dyn Fn() -> bool + Sync),
+    noted: &mut Vec<crate::discover::WalkFault>,
 ) -> Result<Vec<ResolvedTarget>, ResolveStop> {
     let (checkouts, faults) = super::checkout_walk(ctx);
     if cancel() {
         return Err(ResolveStop::Cancelled);
     }
+    let (faults, cannot_enter) = super::split_checkout_faults(faults);
+    noted.extend(cannot_enter);
     if !faults.is_empty() {
         return Err(walk_refusal(plan, faults));
     }

@@ -91,6 +91,8 @@ store, ids, revalidation, receipt and skill with it.
 - **GCPLAN-3.8** THE SYSTEM SHALL complete every check of this story for all targets of the plan before it deletes any path of any target.
 - **GCPLAN-3.9** WHEN `apply` refuses a plan after it marked the plan consumed THE SYSTEM SHALL keep the plan consumed.
 - **GCPLAN-3.10** IF the fingerprint-reading capability or the deletion capability has not passed THEN THE SYSTEM SHALL refuse every plan, delete nothing, leave the plan unconsumed, and exit with code 1.
+- **GCPLAN-3.11** (fix, 2026-11-09) WHEN `apply` walks a secondary root for checkouts and meets a directory that hive's user cannot enter THE SYSTEM SHALL report it as `walk.unreadable` and go on, for unit plans and orphan removals alike, since no build that user runs can work inside it.
+- **GCPLAN-3.12** (guard, 2026-11-09) IF any other fault occurs while `apply` walks for checkouts or targets, a directory that can be entered but not listed and an unreadable directory inside a checkout included, THEN THE SYSTEM SHALL CONTINUE TO refuse the whole plan with reason `walk.unreadable` and delete nothing.
 
 ## 4. Apply protected plans
 

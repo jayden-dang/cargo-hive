@@ -878,12 +878,36 @@ fn a_target_dir_whose_identity_changed_after_the_plan_is_not_removed() {
 }
 
 #[test]
+fn a_directory_that_cannot_be_entered_under_a_secondary_root_does_not_refuse_the_orphan_removal() {
+    let (p, orphan) = Planned::with_orphan("orphan-cannot-enter");
+    let id = p.orphan_plan_id(&orphan);
+    let sealed = p.scratch.path.join("sealed");
+    std::fs::create_dir_all(&sealed).unwrap();
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o222)).unwrap();
+    let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.reason);
+    assert!(!orphan.exists(), "the orphan is still there");
+    assert!(
+        done.findings.iter().any(|(kind, path, _)| {
+            kind == "walk.unreadable"
+                && path
+                    .as_ref()
+                    .is_some_and(|path| path.display().to_string().contains("sealed"))
+        }),
+        "{:?}",
+        done.findings
+    );
+}
+
+#[test]
 fn a_checkout_walk_fault_refuses_the_orphan_removal_before_any_delete() {
     let (p, orphan) = Planned::with_orphan("orphan-walk-fault");
     let id = p.orphan_plan_id(&orphan);
+    // Enterable but not listable: a build can still run in a checkout inside it.
     let blocked = p.scratch.path.join("blocked-checkouts");
     std::fs::create_dir_all(&blocked).unwrap();
-    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o111)).unwrap();
     let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
     std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(done.outcome, Outcome::Refused, "{:?}", done.reason);
