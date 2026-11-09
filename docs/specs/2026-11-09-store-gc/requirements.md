@@ -65,7 +65,7 @@ Terms (defined in `CONTEXT.md`): store, entry, store key, toolchain value, toolc
 The cap is a constant of the CLI. The eviction step takes it as a parameter, and tests and the demonstration of this story run that step with a small cap; no environment variable, flag or key exposes it. *(Weigh W10; agent-decided: a test seam inside the crate, not a setting)*
 
 - **STOREGC-3.1** WHEN store eviction has applied stories 1 and 2 THE SYSTEM SHALL measure the freeable bytes of every remaining entry, counting each inode once, with bytes a surviving clone or hard link still holds counted apart and not as freeable.
-- **STOREGC-3.2** WHILE the freeable bytes of the remaining entries total more than 40,000,000,000 bytes THE SYSTEM SHALL evict whole entries whose keys are not held, oldest `last_live_at` first, ties broken by one total order on the store key, and SHALL stop at the first point where the total is at or under that cap. *(agent-decided: 40 GB read as 40 × 10⁹ bytes, a constant in this run, and the oldest-first order; Weigh A2: the tie-break)*
+- **STOREGC-3.2** WHILE the freeable bytes of the remaining entries total more than 40,000,000,000 bytes THE SYSTEM SHALL evict whole entries whose keys are not held, oldest `last_live_at` first, ties broken by one total order on the store key, and SHALL stop at the first point where the total is at or under that cap, except in a run STOREGC-6.1 skips. *(agent-decided: 40 GB read as 40 × 10⁹ bytes, a constant in this run, and the oldest-first order; Weigh A2: the tie-break)*
 - **STOREGC-3.3** IF the remaining entries are all held and their freeable bytes still total more than the cap THEN THE SYSTEM SHALL evict none of them, and report one finding giving that total and the cap.
 - **STOREGC-3.4** IF doctor check (c), the eviction-accounting capability, has not passed for the active toolchain THEN THE SYSTEM SHALL evict nothing for the cap, still apply stories 1 and 2, and record the cap step in `unmeasured` with the reason "doctor check (c) did not pass". *(agent-decided)*
 
@@ -91,7 +91,7 @@ The cap is a constant of the CLI. The eviction step takes it as a parameter, and
 
 **Story:** As an agent, I want to run bare `cargo hive gc` while another lane runs `cargo hive seed`, so that neither has to wait for the other and the seeded lane still builds from whole units.
 
-- **STOREGC-6.1** WHILE a `seed` is cloning out of an entry, or a fill is publishing an entry, from its rename until its row is merged THE SYSTEM SHALL not remove that entry; store eviction tries that exclusion without waiting, and keeps and counts an entry it cannot take. *(agent-decided: the promise; the mechanism is the design's)*
+- **STOREGC-6.1** WHILE a `seed` is filling the store or cloning out of it THE SYSTEM SHALL remove no store entry; store eviction tries that exclusion once without waiting, and when a seed holds it, evicts no entry in that run and counts the run as busy. *(agent-decided: the promise; one exclusion for the whole store, amended in design 2026-11-09 from "an entry")*
 - **STOREGC-6.2** WHEN a `seed` and a bare `gc` run at the same time THE SYSTEM SHALL leave each unit the seed places in the checkout either with every file its entry holds or with no `.fingerprint/<name-meta>/` directory of it.
 
 ## 7. Read what store eviction did
