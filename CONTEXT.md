@@ -149,22 +149,6 @@ What `apply` did with one plan: applied, partial, or refused. A plan just stored
 _Avoid_: status code
 
 **Receipt**:
-The deterministic counters a hive command returns. It never contains estimated time saved, and it contains durations only in `cargo hive bench`'s receipt, as integer milliseconds bench measured (ARCH-10).
+The deterministic counters a hive command returns. It never contains durations or estimated time saved.
 _Avoid_: report, summary
 
-
-**Bench sample**:
-One timed first build that `cargo hive bench` runs in one fresh secondary checkout the caller made, with no target dir before it. It is either a cold sample or a seeded sample.
-_Avoid_: run, trial, iteration
-
-**Cold sample**:
-A bench sample whose checkout gets no seed: Cargo compiles every unit, with registry sources already downloaded and the build `--offline --locked`. Cold means "no target dir", not "nothing cached anywhere".
-_Avoid_: clean build, from-scratch build
-
-**Seeded sample**:
-A bench sample whose checkout is seeded from the store just before its build. Its seed time and build time are reported apart.
-_Avoid_: warm sample, cached build
-
-**Prime**:
-The one fill bench runs before its first sample, reported apart and kept out of every median, so the store's first compressing fill is measured once.
-_Avoid_: warm-up

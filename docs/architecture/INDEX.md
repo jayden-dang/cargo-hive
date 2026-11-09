@@ -33,7 +33,7 @@ package (A1-A6, D2-D5, D7, S1-S2, C1), the F9 amendment and SPIKES.md.
 - **ARCH-7** Classify every checkout by the C1 rules, and treat anything unclassifiable as protected.
 - **ARCH-8** Take operation scope from arguments or a plan, never from the current directory.
 - **ARCH-9** Accept Cargo fingerprint files only in a known exact format signature; refuse to act on any other shape.
-- **ARCH-10** Report only deterministic counters measured on this machine; durations come only from `cargo hive bench`, as integer milliseconds.
+- **ARCH-10** Report only deterministic counters measured on this machine; seconds come only from `cargo hive bench`.
 - **ARCH-11** Report as freed only the bytes a deletion returns to the volume; bytes a surviving hardlink or clone still holds are counted apart, never as freed.
 - ~~**ARCH-12** Open an owner-authentication dialog only from `cargo hive approve`, with a TTY and no agent ancestor.~~ Retired 2026-11-02, with no successor: hive has no dialog and no approval command (ADR-0002).
 - **ARCH-13** A child `git` or `cargo` never inherits the caller's target-dir or `GIT_*` variables, and a toolchain selected by the caller's directory never leaks into hive's choice of active toolchain; every other variable the child sees is set by hive or kept on purpose.
