@@ -390,15 +390,15 @@ _Requirements: STOREGC-3.1, STOREGC-3.2, STOREGC-3.3, STOREGC-3.4_
 
 **Depends-on:** Task 7
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `a_dry_run_reports_the_counts_the_next_real_run_reports`. On an idle fixture with age, toolchain and rowless candidates, every `store_*` count of `gc --dry-run` equals the same count of the `gc` that follows.
   - `a_dry_run_changes_nothing_under_the_store_or_in_store_db`: a byte-for-byte snapshot of `store/` and `store.db`.
   - `a_scoped_gc_reads_and_writes_no_store_state_and_says_why`. The bytes and mtimes of `store/` and `store.db` are unchanged, the note is present, and the receipt has no `store_*` count.
 
   Run; expect failures.
-- [ ] **Step 2: Implement** design decision 12 (plan, then compute the commit's outcome with no lock, no rename and no write), and the scoped note in `gc_cmd` when `args` is not empty.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(gc): preview store eviction in a dry run and leave the store to bare gc`
+- [x] **Step 2: Implement** design decision 12 (plan, then compute the commit's outcome with no lock, no rename and no write), and the scoped note in `gc_cmd` when `args` is not empty.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(gc): preview store eviction in a dry run and leave the store to bare gc`
 
 _Requirements: STOREGC-5.1, STOREGC-5.2, STOREGC-5.3_
 
