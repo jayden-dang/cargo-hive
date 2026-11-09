@@ -928,7 +928,9 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             b.note(note);
         }
     }
-    if args.is_empty() && !report.cancelled {
+    if !args.is_empty() {
+        b.note("store.skipped_scoped");
+    } else if !report.cancelled {
         match window_days(cfg.gc_window_days) {
             Err(err) => {
                 b.finding("store.window_invalid", None, err.to_string());

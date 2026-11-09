@@ -1412,3 +1412,114 @@ fn with_accounting_off_the_cap_evicts_nothing_and_says_so() {
         outcome.unmeasured
     );
 }
+
+fn store_counts(receipt: &serde_json::Value) -> std::collections::BTreeMap<String, u64> {
+    receipt["counts"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| name.starts_with("store_"))
+        .map(|(name, value)| (name.clone(), value.as_u64().unwrap_or(0)))
+        .collect()
+}
+
+#[test]
+fn a_dry_run_reports_the_counts_the_next_real_run_reports() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let value = rows(&hive)[0]["toolchain_value"].as_u64().unwrap();
+    plant_rowless(
+        &hive,
+        value,
+        "dryrowless-aaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbb",
+    );
+    remove_all_targets(&repo);
+    set_last_live_at(&hive, "", 31 * DAY);
+    synth_entry(
+        &hive,
+        (99_008, "drytool-cccccccccccccccc", "dddddddddddddddd"),
+        &[],
+        &[("blob", vec![4u8; 32])],
+        0,
+    );
+    let (dry_out, dry) = hive.json(&["gc", "--dry-run"]);
+    assert!(dry_out.status.success(), "{dry}");
+    assert!(count(&dry, "store_entries_evicted_age") >= 1, "{dry}");
+    assert!(count(&dry, "store_entries_evicted_rowless") >= 1, "{dry}");
+    assert!(count(&dry, "store_entries_evicted_toolchain") >= 1, "{dry}");
+    let (real_out, real) = hive.json(&["gc"]);
+    assert!(real_out.status.success(), "{real}");
+    assert_eq!(
+        store_counts(&dry),
+        store_counts(&real),
+        "dry={dry}\nreal={real}"
+    );
+}
+
+#[test]
+fn a_dry_run_changes_nothing_under_the_store_or_in_store_db() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let value = rows(&hive)[0]["toolchain_value"].as_u64().unwrap();
+    plant_rowless(&hive, value, "drykeep-eeeeeeeeeeeeeeee", "ffffffffffffffff");
+    synth_entry(
+        &hive,
+        (99_009, "drykeep-gggggggggggggggg", "hhhhhhhhhhhhhhhh"),
+        &[],
+        &[("blob", vec![5u8; 16])],
+        0,
+    );
+    remove_all_targets(&repo);
+    set_last_live_at(&hive, "", 31 * DAY);
+    let store = hive.home.path.join("store");
+    let db = hive.home.path.join("store.db");
+    let snap_store = tree_files(&store);
+    let snap_db = fs::read(&db).unwrap();
+    let (out, receipt) = hive.json(&["gc", "--dry-run"]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        count(&receipt, "store_entries_evicted_age")
+            + count(&receipt, "store_entries_evicted_rowless")
+            + count(&receipt, "store_entries_evicted_toolchain")
+            >= 1,
+        "{receipt}"
+    );
+    assert_eq!(tree_files(&store), snap_store, "{receipt}");
+    assert_eq!(fs::read(&db).unwrap(), snap_db, "{receipt}");
+}
+
+#[test]
+fn a_scoped_gc_reads_and_writes_no_store_state_and_says_why() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let value = rows(&hive)[0]["toolchain_value"].as_u64().unwrap();
+    plant_rowless(&hive, value, "scoped-iiiiiiiiiiiiiiii", "jjjjjjjjjjjjjjjj");
+    synth_entry(
+        &hive,
+        (99_010, "scoped-kkkkkkkkkkkkkkkk", "llllllllllllllll"),
+        &[],
+        &[("blob", vec![6u8; 16])],
+        31 * DAY,
+    );
+    set_last_live_at(&hive, "", 31 * DAY);
+    let store = hive.home.path.join("store");
+    let db = hive.home.path.join("store.db");
+    let snap_store = tree_files(&store);
+    let snap_db = fs::read(&db).unwrap();
+    let snap_mtimes = tree_mtimes(&store);
+    let db_mtime = fs::symlink_metadata(&db).unwrap().modified().unwrap();
+    let main = repo.main.to_str().unwrap();
+    let (out, receipt) = hive.json(&["gc", main]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(has_note(&receipt, "store.skipped_scoped"), "{receipt}");
+    assert!(store_counts(&receipt).is_empty(), "{receipt}");
+    assert_eq!(tree_files(&store), snap_store, "{receipt}");
+    assert_eq!(fs::read(&db).unwrap(), snap_db, "{receipt}");
+    assert_eq!(tree_mtimes(&store), snap_mtimes, "{receipt}");
+    assert_eq!(
+        fs::symlink_metadata(&db).unwrap().modified().unwrap(),
+        db_mtime,
+        "{receipt}"
+    );
+}

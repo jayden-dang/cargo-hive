@@ -16,8 +16,8 @@ use crate::platform::Fs;
 use crate::receipt::{Finding, Measured};
 use crate::seed::source::{self, Holds};
 use crate::seed::store::{
-    self, commit_eviction, entry_dir, evict_dir, inventory, rename_out, store_dir, CommitPlan, Row,
-    StoreKey,
+    self, commit_eviction, entry_dir, evict_dir, inventory, rename_out, store_dir, CommitPlan,
+    Inventory, Row, StoreKey,
 };
 use crate::state::State;
 
@@ -173,8 +173,6 @@ pub fn run(
     let age_keys: BTreeSet<_> = age_candidates.iter().map(|(k, _)| k.clone()).collect();
     let rowless_keys: BTreeSet<_> = rowless_candidates.iter().map(|(k, _)| k.clone()).collect();
     let mut candidates = age_candidates;
-    let age_n = candidates.len() as u64;
-    let rowless_n = rowless_candidates.len() as u64;
     candidates.extend(rowless_candidates);
 
     let mut toolchain_keys = BTreeSet::new();
@@ -228,10 +226,7 @@ pub fn run(
             }
         }
     }
-    let toolchain_n = toolchain_keys.len() as u64;
-
     let mut cap_keys = BTreeSet::new();
-    let mut cap_n = 0u64;
     if !ctx.account_bytes {
         outcome.unmeasured.push((
             "store_freeable_bytes_remaining".into(),
@@ -255,7 +250,6 @@ pub fn run(
         for (key, at) in evict {
             cap_keys.insert(key.clone());
             candidates.push((key, at));
-            cap_n += 1;
         }
         push_count(
             &mut outcome,
@@ -267,16 +261,45 @@ pub fn run(
         }
     }
 
-    if dry_run {
-        push_count(&mut outcome, "store_entries_evicted_age", age_n);
-        push_count(&mut outcome, "store_entries_evicted_rowless", rowless_n);
-        push_count(&mut outcome, "store_entries_evicted_toolchain", toolchain_n);
-        push_count(&mut outcome, "store_entries_evicted_cap", cap_n);
+    if candidates.is_empty() && refreshed.is_empty() {
+        push_count(&mut outcome, "store_entries_evicted_cap", 0);
         return outcome;
     }
 
-    if candidates.is_empty() && refreshed.is_empty() {
-        push_count(&mut outcome, "store_entries_evicted_cap", 0);
+    if dry_run {
+        let renamed = preview_renames(&inv, &candidates);
+        let mut age_evicted = 0u64;
+        let mut rowless_evicted = 0u64;
+        let mut toolchain_evicted = 0u64;
+        let mut cap_evicted = 0u64;
+        for key in &renamed {
+            if age_keys.contains(key) {
+                age_evicted += 1;
+            } else if rowless_keys.contains(key) {
+                rowless_evicted += 1;
+            } else if toolchain_keys.contains(key) {
+                toolchain_evicted += 1;
+            } else if cap_keys.contains(key) {
+                cap_evicted += 1;
+            }
+        }
+        push_count(&mut outcome, "store_entries_evicted_age", age_evicted);
+        push_count(
+            &mut outcome,
+            "store_entries_evicted_rowless",
+            rowless_evicted,
+        );
+        push_count(
+            &mut outcome,
+            "store_entries_evicted_toolchain",
+            toolchain_evicted,
+        );
+        push_count(&mut outcome, "store_entries_evicted_cap", cap_evicted);
+        push_count(
+            &mut outcome,
+            "store_toolchains_dropped",
+            preview_dropped_values(ctx.state, &inv, &renamed),
+        );
         return outcome;
     }
 
@@ -476,6 +499,67 @@ fn values_for_texts(state: &State, texts: &[String]) -> BTreeSet<u64> {
 
 fn push_count(outcome: &mut EvictOutcome, name: &str, n: u64) {
     outcome.counts.push((name.to_string(), n));
+}
+
+fn preview_renames(inv: &Inventory, candidates: &[(StoreKey, Option<u64>)]) -> BTreeSet<StoreKey> {
+    let mut survivors = BTreeSet::new();
+    for (key, planned) in candidates {
+        match planned {
+            Some(planned_at) => match inv.rows.iter().find(|row| row_key_matches(row, key)) {
+                Some(row) if row.last_live_at > *planned_at => {}
+                Some(_) => {
+                    survivors.insert(key.clone());
+                }
+                None => {}
+            },
+            None => {
+                if inv.rows.iter().any(|row| row_key_matches(row, key)) {
+                    continue;
+                }
+                survivors.insert(key.clone());
+            }
+        }
+    }
+    survivors
+}
+
+fn preview_dropped_values(state: &State, inv: &Inventory, renamed: &BTreeSet<StoreKey>) -> u64 {
+    let Ok(file) = store::read(state) else {
+        return 0;
+    };
+    let mut values = BTreeSet::new();
+    for value in file.toolchains.values().copied() {
+        values.insert(value);
+    }
+    let mut dropped = 0u64;
+    for value in values {
+        let remains = inv
+            .rows
+            .iter()
+            .any(|row| row.toolchain_value == value && !renamed.contains(&row_store_key(row)))
+            || inv
+                .rowless
+                .iter()
+                .any(|(key, _)| key.toolchain_value == value && !renamed.contains(key));
+        if !remains {
+            dropped += 1;
+        }
+    }
+    dropped
+}
+
+fn row_key_matches(row: &Row, key: &StoreKey) -> bool {
+    row.toolchain_value == key.toolchain_value
+        && row.name_meta == key.name_meta
+        && row.fingerprint_hash == key.fingerprint_hash
+}
+
+fn row_store_key(row: &Row) -> StoreKey {
+    StoreKey {
+        toolchain_value: row.toolchain_value,
+        name_meta: row.name_meta.clone(),
+        fingerprint_hash: row.fingerprint_hash.clone(),
+    }
 }
 
 struct CapPlan {
