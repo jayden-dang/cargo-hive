@@ -281,7 +281,7 @@ _Requirements: STOREGC-1.1, STOREGC-1.2, STOREGC-1.3, STOREGC-1.4, STOREGC-1.6, 
 
 **Depends-on:** Task 4
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - In `src/seed/source.rs`, `holds` on fixture targets:
     - an Undecided target (a not-current unit inside the window) holds every graph unit's key and every not-current name-meta;
     - an unsupported profile with `.fingerprint/` holds each directory name;
@@ -296,9 +296,9 @@ _Requirements: STOREGC-1.1, STOREGC-1.2, STOREGC-1.3, STOREGC-1.4, STOREGC-1.6, 
     - `liveness_writes_nothing_during_eviction`: target mtimes are unchanged.
 
   Run; expect failures.
-- [ ] **Step 2: Implement** the rules of the design's "Held keys" section. `evict::run` passes every fault that `split_checkout_faults` or `faults_that_can_hide_an_owner` keeps into `whole_store`. A non-empty `whole_store` evicts nothing and reports each cause, and `gc`'s exit code stays as it would be.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `feat(gc): keep every store key a target whose liveness is undecided may use`
+- [x] **Step 2: Implement** the rules of the design's "Held keys" section. `evict::run` passes every fault that `split_checkout_faults` or `faults_that_can_hide_an_owner` keeps into `whole_store`. A non-empty `whole_store` evicts nothing and reports each cause, and `gc`'s exit code stays as it would be.
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `feat(gc): keep every store key a target whose liveness is undecided may use`
 
 _Requirements: STOREGC-4.1, STOREGC-4.2, STOREGC-4.3, STOREGC-4.4, STOREGC-4.5, STOREGC-10.6_
 
