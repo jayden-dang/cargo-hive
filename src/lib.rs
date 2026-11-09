@@ -1,3 +1,4 @@
+pub mod bench;
 pub mod cargo_target;
 pub mod classify;
 pub mod cli;
