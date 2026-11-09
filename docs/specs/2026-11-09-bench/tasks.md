@@ -573,7 +573,7 @@ _Requirements: BENCH-3.1, BENCH-3.2, BENCH-3.4_
 
 **Depends-on:** Task 7
 
-- [ ] **Step 1: Write the failing test**:
+- [x] **Step 1: Write the failing test**:
 
 ```rust
 fn tc(name: Option<&str>) -> Toolchain {
@@ -628,13 +628,13 @@ fn the_build_command_runs_the_resolved_cargo_in_the_checkout_with_exactly_the_ma
 ```
 
   Run: `cargo test --lib bench::command::`. Expect: a compile error.
-- [ ] **Step 2: Implement** `env_map` and `EnvMap` as the test reads, with `command` doing
+- [x] **Step 2: Implement** `env_map` and `EnvMap` as the test reads, with `command` doing
   `Command::new(&tc.cargo)`, `.env_clear()`, `.envs(&self.vars)`, `.current_dir(dir)` and
   `.args(build.args())`. Each wrapper variable the caller set non-empty is one `env.wrapper.overridden`.
   Each caller `RUSTC` or `CARGO_BUILD_RUSTC` is one `env.rustc.overridden`, with detail
   `"<VAR>=<value>; the build used the resolved toolchain"`.
-- [ ] **Step 3: Run** `cargo test --lib bench::`. Expect pass.
-- [ ] **Step 4: Commit** `feat(bench): one build environment with wrappers off and the toolchain pinned`
+- [x] **Step 3: Run** `cargo test --lib bench::`. Expect pass.
+- [x] **Step 4: Commit** `feat(bench): one build environment with wrappers off and the toolchain pinned`
 
 _Requirements: BENCH-5.1, BENCH-5.2, BENCH-5.3, BENCH-5.4_
 
