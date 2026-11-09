@@ -366,3 +366,60 @@ fn a_seeded_sample_copies_each_seed_finding_once() {
         );
     }
 }
+
+#[test]
+fn a_seeded_sample_carries_the_four_seed_counts_and_recompiles_none() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let report = run_bench(
+        &hive,
+        &bench_plan(&hive, &repo, 2),
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &|| false,
+    );
+    for f in report.findings.iter().filter(|f| {
+        f.kind == "bench.sample" && f.measured["arm"] == Measured::Text("seeded".into())
+    }) {
+        for key in [
+            "seeded_fresh",
+            "seeded_unneeded",
+            "seeded_recompiled",
+            "seeded_missing",
+        ] {
+            assert!(
+                matches!(f.measured.get(key), Some(Measured::Int(_))),
+                "{key}"
+            );
+        }
+        assert_eq!(f.measured["seeded_recompiled"], Measured::Int(0));
+    }
+}
+
+#[test]
+fn a_seed_that_clones_nothing_still_builds_and_leaves_its_counts_unmeasured() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let mut plan = bench_plan(&hive, &repo, 2);
+    plan.toolchain.version_text = "rustc 0.0.0 (no such toolchain)".into();
+    let report = run_bench(
+        &hive,
+        &plan,
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &|| false,
+    );
+    assert!(matches!(report.end, End::Finished));
+    assert!(report
+        .findings
+        .iter()
+        .any(|f| f.kind == "toolchain.missing"));
+    assert!(report
+        .unmeasured
+        .iter()
+        .any(|(field, _)| field.ends_with(".seed_counts")));
+}

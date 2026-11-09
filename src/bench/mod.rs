@@ -6,15 +6,17 @@ pub mod order;
 pub mod stats;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::cargo_target::{run_bounded, Capture, ChildOutputError};
-use crate::discover::Checkout;
+use crate::discover::{self, Checkout, Snapshot};
 use crate::doctor::Toolchain;
+use crate::gc;
 use crate::plan_tier::Ctx;
 use crate::receipt::{Finding, Measured, ReceiptBuilder};
 use crate::registry::Repo;
-use crate::seed::{self, Fill};
+use crate::seed::{self, record, Fill};
 
 use self::command::{BuildCmd, EnvMap};
 use self::order::Arm;
@@ -85,6 +87,64 @@ fn push_seed_finding(report: &mut Report, checkout: &Checkout, kind: &str, detai
         detail,
         measured: BTreeMap::new(),
     });
+}
+
+fn attach_seed_counts(
+    report: &mut Report,
+    measured: &mut BTreeMap<String, Measured>,
+    ctx: &Ctx<'_>,
+    checkout: &Checkout,
+    seed_target: Option<&PathBuf>,
+    position: u64,
+    cancel: &(dyn Fn() -> bool + Sync),
+) {
+    let field = format!("sample.{position}.seed_counts");
+    let Some(target_path) = seed_target else {
+        report
+            .unmeasured
+            .push((field, "the seed cloned no target".into()));
+        return;
+    };
+    let seeds = match record::read(ctx.state) {
+        Ok(file) => file,
+        Err(err) => {
+            report.unmeasured.push((field, err.to_string()));
+            return;
+        }
+    };
+    let mut snapshot = Snapshot::default();
+    let scan = discover::targets(
+        std::slice::from_ref(checkout),
+        ctx.cfg,
+        false,
+        &mut snapshot,
+        cancel,
+    );
+    let Some(target) = scan.targets.iter().find(|t| &t.path == target_path) else {
+        report.unmeasured.push((field, "no seed record".into()));
+        return;
+    };
+    let Some(rec) = seeds.targets.get(&target.path) else {
+        report.unmeasured.push((field, "no seed record".into()));
+        return;
+    };
+    match record::counts(target, rec, gc::DEPS_CAP) {
+        Ok(Some(c)) => {
+            measured.insert("seeded_fresh".into(), Measured::Int(c.fresh));
+            measured.insert("seeded_unneeded".into(), Measured::Int(c.unneeded));
+            measured.insert("seeded_recompiled".into(), Measured::Int(c.recompiled));
+            measured.insert("seeded_missing".into(), Measured::Int(c.missing));
+        }
+        Ok(None) => {
+            report.unmeasured.push((
+                field,
+                "the target directory is not the one the record was written for".into(),
+            ));
+        }
+        Err(why) => {
+            report.unmeasured.push((field, why));
+        }
+    }
 }
 
 pub fn run(
@@ -161,6 +221,7 @@ pub fn run(
         let mut clone_ms = None;
         let mut seed_ms = None;
         let mut fill_targets_read = None;
+        let mut seed_target = None;
 
         if matches!(arm, Arm::Seeded) {
             let fill_started = std::time::Instant::now();
@@ -186,6 +247,7 @@ pub fn run(
                             fill_ms = Some(filled_ms);
                             clone_ms = Some(cloned_ms);
                             seed_ms = Some(filled_ms + cloned_ms);
+                            seed_target = outcome.target.map(|(path, _)| path);
                             for (kind, _, detail) in outcome.findings {
                                 push_seed_finding(&mut report, checkout, &kind, detail);
                             }
@@ -338,6 +400,15 @@ pub fn run(
                 measured.insert("fill_ms".into(), Measured::Int(fill));
                 measured.insert("clone_ms".into(), Measured::Int(clone));
                 measured.insert("fill_targets_read".into(), Measured::Int(targets));
+                attach_seed_counts(
+                    &mut report,
+                    &mut measured,
+                    ctx,
+                    checkout,
+                    seed_target.as_ref(),
+                    position,
+                    cancel,
+                );
                 seeded_build_ms.push(build_ms);
                 seeded_seed_ms.push(seed);
                 seeded_total_ms.push(seed + build_ms);
