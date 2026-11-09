@@ -59,10 +59,12 @@ runner, two read-only git readers, a load-average reading, sample order and inte
    (src/cargo_target.rs:15-19) and applies its own `GIT_` prefix filter. There is no scrub extraction (R5).
 6. **One env map per run is built once and given with `env_clear()` + `envs()` to every timed build**, so the
    child sees exactly the map (BENCH-5.1, 5.2). The prime and seed keep their own scrubs.
-7. **[Proposed DF1] The toolchain is pinned and a caller-set `RUSTC` or `CARGO_BUILD_RUSTC` is overridden, not
+7. **[Weigh W18] The toolchain is pinned and a caller-set `RUSTC` or `CARGO_BUILD_RUSTC` is overridden, not
    refused.** The map removes both and always sets `RUSTC=<resolved rustc>`, plus `RUSTUP_TOOLCHAIN=<name>`
    when rustup resolved one, and `RUSTUP_AUTO_INSTALL=0`. That is the pair doctor's probe sets
-   (src/doctor.rs:699-719), and it pins even without rustup. BENCH-5.4's finding still names the caller's
+   (src/doctor.rs:699-719). Without rustup, `resolve_toolchain` falls back to bare `cargo` and `rustc`
+   (src/doctor.rs:459-460), so the pin is the same bare `rustc` on `PATH` that seed resolved, not an absolute
+   path. BENCH-5.4's finding still names the caller's
    value. Why: seed clones only units for the toolchain `resolve_toolchain` found (SEED decision 6,
    MAIN .skills/SEED/decisions.md:11), so a different `RUSTC` would make every seeded unit recompile and
    measure a mismatch. This is the wrapper decision's shape (W6): override and report. It answers the Open
@@ -218,7 +220,7 @@ Locality: new file; `cargo_target.rs` stays as it is, because `TARGET_VARS` is a
 
 `env_map` takes the caller's variables and removes `TARGET_VARS`, every `GIT_*`, `CARGO_PKG_*`,
 `CARGO_MANIFEST_DIR`, `OUT_DIR`, `CARGO_BUILD_RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`, and
-[Proposed DF1] `RUSTC`, `CARGO_BUILD_RUSTC`, `RUSTUP_TOOLCHAIN` and `RUSTUP_TOOLCHAIN_SOURCE`. It sets
+[Weigh W18] `RUSTC`, `CARGO_BUILD_RUSTC`, `RUSTUP_TOOLCHAIN` and `RUSTUP_TOOLCHAIN_SOURCE`. It sets
 `RUSTC_WRAPPER=""`, `RUSTC_WORKSPACE_WRAPPER=""`, `RUSTUP_AUTO_INSTALL=0`, `RUSTC=tc.rustc`, and
 `RUSTUP_TOOLCHAIN=tc.name` when `Some` (decision 7). Each wrapper variable the caller set non-empty becomes
 an `env.wrapper.overridden` finding (BENCH-5.3), and a caller `RUSTC` or `CARGO_BUILD_RUSTC` becomes an
@@ -369,7 +371,8 @@ Surface:
 - tests/guards.rs's allowed state-file set (:230-237): **frozen**. Bench adds no state file, and the bench
   test compares against the seed-era set (`seeds.json` and `store/` added).
 Interface: a "Which command" row, one fenced command line, a "Reading a receipt" paragraph (the prime, the
-sample findings, the `_ms` series, that p90 is the max for n ≤ 9, the four seed counts), the setup and
+sample findings, the `_ms` series, that p90 is the max for n ≤ 9, the four seed counts, and that seed and
+fill times rise through a run as finished samples add targets to scan, shown by `fill_targets_read`), the setup and
 cleanup lines (`git worktree add` 2n times, then `git worktree remove`, an even n), and a "Do not" line
 (run `bench` only when asked).
 Depth: n/a — extends existing docs within the 150-line cap (about 65 body lines today, digest §11).
@@ -420,8 +423,6 @@ Requirements changed at design (already applied to requirements.md, re-surfaced 
 - BENCH-10.2 is narrowed to the children bench's own code spawns. `Git::run`'s missing deadline, which
   discovery already uses for every command, is a new Open Question outside ROAD-11 (R6).
 
-Pending bench-interpret's pick:
-- [Proposed DF1] Decision 7 adds `RUSTC`, `CARGO_BUILD_RUSTC`, `RUSTUP_TOOLCHAIN` and `RUSTUP_TOOLCHAIN_SOURCE`
-  to BENCH-5.2's removals and pins the resolved toolchain. BENCH-5.4 still reports the caller's value. If DF1
-  is accepted, BENCH-5.2's list is amended to match and the RUSTC Open Question closes. If it is rejected,
-  the alternative is a refusal under story 2.
+- DF1 was picked as pin and override (Weigh W18; bench-interpret checked it in a temp crate, and clippy-all
+  still runs clippy's lints under this env shape). BENCH-5.2 and 5.4 are amended, and the RUSTC Open
+  Question is closed. BENCH-2.11 is labeled Weigh W17.

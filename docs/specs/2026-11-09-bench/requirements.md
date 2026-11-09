@@ -116,7 +116,7 @@ comparison, so that I never read a number from a sample that was not cold, not f
   text (`choose::choose`, src/seed/mod.rs:221). [Weigh W16; compared on the whole text since design]
 - **BENCH-2.11** IF two checkouts given resolve the same target directory THEN THE SYSTEM SHALL refuse the
   run, because the first build would create it and every later seeded sample would then clone nothing
-  (src/seed/place.rs:218-232). [Derived at design, from the review]
+  (src/seed/place.rs:218-232). [Weigh W17]
 - **BENCH-2.9** WHEN the run is refused THE SYSTEM SHALL run no prime, seed or build, report one `refusal`
   finding per failing checkout naming its reason, and exit with code 1.
 
@@ -161,14 +161,18 @@ cache wrapper such as sccache cannot pass off a cache read as a cold build.
   ARCH-13's floor (today `resolve` scrubs only the target-dir variables and `GIT_*`, src/cargo_target.rs:352-359,
   and the proof replay removes the wrapper variables, tests/common/prove.rs:797-803): without `CARGO_TARGET_DIR`,
   `CARGO_BUILD_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR`, any `GIT_*`, any `CARGO_PKG_*`, `CARGO_MANIFEST_DIR`,
-  `OUT_DIR`, `CARGO_BUILD_RUSTC_WRAPPER` or `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`; with `RUSTC_WRAPPER` and
-  `RUSTC_WORKSPACE_WRAPPER` set to the empty string; and with the toolchain `seed` resolves for the checkout
-  (`doctor::resolve_toolchain`), not one the caller's current directory selects (ARCH-13). [Weigh W6]
+  `OUT_DIR`, `CARGO_BUILD_RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`, `RUSTC`, `CARGO_BUILD_RUSTC`,
+  `RUSTUP_TOOLCHAIN` or `RUSTUP_TOOLCHAIN_SOURCE`; with `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` set to
+  the empty string; and pinned to the toolchain `seed` resolves for the checkout (`doctor::resolve_toolchain`),
+  not one the caller's current directory selects (ARCH-13). The pin is `RUSTC` set to the resolved rustc, plus
+  `RUSTUP_TOOLCHAIN` set to the resolved name when rustup resolved one, plus `RUSTUP_AUTO_INSTALL=0`.
+  [Weigh W6; the RUSTC removal and pin Weigh W18]
 - **BENCH-5.3** WHEN the caller's environment sets `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`,
   `CARGO_BUILD_RUSTC_WRAPPER` or `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER` to a non-empty value THE SYSTEM SHALL
   report one finding of kind `env.wrapper.overridden` per variable, naming it and its value. [Weigh W6]
 - **BENCH-5.4** WHEN the caller's environment sets `RUSTC` or `CARGO_BUILD_RUSTC` THE SYSTEM SHALL report a
-  finding naming the variable and its value. [Weigh W6]
+  finding of kind `env.rustc.overridden` naming the variable and its value. The timed build uses the pin of
+  BENCH-5.2 instead. [Weigh W6, W18]
 
 ## 6. Stop a bench
 
@@ -292,8 +296,6 @@ Files this change touches, and what each guards:
 - How `cargo hive bench` samples cold versus seeded (BENCH-1.1, 1.2, 1.7 carry a Weigh pick) — project owner —
   2026-10-25 — forbid-guess (cấm đoán). Raised at `docs/specs/2026-10-25-foundation/requirements.md:159`. The
   operator confirms or replaces the pick at the spec sheet.
-- Whether bench pins or refuses a caller-set `RUSTC` or `CARGO_BUILD_RUSTC` (BENCH-5.4 only reports it) —
-  design-solution — 2026-11-09 — decided in design.md, not guessed here.
 - `Git::run` (src/git.rs:66), used by discovery for every command, spawns git with no deadline, against
   `docs/standards/code.md:14`. bench inherits that through `discover::checkouts`. Found at design review,
   2026-11-09; it is outside ROAD-11 and needs its own fix. Owner: the project owner — 2026-11-09 — not
