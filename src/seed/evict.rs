@@ -153,7 +153,7 @@ pub fn run(
         return outcome;
     }
 
-    // Store lock stays held through commit and remove_counted (decision 3).
+    // Store lock stays held through commit and remove_counted.
     let Some(store_lock) = (match ctx.state.try_store_exclusive() {
         Ok(lock) => lock,
         Err(err) => {
@@ -280,13 +280,23 @@ fn absorb_walk_faults(
 }
 
 fn remove_stale_evict_trees(state: &State) -> Result<(), String> {
+    remove_stale_evict_trees_bounded(state, crate::gc::CRATE_DIR_CAP)
+}
+
+fn remove_stale_evict_trees_bounded(state: &State, cap: usize) -> Result<(), String> {
     let dir = store_dir(state).join(".tmp");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(format!("{}: {err}", dir.display())),
     };
-    for entry in entries {
+    for (seen, entry) in entries.enumerate() {
+        if seen >= cap {
+            return Err(format!(
+                "{} has more than {cap} entries; remove temp entries until fewer remain and run the command again",
+                dir.display()
+            ));
+        }
         let entry = entry.map_err(|err| format!("{}: {err}", dir.display()))?;
         let name = entry.file_name();
         let Some(text) = name.to_str() else {
@@ -308,17 +318,69 @@ fn remove_stale_evict_trees(state: &State) -> Result<(), String> {
 }
 
 fn remove_emptied_value_dirs(state: &State, renamed: &[(StoreKey, PathBuf)]) {
+    remove_emptied_value_dirs_bounded(state, renamed, crate::gc::CRATE_DIR_CAP)
+}
+
+fn remove_emptied_value_dirs_bounded(state: &State, renamed: &[(StoreKey, PathBuf)], cap: usize) {
     let mut values = BTreeMap::new();
     for (key, _) in renamed {
         values.insert(key.toolchain_value, ());
     }
     for value in values.into_keys() {
         let dir = store_dir(state).join(value.to_string());
-        let Ok(mut entries) = fs::read_dir(&dir) else {
+        let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
-        if entries.next().is_none() {
+        if entries.take(cap).next().is_none() {
             let _ = fs::remove_dir(&dir);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn scratch_state(label: &str) -> State {
+        let dir = PathBuf::from(format!(
+            "/private/tmp/hive-it-evict-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        State::open_at(dir).unwrap()
+    }
+
+    fn finish(state: &State) {
+        let _ = std::fs::remove_dir_all(state.root());
+    }
+
+    #[test]
+    fn remove_stale_evict_trees_reports_a_listing_past_its_cap_and_leaves_the_rest() {
+        let state = scratch_state("stale-cap");
+        let tmp = store_dir(&state).join(".tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut planted = Vec::new();
+        for name in ["evict-1", "evict-2", "evict-3", "evict-4"] {
+            let path = tmp.join(name);
+            std::fs::create_dir(&path).unwrap();
+            planted.push(path);
+        }
+        let err = remove_stale_evict_trees_bounded(&state, 3)
+            .expect_err("a listing past the cap is not a finished stale cleanup");
+        assert!(
+            err.contains(&format!("{} has more than 3 entries", tmp.display())),
+            "{err}"
+        );
+        assert!(
+            err.contains("remove temp entries until fewer remain and run the command again"),
+            "{err}"
+        );
+        assert_eq!(
+            planted.iter().filter(|path| path.exists()).count(),
+            1,
+            "the entry past the cap stays"
+        );
+        finish(&state);
     }
 }
