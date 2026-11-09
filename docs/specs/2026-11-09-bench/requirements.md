@@ -104,14 +104,19 @@ comparison, so that I never read a number from a sample that was not cold, not f
   off (`git --no-optional-locks`), so the check never rewrites the checkout's index, a repo file under ARCH-2.
   By default `git status` refreshes the index and writes it out (Context7 `/git/htmldocs`, git-status
   "BACKGROUND REFRESH"). [Weigh W13]
-- **BENCH-2.5** IF the target directory Cargo resolves for any checkout given already exists THEN THE SYSTEM
-  SHALL refuse the run. [Weigh W2]
+- **BENCH-2.5** IF the target directory Cargo resolves for any checkout given already exists, or its build
+  directory differs from its target directory THEN THE SYSTEM SHALL refuse the run. [Weigh W2; the build
+  directory clause follows from seed's own `target.split` refusal, src/seed/place.rs:206, added at design]
 - **BENCH-2.6** IF the two arms differ in count, either arm has fewer than 2 checkouts, or one checkout is
   given more than once THEN THE SYSTEM SHALL refuse the run. [Weigh W10]
 - **BENCH-2.7** IF doctor has not passed Seeding, StoreCompression and Deletion for the toolchain release the
   checkouts resolve THEN THE SYSTEM SHALL refuse the run, as `seed` refuses (`src/cli.rs:1496-1506`).
-- **BENCH-2.8** IF the toolchain cannot be resolved for a checkout given, or the checkouts resolve different
-  toolchain releases THEN THE SYSTEM SHALL refuse the run. [Weigh W16]
+- **BENCH-2.8** IF the toolchain cannot be resolved for a checkout given, or the checkouts resolve toolchains
+  whose whole `rustc -vV` text differs THEN THE SYSTEM SHALL refuse the run. Seed matches the store on that
+  text (`choose::choose`, src/seed/mod.rs:221). [Weigh W16; compared on the whole text since design]
+- **BENCH-2.11** IF two checkouts given resolve the same target directory THEN THE SYSTEM SHALL refuse the
+  run, because the first build would create it and every later seeded sample would then clone nothing
+  (src/seed/place.rs:218-232). [Derived at design, from the review]
 - **BENCH-2.9** WHEN the run is refused THE SYSTEM SHALL run no prime, seed or build, report one `refusal`
   finding per failing checkout naming its reason, and exit with code 1.
 
@@ -153,7 +158,7 @@ cache wrapper such as sccache cannot pass off a cache read as a cold build.
 - **BENCH-5.1** THE SYSTEM SHALL build one environment map per run and give it to every timed build of that
   run. The prime and the seed keep the environment scrubs they use today (BENCH-9.6). [Weigh W6]
 - **BENCH-5.2** THE SYSTEM SHALL build that map from the caller's environment, as new behavior that goes beyond
-  ARCH-13's floor (today `resolve` scrubs only the target-dir variables and `GIT_*`, src/cargo_target.rs:350-358,
+  ARCH-13's floor (today `resolve` scrubs only the target-dir variables and `GIT_*`, src/cargo_target.rs:352-359,
   and the proof replay removes the wrapper variables, tests/common/prove.rs:797-803): without `CARGO_TARGET_DIR`,
   `CARGO_BUILD_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR`, any `GIT_*`, any `CARGO_PKG_*`, `CARGO_MANIFEST_DIR`,
   `OUT_DIR`, `CARGO_BUILD_RUSTC_WRAPPER` or `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`; with `RUSTC_WRAPPER` and
@@ -217,9 +222,9 @@ Files this change touches, and what each guards:
 - `src/receipt.rs`: the module doc comment is reworded to name bench as the one command with times
   (a comment, no behavior); guard BENCH-9.3 for the receipt shape.
 - `src/git.rs`: a HEAD and dirty-tree reader is added; guard BENCH-9.5.
-- `src/cargo_target.rs`: the target-dir and `GIT_*` scrub that today lives inline in `resolve`
-  (src/cargo_target.rs:350-358) is extracted so bench can reuse it, and `output_with_deadline` (:259) is
-  reused. Guard BENCH-9.6.
+- `src/cargo_target.rs`: gains a bounded child runner for bench's own children. `resolve` and its inline
+  scrub (src/cargo_target.rs:352-359) are untouched; bench reads the same `TARGET_VARS` list. Guard
+  BENCH-9.6.
 - `src/platform/`: the `Fs` trait gains a load-average reading (`libc::getloadavg`), so macOS code stays
   behind it (ARCH-15). No existing method changes; no behavior to guard.
 - `plugin/skills/hive/SKILL.md`, `tests/skill.rs`, `skills/hive/eval.json`: guard BENCH-9.4.
@@ -255,13 +260,18 @@ Files this change touches, and what each guards:
   and remove no checkout, and remove no target. The only process it spawns that writes outside a target-dir
   clone is the timed Cargo build, run with `--offline --locked` (ARCH-2 under the reading in the close
   package's D3, `[Weigh W3]`, an interpretation of the spine for the operator to confirm; ARCH-18). It runs
-  no test, benchmark or binary of the checkout (story 3's shapes are compile-only). Verified by a test
+  no test, benchmark or binary target of the checkout. Story 3's shapes only compile, though the checkout's
+  own build scripts and proc-macros run as they do in the owner's own build (docs/standards/testing.md:44).
+  Cargo's own writes under `~/.cargo` (such as `.global-cache`) are Cargo's, under the same D3 reading. Verified by a test
   that runs bench on fixture checkouts with a scratch `CARGO_HOME` and `HIVE_HOME`, as the fixture helpers
   do (tests/common/cargo_fixture.rs), and checks that the fixture repo's tracked files are unchanged and that
   every checkout and target still exists afterwards, and that each checkout's git index is byte-identical
   before and after the refusal checks.
-- **Reliability:** **BENCH-10.2** Every child process bench spawns has an explicit deadline, and every
-  directory walk and file read a bounded size (`docs/standards/code.md:14`). Hitting one is a failed step
+- **Reliability:** **BENCH-10.2** Every child process bench's own code spawns (the timed builds and the git
+  HEAD and dirty readers) has an explicit deadline and bounded captured output, and every file read bench
+  adds has a bounded size (`docs/standards/code.md:14`). The git calls that discovery already makes
+  through `Git::run` (src/git.rs:66) have no deadline today. That existing gap is out of scope here; see
+  Open Questions. Hitting one is a failed step
   under BENCH-7.1, never a silent skip. Verified by a test that injects a deadline shorter than a fixture
   build through a test seam, not a flag.
 - **Accessibility:** None. A headless CLI whose output is JSON or one line of text, as every other command.
@@ -284,3 +294,7 @@ Files this change touches, and what each guards:
   operator confirms or replaces the pick at the spec sheet.
 - Whether bench pins or refuses a caller-set `RUSTC` or `CARGO_BUILD_RUSTC` (BENCH-5.4 only reports it) —
   design-solution — 2026-11-09 — decided in design.md, not guessed here.
+- `Git::run` (src/git.rs:66), used by discovery for every command, spawns git with no deadline, against
+  `docs/standards/code.md:14`. bench inherits that through `discover::checkouts`. Found at design review,
+  2026-11-09; it is outside ROAD-11 and needs its own fix. Owner: the project owner — 2026-11-09 — not
+  guessed here.
