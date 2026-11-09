@@ -131,7 +131,7 @@ The outcome of a liveness proof window that could not have caught a fault (an Un
 _Avoid_: skipped, trivially passing
 
 **Auto tier**:
-GC that runs without a plan: `rustc*`/`rmeta*` temp entries and superseded incremental sessions, always after taking the owner's lock.
+GC that runs without a plan: `rustc*`/`rmeta*` temp entries and superseded incremental sessions, always after taking the owner's lock, and, when bare `cargo hive gc` runs over every target hive knows, eviction from the store of entries no target holds.
 
 **Plan tier**:
 GC through `cargo hive gc --plan` then `apply`: closure deletion and whole orphan targets.
