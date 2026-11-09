@@ -519,7 +519,7 @@ _Requirements: BENCH-1.2, BENCH-1.9_
 
 **Depends-on:** Task 6
 
-- [ ] **Step 1: Write the failing test**:
+- [x] **Step 1: Write the failing test**:
 
 ```rust
 #[test]
@@ -545,10 +545,10 @@ fn each_shape_is_its_cargo_command_offline_and_locked() {
 ```
 
   Run: `cargo test --lib bench::command::`. Expect: a compile error.
-- [ ] **Step 2: Implement** `BuildCmd`, `FromStr` (its `Err` is a `String` naming the five shapes), `args` and
+- [x] **Step 2: Implement** `BuildCmd`, `FromStr` (its `Err` is a `String` naming the five shapes), `args` and
   `command_line`, with a `//!` comment on the file.
-- [ ] **Step 3: Run** `cargo test --lib bench::`. Expect pass.
-- [ ] **Step 4: Commit** `feat(bench): the five timed build shapes`
+- [x] **Step 3: Run** `cargo test --lib bench::`. Expect pass.
+- [x] **Step 4: Commit** `feat(bench): the five timed build shapes`
 
 _Requirements: BENCH-3.1, BENCH-3.2, BENCH-3.4_
 
