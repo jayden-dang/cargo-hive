@@ -23,6 +23,7 @@ the derivation in `frame-change`, `clarify-decisions`, and `interpret-session` w
 - **Lifecycle stage:** `Active development` — where the project is in its life. Move it to `Cut Released` when v0.1.0 is published.
 - **Compat obligation** is not written, so it is derived from the lifecycle stage: Idea / Early development / Active development → **None**; Cut Released / Scaling / Maintenance → **External**. **None:** nothing outside this repo depends on any current schema, endpoint, or file format. **Internal:** other services or teams in the same org read them. **External:** users, customers, or third-party clients depend on them. Write a `Compat obligation` line only to override the derivation.
 - **Default PR base:** `main` — `land-branch` reads it as the third rung of its base-resolution ladder.
+- **Default landing action:** `merge` — when a request names no outcome, `land-branch` merges locally after a green gate, pushes `main`, and closes the tickets it completed. This line is the standing permission for that push.
 
 These are distinct from the product **Goals** in `docs/product/vision.md` (what success
 looks like): posture is *how carefully to build right now*, not *what to build*.
