@@ -168,9 +168,6 @@ pub fn run(
                 Ok(Fill::Continue(filled)) => {
                     let filled_ms = millis(fill_started.elapsed());
                     fill_targets_read = Some(filled.report().targets_read);
-                    for (kind, _, detail) in filled.findings() {
-                        push_seed_finding(&mut report, checkout, kind, detail.clone());
-                    }
                     let clone_started = std::time::Instant::now();
                     match seed::run_clone(
                         ctx,

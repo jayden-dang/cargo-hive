@@ -1,8 +1,10 @@
 #![cfg(target_os = "macos")]
 mod common;
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -323,5 +325,44 @@ fn a_bench_primes_once_then_reports_every_sample_in_abba_order() {
                 assert!(!key.contains(banned));
             }
         }
+    }
+}
+
+#[test]
+fn a_seeded_sample_copies_each_seed_finding_once() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let plan = bench_plan(&hive, &repo, 2);
+    let blocked = repo.scratch.path.join("blocked");
+    fs::create_dir_all(&blocked).unwrap();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+    let report = run_bench(
+        &hive,
+        &plan,
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &|| false,
+    );
+    let _ = fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755));
+    assert!(matches!(report.end, End::Finished));
+    let seeded: BTreeSet<_> = plan.seeded.iter().map(|c| c.path.clone()).collect();
+    let rows: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.kind != "bench.sample" && f.path.as_ref().is_some_and(|p| seeded.contains(p)))
+        .collect();
+    assert!(
+        rows.iter().any(|f| f.kind == "walk.unreadable"),
+        "expected a fill finding on a seeded checkout, got {rows:?}"
+    );
+    let mut seen = BTreeSet::new();
+    for f in rows {
+        let key = (f.path.clone(), f.kind.clone(), f.detail.clone());
+        assert!(
+            seen.insert(key.clone()),
+            "seed finding copied more than once: {key:?}"
+        );
     }
 }
