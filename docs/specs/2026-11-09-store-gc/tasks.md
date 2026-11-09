@@ -449,7 +449,7 @@ _Requirements: STOREGC-6.1, STOREGC-6.2, STOREGC-9.4, STOREGC-10.13_
 
 **Depends-on:** Task 9
 
-- [ ] **Step 1: Write the failing tests.** Every entry is made by hand with 2 MiB files, as `spike-k4.md` measured:
+- [x] **Step 1: Write the failing tests.** Every entry is made by hand with 2 MiB files, as `spike-k4.md` measured:
   - In `tests/store_gc.rs`, as library calls:
     - `freed_and_still_shared_bytes_split_by_sharing`. One evicted entry holds a compressed file nothing clones and an incompressible file that a kept scratch clone still shares. `store_freed_bytes` equals the compressed file's blocks, and `store_bytes_still_shared` equals the incompressible file's blocks.
     - `with_check_c_failed_the_store_bytes_are_unmeasured`: `account_bytes` is false.
@@ -457,9 +457,9 @@ _Requirements: STOREGC-6.1, STOREGC-6.2, STOREGC-9.4, STOREGC-10.13_
   - In `tests/gc_disk_image.rs`, `store_freed_bytes_never_exceed_what_the_volume_regained`. `HIVE_HOME` sits on the image, with a compressed entry and an incompressible entry that a clone on the image shares, made by hand and backdated. Run bare `gc`; `store_freed_bytes` is at most the image's available-bytes increase.
 
   Run; expect failures.
-- [ ] **Step 2: Implement** the receipt counts of STOREGC-7.1 that remain, from the ledger's `freed` and `still_shared` as `remove_counted` reports them. Without `account_bytes`, each bytes count goes to `unmeasured` with the reason.
-- [ ] **Step 3: Run.** `cargo test`, then `cargo test --test gc_disk_image`; expect pass.
-- [ ] **Step 4: Commit.** `feat(gc): report the bytes store eviction freed and what clones still share`
+- [x] **Step 2: Implement** the receipt counts of STOREGC-7.1 that remain, from the ledger's `freed` and `still_shared` as `remove_counted` reports them. Without `account_bytes`, each bytes count goes to `unmeasured` with the reason.
+- [x] **Step 3: Run.** `cargo test`, then `cargo test --test gc_disk_image`; expect pass.
+- [x] **Step 4: Commit.** `feat(gc): report the bytes store eviction freed and what clones still share`
 
 _Requirements: STOREGC-7.1, STOREGC-7.2, STOREGC-7.3, STOREGC-7.4, STOREGC-9.3, STOREGC-10.9_
 
