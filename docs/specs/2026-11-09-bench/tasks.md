@@ -985,7 +985,8 @@ fn an_empty_store_for_the_repo_after_the_prime_stops_before_any_sample() {
   `kept` outcome's findings), a non-zero Cargo exit (the exit code and the last stderr lines, capped at
   4 KiB, in the detail, worded `exit code <n>`), and `TimedOut` (worded `past its deadline of <ms> ms`).
   The detail always names the step: `prime`, `seed of <checkout>` or `build of <checkout>`. After the prime,
-  `seed::store::read(ctx.state)` is checked once for a `Row` whose `repos` holds `plan.repo.main`; none gives
+  `seed::store::read(ctx.state)` is checked once for a `Row` whose `repos` holds `plan.repo.main` (the check
+  is on the repo, not the toolchain; see design Upstream sync, Still-open S2); none gives
   `bench.nothing_to_seed` with detail `no stored unit lists <main>; build it once with <command line>, then
   bench again`, and the run ends Failed before the first sample. Each starts no further sample, lists the
   rest as unmeasured, and skips the summaries.

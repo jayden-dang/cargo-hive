@@ -421,7 +421,11 @@ Changed at the conductor's final review (2026-11-09, `.skills/_pending-bench/aut
 (no `Cargo.lock` refuses, §3), BENCH-7.3 (an empty store for the repo after the prime stops the run, §1) and
 BENCH-8.1's lockfile, cache and removal line (§10) are new. The 7.3 check reads `store.db` once
 (`seed::store::read`, src/seed/store.rs:130) and looks for a `Row` whose `repos` holds the repo's main
-(src/seed/store.rs:24-34). A toolchain mismatch still reaches BENCH-4.2's per-sample finding.
+(src/seed/store.rs:24-34). It is a check on the repo, not on the toolchain. If the store has rows for the
+repo but none for the bench's toolchain, the run passes 7.3, and seeded_1's own fill then learns that
+toolchain from cold_1's fresh target, so the first compressing fill for it lands inside seeded_1's seed
+time. A check through `choose::choose` with the plan's `version_text` would catch that case; it is left open
+(Still-open S2) for the operator.
 
 Changed at plan review (2026-11-09, `.skills/_pending-bench/auto/plan-review.md`): the interfaces of §1
 (`Report` fields, `seed_ms` defined as `fill_ms + clone_ms`), §3 (`check` takes the registry, config and
