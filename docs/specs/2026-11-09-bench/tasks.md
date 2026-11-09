@@ -1078,7 +1078,7 @@ fn bench_writes_one_schema_two_receipt_and_exits_zero() {
     assert_eq!(git(&repo.main, &["ls-files", "-s"]), tracked);
     for (lane, before) in lanes.iter().zip(&indexes) {
         assert!(lane.join("target").exists(), "{}: bench removed nothing, so its target stays", lane.display());
-        assert_eq!(git(lane, &["status", "--porcelain", "--untracked-files=no"]), "",
+        assert_eq!(git(lane, &["--no-optional-locks", "status", "--porcelain", "--untracked-files=no"]), "",
                    "{}: a tracked file changed", lane.display());
         assert_eq!(&fs::read(index_of(lane)).unwrap(), before, "{}", lane.display());
     }
