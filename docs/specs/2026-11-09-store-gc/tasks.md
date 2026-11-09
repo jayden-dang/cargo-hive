@@ -142,7 +142,7 @@ _Requirements: STOREGC-10.2, STOREGC-10.7, STOREGC-10.10, STOREGC-10.12_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - In `src/state.rs`, with two `State` values on one scratch root, since flock is per open file description:
     - `two_shared_store_locks_coexist`.
     - `an_exclusive_try_returns_none_while_a_shared_lock_is_held`.
@@ -151,9 +151,9 @@ _Requirements: STOREGC-10.2, STOREGC-10.7, STOREGC-10.10, STOREGC-10.12_
   - In `tests/seed.rs`, `a_seed_waits_for_an_exclusive_store_lock_and_then_seeds`. The test holds `try_store_exclusive` on the fixture's `HIVE_HOME` and starts `cargo hive seed`. After 1 s it asserts that the seed is still running and that `store.db` and `store/` are unchanged, which shows the seed is waiting before fill. It then releases, and the seed exits 0 with clones.
 
   Run `cargo test --lib state::` and `cargo test --test seed a_seed_waits`; expect a compile failure, then a failure.
-- [ ] **Step 2: Implement** the two methods on the `locked_or_cancelled` pattern: `LOCK_SH | LOCK_NB` polled every `LOCK_POLL`, and `LOCK_EX | LOCK_NB` tried once. `seed::run` takes the shared lock with the seed's cancel closure before `fill::fill` and holds it until `place` returns. A cancel while waiting takes the existing SEED-7.5 path.
-- [ ] **Step 3: Run.** `cargo test`; expect pass, with tests/seed.rs, tests/seed_fill.rs and tests/status_seed.rs otherwise unchanged.
-- [ ] **Step 4: Commit.** `feat(state): add a store lock that seed holds shared while it fills and clones`
+- [x] **Step 2: Implement** the two methods on the `locked_or_cancelled` pattern: `LOCK_SH | LOCK_NB` polled every `LOCK_POLL`, and `LOCK_EX | LOCK_NB` tried once. `seed::run` takes the shared lock with the seed's cancel closure before `fill::fill` and holds it until `place` returns. A cancel while waiting takes the existing SEED-7.5 path.
+- [x] **Step 3: Run.** `cargo test`; expect pass, with tests/seed.rs, tests/seed_fill.rs and tests/status_seed.rs otherwise unchanged.
+- [x] **Step 4: Commit.** `feat(state): add a store lock that seed holds shared while it fills and clones`
 
 _Requirements: STOREGC-10.3_
 
