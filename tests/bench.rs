@@ -573,3 +573,40 @@ fn an_empty_store_for_the_repo_after_the_prime_stops_before_any_sample() {
         assert!(!c.path.join("target").exists());
     }
 }
+
+#[test]
+fn a_cancel_after_the_first_sample_keeps_it_and_lists_the_rest() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let plan = bench_plan(&hive, &repo, 2);
+    // cold_1 builds first and finishes; seeded_1's seed then clones into its target/debug, which trips the
+    // cancel during seeded_1's build.
+    let seeded_debug = plan.seeded[0].path.join("target/debug");
+    let cancel = move || seeded_debug.exists();
+    let report = run_bench(
+        &hive,
+        &plan,
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &cancel,
+    );
+    assert!(matches!(report.end, End::Cancelled));
+    assert_eq!(report.exit_code(), 130);
+    let samples: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.kind == "bench.sample")
+        .collect();
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].measured["arm"], Measured::Text("cold".into()));
+    assert!(!report.counts.keys().any(|k| k.ends_with("_median")));
+    assert!(report
+        .unmeasured
+        .iter()
+        .any(|(f, r)| f.starts_with("sample.") && r == "cancelled"));
+    for c in plan.cold.iter().chain(&plan.seeded) {
+        assert!(c.path.exists());
+    }
+}

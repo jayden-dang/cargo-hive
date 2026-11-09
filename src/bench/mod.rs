@@ -102,6 +102,19 @@ fn fail_run(report: &mut Report, from_position: u64, sample_count: u64, finding:
     mark_remaining_failed(report, from_position, sample_count);
 }
 
+fn mark_remaining_cancelled(report: &mut Report, from_position: u64, sample_count: u64) {
+    for position in from_position..=sample_count {
+        report
+            .unmeasured
+            .push((format!("sample.{position}"), "cancelled".into()));
+    }
+}
+
+fn cancel_run(report: &mut Report, from_position: u64, sample_count: u64) {
+    report.end = End::Cancelled;
+    mark_remaining_cancelled(report, from_position, sample_count);
+}
+
 fn push_seed_finding(report: &mut Report, checkout: &Checkout, kind: &str, detail: String) {
     report.findings.push(Finding {
         kind: kind.to_string(),
@@ -205,7 +218,7 @@ pub fn run(
             }
         }
         Ok(Fill::Stopped(_)) => {
-            report.end = End::Cancelled;
+            cancel_run(&mut report, 1, sample_count);
             return report;
         }
         Err(err) => {
@@ -258,7 +271,7 @@ pub fn run(
     for (idx, (arm, i)) in order::abba(n).into_iter().enumerate() {
         let position = idx as u64 + 1;
         if cancel() {
-            report.end = End::Cancelled;
+            cancel_run(&mut report, position, sample_count);
             return report;
         }
 
@@ -292,7 +305,7 @@ pub fn run(
                     ) {
                         Ok(outcome) => {
                             if outcome.cancelled {
-                                report.end = End::Cancelled;
+                                cancel_run(&mut report, position, sample_count);
                                 return report;
                             }
                             let cloned_ms = millis(clone_started.elapsed());
@@ -333,7 +346,7 @@ pub fn run(
                     }
                 }
                 Ok(Fill::Stopped(_)) => {
-                    report.end = End::Cancelled;
+                    cancel_run(&mut report, position, sample_count);
                     return report;
                 }
                 Err(err) => {
@@ -388,7 +401,7 @@ pub fn run(
                 millis(ran.exited_after)
             }
             Err(ChildOutputError::Cancelled) => {
-                report.end = End::Cancelled;
+                cancel_run(&mut report, position, sample_count);
                 return report;
             }
             Err(ChildOutputError::TimedOut) => {
