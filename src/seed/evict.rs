@@ -13,10 +13,11 @@ use crate::doctor::{self, Toolchain};
 use crate::gc::{self, Ledger};
 use crate::plan_tier::{faults_that_can_hide_an_owner, split_checkout_faults};
 use crate::platform::Fs;
-use crate::receipt::Finding;
+use crate::receipt::{Finding, Measured};
 use crate::seed::source::{self, Holds};
 use crate::seed::store::{
-    self, commit_eviction, evict_dir, inventory, rename_out, store_dir, CommitPlan, StoreKey,
+    self, commit_eviction, entry_dir, evict_dir, inventory, rename_out, store_dir, CommitPlan, Row,
+    StoreKey,
 };
 use crate::state::State;
 
@@ -229,14 +230,53 @@ pub fn run(
     }
     let toolchain_n = toolchain_keys.len() as u64;
 
+    let mut cap_keys = BTreeSet::new();
+    let mut cap_n = 0u64;
+    if !ctx.account_bytes {
+        outcome.unmeasured.push((
+            "store_freeable_bytes_remaining".into(),
+            "doctor check (c) did not pass".into(),
+        ));
+    } else {
+        let planned: BTreeSet<_> = candidates.iter().map(|(k, _)| k.clone()).collect();
+        let CapPlan {
+            evict,
+            freeable_remaining,
+            held_over_cap,
+        } = plan_cap(
+            ctx.fs,
+            ctx.state,
+            &inv.rows,
+            &inv.rowless,
+            &planned,
+            &held,
+            limits.cap_bytes,
+        );
+        for (key, at) in evict {
+            cap_keys.insert(key.clone());
+            candidates.push((key, at));
+            cap_n += 1;
+        }
+        push_count(
+            &mut outcome,
+            "store_freeable_bytes_remaining",
+            freeable_remaining,
+        );
+        if let Some(finding) = held_over_cap {
+            outcome.findings.push(finding);
+        }
+    }
+
     if dry_run {
         push_count(&mut outcome, "store_entries_evicted_age", age_n);
         push_count(&mut outcome, "store_entries_evicted_rowless", rowless_n);
         push_count(&mut outcome, "store_entries_evicted_toolchain", toolchain_n);
+        push_count(&mut outcome, "store_entries_evicted_cap", cap_n);
         return outcome;
     }
 
     if candidates.is_empty() && refreshed.is_empty() {
+        push_count(&mut outcome, "store_entries_evicted_cap", 0);
         return outcome;
     }
 
@@ -307,6 +347,7 @@ pub fn run(
     let mut age_evicted = 0u64;
     let mut rowless_evicted = 0u64;
     let mut toolchain_evicted = 0u64;
+    let mut cap_evicted = 0u64;
     let mut ledger = Ledger::new();
     let store_root = store_dir(ctx.state);
     for (key, path) in &committed.renamed {
@@ -316,6 +357,8 @@ pub fn run(
             rowless_evicted += 1;
         } else if toolchain_keys.contains(key) {
             toolchain_evicted += 1;
+        } else if cap_keys.contains(key) {
+            cap_evicted += 1;
         }
         if let Err(err) = gc::remove_counted(
             ctx.fs,
@@ -345,6 +388,7 @@ pub fn run(
         "store_entries_evicted_toolchain",
         toolchain_evicted,
     );
+    push_count(&mut outcome, "store_entries_evicted_cap", cap_evicted);
     push_count(
         &mut outcome,
         "store_toolchains_dropped",
@@ -432,6 +476,215 @@ fn values_for_texts(state: &State, texts: &[String]) -> BTreeSet<u64> {
 
 fn push_count(outcome: &mut EvictOutcome, name: &str, n: u64) {
     outcome.counts.push((name.to_string(), n));
+}
+
+struct CapPlan {
+    evict: Vec<(StoreKey, Option<u64>)>,
+    freeable_remaining: u64,
+    held_over_cap: Option<Finding>,
+}
+
+#[derive(Clone)]
+struct CapEntry {
+    key: StoreKey,
+    last_live_at: Option<u64>,
+    registry_deps: Vec<String>,
+    freeable: u64,
+}
+
+fn plan_cap(
+    fs: &dyn Fs,
+    state: &State,
+    rows: &[Row],
+    rowless: &[(StoreKey, PathBuf)],
+    planned: &BTreeSet<StoreKey>,
+    held: &Holds,
+    cap_bytes: u64,
+) -> CapPlan {
+    let mut unheld = Vec::new();
+    let mut held_freeable = BTreeMap::new();
+    let mut sum = 0u64;
+    for row in rows {
+        let key = StoreKey {
+            toolchain_value: row.toolchain_value,
+            name_meta: row.name_meta.clone(),
+            fingerprint_hash: row.fingerprint_hash.clone(),
+        };
+        if planned.contains(&key) {
+            continue;
+        }
+        let dir = entry_dir(state, row);
+        let freeable = gc::measure(fs, &dir, std::slice::from_ref(&dir), true)
+            .bytes
+            .freed;
+        sum += freeable;
+        if held.hold_reason(&key).is_some() {
+            held_freeable.insert(key, freeable);
+        } else {
+            unheld.push(CapEntry {
+                key,
+                last_live_at: Some(row.last_live_at),
+                registry_deps: row.registry_deps.clone(),
+                freeable,
+            });
+        }
+    }
+    for (key, dir) in rowless {
+        if planned.contains(key) {
+            continue;
+        }
+        let freeable = gc::measure(fs, dir, std::slice::from_ref(dir), true)
+            .bytes
+            .freed;
+        sum += freeable;
+        if held.hold_reason(key).is_some() {
+            held_freeable.insert(key.clone(), freeable);
+        } else {
+            unheld.push(CapEntry {
+                key: key.clone(),
+                last_live_at: None,
+                registry_deps: Vec::new(),
+                freeable,
+            });
+        }
+    }
+
+    sort_cap_candidates(&mut unheld);
+
+    let mut evict = Vec::new();
+    for entry in unheld {
+        if sum <= cap_bytes {
+            break;
+        }
+        if entry.freeable == 0 {
+            continue;
+        }
+        sum = sum.saturating_sub(entry.freeable);
+        evict.push((entry.key, entry.last_live_at));
+    }
+
+    let held_over_cap = if sum > cap_bytes {
+        Some(held_over_cap_finding(held, &held_freeable, sum, cap_bytes))
+    } else {
+        None
+    };
+
+    CapPlan {
+        evict,
+        freeable_remaining: sum,
+        held_over_cap,
+    }
+}
+
+fn sort_cap_candidates(entries: &mut [CapEntry]) {
+    entries.sort_by(|a, b| match (a.last_live_at, b.last_live_at) {
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, None) => a.key.cmp(&b.key),
+        (Some(a_at), Some(b_at)) => a_at.cmp(&b_at).then_with(|| a.key.cmp(&b.key)),
+    });
+
+    let mut i = 0;
+    while i < entries.len() {
+        let at = entries[i].last_live_at;
+        let mut j = i + 1;
+        while j < entries.len() && entries[j].last_live_at == at {
+            j += 1;
+        }
+        reverse_topo_cohort(&mut entries[i..j]);
+        i = j;
+    }
+}
+
+fn reverse_topo_cohort(cohort: &mut [CapEntry]) {
+    if cohort.len() <= 1 {
+        return;
+    }
+    let n = cohort.len();
+    let index: BTreeMap<&str, usize> = cohort
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (e.key.fingerprint_hash.as_str(), i))
+        .collect();
+    let mut indegree = vec![0usize; n];
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, entry) in cohort.iter().enumerate() {
+        for dep in &entry.registry_deps {
+            if let Some(&j) = index.get(dep.as_str()) {
+                succ[i].push(j);
+                indegree[j] += 1;
+            }
+        }
+    }
+    let mut ready: BTreeSet<(StoreKey, usize)> = BTreeSet::new();
+    for (i, &deg) in indegree.iter().enumerate() {
+        if deg == 0 {
+            ready.insert((cohort[i].key.clone(), i));
+        }
+    }
+    let mut order = Vec::with_capacity(n);
+    while let Some((_, i)) = ready.pop_first() {
+        order.push(i);
+        for &j in &succ[i] {
+            indegree[j] -= 1;
+            if indegree[j] == 0 {
+                ready.insert((cohort[j].key.clone(), j));
+            }
+        }
+    }
+    if order.len() < n {
+        let mut rest: Vec<usize> = (0..n).filter(|i| !order.contains(i)).collect();
+        rest.sort_by(|&a, &b| cohort[a].key.cmp(&cohort[b].key));
+        order.extend(rest);
+    }
+    let sorted: Vec<CapEntry> = order
+        .into_iter()
+        .map(|i| CapEntry {
+            key: cohort[i].key.clone(),
+            last_live_at: cohort[i].last_live_at,
+            registry_deps: cohort[i].registry_deps.clone(),
+            freeable: cohort[i].freeable,
+        })
+        .collect();
+    cohort.clone_from_slice(&sorted);
+}
+
+fn held_over_cap_finding(
+    held: &Holds,
+    held_freeable: &BTreeMap<StoreKey, u64>,
+    total: u64,
+    cap_bytes: u64,
+) -> Finding {
+    let mut per_target: Vec<(PathBuf, u64)> = Vec::new();
+    for (path, local) in &held.by_target {
+        let mut bytes = 0u64;
+        for (key, freeable) in held_freeable {
+            if local.keys.contains(key) || local.name_metas.contains(&key.name_meta) {
+                bytes += freeable;
+            }
+        }
+        if bytes > 0 {
+            per_target.push((path.clone(), bytes));
+        }
+    }
+    per_target.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    per_target.truncate(10);
+
+    let mut measured = BTreeMap::new();
+    measured.insert("total".into(), Measured::Int(total));
+    measured.insert("cap".into(), Measured::Int(cap_bytes));
+    let mut detail = format!("{total} freeable bytes held over the {cap_bytes} byte cap");
+    for (path, bytes) in &per_target {
+        measured.insert(path.display().to_string(), Measured::Int(*bytes));
+        detail.push_str(&format!("\n{}: {bytes}", path.display()));
+    }
+
+    Finding {
+        kind: "store.held_over_cap".into(),
+        path: per_target.first().map(|(p, _)| p.clone()),
+        detail,
+        measured,
+    }
 }
 
 fn absorb_walk_faults(

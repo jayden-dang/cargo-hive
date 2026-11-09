@@ -6,12 +6,17 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cargo_hive::cargo_target::{Owner, TargetDir, TAG_LINE};
 use cargo_hive::classify::{CheckoutKind, Class};
 use cargo_hive::discover::Checkout;
+use cargo_hive::fingerprint;
+use cargo_hive::gc;
 use cargo_hive::platform::apfs::Apfs;
+use cargo_hive::platform::Fs;
+use cargo_hive::receipt::Measured;
 use cargo_hive::seed::choose::{self, Choice};
 use cargo_hive::seed::evict::{self, EvictCtx, Limits};
-use cargo_hive::seed::store;
+use cargo_hive::seed::store::{self, store_dir};
 use cargo_hive::state::State;
 use common::store_fixture::{
     count, drop_row, entry_dirs, has_finding, plant_rowless, rows, seeded_store, set_last_live_at,
@@ -923,5 +928,487 @@ fn no_caller_toolchain_while_it_is_kept_blocks_every_drop() {
             .all(|row| row["name_meta"].as_str() != Some("agedblock-cccccccccccccccc")),
         "{:?}",
         rows(&hive)
+    );
+}
+
+fn kib256(seed: u64) -> Vec<u8> {
+    let mut bytes = vec![0u8; 256 * 1024];
+    let mut state = seed;
+    for b in &mut bytes {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        *b = (state >> 33) as u8;
+    }
+    bytes
+}
+
+fn outcome_count(outcome: &evict::EvictOutcome, name: &str) -> u64 {
+    outcome
+        .counts
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, n)| *n)
+        .unwrap_or(0)
+}
+
+fn entry_path(
+    hive: &Hive,
+    toolchain_value: u64,
+    name_meta: &str,
+    fingerprint_hash: &str,
+) -> PathBuf {
+    store_dir(&State::open_at(hive.home.path.clone()).unwrap())
+        .join(toolchain_value.to_string())
+        .join(format!("{name_meta}-{fingerprint_hash}"))
+}
+
+fn freeable_of(fs: &Apfs, dir: &Path) -> u64 {
+    gc::measure(fs, dir, &[dir.to_path_buf()], true).bytes.freed
+}
+
+fn run_evict(
+    hive: &Hive,
+    fs: &Apfs,
+    targets: &[TargetDir],
+    limits: Limits,
+    account_bytes: bool,
+) -> evict::EvictOutcome {
+    let state = State::open_at(hive.home.path.clone()).unwrap();
+    let rustup = PathBuf::from("rustup");
+    evict::run(
+        &EvictCtx {
+            state: &state,
+            fs,
+            targets,
+            checkouts: &[],
+            checkout_faults: &[],
+            scan_faults: &[],
+            cache_roots: &[],
+            window: Duration::from_secs(7 * DAY),
+            account_bytes,
+            now: SystemTime::now(),
+            caller_toolchain: None,
+            caller_toolchain_kept: false,
+            rustup: &rustup,
+        },
+        limits,
+        false,
+        &|| false,
+    )
+}
+
+fn plant_undecided_name_meta_target(root: &Path, name_meta: &str) -> TargetDir {
+    let profile = root.join("debug");
+    let unit = profile.join(".fingerprint").join(name_meta);
+    fs::create_dir_all(&unit).unwrap();
+    fs::write(
+        root.join("CACHEDIR.TAG"),
+        format!("Signature: 8a477f597d28d172789f06886806bc55\n{TAG_LINE}\n"),
+    )
+    .unwrap();
+    fs::write(unit.join("output-lib-meta"), "").unwrap();
+    let stamp = unit.join("invoked.timestamp");
+    fs::write(&stamp, "").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&stamp)
+        .unwrap()
+        .set_modified(SystemTime::now())
+        .unwrap();
+    TargetDir {
+        path: root.to_path_buf(),
+        owner: Owner::Unresolved {
+            reason: "cap test".into(),
+        },
+        profiles: vec![fingerprint::read_profile(&profile)],
+        size: None,
+        unreadable: None,
+    }
+}
+
+#[test]
+fn the_cap_evicts_unheld_entries_oldest_first_until_under() {
+    let hive = Hive::ready();
+    let fs = apfs();
+    let value = 77_001u64;
+    let keys = [
+        (value, "old-aaaaaaaaaaaaaaaa", "1111111111111111", 3 * DAY),
+        (value, "mid-bbbbbbbbbbbbbbbb", "2222222222222222", 2 * DAY),
+        (value, "new-cccccccccccccccc", "3333333333333333", DAY),
+    ];
+    for &(tv, meta, fp, age) in &keys {
+        synth_entry(&hive, (tv, meta, fp), &[], &[("blob", kib256(age))], age);
+    }
+    let free: Vec<u64> = keys
+        .iter()
+        .map(|&(tv, meta, fp, _)| freeable_of(&fs, &entry_path(&hive, tv, meta, fp)))
+        .collect();
+    assert!(free.iter().all(|&n| n > 0), "{free:?}");
+    let total: u64 = free.iter().sum();
+    let cap = free[0] + free[1] + free[2] / 2;
+    assert!(
+        cap < total && cap >= free[1] + free[2],
+        "cap={cap} free={free:?}"
+    );
+
+    let outcome = run_evict(
+        &hive,
+        &fs,
+        &[],
+        Limits {
+            cap_bytes: cap,
+            max_age_secs: MAX_AGE_SECS,
+        },
+        true,
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_entries_evicted_cap"),
+        1,
+        "{:?}",
+        outcome.counts
+    );
+    assert!(
+        outcome_count(&outcome, "store_freeable_bytes_remaining") <= cap,
+        "{:?}",
+        outcome.counts
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .all(|row| row["name_meta"].as_str() != Some("old-aaaaaaaaaaaaaaaa")),
+        "{:?}",
+        rows(&hive)
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .any(|row| row["name_meta"].as_str() == Some("mid-bbbbbbbbbbbbbbbb")),
+        "{:?}",
+        rows(&hive)
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .any(|row| row["name_meta"].as_str() == Some("new-cccccccccccccccc")),
+        "{:?}",
+        rows(&hive)
+    );
+}
+
+#[test]
+fn within_one_last_live_at_an_entry_goes_before_the_entries_its_registry_deps_name() {
+    let hive = Hive::ready();
+    let fs = apfs();
+    let value = 77_002u64;
+    let dep_fp = "aaaaaaaaaaaaaaaa";
+    let user_fp = "zzzzzzzzzzzzzzzz";
+    synth_entry(
+        &hive,
+        (value, "aaa-dep", dep_fp),
+        &[],
+        &[("blob", kib256(1))],
+        0,
+    );
+    synth_entry(
+        &hive,
+        (value, "zzz-user", user_fp),
+        &[dep_fp],
+        &[("blob", kib256(2))],
+        0,
+    );
+    let dep_free = freeable_of(&fs, &entry_path(&hive, value, "aaa-dep", dep_fp));
+    let user_free = freeable_of(&fs, &entry_path(&hive, value, "zzz-user", user_fp));
+    assert!(dep_free > 0 && user_free > 0, "{dep_free} {user_free}");
+    let cap = dep_free.max(user_free);
+
+    let outcome = run_evict(
+        &hive,
+        &fs,
+        &[],
+        Limits {
+            cap_bytes: cap,
+            max_age_secs: MAX_AGE_SECS,
+        },
+        true,
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_entries_evicted_cap"),
+        1,
+        "{:?}",
+        outcome.counts
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .all(|row| row["name_meta"].as_str() != Some("zzz-user")),
+        "dependent should go first: {:?}",
+        rows(&hive)
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .any(|row| row["name_meta"].as_str() == Some("aaa-dep")),
+        "dependency should stay: {:?}",
+        rows(&hive)
+    );
+}
+
+#[test]
+fn held_entries_over_the_cap_are_kept_and_reported() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let fs = apfs();
+    let sample = rows(&hive)[0].clone();
+    let value = sample["toolchain_value"].as_u64().unwrap();
+    let key_meta = sample["name_meta"].as_str().unwrap().to_string();
+    let key_fp = sample["fingerprint_hash"].as_str().unwrap().to_string();
+    let key_dir = entry_path(&hive, value, &key_meta, &key_fp);
+    fs::write(key_dir.join("cap-pad"), kib256(9)).unwrap();
+
+    let shared_meta = "sharemeta-aaaaaaaaaaaaaaaa";
+    let shared_fp = "bbbbbbbbbbbbbbbb";
+    synth_entry(
+        &hive,
+        (value, shared_meta, shared_fp),
+        &[],
+        &[("blob", kib256(10))],
+        0,
+    );
+    let only_meta = "onlymeta-cccccccccccccccc";
+    let only_fp = "dddddddddddddddd";
+    synth_entry(
+        &hive,
+        (value, only_meta, only_fp),
+        &[],
+        &[("blob", kib256(11))],
+        0,
+    );
+
+    let key_target = common::cargo_fixture::read_target(&repo.main.join("target"));
+    let undecided_root = hive.home.path.join("undecided-cap-target");
+    let _ = plant_undecided_name_meta_target(&undecided_root, shared_meta);
+    for meta in [only_meta, key_meta.as_str()] {
+        let unit = undecided_root.join("debug/.fingerprint").join(meta);
+        fs::create_dir_all(&unit).unwrap();
+        fs::write(unit.join("output-lib-meta"), "").unwrap();
+        let stamp = unit.join("invoked.timestamp");
+        fs::write(&stamp, "").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&stamp)
+            .unwrap()
+            .set_modified(SystemTime::now())
+            .unwrap();
+    }
+    let undecided = TargetDir {
+        path: undecided_root.clone(),
+        owner: Owner::Unresolved {
+            reason: "cap test".into(),
+        },
+        profiles: vec![fingerprint::read_profile(&undecided_root.join("debug"))],
+        size: None,
+        unreadable: None,
+    };
+
+    let key_free = freeable_of(&fs, &key_dir);
+    let shared_free = freeable_of(&fs, &entry_path(&hive, value, shared_meta, shared_fp));
+    let only_free = freeable_of(&fs, &entry_path(&hive, value, only_meta, only_fp));
+    assert!(key_free > 0 && shared_free > 0 && only_free > 0);
+
+    // Decided target holds every seeded live key (including the padded entry). Undecided
+    // holds shared_meta, only_meta, and key_meta by name-meta; the padded entry counts for both.
+    let mut decided_bytes = 0u64;
+    for row in rows(&hive) {
+        let meta = row["name_meta"].as_str().unwrap();
+        if meta == shared_meta || meta == only_meta {
+            continue;
+        }
+        let tv = row["toolchain_value"].as_u64().unwrap();
+        let fp = row["fingerprint_hash"].as_str().unwrap();
+        decided_bytes += freeable_of(&fs, &entry_path(&hive, tv, meta, fp));
+    }
+    let undecided_bytes = key_free + shared_free + only_free;
+    let held_total = decided_bytes + shared_free + only_free;
+    assert!(held_total > decided_bytes, "{held_total} {decided_bytes}");
+    let mut expected = [
+        (key_target.path.clone(), decided_bytes),
+        (undecided.path.clone(), undecided_bytes),
+    ];
+    expected.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let cap = held_total.saturating_sub(1);
+    let targets = [key_target, undecided];
+    let before = rows(&hive).len();
+
+    let outcome = run_evict(
+        &hive,
+        &fs,
+        &targets,
+        Limits {
+            cap_bytes: cap,
+            max_age_secs: MAX_AGE_SECS,
+        },
+        true,
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_entries_evicted_cap"),
+        0,
+        "{:?}",
+        outcome.counts
+    );
+    assert_eq!(rows(&hive).len(), before, "{:?}", rows(&hive));
+    let finding = outcome
+        .findings
+        .iter()
+        .find(|f| f.kind == "store.held_over_cap")
+        .expect("store.held_over_cap");
+    assert_eq!(
+        finding.measured.get("total"),
+        Some(&Measured::Int(held_total)),
+        "{finding:?}"
+    );
+    assert_eq!(
+        finding.measured.get("cap"),
+        Some(&Measured::Int(cap)),
+        "{finding:?}"
+    );
+    for (path, bytes) in &expected {
+        assert_eq!(
+            finding.measured.get(&path.display().to_string()),
+            Some(&Measured::Int(*bytes)),
+            "path {} bytes {bytes}: {finding:?}",
+            path.display()
+        );
+    }
+    let larger = &expected[0].0;
+    let smaller = &expected[1].0;
+    let detail = &finding.detail;
+    assert!(
+        detail.find(&larger.display().to_string()) < detail.find(&smaller.display().to_string()),
+        "larger first in detail: {detail}"
+    );
+}
+
+#[test]
+fn an_entry_that_frees_0_bytes_is_not_evicted_for_the_cap() {
+    let hive = Hive::ready();
+    let fs = apfs();
+    let value = 77_003u64;
+    synth_entry(
+        &hive,
+        (value, "shared-aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        &[],
+        &[("blob", kib256(3))],
+        0,
+    );
+    synth_entry(
+        &hive,
+        (value, "alone-cccccccccccccccc", "dddddddddddddddd"),
+        &[],
+        &[("blob", kib256(4))],
+        0,
+    );
+    let shared_dir = entry_path(&hive, value, "shared-aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb");
+    let keep = hive.home.path.join("clone-keep");
+    fs::create_dir_all(&keep).unwrap();
+    fs.clone_file(&shared_dir.join("blob"), &keep.join("blob"))
+        .unwrap();
+    assert_eq!(freeable_of(&fs, &shared_dir), 0);
+    let alone_free = freeable_of(
+        &fs,
+        &entry_path(&hive, value, "alone-cccccccccccccccc", "dddddddddddddddd"),
+    );
+    assert!(alone_free > 0);
+
+    let outcome = run_evict(
+        &hive,
+        &fs,
+        &[],
+        Limits {
+            cap_bytes: alone_free / 2,
+            max_age_secs: MAX_AGE_SECS,
+        },
+        true,
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .any(|row| row["name_meta"].as_str() == Some("shared-aaaaaaaaaaaaaaaa")),
+        "zero-freeable entry must stay: {:?}",
+        rows(&hive)
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .all(|row| row["name_meta"].as_str() != Some("alone-cccccccccccccccc")),
+        "{:?}",
+        rows(&hive)
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_entries_evicted_cap"),
+        1,
+        "{:?}",
+        outcome.counts
+    );
+}
+
+#[test]
+fn with_accounting_off_the_cap_evicts_nothing_and_says_so() {
+    let hive = Hive::ready();
+    let fs = apfs();
+    let value = 77_004u64;
+    synth_entry(
+        &hive,
+        (value, "capcand-aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        &[],
+        &[("blob", kib256(5))],
+        0,
+    );
+    synth_entry(
+        &hive,
+        (value, "agedcap-cccccccccccccccc", "dddddddddddddddd"),
+        &[],
+        &[("blob", kib256(6))],
+        31 * DAY,
+    );
+    let young_free = freeable_of(
+        &fs,
+        &entry_path(&hive, value, "capcand-aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+    );
+    assert!(young_free > 0);
+
+    let outcome = run_evict(
+        &hive,
+        &fs,
+        &[],
+        Limits {
+            cap_bytes: young_free / 2,
+            max_age_secs: MAX_AGE_SECS,
+        },
+        false,
+    );
+    assert!(
+        outcome_count(&outcome, "store_entries_evicted_age") >= 1,
+        "{:?}",
+        outcome.counts
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_entries_evicted_cap"),
+        0,
+        "{:?}",
+        outcome.counts
+    );
+    assert!(
+        rows(&hive)
+            .iter()
+            .any(|row| row["name_meta"].as_str() == Some("capcand-aaaaaaaaaaaaaaaa")),
+        "{:?}",
+        rows(&hive)
+    );
+    assert!(
+        outcome.unmeasured.iter().any(|(field, reason)| {
+            reason == "doctor check (c) did not pass"
+                && (field == "store_freeable_bytes_remaining" || field.contains("cap"))
+        }),
+        "{:?}",
+        outcome.unmeasured
     );
 }
