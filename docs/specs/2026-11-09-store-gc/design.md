@@ -199,7 +199,7 @@ Locality: new `src/seed/evict.rs`; `seed/mod.rs` gains `pub mod evict`; neighbor
 
 Flow:
 1. Holds: `source::holds`. Any fault STOREGC-4.4 names joins `whole_store`.
-2. Toolchains: lookups (a) and (b). A failure, a fault `apply` would refuse on, or no resolved checkout blocks drops (STOREGC-2.4, 2.5).
+2. Toolchains: lookups (a) and (b). A failed lookup or no resolved checkout blocks drops (STOREGC-2.4, 2.5). A fault `apply` would refuse on already went to `whole_store` in step 1 (STOREGC-4.4).
 3. `store::inventory`.
 4. If `whole_store` is non-empty → no candidates; report the holds (STOREGC-4.4).
 5. Otherwise: age candidates, then toolchain candidates (unheld entries of values not in use), then the cap. Without `account_bytes` the cap step is skipped into `unmeasured` (STOREGC-3.4). With it, measure every remaining entry, sum, and evict unheld entries in decision 7's order until the sum is at or under `cap_bytes`. If only held entries remain over it, that is STOREGC-3.3's finding, naming up to 10 targets, each with the freeable bytes of the held entries it holds by key or by name-meta (an entry held by several targets counts toward each), ordered by that number, with ties by path.
