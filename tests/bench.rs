@@ -1,14 +1,79 @@
 #![cfg(target_os = "macos")]
 mod common;
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use cargo_hive::bench::check::{check, Checked, Unfair};
+use cargo_hive::bench::command::{env_map, BuildCmd};
+use cargo_hive::bench::{run, End, Limits, Plan, Report, BUILD_DEADLINE};
+use cargo_hive::plan_tier::Ctx;
+use cargo_hive::receipt::Measured;
 use cargo_hive::registry::Registry;
-use cargo_hive::state::State;
-use common::registry_fixture::RegistryRepo;
+use cargo_hive::state::{Config, State};
+use common::plan_fixture::LibCtx;
+use common::recording_fs::Recording;
+use common::registry_fixture::{cargo_json, RegistryRepo};
 use common::{env_lock, git, init_repo, register, CargoHomeGuard, Hive, Scratch};
+
+fn bench_plan(hive: &Hive, repo: &RegistryRepo, n: usize) -> Plan {
+    let cold_paths: Vec<_> = (0..n).map(|i| repo.worktree(&format!("cold{i}"))).collect();
+    let seeded_paths: Vec<_> = (0..n)
+        .map(|i| repo.worktree(&format!("seeded{i}")))
+        .collect();
+    let checked = checked(hive, &cold_paths, &seeded_paths)
+        .unwrap_or_else(|list| panic!("{}", reason(Err(list))));
+    let mut vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    vars.retain(|(k, _)| k != "CARGO_HOME");
+    vars.push((
+        OsString::from("CARGO_HOME"),
+        hive.cargo_home.path.as_os_str().to_owned(),
+    ));
+    let env = env_map(vars, &checked.toolchain);
+    Plan {
+        repo: checked.repo,
+        cold: checked.cold,
+        seeded: checked.seeded,
+        toolchain: checked.toolchain,
+        build: BuildCmd::default(),
+        env,
+    }
+}
+
+fn run_bench(
+    hive: &Hive,
+    plan: &Plan,
+    limits: Limits,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Report {
+    run_bench_cfg(hive, plan, limits, cancel, |_| {})
+}
+
+fn run_bench_cfg(
+    hive: &Hive,
+    plan: &Plan,
+    limits: Limits,
+    cancel: &(dyn Fn() -> bool + Sync),
+    configure: impl FnOnce(&mut Config),
+) -> Report {
+    let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let _home = CargoHomeGuard::set(&hive.cargo_home.path);
+    let mut lib = LibCtx::open(hive, Recording::over_real().fs());
+    configure(&mut lib.cfg);
+    let repos = [plan.repo.clone()];
+    let ctx = Ctx {
+        state: &lib.state,
+        fs: lib.fs.as_ref(),
+        cfg: &lib.cfg,
+        now: SystemTime::now(),
+        account_bytes: true,
+        repos: &repos,
+        mains: &lib.mains,
+    };
+    run(&ctx, plan, limits, cancel)
+}
 
 fn checked(hive: &Hive, cold: &[PathBuf], seeded: &[PathBuf]) -> Result<Checked, Vec<Unfair>> {
     let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
@@ -188,4 +253,75 @@ fn a_repo_without_a_cargo_lock_is_refused() {
     let [a, b, c, d] = ["a", "b", "c", "d"].map(|n| repo.worktree(n));
     let r = reason(checked(&hive, &[a, b], &[c, d]));
     assert!(r.contains("has no Cargo.lock"), "{r}");
+}
+
+#[test]
+fn a_bench_primes_once_then_reports_every_sample_in_abba_order() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let plan = bench_plan(&hive, &repo, 2);
+    let report = run_bench(
+        &hive,
+        &plan,
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &|| false,
+    );
+    assert!(matches!(report.end, End::Finished));
+    assert_eq!(report.exit_code(), 0);
+    for key in ["prime_ms", "prime_entries_added", "prime_targets_read"] {
+        assert!(report.counts.contains_key(key), "{key}");
+    }
+    let samples: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.kind == "bench.sample")
+        .collect();
+    let arms: Vec<_> = samples.iter().map(|f| f.measured["arm"].clone()).collect();
+    assert_eq!(
+        arms,
+        ["cold", "seeded", "seeded", "cold"].map(|a| Measured::Text(a.into()))
+    );
+    for (i, f) in samples.iter().enumerate() {
+        assert_eq!(f.measured["position"], Measured::Int(i as u64 + 1));
+        for key in ["build_ms", "load_before_x100", "load_after_x100"] {
+            assert!(
+                matches!(f.measured.get(key), Some(Measured::Int(_))),
+                "{key}"
+            );
+        }
+    }
+    for f in samples
+        .iter()
+        .filter(|f| f.measured["arm"] == Measured::Text("seeded".into()))
+    {
+        let ms = |k: &str| match f.measured[k] {
+            Measured::Int(v) => v,
+            _ => panic!("{k}"),
+        };
+        assert_eq!(ms("seed_ms"), ms("fill_ms") + ms("clone_ms"));
+        assert!(f.measured.contains_key("fill_targets_read"));
+    }
+    for series in [
+        "cold_build_ms",
+        "seeded_build_ms",
+        "seeded_seed_ms",
+        "seeded_total_ms",
+    ] {
+        for stat in ["median", "p90", "min", "max", "spread"] {
+            assert!(
+                report.counts.contains_key(&format!("{series}_{stat}")),
+                "{series}_{stat}"
+            );
+        }
+    }
+    for f in &report.findings {
+        for key in f.measured.keys() {
+            for banned in ["seconds", "duration", "elapsed", "saved", "estimate"] {
+                assert!(!key.contains(banned));
+            }
+        }
+    }
 }
