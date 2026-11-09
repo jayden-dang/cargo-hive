@@ -128,7 +128,7 @@ House rules for this plan:
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test** in `tests/seed.rs`, next to `run_seed` (line 1892), reusing
+- [x] **Step 1: Write the failing test** in `tests/seed.rs`, next to `run_seed` (line 1892), reusing
   `run_seed`'s locate block:
 
 ```rust
@@ -167,13 +167,13 @@ fn seeding_through_the_fill_and_clone_halves_reports_what_one_run_reports() {
   `CargoHomeGuard` (tests/seed.rs:2572-2597) into `tests/common/mod.rs` as `pub`, and have tests/seed.rs
   import them. Run: `cargo test --test seed seeding_through_the_fill_and_clone_halves`.
   Expect: a compile error, because `seed::run_fill` does not exist.
-- [ ] **Step 2: Implement.** Move lines 186 to 199 into `run_fill`. A cancel at either point returns
+- [x] **Step 2: Implement.** Move lines 186 to 199 into `run_fill`. A cancel at either point returns
   `Ok(Fill::Stopped(from_fill(...)))` with exactly today's arguments. Otherwise it returns
   `Ok(Fill::Continue(Filled { report, findings }))`. Move lines 200 to 260 into `run_clone`. `run` becomes
   `match run_fill(..)? { Fill::Stopped(o) => Ok(o), Fill::Continue(f) => run_clone(.., f, cancel) }`.
-- [ ] **Step 3: Run** `cargo test --test seed` and `cargo test --lib seed::`. Expect every existing seed test
+- [x] **Step 3: Run** `cargo test --test seed` and `cargo test --lib seed::`. Expect every existing seed test
   to pass unchanged, plus the new one.
-- [ ] **Step 4: Commit** `refactor(seed): run as a fill half and a clone half`
+- [x] **Step 4: Commit** `refactor(seed): run as a fill half and a clone half`
 
 _Requirements: BENCH-9.1_
 
