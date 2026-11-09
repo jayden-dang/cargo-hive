@@ -29,7 +29,7 @@ Retrieval (schema 1.1, recipe fsubr-1.2, fresh 2026-11-09, seeds STOREGC plus re
 
 The retrieval is advisory; every `Reuse:` below comes from the scan digests.
 
-ARCH invariants this design relies on: ARCH-2, ARCH-4, ARCH-8, ARCH-10, ARCH-11, ARCH-13, ARCH-14, ARCH-15, ARCH-16, ARCH-17, ARCH-18, ARCH-19.
+ARCH invariants this design relies on: ARCH-2, ARCH-4, ARCH-8, ARCH-9, ARCH-10, ARCH-11, ARCH-13, ARCH-14, ARCH-15, ARCH-16, ARCH-17, ARCH-18. ARCH-19's try-without-waiting shape is borrowed for the store lock (decision 2); the store is not a Cargo target dir, so ARCH-19 itself does not bind it.
 
 ## Decisions
 
@@ -145,8 +145,8 @@ Surface:
 Interface:
 - `StoreKey { toolchain_value: u64, name_meta: String, fingerprint_hash: String }`, the key `same_key` already compares.
 - `store::inventory(fs, state) -> Inventory { rows: Vec<Row>, rowless: Vec<(StoreKey, PathBuf)>, tmp_bytes: u64 }`: every row with its directory present, every entry directory with no row, and the allocated bytes of `.tmp/`. It lists `store/<u64>/<name-meta>-<hash>/` only, skipping `.tmp/`, `CACHEDIR.TAG` and any name that is not one.
-- `store::rename_out(state, key, seq) -> io::Result<PathBuf>`.
-- `store::commit_eviction(state, plan: &CommitPlan, rename: impl FnMut(&StoreKey) -> io::Result<PathBuf>) -> Result<Committed, StateError>`. In one `Tx` it reads the rows, revalidates the plan, calls `rename` for each surviving candidate, writes the rows and texts, and returns what it renamed (decision 3).
+- `store::evict_dir(state, pid, seq) -> PathBuf` (`store/.tmp/evict-<pid>-<seq>`) and `store::rename_out(state, key, to) -> io::Result<()>`.
+- `store::commit_eviction(state, plan: &CommitPlan, rename: impl FnMut(&StoreKey) -> io::Result<Option<PathBuf>>) -> Result<Committed, StateError>`, where `Ok(None)` stops renaming (cancel). In one `Tx` it reads the rows, revalidates the plan, calls `rename` for each surviving candidate, writes the rows and texts, and returns what it renamed (decision 3).
 Depth: n/a — extends `store`.
 Locality: extend `src/seed/store.rs`; `read` and `merge` leave (STOREGC-10.4).
 
@@ -158,7 +158,7 @@ Respects: ARCH-17, ARCH-9
 Surface:
 - `source::live_registry_units` (called through `owned_targets` by fill, `src/seed/mod.rs:186`): `replace`. It calls the extracted helper, with the same output.
 - `liveness()`: `leave` (STOREGC-10.6).
-Interface: `source::holds(fs, targets: &[TargetDir], now, window) -> Holds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String>, by_reason: counts, whole_store: Vec<Finding>, findings: Vec<Finding> }`.
+Interface: `source::unit_key(&Unit) -> StoreKey` (the extracted mapping); `source::holds(fs, targets: &[TargetDir], now, window) -> Holds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String>, by_reason: counts, whole_store: Vec<Finding>, findings: Vec<Finding> }`.
 Depth: n/a — extends `source`.
 Locality: extend `src/seed/source.rs` (extract one helper); `fill.rs` leave.
 
@@ -178,7 +178,7 @@ Respects: ARCH-13, ARCH-14
 Surface:
 - `drop_directory_toolchain` readers (`src/doctor.rs:408`, `src/cargo_target.rs:360`): `leave` (STOREGC-10.7).
 - `resolve_toolchain`, `resolve_toolchain_until` callers (`src/cli.rs:369, 533, 849, 1012, 1118, 1279, 1474`; `src/seed/fill.rs:740`; `src/doctor.rs:1661`; tests/capability_gate.rs): `leave`. Same results, same environment handling.
-- `drop_directory_toolchain` body: `replace`. Its keep/drop predicate is extracted into `caller_toolchain_kept()`, which it calls, with the same behavior.
+- `drop_directory_toolchain` body: `replace`. Its keep/drop predicate is extracted into the pure `caller_toolchain_kept_from(source)` and the env-reading `caller_toolchain_kept()`, which it calls, with the same behavior.
 Interface:
 - `doctor::resolve_toolchain_own_dir_until(cwd, cancel) -> Result<Toolchain, String>`, lookup (a).
 - `doctor::caller_toolchain_kept() -> bool`, which reports whether (b) is one lookup.
@@ -191,7 +191,7 @@ Satisfies: STOREGC-1.1, STOREGC-1.4, STOREGC-1.7, STOREGC-1.8, STOREGC-2.2, STOR
 Reuse: none — new code (rung 7), because no module orders evictions or phases a store commit. Inside it: rung 2 for `gc::measure` (per-entry freeable), `gc::account::remove_counted` with `Ledger` (removal and freed bytes), `split_checkout_faults` and `faults_that_can_hide_an_owner` (`src/plan_tier/mod.rs:50-64`), and `Receipt` builders.
 Respects: ARCH-2, ARCH-4, ARCH-8, ARCH-10, ARCH-11, ARCH-15, ARCH-16, ARCH-18
 Interface: `seed::evict::run(ctx: &EvictCtx, limits: Limits, dry_run: bool, cancel: &dyn Fn() -> bool) -> EvictOutcome`.
-- `EvictCtx { state, fs, targets, checkouts, checkout_faults, scan_faults, cache_roots, window, account_bytes, now }`.
+- `EvictCtx { state, fs, targets, checkouts, checkout_faults, scan_faults, cache_roots, window, account_bytes, now, caller_toolchain }`, where `caller_toolchain` is the whole `Toolchain` `gc_cmd` already resolves at `src/cli.rs:849`, lookup (b)'s single result.
 - `Limits { cap_bytes, max_age_secs }`.
 - `EvictOutcome { counts: Vec<(String, u64)>, findings, notes, unmeasured, cancelled }`.
 Depth: if this module vanished, its one caller would still need to know only that eviction takes the scanned targets, the checkouts, a cap and a max age, and returns counts and findings. The phase order, hold rules, sort, lock protocol and commit stay hidden behind that interface. With one caller, the module earns its place as the locality of every STOREGC rule and as the one test seam for the cap (W10).
