@@ -479,7 +479,7 @@ _Requirements: STOREGC-7.1, STOREGC-7.2, STOREGC-7.3, STOREGC-7.4, STOREGC-9.3, 
 
 **Depends-on:** Task 10
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `a_cancel_during_commit_records_what_was_renamed_and_releases_both_locks`. This is a library call whose cancel closure turns true on its Nth call, for N across the commit. Afterwards:
     - `cancelled` is true;
     - `store.db` has no row for a renamed key;
@@ -493,13 +493,13 @@ _Requirements: STOREGC-7.1, STOREGC-7.2, STOREGC-7.3, STOREGC-7.4, STOREGC-9.3, 
   - `gc_exits_130_when_store_eviction_is_cancelled`: SIGINT is sent while the test holds the state lock, so commit waits. The exit is 130.
 
   Run; expect failures.
-- [ ] **Step 2: Implement** design decision 13.
+- [x] **Step 2: Implement** design decision 13.
   - Check cancel before each rename, inside `commit_eviction`'s rename closure.
   - Take the state lock non-cancellably.
   - Skip the removal on cancel.
   - In `gc_cmd`, exit 130 when `EvictOutcome.cancelled`.
-- [ ] **Step 3: Run.** `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `fix(gc): keep store entries whole when gc is killed or cancelled mid-eviction`
+- [x] **Step 3: Run.** `cargo test`; expect pass.
+- [x] **Step 4: Commit.** `fix(gc): keep store entries whole when gc is killed or cancelled mid-eviction`
 
 _Requirements: STOREGC-9.2_
 
