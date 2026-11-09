@@ -770,7 +770,7 @@ sequences builds and seeds.
 
 **Depends-on:** Task 1, Task 3, Task 5, Task 6, Task 8, Task 9
 
-- [ ] **Step 1: Write the failing test** in `tests/bench.rs`. `bench_plan(hive, repo, n)` makes 2n worktrees,
+- [x] **Step 1: Write the failing test** in `tests/bench.rs`. `bench_plan(hive, repo, n)` makes 2n worktrees,
   runs `checked` (Task 9), and builds `Plan` with `env_map` over `std::env::vars_os()` with `CARGO_HOME`
   replaced by `hive.cargo_home.path` (house rule 7). `run_bench(hive, plan, limits, cancel)` calls
   `run_bench_cfg(hive, plan, limits, cancel, |_| {})`. `run_bench_cfg` holds `env_lock()` and
@@ -817,15 +817,15 @@ fn a_bench_primes_once_then_reports_every_sample_in_abba_order() {
 
   Run: `cargo test --test bench a_bench_primes_once`. Expect: a compile error, because `bench::run` does not
   exist.
-- [ ] **Step 2: Implement** `run` as design §1's flow, for the finished path: the prime through `run_fill`
+- [x] **Step 2: Implement** `run` as design §1's flow, for the finished path: the prime through `run_fill`
   (its findings copied); then for each `abba(n)` entry, load before, `run_fill` + `run_clone` for a seeded
   sample (seed findings copied with the sample's checkout as path), `run_bounded` with
   `Capture { stdout_cap: 0, stderr_cap: 64 * 1024 }`, load after, and the `bench.sample` finding. Then the
   `<series>_<stat>` counts from `summarize`. A failed load reading goes in `unmeasured` as
   `sample.<position>.load_before` or `.load_after`. Report's `exit_code` maps Finished 0, Failed 1,
   Cancelled 130.
-- [ ] **Step 3: Run** `cargo test --test bench`. Expect pass.
-- [ ] **Step 4: Commit** `feat(bench): prime, then time cold and seeded samples in ABBA order`
+- [x] **Step 3: Run** `cargo test --test bench`. Expect pass.
+- [x] **Step 4: Commit** `feat(bench): prime, then time cold and seeded samples in ABBA order`
 
 _Requirements: BENCH-1.1, BENCH-1.2, BENCH-1.3, BENCH-1.4, BENCH-1.5, BENCH-1.6, BENCH-1.7, BENCH-1.8, BENCH-1.10, BENCH-1.12_
 
