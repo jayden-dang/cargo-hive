@@ -738,7 +738,7 @@ pub fn toolchain_row(
     let version = rustc_info_version(&text).map_err(|err| format!("{}: {err}", path.display()))?;
     let resolved =
         crate::doctor::resolve_toolchain_until(source_checkout, cancel).map_err(|err| {
-            if crate::doctor::toolchain_failure_exit(&err) == 130 {
+            if cancel() {
                 format!("{}: {err}", source_checkout.display())
             } else {
                 format!(
