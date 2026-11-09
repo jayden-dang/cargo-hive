@@ -41,7 +41,7 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
-    /// Delete superseded incremental sessions and leftover rustc temp dirs. A session with a lock file is deleted under that lock, and evicts from the store when given no repo
+    /// Delete superseded incremental sessions and leftover rustc temp dirs. A session with a lock file is deleted under that lock. With no repo argument, also evicts from the store
     Gc {
         /// Registered repos to clean; none means every target hive knows
         repos: Vec<std::path::PathBuf>,
@@ -496,6 +496,13 @@ fn live_checkouts(
     for repo in repos {
         b.scope_mut().repos.push(repo.main.clone());
         let (rows, faults) = crate::discover::checkouts(repo, registered_mains, cfg);
+        for fault in &faults {
+            b.finding(
+                "walk.unreadable",
+                Some(fault.path.clone()),
+                fault.detail.clone(),
+            );
+        }
         walk_faults.extend(faults);
         for c in rows {
             if !c.missing {
@@ -868,13 +875,6 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
     let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
     let (checkouts, checkout_faults) =
         live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
-    for fault in &checkout_faults {
-        b.finding(
-            "walk.unreadable",
-            Some(fault.path.clone()),
-            fault.detail.clone(),
-        );
-    }
     let all_repos = selection.all_repos;
     let scan = discover::targets(&checkouts, &cfg, all_repos, &mut snapshot, cancelled);
     if cancelled() {
@@ -1201,10 +1201,7 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
             }
         }
     }
-    let (_checkouts, checkout_faults) = live_checkouts(&named, &registered_mains, &cfg, &mut b);
-    for fault in checkout_faults {
-        b.finding("walk.unreadable", Some(fault.path), fault.detail);
-    }
+    let (_checkouts, _) = live_checkouts(&named, &registered_mains, &cfg, &mut b);
     if !args.is_empty() {
         for repo in &reg.repos {
             let (rows, _) = crate::discover::checkouts(repo, &registered_mains, &cfg);
@@ -1364,11 +1361,7 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
     }
     let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
     let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
-    let (checkouts, checkout_faults) =
-        live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
-    for fault in checkout_faults {
-        b.finding("walk.unreadable", Some(fault.path), fault.detail);
-    }
+    let (checkouts, _) = live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
     let scan = discover::targets(
         &checkouts,
         &cfg,

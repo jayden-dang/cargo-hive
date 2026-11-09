@@ -186,13 +186,7 @@ impl State {
         mut cancel: impl FnMut() -> bool,
     ) -> Result<StoreLock, StateError> {
         let path = self.root.join("store.lock");
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| io_err(&path, e))?;
+        let file = self.open_store_lock_file(&path)?;
         loop {
             // SAFETY: `file` owns a valid descriptor for the whole call.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
@@ -212,13 +206,7 @@ impl State {
     /// absent. `Ok(None)` when another process holds a shared or exclusive lock.
     pub fn try_store_exclusive(&self) -> Result<Option<StoreLock>, StateError> {
         let path = self.root.join("store.lock");
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| io_err(&path, e))?;
+        let file = self.open_store_lock_file(&path)?;
         loop {
             // SAFETY: `file` owns a valid descriptor for the whole call.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
@@ -231,6 +219,16 @@ impl State {
                 _ => return Err(io_err(&path, err)),
             }
         }
+    }
+
+    fn open_store_lock_file(&self, path: &Path) -> Result<fs::File, StateError> {
+        OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|e| io_err(path, e))
     }
 }
 

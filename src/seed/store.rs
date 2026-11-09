@@ -53,9 +53,7 @@ pub fn store_dir(state: &State) -> PathBuf {
 }
 
 pub fn entry_dir(state: &State, row: &Row) -> PathBuf {
-    store_dir(state)
-        .join(row.toolchain_value.to_string())
-        .join(format!("{}-{}", row.name_meta, row.fingerprint_hash))
+    key_dir(state, &row_key(row))
 }
 
 pub fn tag_path(state: &State) -> PathBuf {
@@ -74,7 +72,7 @@ pub fn evict_dir(state: &State, pid: u32, seq: usize) -> PathBuf {
         .join(format!("evict-{pid}-{seq}"))
 }
 
-fn key_dir(state: &State, key: &StoreKey) -> PathBuf {
+pub(crate) fn key_dir(state: &State, key: &StoreKey) -> PathBuf {
     store_dir(state)
         .join(key.toolchain_value.to_string())
         .join(format!("{}-{}", key.name_meta, key.fingerprint_hash))
@@ -420,7 +418,7 @@ fn same_key(left: &Row, right: &Row) -> bool {
         && left.fingerprint_hash == right.fingerprint_hash
 }
 
-fn row_key(row: &Row) -> StoreKey {
+pub(crate) fn row_key(row: &Row) -> StoreKey {
     StoreKey {
         toolchain_value: row.toolchain_value,
         name_meta: row.name_meta.clone(),
@@ -428,7 +426,7 @@ fn row_key(row: &Row) -> StoreKey {
     }
 }
 
-fn row_matches(row: &Row, key: &StoreKey) -> bool {
+pub(crate) fn row_matches(row: &Row, key: &StoreKey) -> bool {
     row.toolchain_value == key.toolchain_value
         && row.name_meta == key.name_meta
         && row.fingerprint_hash == key.fingerprint_hash
@@ -1208,9 +1206,7 @@ mod tests {
     }
 
     fn plant_entry(state: &State, key: &StoreKey) -> PathBuf {
-        let dir = store_dir(state)
-            .join(key.toolchain_value.to_string())
-            .join(format!("{}-{}", key.name_meta, key.fingerprint_hash));
+        let dir = key_dir(state, key);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f"), b"x").unwrap();
         dir
@@ -1325,9 +1321,7 @@ mod tests {
     }
 
     fn entry_path(state: &State, key: &StoreKey) -> PathBuf {
-        store_dir(state)
-            .join(key.toolchain_value.to_string())
-            .join(format!("{}-{}", key.name_meta, key.fingerprint_hash))
+        key_dir(state, key)
     }
 
     #[test]

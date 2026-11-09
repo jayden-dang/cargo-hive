@@ -16,8 +16,8 @@ use crate::platform::Fs;
 use crate::receipt::{Finding, Measured};
 use crate::seed::source::{self, Holds};
 use crate::seed::store::{
-    self, commit_eviction, entry_dir, evict_dir, inventory, rename_out, store_dir, CommitPlan,
-    Inventory, Row, StoreKey,
+    self, commit_eviction, entry_dir, evict_dir, inventory, key_dir, rename_out, row_key,
+    row_matches, store_dir, CommitPlan, Inventory, Row, StoreKey,
 };
 use crate::state::State;
 
@@ -72,11 +72,6 @@ pub fn run(
         ctx.cache_roots,
     );
     outcome.findings.extend(held.findings.iter().cloned());
-    for finding in &held.whole_store {
-        if !outcome.findings.iter().any(|existing| existing == finding) {
-            outcome.findings.push(finding.clone());
-        }
-    }
 
     let inv = match inventory(ctx.fs, ctx.state) {
         Ok(inv) => inv,
@@ -112,48 +107,28 @@ pub fn run(
     let mut held_name_meta = 0u64;
 
     for row in &inv.rows {
-        let key = StoreKey {
-            toolchain_value: row.toolchain_value,
-            name_meta: row.name_meta.clone(),
-            fingerprint_hash: row.fingerprint_hash.clone(),
-        };
-        match held.hold_reason(&key) {
-            Some("live") => {
-                refreshed.push(key);
-                held_live += 1;
-                continue;
-            }
-            Some("undecided") => {
-                refreshed.push(key);
-                held_undecided += 1;
-                continue;
-            }
-            Some("name_meta") => {
-                refreshed.push(key);
-                held_name_meta += 1;
-                continue;
-            }
-            Some(_) | None => {}
+        let key = row_key(row);
+        if bump_hold(
+            held.hold_reason(&key),
+            &mut held_live,
+            &mut held_undecided,
+            &mut held_name_meta,
+        ) {
+            refreshed.push(key);
+            continue;
         }
         if now_secs.saturating_sub(row.last_live_at) > limits.max_age_secs {
             age_candidates.push((key, Some(row.last_live_at)));
         }
     }
     for (key, _) in &inv.rowless {
-        match held.hold_reason(key) {
-            Some("live") => {
-                held_live += 1;
-                continue;
-            }
-            Some("undecided") => {
-                held_undecided += 1;
-                continue;
-            }
-            Some("name_meta") => {
-                held_name_meta += 1;
-                continue;
-            }
-            Some(_) | None => {}
+        if bump_hold(
+            held.hold_reason(key),
+            &mut held_live,
+            &mut held_undecided,
+            &mut held_name_meta,
+        ) {
+            continue;
         }
         rowless_candidates.push((key.clone(), None));
     }
@@ -193,11 +168,7 @@ pub fn run(
                 Ok(used_values) => {
                     let already: BTreeSet<_> = candidates.iter().map(|(k, _)| k.clone()).collect();
                     for row in &inv.rows {
-                        let key = StoreKey {
-                            toolchain_value: row.toolchain_value,
-                            name_meta: row.name_meta.clone(),
-                            fingerprint_hash: row.fingerprint_hash.clone(),
-                        };
+                        let key = row_key(row);
                         if used_values.contains(&row.toolchain_value) {
                             continue;
                         }
@@ -342,13 +313,15 @@ pub fn run(
     }
 
     if cancel() {
-        if post_plan_remaining.is_some() {
-            push_count(
-                &mut outcome,
-                "store_freeable_bytes_remaining",
-                untouched_freeable(ctx.fs, ctx.state, &inv.rows, &inv.rowless, &held),
-            );
-        }
+        push_untouched_freeable(
+            &mut outcome,
+            post_plan_remaining,
+            ctx.fs,
+            ctx.state,
+            &inv.rows,
+            &inv.rowless,
+            &held,
+        );
         outcome.cancelled = true;
         return outcome;
     }
@@ -357,13 +330,15 @@ pub fn run(
     let Some(store_lock) = (match ctx.state.try_store_exclusive() {
         Ok(lock) => lock,
         Err(err) => {
-            if post_plan_remaining.is_some() {
-                push_count(
-                    &mut outcome,
-                    "store_freeable_bytes_remaining",
-                    untouched_freeable(ctx.fs, ctx.state, &inv.rows, &inv.rowless, &held),
-                );
-            }
+            push_untouched_freeable(
+                &mut outcome,
+                post_plan_remaining,
+                ctx.fs,
+                ctx.state,
+                &inv.rows,
+                &inv.rowless,
+                &held,
+            );
             outcome.findings.push(Finding {
                 kind: "store.write_failed".into(),
                 path: Some(ctx.state.root().join("store.lock")),
@@ -373,13 +348,15 @@ pub fn run(
             return outcome;
         }
     }) else {
-        if post_plan_remaining.is_some() {
-            push_count(
-                &mut outcome,
-                "store_freeable_bytes_remaining",
-                untouched_freeable(ctx.fs, ctx.state, &inv.rows, &inv.rowless, &held),
-            );
-        }
+        push_untouched_freeable(
+            &mut outcome,
+            post_plan_remaining,
+            ctx.fs,
+            ctx.state,
+            &inv.rows,
+            &inv.rowless,
+            &held,
+        );
         let busy = candidates.len() as u64;
         push_count(&mut outcome, "store_entries_held_busy", busy);
         push_count(
@@ -422,13 +399,15 @@ pub fn run(
     }) {
         Ok(committed) => committed,
         Err(err) => {
-            if post_plan_remaining.is_some() {
-                push_count(
-                    &mut outcome,
-                    "store_freeable_bytes_remaining",
-                    untouched_freeable(ctx.fs, ctx.state, &inv.rows, &inv.rowless, &held),
-                );
-            }
+            push_untouched_freeable(
+                &mut outcome,
+                post_plan_remaining,
+                ctx.fs,
+                ctx.state,
+                &inv.rows,
+                &inv.rowless,
+                &held,
+            );
             outcome.findings.push(Finding {
                 kind: "store.write_failed".into(),
                 path: Some(ctx.state.root().join(store::STORE_FILE)),
@@ -448,11 +427,7 @@ pub fn run(
     }
 
     for (key, detail) in &committed.rename_failures {
-        let path = path_for_key(ctx.state, &inv, key).unwrap_or_else(|| {
-            store_dir(ctx.state)
-                .join(key.toolchain_value.to_string())
-                .join(format!("{}-{}", key.name_meta, key.fingerprint_hash))
-        });
+        let path = key_dir(ctx.state, key);
         outcome.findings.push(Finding {
             kind: "store.rename_failed".into(),
             path: Some(path),
@@ -643,9 +618,42 @@ fn push_count(outcome: &mut EvictOutcome, name: &str, n: u64) {
     outcome.counts.push((name.to_string(), n));
 }
 
+fn bump_hold(
+    reason: Option<&str>,
+    live: &mut u64,
+    undecided: &mut u64,
+    name_meta: &mut u64,
+) -> bool {
+    match reason {
+        Some("live") => *live += 1,
+        Some("undecided") => *undecided += 1,
+        Some("name_meta") => *name_meta += 1,
+        _ => return false,
+    }
+    true
+}
+
+fn push_untouched_freeable(
+    outcome: &mut EvictOutcome,
+    post_plan_remaining: Option<u64>,
+    fs: &dyn Fs,
+    state: &State,
+    rows: &[Row],
+    rowless: &[(StoreKey, PathBuf)],
+    held: &Holds,
+) {
+    if post_plan_remaining.is_some() {
+        push_count(
+            outcome,
+            "store_freeable_bytes_remaining",
+            untouched_freeable(fs, state, rows, rowless, held),
+        );
+    }
+}
+
 fn path_for_key(state: &State, inv: &Inventory, key: &StoreKey) -> Option<PathBuf> {
-    if let Some(row) = inv.rows.iter().find(|row| row_key_matches(row, key)) {
-        return Some(entry_dir(state, row));
+    if inv.rows.iter().any(|row| row_matches(row, key)) {
+        return Some(key_dir(state, key));
     }
     inv.rowless
         .iter()
@@ -657,7 +665,7 @@ fn preview_renames(inv: &Inventory, candidates: &[(StoreKey, Option<u64>)]) -> B
     let mut survivors = BTreeSet::new();
     for (key, planned) in candidates {
         match planned {
-            Some(planned_at) => match inv.rows.iter().find(|row| row_key_matches(row, key)) {
+            Some(planned_at) => match inv.rows.iter().find(|row| row_matches(row, key)) {
                 Some(row) if row.last_live_at > *planned_at => {}
                 Some(_) => {
                     survivors.insert(key.clone());
@@ -665,7 +673,7 @@ fn preview_renames(inv: &Inventory, candidates: &[(StoreKey, Option<u64>)]) -> B
                 None => {}
             },
             None => {
-                if inv.rows.iter().any(|row| row_key_matches(row, key)) {
+                if inv.rows.iter().any(|row| row_matches(row, key)) {
                     continue;
                 }
                 survivors.insert(key.clone());
@@ -690,7 +698,7 @@ fn preview_dropped_values(
         let remains = inv
             .rows
             .iter()
-            .any(|row| row.toolchain_value == value && !renamed.contains(&row_store_key(row)))
+            .any(|row| row.toolchain_value == value && !renamed.contains(&row_key(row)))
             || inv
                 .rowless
                 .iter()
@@ -700,20 +708,6 @@ fn preview_dropped_values(
         }
     }
     Ok(dropped)
-}
-
-fn row_key_matches(row: &Row, key: &StoreKey) -> bool {
-    row.toolchain_value == key.toolchain_value
-        && row.name_meta == key.name_meta
-        && row.fingerprint_hash == key.fingerprint_hash
-}
-
-fn row_store_key(row: &Row) -> StoreKey {
-    StoreKey {
-        toolchain_value: row.toolchain_value,
-        name_meta: row.name_meta.clone(),
-        fingerprint_hash: row.fingerprint_hash.clone(),
-    }
 }
 
 struct CapPlan {
@@ -743,11 +737,7 @@ fn plan_cap(
     let mut held_freeable = BTreeMap::new();
     let mut sum = 0u64;
     for row in rows {
-        let key = StoreKey {
-            toolchain_value: row.toolchain_value,
-            name_meta: row.name_meta.clone(),
-            fingerprint_hash: row.fingerprint_hash.clone(),
-        };
+        let key = row_key(row);
         if planned.contains(&key) {
             continue;
         }
