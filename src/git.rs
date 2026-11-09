@@ -52,24 +52,19 @@ impl Git {
     }
 
     fn command(&self) -> Command {
+        self.git_cmd(&[])
+    }
+
+    fn read_only(&self) -> Command {
+        // Plain `git status` refreshes mtimes into .git/index; --no-optional-locks does not.
+        self.git_cmd(&["--no-optional-locks"])
+    }
+
+    fn git_cmd(&self, leading: &[&str]) -> Command {
         let mut cmd = Command::new("git");
         // A user's `core.fsmonitor=true` would start a daemon that writes a socket into the
         // checkout's .git; hive only reads.
-        cmd.args(["-c", "core.fsmonitor=false"])
-            .arg("-C")
-            .arg(&self.dir);
-        for (key, _) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with("GIT_") {
-                cmd.env_remove(&key);
-            }
-        }
-        cmd
-    }
-
-    // Plain `git status` refreshes mtimes into .git/index; --no-optional-locks does not.
-    fn read_only(&self) -> Command {
-        let mut cmd = Command::new("git");
-        cmd.arg("--no-optional-locks")
+        cmd.args(leading)
             .args(["-c", "core.fsmonitor=false"])
             .arg("-C")
             .arg(&self.dir);

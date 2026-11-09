@@ -66,26 +66,8 @@ pub fn check(
 
     let mut cold_ok: Vec<(Repo, Checkout, Toolchain)> = Vec::new();
     let mut seeded_ok: Vec<(Repo, Checkout, Toolchain)> = Vec::new();
-    for path in cold {
-        match locate_checkout(reg, cfg, caps, path) {
-            Ok(row) => cold_ok.push(row),
-            Err(r) if r.code == 130 => return Err(CheckStop::Cancelled),
-            Err(r) => unfair.push(Unfair {
-                path: r.path,
-                reason: r.detail,
-            }),
-        }
-    }
-    for path in seeded {
-        match locate_checkout(reg, cfg, caps, path) {
-            Ok(row) => seeded_ok.push(row),
-            Err(r) if r.code == 130 => return Err(CheckStop::Cancelled),
-            Err(r) => unfair.push(Unfair {
-                path: r.path,
-                reason: r.detail,
-            }),
-        }
-    }
+    locate_arm(reg, cfg, caps, cold, &mut cold_ok, &mut unfair)?;
+    locate_arm(reg, cfg, caps, seeded, &mut seeded_ok, &mut unfair)?;
 
     let located: Vec<&(Repo, Checkout, Toolchain)> =
         cold_ok.iter().chain(seeded_ok.iter()).collect();
@@ -236,4 +218,25 @@ pub fn check(
         seeded: seeded_ok.into_iter().map(|(_, c, _)| c).collect(),
         toolchain,
     })
+}
+
+fn locate_arm(
+    reg: &Registry,
+    cfg: &Config,
+    caps: &Capabilities,
+    paths: &[PathBuf],
+    dest: &mut Vec<(Repo, Checkout, Toolchain)>,
+    unfair: &mut Vec<Unfair>,
+) -> Result<(), CheckStop> {
+    for path in paths {
+        match locate_checkout(reg, cfg, caps, path) {
+            Ok(row) => dest.push(row),
+            Err(r) if r.code == 130 => return Err(CheckStop::Cancelled),
+            Err(r) => unfair.push(Unfair {
+                path: r.path,
+                reason: r.detail,
+            }),
+        }
+    }
+    Ok(())
 }

@@ -87,32 +87,54 @@ fn stderr_for_detail(tail: &[u8]) -> String {
     String::from_utf8_lossy(&tail[start..]).into_owned()
 }
 
-fn mark_remaining_failed(report: &mut Report, from_position: u64, sample_count: u64) {
+fn mark_remaining(report: &mut Report, from_position: u64, sample_count: u64, reason: &str) {
     for position in from_position..=sample_count {
-        report.unmeasured.push((
-            format!("sample.{position}"),
-            "not run: an earlier step failed".into(),
-        ));
+        report
+            .unmeasured
+            .push((format!("sample.{position}"), reason.into()));
     }
 }
 
 fn fail_run(report: &mut Report, from_position: u64, sample_count: u64, finding: Finding) {
     report.end = End::Failed;
     report.findings.push(finding);
-    mark_remaining_failed(report, from_position, sample_count);
-}
-
-fn mark_remaining_cancelled(report: &mut Report, from_position: u64, sample_count: u64) {
-    for position in from_position..=sample_count {
-        report
-            .unmeasured
-            .push((format!("sample.{position}"), "cancelled".into()));
-    }
+    mark_remaining(
+        report,
+        from_position,
+        sample_count,
+        "not run: an earlier step failed",
+    );
 }
 
 fn cancel_run(report: &mut Report, from_position: u64, sample_count: u64) {
     report.end = End::Cancelled;
-    mark_remaining_cancelled(report, from_position, sample_count);
+    mark_remaining(report, from_position, sample_count, "cancelled");
+}
+
+fn record_prime(
+    report: &mut Report,
+    started: std::time::Instant,
+    entries_added: u64,
+    targets_read: u64,
+    findings: &[(String, Option<PathBuf>, String)],
+) {
+    report
+        .counts
+        .insert("prime_ms".into(), millis(started.elapsed()));
+    report
+        .counts
+        .insert("prime_entries_added".into(), entries_added);
+    report
+        .counts
+        .insert("prime_targets_read".into(), targets_read);
+    for (kind, path, detail) in findings {
+        report.findings.push(Finding {
+            kind: kind.clone(),
+            path: path.clone(),
+            detail: detail.clone(),
+            measured: BTreeMap::new(),
+        });
+    }
 }
 
 fn push_seed_finding(report: &mut Report, checkout: &Checkout, kind: &str, detail: String) {
@@ -199,52 +221,30 @@ pub fn run(
     let prime_started = std::time::Instant::now();
     match seed::run_fill(ctx, &plan.repo, cancel) {
         Ok(Fill::Continue(filled)) => {
-            report
-                .counts
-                .insert("prime_ms".into(), millis(prime_started.elapsed()));
-            report
-                .counts
-                .insert("prime_entries_added".into(), filled.report().entries_added);
-            report
-                .counts
-                .insert("prime_targets_read".into(), filled.report().targets_read);
-            for (kind, path, detail) in filled.findings() {
-                report.findings.push(Finding {
-                    kind: kind.clone(),
-                    path: path.clone(),
-                    detail: detail.clone(),
-                    measured: BTreeMap::new(),
-                });
-            }
+            record_prime(
+                &mut report,
+                prime_started,
+                filled.report().entries_added,
+                filled.report().targets_read,
+                filled.findings(),
+            );
         }
         Ok(Fill::Stopped(outcome)) => {
-            report
-                .counts
-                .insert("prime_ms".into(), millis(prime_started.elapsed()));
-            report.counts.insert(
-                "prime_entries_added".into(),
+            record_prime(
+                &mut report,
+                prime_started,
                 outcome
                     .counts
                     .get("fill_entries_added")
                     .copied()
                     .unwrap_or(0),
-            );
-            report.counts.insert(
-                "prime_targets_read".into(),
                 outcome
                     .counts
                     .get("fill_targets_read")
                     .copied()
                     .unwrap_or(0),
+                &outcome.findings,
             );
-            for (kind, path, detail) in &outcome.findings {
-                report.findings.push(Finding {
-                    kind: kind.clone(),
-                    path: path.clone(),
-                    detail: detail.clone(),
-                    measured: BTreeMap::new(),
-                });
-            }
             cancel_run(&mut report, 1, sample_count);
             return report;
         }
