@@ -52,6 +52,7 @@ codex plugin add cargo-hive@cargo-hive
 | `cargo hive apply <id>` | Deletes the plan's paths for every class |
 | `cargo hive explain [<repo>…] [-n N]` | Reports copies of one crate, feature splits, and units whose last compile failed. `-n` defaults to 10; `-n 0` shows every group |
 | `cargo hive seed <checkout>` | Copies registry output into a new secondary checkout before its first build. A checkout that already has a target gets nothing. The store only grows until store GC ships |
+| `cargo hive bench --cold <checkout>… --seeded <checkout>…` | Times cold and seeded first builds of fresh secondary checkouts and reports integer milliseconds in a receipt |
 
 A failure of check (g) disables failed-unit reporting only.
 
