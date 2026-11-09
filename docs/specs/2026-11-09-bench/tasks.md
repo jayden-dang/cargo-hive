@@ -917,7 +917,7 @@ sequences builds and seeds.
 
 **Depends-on:** Task 11
 
-- [ ] **Step 1: Write the failing tests** in `tests/bench.rs`:
+- [x] **Step 1: Write the failing tests** in `tests/bench.rs`:
 
 ```rust
 #[test]
@@ -982,7 +982,7 @@ fn an_empty_store_for_the_repo_after_the_prime_stops_before_any_sample() {
 
   A failing prime takes the same `Err` path as a failing seed. No cheap fixture makes `run_fill` fail, so that
   branch is covered by the shared code, not by its own test. Run: `cargo test --test bench stops_the_run`. Expect: a failure, because the run does not stop yet.
-- [ ] **Step 2: Implement** the Failed paths of design §1: a prime or seed `Err` (a `DiskFull` keeps its
+- [x] **Step 2: Implement** the Failed paths of design §1: a prime or seed `Err` (a `DiskFull` keeps its
   `kept` outcome's findings), a non-zero Cargo exit (the exit code and the last stderr lines, capped at
   4 KiB, in the detail, worded `exit code <n>`), and `TimedOut` (worded `past its deadline of <ms> ms`).
   The detail always names the step: `prime`, `seed of <checkout>` or `build of <checkout>`. After the prime,
@@ -991,8 +991,8 @@ fn an_empty_store_for_the_repo_after_the_prime_stops_before_any_sample() {
   `bench.nothing_to_seed` with detail `no stored unit lists <main>; build it once with <command line>, then
   bench again`, and the run ends Failed before the first sample. Each starts no further sample, lists the
   rest as unmeasured, and skips the summaries.
-- [ ] **Step 3: Run** `cargo test --test bench`. Expect pass.
-- [ ] **Step 4: Commit** `feat(bench): a failed or overdue step ends the run`
+- [x] **Step 3: Run** `cargo test --test bench`. Expect pass.
+- [x] **Step 4: Commit** `feat(bench): a failed or overdue step ends the run`
 
 _Requirements: BENCH-7.1, BENCH-7.2, BENCH-7.3, BENCH-6.3, BENCH-10.2_
 
