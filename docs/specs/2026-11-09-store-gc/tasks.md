@@ -8,7 +8,7 @@
 > The chosen skill writes `Execution-mode:`. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 Feature code: STOREGC
-Status: Draft
+Status: Approved — operator "approve", 2026-11-09
 Date: 2026-11-09
 Execution-mode: unset
 Max-concurrency: auto

@@ -1,7 +1,7 @@
 # Design: Store GC (bare `cargo hive gc` keeps hive's store bounded)
 
 Feature code: STOREGC
-Status: Draft — revised after an independent design review (ten findings applied) and two review rounds
+Status: Approved — operator "approve", 2026-11-09 (revised after an independent design review, ten findings applied, and two review rounds)
 Date: 2026-11-09
 Requirements: ./requirements.md
 
