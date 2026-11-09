@@ -1076,7 +1076,7 @@ for the arguments.
 
 **Depends-on:** Task 13
 
-- [ ] **Step 1: Write the failing tests** in `tests/bench.rs`, through the binary:
+- [x] **Step 1: Write the failing tests** in `tests/bench.rs`, through the binary:
 
 ```rust
 #[test]
@@ -1156,16 +1156,16 @@ fn ctrl_c_stops_bench_with_exit_130() {
   The SIGINT test follows tests/status_targets.rs:540-575 (`kill -INT`, then `wait_within`). `RegistryRepo`
   already sets `secondary_roots` to its scratch dir. Run:
   `cargo test --test bench bench_`. Expect: exit 2, because `bench` is not a subcommand yet.
-- [ ] **Step 2: Implement** `Command::Bench` (`BuildCmd` parses through its `FromStr`, so an unknown shape is a
+- [x] **Step 2: Implement** `Command::Bench` (`BuildCmd` parses through its `FromStr`, so an unknown shape is a
   clap error, exit 2), the `main_with` arm, and `bench_cmd`. `bench_cmd` reads the registry, config and
   capabilities; checks `window_days`; installs the signal handlers; calls `check`; on refusal writes one
   `refusal` finding per `Unfair` with exit 1; otherwise builds `env_map(std::env::vars_os(), &toolchain)`,
   the `Plan`, the `Ctx` with `repos = [repo]` and `Limits { build_deadline: BUILD_DEADLINE }`; runs; writes
   the report, the env findings and a `bench.command` finding into `Receipt::new("bench", scope)`; and
   emits with `report.exit_code()`. Add `Parsed::Bench` and its arm in `tests/skill.rs` in the same commit.
-- [ ] **Step 3: Run** `cargo test --test bench`, `cargo test --test skill` and `cargo test --test liveness`.
+- [x] **Step 3: Run** `cargo test --test bench`, `cargo test --test skill` and `cargo test --test liveness`.
   Expect pass. (`skill_documents_every_shipped_command` checks only its wants list, which Task 15 extends.)
-- [ ] **Step 4: Commit** `feat(cli): cargo hive bench`
+- [x] **Step 4: Commit** `feat(cli): cargo hive bench`
 
 _Requirements: BENCH-1.11, BENCH-2.9, BENCH-3.3, BENCH-6.1, BENCH-9.7, BENCH-10.1_
 
