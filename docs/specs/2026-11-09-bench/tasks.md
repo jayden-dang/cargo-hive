@@ -851,7 +851,7 @@ sequences builds and seeds.
 
 **Depends-on:** Task 10
 
-- [ ] **Step 1: Write the failing tests** in `tests/bench.rs`:
+- [x] **Step 1: Write the failing tests** in `tests/bench.rs`:
 
 ```rust
 #[test]
@@ -885,14 +885,14 @@ fn a_seed_that_clones_nothing_still_builds_and_leaves_its_counts_unmeasured() {
 
   Run: `cargo test --test bench seed_counts`, then `cargo test --test bench a_seed`. Expect the first test to
   fail on the missing `seeded_fresh` key.
-- [ ] **Step 2: Implement.** After a seeded build, `record::read(ctx.state)`, then
+- [x] **Step 2: Implement.** After a seeded build, `record::read(ctx.state)`, then
   `discover::targets(&[row.clone()], ctx.cfg, false, &mut Snapshot::default(), cancel)`. Pick the
   `TargetDir` whose path is the seed outcome's target, look up its record, and call
   `record::counts(target, record, gc::DEPS_CAP)`. `Ok(Some(c))` gives the four keys. `Ok(None)`, no record,
   or `Err(why)` gives `unmeasured` `sample.<position>.seed_counts` with the reason.
-- [ ] **Step 3: Run** `cargo test --test bench`, `cargo test --test status_targets` and
+- [x] **Step 3: Run** `cargo test --test bench`, `cargo test --test status_targets` and
   `cargo test --test status_seed`. Expect pass.
-- [ ] **Step 4: Commit** `feat(bench): report the seed counts of each seeded sample`
+- [x] **Step 4: Commit** `feat(bench): report the seed counts of each seeded sample`
 
 _Requirements: BENCH-4.1, BENCH-4.2, BENCH-4.3, BENCH-9.2_
 
