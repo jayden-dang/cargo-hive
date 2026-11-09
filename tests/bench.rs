@@ -6,7 +6,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime};
 
 use cargo_hive::bench::check::{check, Checked, Unfair};
 use cargo_hive::bench::command::{env_map, BuildCmd};
@@ -19,7 +20,7 @@ use cargo_hive::state::{Config, State};
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
 use common::registry_fixture::{cargo_json, RegistryRepo};
-use common::{env_lock, git, init_repo, register, CargoHomeGuard, Hive, Scratch};
+use common::{env_lock, git, init_repo, register, wait_within, CargoHomeGuard, Hive, Scratch};
 
 fn bench_plan(hive: &Hive, repo: &RegistryRepo, n: usize) -> Plan {
     let cold_paths: Vec<_> = (0..n).map(|i| repo.worktree(&format!("cold{i}"))).collect();
@@ -608,5 +609,176 @@ fn a_cancel_after_the_first_sample_keeps_it_and_lists_the_rest() {
         .any(|(f, r)| f.starts_with("sample.") && r == "cancelled"));
     for c in plan.cold.iter().chain(&plan.seeded) {
         assert!(c.path.exists());
+    }
+}
+
+#[test]
+fn bench_writes_one_schema_two_receipt_and_exits_zero() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lanes = ["c1", "s1", "s2", "c2"].map(|n| repo.worktree(n));
+    let tracked = git(&repo.main, &["ls-files", "-s"]);
+    // each linked worktree's index lives where `git rev-parse --git-path index` says
+    let index_of =
+        |lane: &PathBuf| lane.join(git(lane, &["rev-parse", "--git-path", "index"]).trim());
+    let indexes: Vec<Vec<u8>> = lanes
+        .iter()
+        .map(|l| fs::read(index_of(l)).unwrap())
+        .collect();
+    let s = |p: &PathBuf| p.to_str().unwrap().to_string();
+    let (out, receipt) = hive.json(&[
+        "bench",
+        "--cold",
+        &s(&lanes[0]),
+        &s(&lanes[3]),
+        "--seeded",
+        &s(&lanes[1]),
+        &s(&lanes[2]),
+    ]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(receipt["command"], "bench");
+    assert_eq!(receipt["schema"], 2);
+    let keys: BTreeSet<_> = receipt.as_object().unwrap().keys().cloned().collect();
+    let allowed: BTreeSet<_> = [
+        "schema",
+        "hive_version",
+        "macos_version",
+        "toolchain",
+        "command",
+        "ts",
+        "scope",
+        "counts",
+        "checks",
+        "findings",
+        "unmeasured",
+        "notes",
+    ]
+    .map(String::from)
+    .into();
+    assert!(keys.is_subset(&allowed), "{keys:?}");
+    assert!(receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["kind"] == "bench.command"));
+    assert_eq!(git(&repo.main, &["ls-files", "-s"]), tracked);
+    for (lane, before) in lanes.iter().zip(&indexes) {
+        assert!(
+            lane.join("target").exists(),
+            "{}: bench removed nothing, so its target stays",
+            lane.display()
+        );
+        assert_eq!(
+            git(
+                lane,
+                &[
+                    "--no-optional-locks",
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=no"
+                ]
+            ),
+            "",
+            "{}: a tracked file changed",
+            lane.display()
+        );
+        assert_eq!(
+            &fs::read(index_of(lane)).unwrap(),
+            before,
+            "{}",
+            lane.display()
+        );
+    }
+    let allowed: BTreeSet<&str> = [
+        ".lock",
+        "capabilities.json",
+        "config.json",
+        "receipts",
+        "registry.json",
+        "snapshot.json",
+        "seeds.json",
+        "store",
+        "store.db",
+    ]
+    .into();
+    let _ = fs::remove_file(hive.home.path.join("cargo-json.out"));
+    let _ = fs::remove_file(hive.home.path.join("cargo-json.err"));
+    for entry in fs::read_dir(&hive.home.path).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        assert!(
+            allowed.contains(name.as_str()),
+            "unexpected state file {name}"
+        );
+    }
+}
+
+#[test]
+fn bench_refuses_with_exit_one_and_rejects_an_unknown_shape_with_exit_two() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    let a = repo.worktree("a");
+    let b = repo.worktree("b");
+    let s = |p: &PathBuf| p.to_str().unwrap().to_string();
+    let (out, receipt) = hive.json(&["bench", "--cold", &s(&a), "--seeded", &s(&b)]);
+    assert_eq!(out.status.code(), Some(1), "{receipt}");
+    assert!(receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["kind"] == "refusal"));
+    let out = hive.run(&[
+        "bench",
+        "--cold",
+        &s(&a),
+        "--seeded",
+        &s(&b),
+        "--build-cmd",
+        "run",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn ctrl_c_stops_bench_with_exit_130() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lanes = ["c1", "s1", "s2", "c2"].map(|n| repo.worktree(n));
+    let s = |p: &PathBuf| p.to_str().unwrap().to_string();
+    let child = hive
+        .command(&[
+            "bench",
+            "--cold",
+            &s(&lanes[0]),
+            &s(&lanes[3]),
+            "--seeded",
+            &s(&lanes[1]),
+            &s(&lanes[2]),
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let started = Instant::now();
+    while !lanes[0].join("target/debug").exists() {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "the first build never started"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let out = wait_within(child, Duration::from_secs(30));
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
+    for lane in &lanes {
+        assert!(lane.exists());
     }
 }

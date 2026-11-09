@@ -1,5 +1,6 @@
 //! Thin adapter: arguments → library calls → one receipt.
 
+use crate::bench::command::BuildCmd;
 use crate::platform::{self, MACOS_ONLY_MESSAGE};
 use crate::receipt::{PlanRecord, PlanTierBody, Receipt, ReceiptBuilder, Scope};
 use crate::registry::{self, Registry};
@@ -65,6 +66,20 @@ pub enum Command {
     Seed {
         /// Checkout to clone into. The caller's directory selects nothing
         checkout: std::path::PathBuf,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// Time cold and seeded first builds of fresh checkouts
+    Bench {
+        /// Fresh checkouts measured without seeding
+        #[arg(long, num_args = 1.., required = true)]
+        cold: Vec<std::path::PathBuf>,
+        /// Fresh checkouts measured after seeding from the store
+        #[arg(long, num_args = 1.., required = true)]
+        seeded: Vec<std::path::PathBuf>,
+        /// Compile-only cargo shape for the timed build
+        #[arg(long, default_value = "build")]
+        build_cmd: BuildCmd,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -171,6 +186,12 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
         }
         Command::Apply { id, out } => apply_cmd(&state, &id, out),
         Command::Seed { checkout, out } => seed_cmd(&state, &checkout, out),
+        Command::Bench {
+            cold,
+            seeded,
+            build_cmd,
+            out,
+        } => bench_cmd(&state, &cold, &seeded, build_cmd, out),
         Command::Explain { repos, top, out } => explain_cmd(&state, &repos, top, out),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
         Command::TryLock { .. } => unreachable!("handled before the state root is opened"),
@@ -1602,6 +1623,130 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
         }
         Err(err) => emit(state, out, b.finish(), &format!("{err}\n"), code),
     }
+}
+
+fn bench_cmd(
+    state: &State,
+    cold: &[std::path::PathBuf],
+    seeded: &[std::path::PathBuf],
+    build: BuildCmd,
+    out: OutputArgs,
+) -> i32 {
+    use crate::bench::command::env_map;
+    use crate::bench::{self, Limits, Plan, BUILD_DEADLINE};
+    use crate::doctor::{self, Capabilities, Capability};
+    use crate::plan_tier::Ctx;
+    use crate::receipt::Measured;
+    use crate::state::window_days;
+    use std::collections::BTreeMap;
+
+    let loaded = (|| -> Result<_, StateError> {
+        Ok((
+            state.read::<Registry>(registry::FILE)?,
+            state.config()?,
+            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+        ))
+    })();
+    let (reg, cfg, caps) = match loaded {
+        Ok(v) => v,
+        Err(e) => return emit_failure(state, out, "bench", &e.to_string(), 1),
+    };
+    let mut b = Receipt::new("bench", Scope::default());
+    if let Err(err) = window_days(cfg.gc_window_days) {
+        b.finding("refusal", None, err.to_string());
+        return emit(state, out, b.finish(), &format!("refused: {err}\n"), 1);
+    }
+    if let Err(e) = doctor::install_signal_handlers() {
+        return emit_failure(
+            state,
+            out,
+            "bench",
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
+    }
+    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let Ok(platform) = platform::current() else {
+        eprintln!("{MACOS_ONLY_MESSAGE}");
+        return 2;
+    };
+    let checked = match bench::check::check(&reg, &cfg, &caps, cold, seeded, &cancelled) {
+        Ok(v) => v,
+        Err(list) => {
+            for u in &list {
+                b.finding("refusal", u.path.clone(), u.reason.clone());
+            }
+            let detail = list
+                .iter()
+                .map(|u| u.reason.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
+        }
+    };
+    let env = env_map(std::env::vars_os(), &checked.toolchain);
+    let plan = Plan {
+        repo: checked.repo,
+        cold: checked.cold,
+        seeded: checked.seeded,
+        toolchain: checked.toolchain,
+        build,
+        env,
+    };
+    let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
+    let repos = [plan.repo.clone()];
+    let ctx = Ctx {
+        state,
+        fs: &*platform.fs,
+        cfg: &cfg,
+        now: std::time::SystemTime::now(),
+        account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
+        repos: &repos,
+        mains: &registered_mains,
+    };
+    let report = bench::run(
+        &ctx,
+        &plan,
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &cancelled,
+    );
+    b.toolchain(Some(plan.toolchain.release.clone()));
+    b.scope_mut().repos.push(plan.repo.main.clone());
+    for c in plan.cold.iter().chain(plan.seeded.iter()) {
+        b.scope_mut().checkouts.push(c.path.clone());
+    }
+    report.write_into(&mut b);
+    for (kind, detail) in plan.env.findings() {
+        b.finding(kind, None, detail);
+    }
+    let command_line = plan.build.command_line();
+    b.finding_measured(
+        "bench.command",
+        None,
+        command_line.clone(),
+        BTreeMap::from([("command".into(), Measured::Text(command_line))]),
+    );
+    let n = plan.cold.len();
+    let human = match report.end {
+        bench::End::Finished => {
+            let cold_ms = report
+                .counts
+                .get("cold_build_ms_median")
+                .copied()
+                .unwrap_or(0);
+            let seeded_ms = report
+                .counts
+                .get("seeded_total_ms_median")
+                .copied()
+                .unwrap_or(0);
+            format!("bench n={n}: cold median {cold_ms} ms, seeded-total median {seeded_ms} ms\n")
+        }
+        bench::End::Cancelled => "bench was cancelled\n".into(),
+        bench::End::Failed => "bench failed\n".into(),
+    };
+    emit(state, out, b.finish(), &human, report.exit_code())
 }
 
 #[cfg(test)]
