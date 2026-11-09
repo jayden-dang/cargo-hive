@@ -27,6 +27,8 @@ impl fmt::Display for GitError {
     }
 }
 
+impl std::error::Error for GitError {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorktreeRecord {
     pub path: PathBuf,
@@ -330,5 +332,15 @@ mod tests {
         assert!(!Git::at(dir).has_tracked_changes().unwrap());
         std::fs::write(dir.join("a"), "changed").unwrap();
         assert!(Git::at(dir).has_tracked_changes().unwrap());
+    }
+
+    fn assert_error<E: std::error::Error>(_: &E) {}
+
+    #[test]
+    fn git_errors_are_std_errors() {
+        let err = GitError::NotGit;
+        assert_error(&err);
+        assert_eq!(err.to_string(), "not inside a git checkout");
+        assert!(std::error::Error::source(&err).is_none());
     }
 }

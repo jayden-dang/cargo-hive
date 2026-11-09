@@ -4,6 +4,7 @@
 
 use crate::fingerprint::ProfileReport;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
@@ -218,6 +219,18 @@ pub enum ChildOutputError {
     Cancelled,
     Failed(String),
 }
+
+impl fmt::Display for ChildOutputError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChildOutputError::TimedOut => write!(f, "child process exceeded its deadline"),
+            ChildOutputError::Cancelled => write!(f, "child process was cancelled"),
+            ChildOutputError::Failed(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for ChildOutputError {}
 
 fn kill_pgid(pid: u32) {
     // SAFETY: the child leads its own process group; this signals only that group.
@@ -889,5 +902,21 @@ mod tests {
             "{:?}",
             start.elapsed()
         );
+    }
+
+    fn assert_error<E: std::error::Error>(_: &E) {}
+
+    #[test]
+    fn child_output_errors_display_what_went_wrong() {
+        let cancelled = ChildOutputError::Cancelled;
+        let timed_out = ChildOutputError::TimedOut;
+        let failed = ChildOutputError::Failed("could not spawn: boom".into());
+        assert_error(&cancelled);
+        assert_error(&timed_out);
+        assert_error(&failed);
+        assert_eq!(cancelled.to_string(), "child process was cancelled");
+        assert_eq!(timed_out.to_string(), "child process exceeded its deadline");
+        assert_eq!(failed.to_string(), "could not spawn: boom");
+        assert!(std::error::Error::source(&cancelled).is_none());
     }
 }

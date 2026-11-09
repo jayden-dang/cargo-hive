@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
-use cargo_hive::bench::check::{check, Checked, Unfair};
+use cargo_hive::bench::check::{check, CheckStop, Checked};
 use cargo_hive::bench::command::{env_map, BuildCmd};
 use cargo_hive::bench::{run, End, Limits, Plan, Report, BUILD_DEADLINE};
 use cargo_hive::plan_tier::Ctx;
@@ -99,23 +99,33 @@ fn prime_store(hive: &Hive, plan: &Plan) {
     }
 }
 
-fn checked(hive: &Hive, cold: &[PathBuf], seeded: &[PathBuf]) -> Result<Checked, Vec<Unfair>> {
+fn checked(hive: &Hive, cold: &[PathBuf], seeded: &[PathBuf]) -> Result<Checked, CheckStop> {
+    checked_with_cancel(hive, cold, seeded, &|| false)
+}
+
+fn checked_with_cancel(
+    hive: &Hive,
+    cold: &[PathBuf],
+    seeded: &[PathBuf],
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Checked, CheckStop> {
     let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
     let _home = CargoHomeGuard::set(&hive.cargo_home.path);
     let state = State::open_at(hive.home.path.clone()).unwrap();
     let reg: Registry = state.read(cargo_hive::registry::FILE).unwrap();
     let cfg = state.config().unwrap();
     let caps = state.read(cargo_hive::doctor::CAPABILITIES_FILE).unwrap();
-    check(&reg, &cfg, &caps, cold, seeded, &|| false)
+    check(&reg, &cfg, &caps, cold, seeded, cancel)
 }
 
-fn reason(r: Result<Checked, Vec<Unfair>>) -> String {
+fn reason(r: Result<Checked, CheckStop>) -> String {
     match r {
-        Err(list) => list
+        Err(CheckStop::Unfair(list)) => list
             .iter()
             .map(|x| x.reason.clone())
             .collect::<Vec<_>>()
             .join(" | "),
+        Err(CheckStop::Cancelled) => "cancelled".into(),
         Ok(_) => "accepted".into(),
     }
 }
@@ -188,6 +198,20 @@ fn an_unfair_set_of_checkouts_is_refused_with_a_reason_for_each() {
     .contains("already exists"));
     let g = repo.worktree("g");
     assert!(checked(&hive, &[a, b], &[f, g]).is_ok());
+}
+
+#[test]
+fn a_cancel_during_the_fairness_check_stops_as_cancelled() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    let cold: Vec<_> = (0..2).map(|i| repo.worktree(&format!("c{i}"))).collect();
+    let seeded: Vec<_> = (0..2).map(|i| repo.worktree(&format!("s{i}"))).collect();
+    let result = checked_with_cancel(&hive, &cold, &seeded, &|| true);
+    assert!(
+        matches!(result, Err(CheckStop::Cancelled)),
+        "{}",
+        reason(result)
+    );
 }
 
 #[test]
@@ -573,6 +597,48 @@ fn an_empty_store_for_the_repo_after_the_prime_stops_before_any_sample() {
     for c in plan.cold.iter().chain(&plan.seeded) {
         assert!(!c.path.join("target").exists());
     }
+}
+
+#[test]
+fn a_cancel_during_prime_still_reports_prime_counts() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let plan = bench_plan(&hive, &repo, 2);
+    let report = run_bench(
+        &hive,
+        &plan,
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &|| true,
+    );
+    assert!(matches!(report.end, End::Cancelled));
+    assert_eq!(report.exit_code(), 130);
+    for key in ["prime_ms", "prime_entries_added", "prime_targets_read"] {
+        assert!(
+            report.counts.contains_key(key),
+            "{key} in {:?}",
+            report.counts
+        );
+    }
+    assert!(!report.counts.keys().any(|k| k.ends_with("_median")));
+    assert_eq!(
+        report
+            .unmeasured
+            .iter()
+            .filter(|(f, r)| f.starts_with("sample.") && r == "cancelled")
+            .count(),
+        4
+    );
+    assert_eq!(
+        report
+            .findings
+            .iter()
+            .filter(|f| f.kind == "bench.sample")
+            .count(),
+        0
+    );
 }
 
 #[test]

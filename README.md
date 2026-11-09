@@ -62,7 +62,8 @@ A failure of check (g) disables failed-unit reporting only.
 
 Every command accepts `--json`. It then prints exactly one receipt on stdout, and every
 receipt is also appended to `~/.hive/receipts/<date>.jsonl`. Receipts carry counts and
-measured values only, never durations or estimated time saved.
+measured values only, never estimated time saved; durations appear only in
+`cargo hive bench`, as integer milliseconds.
 
 ## gc
 

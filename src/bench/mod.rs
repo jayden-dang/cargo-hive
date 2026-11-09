@@ -217,7 +217,34 @@ pub fn run(
                 });
             }
         }
-        Ok(Fill::Stopped(_)) => {
+        Ok(Fill::Stopped(outcome)) => {
+            report
+                .counts
+                .insert("prime_ms".into(), millis(prime_started.elapsed()));
+            report.counts.insert(
+                "prime_entries_added".into(),
+                outcome
+                    .counts
+                    .get("fill_entries_added")
+                    .copied()
+                    .unwrap_or(0),
+            );
+            report.counts.insert(
+                "prime_targets_read".into(),
+                outcome
+                    .counts
+                    .get("fill_targets_read")
+                    .copied()
+                    .unwrap_or(0),
+            );
+            for (kind, path, detail) in &outcome.findings {
+                report.findings.push(Finding {
+                    kind: kind.clone(),
+                    path: path.clone(),
+                    detail: detail.clone(),
+                    measured: BTreeMap::new(),
+                });
+            }
             cancel_run(&mut report, 1, sample_count);
             return report;
         }

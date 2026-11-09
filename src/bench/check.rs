@@ -23,6 +23,11 @@ pub struct Unfair {
     pub reason: String,
 }
 
+pub enum CheckStop {
+    Unfair(Vec<Unfair>),
+    Cancelled,
+}
+
 pub fn check(
     reg: &Registry,
     cfg: &Config,
@@ -30,7 +35,7 @@ pub fn check(
     cold: &[PathBuf],
     seeded: &[PathBuf],
     cancel: &(dyn Fn() -> bool + Sync),
-) -> Result<Checked, Vec<Unfair>> {
+) -> Result<Checked, CheckStop> {
     let mut unfair = Vec::new();
 
     if cold.len() < 2 || seeded.len() < 2 {
@@ -64,6 +69,7 @@ pub fn check(
     for path in cold {
         match locate_checkout(reg, cfg, caps, path) {
             Ok(row) => cold_ok.push(row),
+            Err(r) if r.code == 130 => return Err(CheckStop::Cancelled),
             Err(r) => unfair.push(Unfair {
                 path: r.path,
                 reason: r.detail,
@@ -73,6 +79,7 @@ pub fn check(
     for path in seeded {
         match locate_checkout(reg, cfg, caps, path) {
             Ok(row) => seeded_ok.push(row),
+            Err(r) if r.code == 130 => return Err(CheckStop::Cancelled),
             Err(r) => unfair.push(Unfair {
                 path: r.path,
                 reason: r.detail,
@@ -205,6 +212,9 @@ pub fn check(
                     seen_targets.insert(resolved.target_directory.clone(), checkout.path.clone());
                 }
             }
+            Err(err) if err == "cargo metadata was cancelled" => {
+                return Err(CheckStop::Cancelled);
+            }
             Err(err) => unfair.push(Unfair {
                 path: Some(checkout.path.clone()),
                 reason: err,
@@ -213,7 +223,7 @@ pub fn check(
     }
 
     if !unfair.is_empty() {
-        return Err(unfair);
+        return Err(CheckStop::Unfair(unfair));
     }
 
     let (repo, _, toolchain) = cold_ok

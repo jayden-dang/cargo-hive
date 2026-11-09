@@ -1485,7 +1485,7 @@ pub(crate) fn locate_checkout(
     };
     if row.class == Class::Protected {
         let detail = format!(
-            "{path} is protected ({reason}); seed leaves a protected checkout untouched",
+            "{path} is protected ({reason}); hive leaves a protected checkout untouched",
             path = real.display(),
             reason = row.reason
         );
@@ -1672,7 +1672,11 @@ fn bench_cmd(
     };
     let checked = match bench::check::check(&reg, &cfg, &caps, cold, seeded, &cancelled) {
         Ok(v) => v,
-        Err(list) => {
+        Err(bench::check::CheckStop::Cancelled) => {
+            b.finding("error", None, "bench was cancelled");
+            return emit(state, out, b.finish(), "bench was cancelled\n", 130);
+        }
+        Err(bench::check::CheckStop::Unfair(list)) => {
             for u in &list {
                 b.finding("refusal", u.path.clone(), u.reason.clone());
             }
@@ -1753,8 +1757,10 @@ fn bench_cmd(
 mod tests {
     use super::*;
     use crate::doctor::Capabilities;
+    use crate::git::Git;
     use crate::state::Config;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     #[test]
     fn locating_a_missing_path_refuses_with_the_path_as_given() {
@@ -1777,5 +1783,71 @@ mod tests {
             refusal.detail
         );
         assert_eq!(refusal.code, 1);
+    }
+
+    #[test]
+    fn a_protected_checkout_refusal_does_not_name_seed() {
+        let dir = PathBuf::from(format!(
+            "/private/tmp/hive-it-protected-locate-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a"), "a").unwrap();
+        git(&["add", "a"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "a",
+        ]);
+        let main = dir.canonicalize().unwrap();
+        let roots = Git::at(&main).root_commits().unwrap();
+        let reg = Registry {
+            repos: vec![registry::Repo {
+                main: main.clone(),
+                root_commits: roots,
+            }],
+        };
+        let cfg = Config {
+            secondary_roots: vec![],
+            cache_roots: vec![],
+            gc_window_days: None,
+        };
+        let caps = Capabilities::default();
+        let refusal = locate_checkout(&reg, &cfg, &caps, &main).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(refusal.kind, "refusal");
+        assert_eq!(refusal.code, 1);
+        assert!(
+            refusal
+                .detail
+                .contains("hive leaves a protected checkout untouched"),
+            "{}",
+            refusal.detail
+        );
+        assert!(
+            !refusal.detail.contains("seed leaves"),
+            "{}",
+            refusal.detail
+        );
     }
 }
