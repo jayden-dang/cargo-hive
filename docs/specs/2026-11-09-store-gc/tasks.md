@@ -220,7 +220,7 @@ _Requirements: STOREGC-1.5, STOREGC-2.3, STOREGC-10.4, STOREGC-10.5_
   - `inventory`, `evict_dir`, `rename_out`, `commit_eviction` (Task 3);
   - `liveness::liveness`, `gc::account::remove_counted`.
 - Produces:
-  - `pub(crate) fn holds(fs: &dyn Fs, targets: &[TargetDir], now: SystemTime, window: Duration) -> Holds`, with `Holds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String>, by_target: BTreeMap<PathBuf, BTreeSet<StoreKey>>, whole_store: Vec<Finding>, findings: Vec<Finding>, by_reason: BTreeMap<&'static str, u64> }`, where `by_target` records which target held each key, in memory only. In this task an unreadable target or any non-Decided verdict goes to `whole_store`; Task 5 narrows that.
+  - `pub(crate) fn holds(fs: &dyn Fs, targets: &[TargetDir], now: SystemTime, window: Duration) -> Holds`, with `Holds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String>, by_target: BTreeMap<PathBuf, TargetHolds>, whole_store: Vec<Finding>, findings: Vec<Finding>, by_reason: BTreeMap<&'static str, u64> }`, with `TargetHolds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String> }`, recording which target held each key or name-meta, in memory only. Task 5 fills `name_metas`. In this task an unreadable target or any non-Decided verdict goes to `whole_store`; Task 5 narrows that.
   - `pub fn run(ctx: &EvictCtx<'_>, limits: Limits, dry_run: bool, cancel: &dyn Fn() -> bool) -> EvictOutcome` in `seed::evict`.
   - `pub struct EvictCtx<'a> { pub state: &'a State, pub fs: &'a dyn Fs, pub targets: &'a [TargetDir], pub checkouts: &'a [Checkout], pub checkout_faults: &'a [WalkFault], pub scan_faults: &'a [WalkFault], pub cache_roots: &'a [PathBuf], pub window: Duration, pub account_bytes: bool, pub now: SystemTime, pub caller_toolchain: Option<Toolchain>, pub caller_toolchain_kept: bool, pub rustup: &'a Path }`. `gc_cmd` fills `caller_toolchain_kept` from `doctor::caller_toolchain_kept()`, so `evict::run` reads no environment (house rule 11). `gc_cmd` passes `Path::new("rustup")`; tests pass a fake script, as `resolve_toolchain_with` already takes a rustup path (`src/doctor.rs:439,447`).
   - `pub struct Limits { pub cap_bytes: u64, pub max_age_secs: u64 }`.
@@ -352,7 +352,7 @@ _Requirements: STOREGC-2.1, STOREGC-2.2, STOREGC-2.4, STOREGC-2.5, STOREGC-10.8_
 - Consumes: `evict::run`, `EvictCtx`, `Limits`, `synth_entry` (Task 4); `Holds` (Task 5); `Row.registry_deps`
 - Produces:
   - counts `store_entries_evicted_cap` and `store_freeable_bytes_remaining`;
-  - finding `store.held_over_cap`, naming up to 10 targets by the freeable bytes of the entries each holds, with ties by path;
+  - finding `store.held_over_cap`, naming up to 10 targets, each with the freeable bytes of the held entries it holds by key or by name-meta, ordered by that number, with ties by path;
   - an `unmeasured` entry for the cap step when `account_bytes` is false.
 
 **Depends-on:** Task 6
@@ -360,7 +360,7 @@ _Requirements: STOREGC-2.1, STOREGC-2.2, STOREGC-2.4, STOREGC-2.5, STOREGC-10.8_
 - [ ] **Step 1: Write the failing tests.** Each builds `EvictCtx` from a scratch `State`, `Apfs::new`, an empty target list, and entries made with `synth_entry` from 256 KiB files of random bytes, so each frees more than 0 bytes:
   - `the_cap_evicts_unheld_entries_oldest_first_until_under`: three age cohorts and a cap between their sums.
   - `within_one_last_live_at_an_entry_goes_before_the_entries_its_registry_deps_name`. One cohort holds `aaa-dep`, which `zzz-user`'s `registry_deps` names, so alphabetical order would evict the dependency first. The cap is set to stop after one eviction. `zzz-user` goes and `aaa-dep` stays.
-  - `held_entries_over_the_cap_are_kept_and_reported`: two targets hold the keys, one holding more bytes. The finding gives the held total and the cap, and names both targets with their shares, larger first.
+  - `held_entries_over_the_cap_are_kept_and_reported`: one target holds entries by key and a second, Undecided target holds another entry only by name-meta. The finding gives the held total and the cap, and names both targets, larger first, each with the exact freeable bytes of the held entries it holds; one entry held by both counts toward each.
   - `an_entry_that_frees_0_bytes_is_not_evicted_for_the_cap`: every file of the entry is `clone_file`d into a scratch dir the test keeps.
   - `with_accounting_off_the_cap_evicts_nothing_and_says_so`: age still evicts.
 

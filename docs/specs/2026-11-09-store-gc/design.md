@@ -158,7 +158,7 @@ Respects: ARCH-17, ARCH-9
 Surface:
 - `source::live_registry_units` (called through `owned_targets` by fill, `src/seed/mod.rs:186`): `replace`. It calls the extracted helper, with the same output.
 - `liveness()`: `leave` (STOREGC-10.6).
-Interface: `source::unit_key(&Unit) -> StoreKey` (the extracted mapping); `source::holds(fs, targets: &[TargetDir], now, window) -> Holds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String>, by_target: BTreeMap<PathBuf, BTreeSet<StoreKey>>, by_reason: counts, whole_store: Vec<Finding>, findings: Vec<Finding> }`. `by_target` records which target held each key, in memory only; the cap step uses it to name the targets of `store.held_over_cap` (STOREGC-3.3).
+Interface: `source::unit_key(&Unit) -> StoreKey` (the extracted mapping); `source::holds(fs, targets: &[TargetDir], now, window) -> Holds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String>, by_target: BTreeMap<PathBuf, TargetHolds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String> }>, by_reason: counts, whole_store: Vec<Finding>, findings: Vec<Finding> }`. `by_target` records which target held each key or name-meta, in memory only; the cap step uses it to name the targets of `store.held_over_cap` (STOREGC-3.3, Weigh W20).
 Depth: n/a — extends `source`.
 Locality: extend `src/seed/source.rs` (extract one helper); `fill.rs` leave.
 
@@ -202,7 +202,7 @@ Flow:
 2. Toolchains: lookups (a) and (b). A failure, a fault `apply` would refuse on, or no resolved checkout blocks drops (STOREGC-2.4, 2.5).
 3. `store::inventory`.
 4. If `whole_store` is non-empty → no candidates; report the holds (STOREGC-4.4).
-5. Otherwise: age candidates, then toolchain candidates (unheld entries of values not in use), then the cap. Without `account_bytes` the cap step is skipped into `unmeasured` (STOREGC-3.4). With it, measure every remaining entry, sum, and evict unheld entries in decision 7's order until the sum is at or under `cap_bytes`. If only held entries remain over it, that is STOREGC-3.3's finding, naming up to 10 targets ordered by the freeable bytes of the entries each holds (an entry held by several targets counts toward each), with ties by path.
+5. Otherwise: age candidates, then toolchain candidates (unheld entries of values not in use), then the cap. Without `account_bytes` the cap step is skipped into `unmeasured` (STOREGC-3.4). With it, measure every remaining entry, sum, and evict unheld entries in decision 7's order until the sum is at or under `cap_bytes`. If only held entries remain over it, that is STOREGC-3.3's finding, naming up to 10 targets, each with the freeable bytes of the held entries it holds by key or by name-meta (an entry held by several targets counts toward each), ordered by that number, with ties by path.
 6. Commit and remove as decision 3, or in a dry run report the counts only.
 
 Rowless directories go through the same rules with `last_live_at` unknown. They are evicted when unheld (STOREGC-1.6) and are never refreshed.
