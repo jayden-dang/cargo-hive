@@ -6,6 +6,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::cargo_target::{run_bounded, Capture, ChildOutputError, Ran, METADATA_DEADLINE};
+
 #[derive(Debug)]
 pub enum GitError {
     NotGit,
@@ -62,6 +64,53 @@ impl Git {
         cmd
     }
 
+    // Plain `git status` refreshes mtimes into .git/index; --no-optional-locks does not.
+    fn read_only(&self) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.arg("--no-optional-locks")
+            .args(["-c", "core.fsmonitor=false"])
+            .arg("-C")
+            .arg(&self.dir);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                cmd.env_remove(&key);
+            }
+        }
+        cmd
+    }
+
+    fn run_read_only(&self, args: &[&str]) -> Result<Ran, GitError> {
+        let mut cmd = self.read_only();
+        cmd.args(args);
+        match run_bounded(
+            &mut cmd,
+            METADATA_DEADLINE,
+            Capture {
+                stdout_cap: 64 * 1024,
+                stderr_cap: 4 * 1024,
+            },
+            || false,
+        ) {
+            Ok(ran) if ran.status.success() => Ok(ran),
+            Ok(ran) => Err(GitError::Failed {
+                args: args.join(" "),
+                stderr: String::from_utf8_lossy(&ran.stderr_tail).to_string(),
+            }),
+            Err(ChildOutputError::TimedOut) => Err(GitError::Failed {
+                args: args.join(" "),
+                stderr: format!("{METADATA_DEADLINE:?}"),
+            }),
+            Err(ChildOutputError::Cancelled) => Err(GitError::Failed {
+                args: args.join(" "),
+                stderr: "cancelled".into(),
+            }),
+            Err(ChildOutputError::Failed(msg)) => Err(GitError::Failed {
+                args: args.join(" "),
+                stderr: msg,
+            }),
+        }
+    }
+
     fn run(&self, args: &[&str]) -> Result<std::process::Output, GitError> {
         let out = self
             .command()
@@ -85,6 +134,16 @@ impl Git {
         Ok(String::from_utf8_lossy(&self.run(args)?.stdout)
             .trim()
             .to_string())
+    }
+
+    pub fn head(&self) -> Result<String, GitError> {
+        let ran = self.run_read_only(&["rev-parse", "--verify", "HEAD"])?;
+        Ok(String::from_utf8_lossy(&ran.stdout).trim().to_string())
+    }
+
+    pub fn has_tracked_changes(&self) -> Result<bool, GitError> {
+        let ran = self.run_read_only(&["status", "--porcelain", "--untracked-files=no"])?;
+        Ok(!ran.stdout.is_empty())
     }
 
     pub fn toplevel(&self) -> Result<PathBuf, GitError> {
@@ -186,5 +245,90 @@ impl Git {
         }
         records.extend(current);
         Ok(records)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    struct ScratchRepo(PathBuf);
+
+    impl ScratchRepo {
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn scratch_repo(label: &str) -> ScratchRepo {
+        let dir = PathBuf::from(format!(
+            "/private/tmp/hive-it-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a"), "a").unwrap();
+        git(&dir, &["add", "a"]);
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "a",
+            ],
+        );
+        ScratchRepo(dir)
+    }
+
+    #[test]
+    fn reading_a_touched_but_unchanged_tree_leaves_the_index_bytes_unchanged() {
+        let repo = scratch_repo("bench-git");
+        let dir = repo.path();
+        let index = dir.join(".git/index");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(dir.join("a"), std::fs::read(dir.join("a")).unwrap()).unwrap();
+        let before = std::fs::read(&index).unwrap();
+        let g = Git::at(dir);
+        assert_eq!(g.head().unwrap().len(), 40);
+        assert!(!g.has_tracked_changes().unwrap());
+        assert_eq!(std::fs::read(&index).unwrap(), before);
+    }
+
+    #[test]
+    fn a_changed_tracked_file_is_a_change_and_an_untracked_file_is_not() {
+        let repo = scratch_repo("bench-git-changes");
+        let dir = repo.path();
+        std::fs::write(dir.join("new"), "x").unwrap();
+        assert!(!Git::at(dir).has_tracked_changes().unwrap());
+        std::fs::write(dir.join("a"), "changed").unwrap();
+        assert!(Git::at(dir).has_tracked_changes().unwrap());
     }
 }
