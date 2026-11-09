@@ -1883,6 +1883,7 @@ fn a_cancel_during_commit_records_what_was_renamed_and_releases_both_locks() {
         files.iter().map(|(name, _)| PathBuf::from(*name)).collect();
     let fs = apfs();
     let rustup = PathBuf::from("rustup");
+    let mut saw_mid_commit = false;
     for cancel_after in 2..=6 {
         for (tv, meta, fp) in &keys {
             let dir = entry_path(&hive, *tv, meta, fp);
@@ -1925,18 +1926,19 @@ fn a_cancel_during_commit_records_what_was_renamed_and_releases_both_locks() {
             "cancel_after {cancel_after}: {:?}",
             outcome.counts
         );
-        let file = store::read(&state).unwrap();
-        let listed: std::collections::BTreeSet<_> = file
-            .units
-            .iter()
-            .map(|row| {
-                (
-                    row.toolchain_value,
-                    row.name_meta.clone(),
-                    row.fingerprint_hash.clone(),
-                )
+        drop(state);
+        let listed: std::collections::BTreeSet<_> = rows(&hive)
+            .into_iter()
+            .filter_map(|row| {
+                Some((
+                    row["toolchain_value"].as_u64()?,
+                    row["name_meta"].as_str()?.to_string(),
+                    row["fingerprint_hash"].as_str()?.to_string(),
+                ))
             })
             .collect();
+        let mut absent = 0usize;
+        let mut complete = 0usize;
         for (tv, meta, fp) in &keys {
             let dir = entry_path(&hive, *tv, meta, fp);
             let key = (*tv, meta.clone(), fp.clone());
@@ -1949,15 +1951,19 @@ fn a_cancel_during_commit_records_what_was_renamed_and_releases_both_locks() {
                     "cancel_after {cancel_after}: incomplete {}",
                     dir.display()
                 );
+                complete += 1;
             } else {
                 assert!(
                     !dir.exists(),
-                    "cancel_after {cancel_after}: row gone but dir remains {}",
+                    "cancel_after {cancel_after}: raw store.db has no row but dir remains {}",
                     dir.display()
                 );
+                absent += 1;
             }
         }
-        drop(state);
+        if absent > 0 && complete > 0 {
+            saw_mid_commit = true;
+        }
         let state = State::open_at(hive.home.path.clone()).unwrap();
         assert!(
             state.try_store_exclusive().unwrap().is_some(),
@@ -1967,6 +1973,10 @@ fn a_cancel_during_commit_records_what_was_renamed_and_releases_both_locks() {
             .locked(|_| Ok::<(), cargo_hive::state::StateError>(()))
             .unwrap();
     }
+    assert!(
+        saw_mid_commit,
+        "expected at least one cancel_after with both renamed-absent raw rows and remaining complete dirs"
+    );
 }
 
 #[test]
@@ -1988,6 +1998,8 @@ fn killing_gc_during_store_eviction_never_leaves_a_partial_entry_listed_or_adopt
         31 * DAY,
     );
     let delays_ms = [0u64, 5, 15, 40, 80, 150, 300, 600];
+    let lane = repo.worktree("after-kill");
+    let last = delays_ms.len() - 1;
     for (round, delay) in delays_ms.into_iter().enumerate() {
         let mut child = hive
             .command(&["gc", "--json"])
@@ -2004,27 +2016,30 @@ fn killing_gc_during_store_eviction_never_leaves_a_partial_entry_listed_or_adopt
             .status();
         let _ = child.wait();
         assert_store_entries_whole_or_absent(&hive, &expected_files, round, delay);
-        plant_many_aged(
-            &hive,
-            92_001,
-            2_000,
-            &expected_files,
-            &[b"one", b"two", b"three"],
-            31 * DAY,
+        let (seed_out, seed) = hive.json(&["seed", lane.to_str().unwrap()]);
+        assert!(
+            seed_out.status.success(),
+            "round {round} delay {delay}: {seed}"
         );
+        assert!(
+            seed["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|finding| finding["kind"] != "unit.refused"),
+            "round {round} delay {delay}: unit.refused on post-kill store: {seed}"
+        );
+        if round != last {
+            plant_many_aged(
+                &hive,
+                92_001,
+                2_000,
+                &expected_files,
+                &[b"one", b"two", b"three"],
+                31 * DAY,
+            );
+        }
     }
-    let lane = repo.worktree("after-kill");
-    let (seed_out, seed) = hive.json(&["seed", lane.to_str().unwrap()]);
-    assert!(seed_out.status.success(), "{seed}");
-    assert!(
-        seed["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|finding| finding["kind"] != "unit.refused"),
-        "unit.refused after kill: {seed}"
-    );
-    assert_store_entries_whole_or_absent(&hive, &expected_files, 999, 0);
 }
 
 #[test]
@@ -2055,9 +2070,18 @@ fn gc_exits_130_when_store_eviction_is_cancelled() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    wait_until_open(child.id(), &hive.home.path.join(".lock"));
+    let hive_pid = child.id();
+    wait_until_open(hive_pid, &hive.home.path.join(".lock"));
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(250) {
+        assert!(
+            pid_alive(hive_pid),
+            "gc should still be blocked on the state lock"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert!(Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
+        .args(["-INT", &hive_pid.to_string()])
         .status()
         .unwrap()
         .success());
@@ -2206,6 +2230,16 @@ fn wait_until_open(pid: u32, path: &Path) {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn mib2_text() -> Vec<u8> {
