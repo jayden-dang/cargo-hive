@@ -968,7 +968,7 @@ fn freeable_of(fs: &Apfs, dir: &Path) -> u64 {
 
 fn run_evict(
     hive: &Hive,
-    fs: &Apfs,
+    fs: &dyn Fs,
     targets: &[TargetDir],
     limits: Limits,
     account_bytes: bool,
@@ -1693,6 +1693,176 @@ fn a_stale_evict_tree_leaves_seed_store_bytes_working_and_the_next_gc_removes_it
         !stale.exists(),
         "bare gc must remove store/.tmp/evict-*: {gc}"
     );
+}
+
+#[test]
+fn freed_and_still_shared_bytes_split_by_sharing() {
+    let hive = Hive::ready();
+    let fs = apfs();
+    let value = 88_001u64;
+    let meta = "bytesplit-aaaaaaaaaaaaaaaa";
+    let fp = "bbbbbbbbbbbbbbbb";
+    let text = mib2_text();
+    let random = mib2_random(7);
+    synth_entry(
+        &hive,
+        (value, meta, fp),
+        &[],
+        &[("packed", text), ("noise", random)],
+        31 * DAY,
+    );
+    let dir = entry_path(&hive, value, meta, fp);
+    let packed = dir.join("packed");
+    let noise = dir.join("noise");
+    assert!(matches!(
+        fs.compress(&packed),
+        cargo_hive::platform::CompressOutcome::Compressed
+    ));
+    let keep = hive.home.path.join("clone-keep");
+    fs::create_dir_all(&keep).unwrap();
+    fs.clone_file(&noise, &keep.join("noise")).unwrap();
+    let packed_blocks = fs.entry_stat(&packed).unwrap().blocks.saturating_mul(512);
+    let noise_blocks = fs.entry_stat(&noise).unwrap().blocks.saturating_mul(512);
+    assert!(
+        packed_blocks > 0 && packed_blocks < 2 << 20,
+        "{packed_blocks}"
+    );
+    assert_eq!(noise_blocks, 2 << 20);
+
+    let outcome = run_evict(&hive, &fs, &[], limits(), true);
+    assert!(
+        outcome_count(&outcome, "store_entries_evicted_age") >= 1,
+        "{:?}",
+        outcome.counts
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_freed_bytes"),
+        packed_blocks,
+        "{:?}",
+        outcome.counts
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_bytes_still_shared"),
+        noise_blocks,
+        "{:?}",
+        outcome.counts
+    );
+}
+
+#[test]
+fn with_check_c_failed_the_store_bytes_are_unmeasured() {
+    let hive = Hive::ready();
+    let fs = apfs();
+    let value = 88_002u64;
+    synth_entry(
+        &hive,
+        (value, "nocheckc-aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        &[],
+        &[("blob", mib2_text())],
+        31 * DAY,
+    );
+    let outcome = run_evict(&hive, &fs, &[], limits(), false);
+    assert!(
+        outcome_count(&outcome, "store_entries_evicted_age") >= 1,
+        "{:?}",
+        outcome.counts
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_freed_bytes"),
+        0,
+        "{:?}",
+        outcome.counts
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_bytes_still_shared"),
+        0,
+        "{:?}",
+        outcome.counts
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_freeable_bytes_remaining"),
+        0,
+        "{:?}",
+        outcome.counts
+    );
+    let reason = "doctor check (c) did not pass";
+    for field in [
+        "store_freed_bytes",
+        "store_bytes_still_shared",
+        "store_freeable_bytes_remaining",
+    ] {
+        assert!(
+            outcome
+                .unmeasured
+                .iter()
+                .any(|(f, r)| f == field && r == reason),
+            "missing {field}: {:?}",
+            outcome.unmeasured
+        );
+    }
+}
+
+#[test]
+fn an_unreadable_file_in_an_evicted_entry_is_unmeasured_not_counted() {
+    let hive = Hive::ready();
+    let value = 88_003u64;
+    let meta = "unreadable-aaaaaaaaaaaaaaaa";
+    let fp = "bbbbbbbbbbbbbbbb";
+    synth_entry(
+        &hive,
+        (value, meta, fp),
+        &[],
+        &[("blob", mib2_text())],
+        31 * DAY,
+    );
+    let renamed_blob = hive
+        .home
+        .path
+        .join("store/.tmp")
+        .join(format!("evict-{}-0", std::process::id()))
+        .join("blob");
+    let recording = common::recording_fs::Recording::over_real().fail_sharing(&renamed_blob);
+    let fs = recording.fs();
+    let outcome = run_evict(&hive, fs.as_ref(), &[], limits(), true);
+    assert!(
+        outcome_count(&outcome, "store_entries_evicted_age") >= 1,
+        "{:?}",
+        outcome.counts
+    );
+    assert!(
+        outcome
+            .unmeasured
+            .iter()
+            .any(|(field, _)| field.contains("blob") && field.contains("evict-")),
+        "{:?}",
+        outcome.unmeasured
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_freed_bytes"),
+        0,
+        "{:?}",
+        outcome.counts
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_bytes_still_shared"),
+        0,
+        "{:?}",
+        outcome.counts
+    );
+}
+
+fn mib2_text() -> Vec<u8> {
+    vec![b'a'; 2 << 20]
+}
+
+fn mib2_random(seed: u64) -> Vec<u8> {
+    let mut bytes = vec![0u8; 2 << 20];
+    let mut state = seed;
+    for b in &mut bytes {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        *b = (state >> 33) as u8;
+    }
+    bytes
 }
 
 fn assert_seeded_units_whole_or_absent(hive: &Hive, lane: &Path) {

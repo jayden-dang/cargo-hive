@@ -228,10 +228,14 @@ pub fn run(
     }
     let mut cap_keys = BTreeSet::new();
     if !ctx.account_bytes {
-        outcome.unmeasured.push((
-            "store_freeable_bytes_remaining".into(),
-            "doctor check (c) did not pass".into(),
-        ));
+        let reason = "doctor check (c) did not pass";
+        for field in [
+            "store_freeable_bytes_remaining",
+            "store_freed_bytes",
+            "store_bytes_still_shared",
+        ] {
+            outcome.unmeasured.push((field.into(), reason.into()));
+        }
     } else {
         let planned: BTreeSet<_> = candidates.iter().map(|(k, _)| k.clone()).collect();
         let CapPlan {
@@ -300,6 +304,21 @@ pub fn run(
             "store_toolchains_dropped",
             preview_dropped_values(ctx.state, &inv, &renamed),
         );
+        let mut ledger = Ledger::new();
+        let store_root = store_dir(ctx.state);
+        for key in &renamed {
+            if let Some(path) = path_for_key(ctx.state, &inv, key) {
+                let _ = gc::remove_counted(
+                    ctx.fs,
+                    &mut ledger,
+                    &store_root,
+                    &path,
+                    ctx.account_bytes,
+                    true,
+                );
+            }
+        }
+        apply_removal_ledger(&mut outcome, ledger, ctx.account_bytes);
         return outcome;
     }
 
@@ -430,8 +449,33 @@ pub fn run(
         "store_toolchains_dropped",
         committed.dropped_values.len() as u64,
     );
+    apply_removal_ledger(&mut outcome, ledger, ctx.account_bytes);
     drop(store_lock);
     outcome
+}
+
+fn apply_removal_ledger(outcome: &mut EvictOutcome, ledger: Ledger, account_bytes: bool) {
+    let tally = ledger.finish();
+    if account_bytes {
+        push_count(outcome, "store_freed_bytes", tally.total.freed);
+        push_count(
+            outcome,
+            "store_bytes_still_shared",
+            tally.total.still_shared,
+        );
+    }
+    for (path, why) in tally.unmeasured {
+        outcome.unmeasured.push((path.display().to_string(), why));
+    }
+    if tally.unmeasured_more > 0 {
+        outcome.unmeasured.push((
+            "unmeasured_paths".into(),
+            format!(
+                "{} more paths could not be measured and are not listed",
+                tally.unmeasured_more
+            ),
+        ));
+    }
 }
 
 enum ToolchainsInUse {
@@ -512,6 +556,16 @@ fn values_for_texts(state: &State, texts: &[String]) -> BTreeSet<u64> {
 
 fn push_count(outcome: &mut EvictOutcome, name: &str, n: u64) {
     outcome.counts.push((name.to_string(), n));
+}
+
+fn path_for_key(state: &State, inv: &Inventory, key: &StoreKey) -> Option<PathBuf> {
+    if let Some(row) = inv.rows.iter().find(|row| row_key_matches(row, key)) {
+        return Some(entry_dir(state, row));
+    }
+    inv.rowless
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, path)| path.clone())
 }
 
 fn preview_renames(inv: &Inventory, candidates: &[(StoreKey, Option<u64>)]) -> BTreeSet<StoreKey> {
