@@ -1,6 +1,13 @@
 //! Compile-only cargo shapes for the timed bench build, always offline and locked.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::Path;
+use std::process::Command;
 use std::str::FromStr;
+
+use crate::cargo_target::TARGET_VARS;
+use crate::doctor::Toolchain;
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum BuildCmd {
@@ -61,9 +68,116 @@ impl BuildCmd {
     }
 }
 
+pub struct EnvMap {
+    vars: BTreeMap<OsString, OsString>,
+    overridden: Vec<(&'static str, String, String)>,
+}
+
+pub fn env_map(caller: impl IntoIterator<Item = (OsString, OsString)>, tc: &Toolchain) -> EnvMap {
+    const WRAPPERS: [&str; 4] = [
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_BUILD_RUSTC_WRAPPER",
+        "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+    ];
+    const DROP_EXACT: [&str; 8] = [
+        "CARGO_MANIFEST_DIR",
+        "OUT_DIR",
+        "CARGO_BUILD_RUSTC_WRAPPER",
+        "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+        "RUSTC",
+        "CARGO_BUILD_RUSTC",
+        "RUSTUP_TOOLCHAIN",
+        "RUSTUP_TOOLCHAIN_SOURCE",
+    ];
+
+    let mut vars = BTreeMap::new();
+    let mut overridden = Vec::new();
+
+    for (key, value) in caller {
+        let key_str = key.to_string_lossy();
+        if WRAPPERS.iter().any(|w| *w == key_str.as_ref()) && !value.is_empty() {
+            overridden.push((
+                "env.wrapper.overridden",
+                key_str.to_string(),
+                value.to_string_lossy().into_owned(),
+            ));
+        }
+        if key_str == "RUSTC" || key_str == "CARGO_BUILD_RUSTC" {
+            overridden.push((
+                "env.rustc.overridden",
+                key_str.to_string(),
+                value.to_string_lossy().into_owned(),
+            ));
+        }
+        let drop = TARGET_VARS.iter().any(|v| *v == key_str.as_ref())
+            || key_str.starts_with("GIT_")
+            || key_str.starts_with("CARGO_PKG_")
+            || DROP_EXACT.iter().any(|v| *v == key_str.as_ref());
+        if !drop {
+            vars.insert(key, value);
+        }
+    }
+
+    vars.insert(OsString::from("RUSTC_WRAPPER"), OsString::from(""));
+    vars.insert(
+        OsString::from("RUSTC_WORKSPACE_WRAPPER"),
+        OsString::from(""),
+    );
+    vars.insert(OsString::from("RUSTUP_AUTO_INSTALL"), OsString::from("0"));
+    vars.insert(OsString::from("RUSTC"), OsString::from(&tc.rustc));
+    if let Some(name) = &tc.name {
+        vars.insert(OsString::from("RUSTUP_TOOLCHAIN"), OsString::from(name));
+    }
+
+    EnvMap { vars, overridden }
+}
+
+impl EnvMap {
+    pub fn vars(&self) -> &BTreeMap<OsString, OsString> {
+        &self.vars
+    }
+
+    pub fn command(&self, tc: &Toolchain, dir: &Path, build: &BuildCmd) -> Command {
+        let mut cmd = Command::new(&tc.cargo);
+        cmd.env_clear()
+            .envs(&self.vars)
+            .current_dir(dir)
+            .args(build.args());
+        cmd
+    }
+
+    pub fn findings(&self) -> Vec<(&'static str, String)> {
+        self.overridden
+            .iter()
+            .map(|(kind, var, value)| {
+                let detail = if *kind == "env.rustc.overridden" {
+                    format!("{var}={value}; the build used the resolved toolchain")
+                } else {
+                    format!("{var}={value}")
+                };
+                (*kind, detail)
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doctor::Toolchain;
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    fn tc(name: Option<&str>) -> Toolchain {
+        Toolchain {
+            name: name.map(String::from),
+            cargo: "/tc/bin/cargo".into(),
+            rustc: "/tc/bin/rustc".into(),
+            release: "1.97.1".into(),
+            version_text: "rustc 1.97.1".into(),
+        }
+    }
 
     #[test]
     fn each_shape_is_its_cargo_command_offline_and_locked() {
@@ -90,5 +204,106 @@ mod tests {
         ] {
             assert!(bad.parse::<BuildCmd>().is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_build_environment_drops_wrappers_and_pins_the_resolved_toolchain() {
+        let caller = [
+            ("PATH", "/bin"),
+            ("CARGO_HOME", "/h"),
+            ("RUSTFLAGS", "-Dwarnings"),
+            ("CARGO_TARGET_DIR", "/t"),
+            ("CARGO_BUILD_TARGET_DIR", "/t"),
+            ("CARGO_BUILD_BUILD_DIR", "/b"),
+            ("GIT_DIR", "/g"),
+            ("CARGO_PKG_NAME", "x"),
+            ("CARGO_MANIFEST_DIR", "/m"),
+            ("OUT_DIR", "/o"),
+            ("RUSTC_WRAPPER", "sccache"),
+            ("RUSTC_WORKSPACE_WRAPPER", ""),
+            ("CARGO_BUILD_RUSTC_WRAPPER", "sccache"),
+            ("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER", "w"),
+            ("RUSTC", "/other/rustc"),
+            ("CARGO_BUILD_RUSTC", "/r"),
+            ("RUSTUP_TOOLCHAIN", "nightly"),
+            ("RUSTUP_TOOLCHAIN_SOURCE", "env"),
+        ]
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        let env = env_map(caller, &tc(Some("stable-aarch64-apple-darwin")));
+        let get = |k: &str| {
+            env.vars()
+                .get(&OsString::from(k))
+                .map(|v| v.to_string_lossy().into_owned())
+        };
+        for kept in ["PATH", "CARGO_HOME", "RUSTFLAGS"] {
+            assert!(get(kept).is_some(), "{kept}");
+        }
+        for gone in [
+            "CARGO_TARGET_DIR",
+            "CARGO_BUILD_TARGET_DIR",
+            "CARGO_BUILD_BUILD_DIR",
+            "GIT_DIR",
+            "CARGO_PKG_NAME",
+            "CARGO_MANIFEST_DIR",
+            "OUT_DIR",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+            "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_RUSTC",
+            "RUSTUP_TOOLCHAIN_SOURCE",
+        ] {
+            assert_eq!(get(gone), None, "{gone}");
+        }
+        assert_eq!(get("RUSTC_WRAPPER").as_deref(), Some(""));
+        assert_eq!(get("RUSTC_WORKSPACE_WRAPPER").as_deref(), Some(""));
+        assert_eq!(get("RUSTC").as_deref(), Some("/tc/bin/rustc"));
+        assert_eq!(
+            get("RUSTUP_TOOLCHAIN").as_deref(),
+            Some("stable-aarch64-apple-darwin")
+        );
+        assert_eq!(get("RUSTUP_AUTO_INSTALL").as_deref(), Some("0"));
+        let kinds: Vec<_> = env.findings().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == "env.wrapper.overridden")
+                .count(),
+            3
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == "env.rustc.overridden")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn without_rustup_the_pin_is_the_resolved_rustc_alone() {
+        let env = env_map([], &tc(None));
+        assert!(env
+            .vars()
+            .get(&OsString::from("RUSTUP_TOOLCHAIN"))
+            .is_none());
+        assert_eq!(
+            env.vars()[&OsString::from("RUSTC")],
+            OsString::from("/tc/bin/rustc")
+        );
+        assert!(env.findings().is_empty());
+    }
+
+    #[test]
+    fn the_build_command_runs_the_resolved_cargo_in_the_checkout_with_exactly_the_map() {
+        let env = env_map(
+            [(OsString::from("PATH"), OsString::from("/bin"))],
+            &tc(None),
+        );
+        let cmd = env.command(&tc(None), Path::new("/lane"), &BuildCmd::Build);
+        assert_eq!(cmd.get_program(), "/tc/bin/cargo");
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/lane")));
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            ["build", "--offline", "--locked"]
+        );
     }
 }
