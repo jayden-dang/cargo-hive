@@ -1,7 +1,8 @@
 # Requirements: Bench (measured cold-versus-seeded first builds)
 
 Feature code: BENCH
-Status: Draft
+Status: Approved
+Approved: 2026-11-09 14:58 by the operator (Jayden), "approve" on the spec sheet for #6 at feat/bench 0be0657, relayed by the conductor (/Users/jayden/Developer/experiments/cargo-zip/.skills/_pending-bench/auto/operator-reply.md). The reply approves the sheet as a whole; the Open Questions in requirements.md stay open as listed, and the owner-reserved sampling pick (S1) stays labelled as such.
 Date: 2026-11-09
 
 <!--
