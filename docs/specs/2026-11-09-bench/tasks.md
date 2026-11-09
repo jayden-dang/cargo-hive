@@ -345,7 +345,7 @@ runner (section 7) with `METADATA_DEADLINE` (60 s) and `Capture { stdout_cap: 64
 
 **Depends-on:** Task 3
 
-- [ ] **Step 1: Write the failing tests** in a new `#[cfg(test)] mod tests` at the end of `src/git.rs` (it has
+- [x] **Step 1: Write the failing tests** in a new `#[cfg(test)] mod tests` at the end of `src/git.rs` (it has
   none today). Its helper `scratch_repo(label) -> ScratchRepo` makes `/private/tmp/hive-it-<label>-<pid>` and
   returns a guard whose `Drop` removes that directory, so no fixture outlives its test
   (docs/standards/testing.md:34); `ScratchRepo::path(&self) -> &Path`. It runs
@@ -381,14 +381,14 @@ fn a_changed_tracked_file_is_a_change_and_an_untracked_file_is_not() {
   Run: `cargo test --lib git::`. Expect: a compile error, because `head` does not exist. (The plan review
   checked in a scratch repo that plain `git status` rewrites the index after a same-content touch, and that
   `--no-optional-locks status` does not.)
-- [ ] **Step 2: Implement.** `head` runs `rev-parse --verify HEAD` and `has_tracked_changes` runs
+- [x] **Step 2: Implement.** `head` runs `rev-parse --verify HEAD` and `has_tracked_changes` runs
   `status --porcelain --untracked-files=no`, both via `read_only()` through
   `run_bounded(cmd, METADATA_DEADLINE, Capture { stdout_cap: 64 * 1024, stderr_cap: 4 * 1024 }, || false)`.
   A non-zero exit maps to `GitError::Failed`, and a timeout to `GitError::Failed` with the deadline in
   `stderr`. `has_tracked_changes` is `!ran.stdout.is_empty()`. `Git::command` and `Git::run` stay as they
   are.
-- [ ] **Step 3: Run** `cargo test --lib git::` and `cargo test --test status_checkouts`. Expect pass.
-- [ ] **Step 4: Commit** `feat(git): read HEAD and tracked changes with optional locks off`
+- [x] **Step 3: Run** `cargo test --lib git::` and `cargo test --test status_checkouts`. Expect pass.
+- [x] **Step 4: Commit** `feat(git): read HEAD and tracked changes with optional locks off`
 
 _Requirements: BENCH-2.10, BENCH-9.5_
 
