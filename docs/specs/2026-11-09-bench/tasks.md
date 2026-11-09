@@ -1192,7 +1192,7 @@ _Requirements: BENCH-1.11, BENCH-2.9, BENCH-3.3, BENCH-6.1, BENCH-9.7, BENCH-10.
 
 **Depends-on:** Task 14
 
-- [ ] **Step 1: Write the failing test** in `tests/skill.rs`, shaped like `the_skill_teaches_seeding_a_new_lane`
+- [x] **Step 1: Write the failing test** in `tests/skill.rs`, shaped like `the_skill_teaches_seeding_a_new_lane`
   (read the skill body the way that test does):
 
 ```rust
@@ -1210,7 +1210,7 @@ fn the_skill_teaches_benching_cold_against_seeded() {
 
   Add `Bench` to the wants list and to the path-required set. Run: `cargo test --test skill`. Expect: a
   failure on the first missing needle.
-- [ ] **Step 2: Write the docs.** Put these in SKILL.md, inside the existing headings: a "Which command" row;
+- [x] **Step 2: Write the docs.** Put these in SKILL.md, inside the existing headings: a "Which command" row;
   one fenced line, `cargo hive bench --cold /path/to/cold1 /path/to/cold2 --seeded /path/to/seeded1 /path/to/seeded2 --json`
   (no `<…>` words, because `command_words` stops at any word containing `>`, tests/skill.rs:365; and no
   backticked `cargo hive bench` in prose, which the skill test would read as a command line); the setup and cleanup lines
@@ -1223,8 +1223,8 @@ fn the_skill_teaches_benching_cold_against_seeded() {
   when asked, because it makes 2n full builds. Add a README row. Reword `src/receipt.rs`'s module doc to
   say bench's receipt is the one that holds integer milliseconds. Add the eval entry and its TESTS.md
   heading.
-- [ ] **Step 3: Run** `cargo test --test skill` and `cargo test --lib receipt::`. Expect pass, with the body
+- [x] **Step 3: Run** `cargo test --test skill` and `cargo test --lib receipt::`. Expect pass, with the body
   at most 150 lines and the seven headings unchanged.
-- [ ] **Step 4: Commit** `docs(skill): teach agents to bench a cold lane against a seeded one`
+- [x] **Step 4: Commit** `docs(skill): teach agents to bench a cold lane against a seeded one`
 
 _Requirements: BENCH-8.1, BENCH-8.2, BENCH-8.3, BENCH-9.3, BENCH-9.4_
