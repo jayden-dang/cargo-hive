@@ -1778,8 +1778,20 @@ fn collect_keys(value: &serde_json::Value, out: &mut Vec<String>, depth: usize) 
     }
 }
 
-fn hold_build_locks(hive: &Hive, root: &Path) -> Vec<Child> {
-    let mut locks = Vec::new();
+/// Lock holders that are killed when the test drops them, pass or fail.
+struct Held(Vec<Child>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        for child in &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn hold_build_locks(hive: &Hive, root: &Path) -> Held {
+    let mut held = Held(Vec::new());
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
         assert!(depth < 10, "walk bound hit");
@@ -1794,7 +1806,7 @@ fn hold_build_locks(hive: &Hive, root: &Path) -> Vec<Child> {
             let path = entry.path();
             let name = entry.file_name();
             if name == ".cargo-build-lock" {
-                locks.push(hive.hold_lock_child("flock", &path));
+                held.0.push(hive.hold_lock_child("flock", &path));
                 continue;
             }
             if name == ".git" || name == "reg" {
@@ -1805,8 +1817,8 @@ fn hold_build_locks(hive: &Hive, root: &Path) -> Vec<Child> {
             }
         }
     }
-    assert!(!locks.is_empty(), "no build lock under {}", root.display());
-    locks
+    assert!(!held.0.is_empty(), "no build lock under {}", root.display());
+    held
 }
 
 fn compressed_rlib(store: &Path) -> bool {
