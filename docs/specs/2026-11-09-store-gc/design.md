@@ -1,7 +1,7 @@
 # Design: Store GC (bare `cargo hive gc` keeps hive's store bounded)
 
 Feature code: STOREGC
-Status: Draft — revised after the independent review (`.skills/_pending-store-gc/auto/design-review.md`, findings 1–10 applied)
+Status: Draft — revised after an independent design review (ten findings applied) and two review rounds
 Date: 2026-11-09
 Requirements: ./requirements.md
 
@@ -35,14 +35,14 @@ ARCH invariants this design relies on: ARCH-2, ARCH-4, ARCH-8, ARCH-9, ARCH-10, 
 
 The close package and ledger (`.skills/_pending-store-gc/auto/`) hold the frame's decisions; they are not restated. These are what design settled.
 
-1. **Store eviction is `src/seed/evict.rs`, a sibling of `store.rs`.** Eviction needs store internals that are private to `seed`: `entry_dir`, `same_key`, row merging. Living inside `seed` keeps them private. `cli.rs` calls one function, as it calls `seed::run`.
-2. **The exclusion is one store lock, `<state root>/store.lock`, created and taken through `state`.**
+1. **Store eviction is `src/seed/evict.rs`, a sibling of `store.rs`.** *(agent-decided)* Eviction needs store internals that are private to `seed`: `entry_dir`, `same_key`, row merging. Living inside `seed` keeps them private. `cli.rs` calls one function, as it calls `seed::run`.
+2. **The exclusion is one store lock, `<state root>/store.lock`, created and taken through `state`.** *(agent-decided; the store-wide scope is Weigh W13's approved sync-back)*
    - `seed::run` holds it shared from just before `fill::fill` (`src/seed/mod.rs:194`) until `place` returns. That covers fill's `.tmp` sweep (`src/seed/fill.rs:83`), its publish-to-merge window, seed's `store::read` (`src/seed/mod.rs:220`), the clone-out, and the `store_bytes` walk. It takes the lock as `locked_or_cancelled` takes the state lock: `LOCK_SH | LOCK_NB`, polled every 10 ms, cancellable.
-   - Bare `gc` tries it exclusive once, with `LOCK_EX | LOCK_NB`, and holds it through the commit and removal phases (decision 3). Held means no entry is evicted this run, with a `store.busy` finding and the `store_entries_held_busy` count.
+   - Bare `gc` tries it exclusive once, with `LOCK_EX | LOCK_NB`, and holds it through the commit and removal phases (decision 3). Held means no entry is evicted this run, with a `store.busy` finding, whose text says to run `gc` again when no seed runs, and the `store_entries_held_busy` count. No cross-run counter bounds a run of busy results: that would be a persisted field (charter hard stop).
    - One lock for the whole store, not one per entry. Per-entry locks would cost one file per entry for a window that seed holds across hundreds of entries anyway. So while any seed runs, gc evicts nothing and the cap is not enforced that run; STOREGC-6.1 and STOREGC-3.2 are reworded to say so (Upstream sync-back).
    - It is a lock file, not metadata: it holds no content, so it is no persisted format. `store.db` is still written only under the state lock (ARCH-16).
    - SH and EX|NB flocks are atomic and the two locks are always taken in one order (store lock, then state lock), so there is no cycle (review finding 4, verified).
-3. **Two phases: plan with no lock, commit under the exclusive lock.**
+3. **Two phases: plan with no lock, commit under the exclusive lock.** *(agent-decided)*
    - **Plan:** scan targets, form held keys, resolve toolchains, read `store.db`, list entry directories and measure them. This is the slow part, and seeds run beside it.
    - **Commit**, under the exclusive store lock: no fill can merge while it is held, so the rows read now are final.
      1. Remove any `store/.tmp/evict-*` left by a killed run.
@@ -53,36 +53,36 @@ The close package and ledger (`.skills/_pending-store-gc/auto/`) hold the frame'
    - **Removal**, still under the exclusive store lock: remove the renamed trees with `remove_counted`, then release.
    - Holding the lock through removal is what keeps fill's `.tmp` sweep and seed's `store_bytes` walk off a tree being removed (review finding 1: a rename keeps the directory's mtime, so a 30-day-old entry is sweep-eligible at once).
    - A seed waits for renames, one write and the removals, never for the scan. Accepted trade-off. Reopen if a measured seed waits more than 10 s on `store.lock`.
-4. **Kill safety comes from rename-then-remove (STOREGC-9.2).**
+4. **Kill safety comes from rename-then-remove (STOREGC-9.2).** *(Weigh W6 for the promise; agent-decided for rename-then-remove)*
    - A rename within one volume is atomic, so an entry path holds either the whole entry or nothing.
    - Killed after a rename and before the write: the row's directory is gone, and `store::read`/`merge` already prune such rows (STOREGC-10.4).
    - Killed during removal: the partial tree sits under `.tmp/`, where fill does not adopt. The next gc's commit step 1 removes it, and fill's one-day sweep may too. Neither runs while another gc holds the lock.
    - The `evict-` prefix never matches fill's `<pid>-<key>` names.
-5. **The emptied `store/<value>/` is removed under the exclusive lock.** Fill's `create_dir_all(parent)` then `rename` (`src/seed/store.rs:340-342`) runs while fill holds the shared lock, so the two cannot race.
-6. **Freeable bytes come from `gc::measure(fs, entry_dir, &[entry_dir], account_bytes)`, one call per entry.** Entries share no inode (fill clones per file, and `SkippedHardLink` fails a fill), so per-entry sums add up. The spike shows the ledger's rule is right for every store case. No clone id is recorded (SEED design decision 3 stays answered "not yet").
-7. **Cap order and tie-break (STOREGC-3.2, Weigh A2 amended by W12).** Candidates sort by `last_live_at` ascending. Within one `last_live_at`, an entry comes before every entry its `registry_deps` name (dependents first: a reverse topological order over the cohort's `registry_deps`, which `Row` already holds), and remaining ties go by (`toolchain_value`, `name_meta`, `fingerprint_hash`) ascending. Ties are the normal case: a gc run gives every held key one `now`, and a fill writes one `now` (`src/seed/fill.rs:406-407,519-520`). An alphabetical cut through a cohort would leave dependents whose dependencies are gone, which `choose` drops (`src/seed/choose.rs`), counted against the cap and usable by no seed. The total compared with the cap is the freeable bytes of every entry remaining after stories 1 and 2, held entries included. Freeable bytes of rowless directories count too, but `.tmp/` does not; its bytes are reported apart (STOREGC-1.8). An entry that frees 0 bytes is skipped by the cap step: evicting it cannot lower the total. `CAP_BYTES = 40_000_000_000` and `MAX_AGE = 30 × 86 400 s` are constants in `cli.rs`, passed to `evict::run` in `Limits` (Weigh W10).
-8. **Held keys are formed from each profile's graph, not from `liveness` alone.**
+5. **The emptied `store/<value>/` is removed under the exclusive lock.** *(agent-decided)* Fill's `create_dir_all(parent)` then `rename` (`src/seed/store.rs:340-342`) runs while fill holds the shared lock, so the two cannot race.
+6. *(Weigh: spike-k4.md evidence)* **Freeable bytes come from `gc::measure(fs, entry_dir, &[entry_dir], account_bytes)`, one call per entry.** Entries share no inode (fill clones per file, and `SkippedHardLink` fails a fill), so per-entry sums add up. The spike shows the ledger's rule is right for every store case. No clone id is recorded (SEED design decision 3 stays answered "not yet").
+7. **Cap order and tie-break (STOREGC-3.2, Weigh A2 amended by W12).** *(agent-decided D2 for oldest-first; Weigh W12 for the tie-break)* Candidates sort by `last_live_at` ascending. Within one `last_live_at`, an entry comes before every entry its `registry_deps` name (dependents first: a reverse topological order over the cohort's `registry_deps`, which `Row` already holds), and remaining ties go by (`toolchain_value`, `name_meta`, `fingerprint_hash`) ascending. Ties are the normal case: a gc run gives every held key one `now`, and a fill writes one `now` (`src/seed/fill.rs:406-407,519-520`). An alphabetical cut through a cohort would leave dependents whose dependencies are gone, which `choose` drops (`src/seed/choose.rs`), counted against the cap and usable by no seed. The total compared with the cap is the freeable bytes of every entry remaining after stories 1 and 2, held entries included. Freeable bytes of rowless directories count too, but `.tmp/` does not; its bytes are reported apart (STOREGC-1.8). An entry that frees 0 bytes is skipped by the cap step: evicting it cannot lower the total. `CAP_BYTES = 40_000_000_000` and `MAX_AGE = 30 × 86 400 s` are constants in `cli.rs`, passed to `evict::run` in `Limits` (Weigh W10).
+8. **Held keys are formed from each profile's graph, not from `liveness` alone.** *(Weigh W1; agent-decided for the profile-level extension)*
    - `liveness` gives `UnitRef { profile, dir_name }` for Decided targets and nothing for Undecided ones (`src/liveness.rs:30-36`). For a Decided target, the live refs are mapped to keys through the profile graph, as `source::live_registry_units` does (`src/seed/source.rs:122-171`). A live ref with no graph unit, a live not-current node, is held by its name-meta (STOREGC-4.3).
    - Undecided: every unit in the graph gives its key, and every not-current unit gives its name-meta (STOREGC-4.2, 4.3).
    - Unsupported profile: its `.fingerprint/` is listed with `read_dir_bounded(CRATE_DIR_CAP)`, and each directory name is held as a name-meta. With no `.fingerprint/` it holds nothing. A failed listing is STOREGC-4.4's whole-store hold.
-9. **Toolchain lookups (STOREGC-2.1, Weigh W9).**
+9. **Toolchain lookups (STOREGC-2.1, Weigh W9).** *(Weigh W9, W18, W19)*
    - Lookup (a) is a new `doctor::resolve_toolchain_own_dir_until(cwd, cancel)`, which removes `RUSTUP_TOOLCHAIN` and `RUSTUP_TOOLCHAIN_SOURCE` unconditionally: the stated CORE-1.12 exception, and allowed by ARCH-13 as a variable "set by hive or kept on purpose". It runs once per non-missing checkout.
    - Lookup (b) is seed's `resolve_toolchain_until` (`src/doctor.rs:443`). When the caller's `RUSTUP_TOOLCHAIN` survives `drop_directory_toolchain`, (b) resolves the same toolchain in every directory, so it runs once. `gc_cmd`'s existing `resolve_toolchain(state.root())` (`src/cli.rs:849`) is that one result and is reused. When it does not survive, (b) equals (a), and the run reuses (a). Whether it survives is one predicate, extracted from `drop_directory_toolchain` so both read it (verified on rustup 1.29.3, review findings 2 and 9).
    - No lookup runs when the store has no entry.
    - Cost: about 87 ms per checkout on klynt (`.skills/_pending-store-gc/auto/measure-u1.md`). S2's 10 s trigger is about 115 checkouts.
-10. **Dependents of an evicted entry are not cascaded by the age and toolchain steps (K6 closed).** A live dependent's dependencies are live under closure liveness, so they are held. An unheld dependent is not live, and the age or toolchain rule reaches it with its dependencies, since they share a value and age together. The cap step is different: it can stop inside a cohort, which is why decision 7 orders dependents first. `choose` already drops a unit whose `registry_deps` fall outside the store (SEED-3.7).
-11. **Time.** One `SystemTime::now()` at the start of eviction, in whole seconds since the epoch, as `Row` stores it. "More than 30 days before" means `now - last_live_at > MAX_AGE`.
-12. **Dry run (STOREGC-5.1).** It runs the plan phase and computes what the commit phase would do with no lock, no rename and no write; the counts are named as in a real run. It takes no store lock, so its counts match the next real run only on an idle store (STOREGC-5.2).
-13. **Cancel and failure.**
+10. **Dependents of an evicted entry are not cascaded by the age and toolchain steps (K6 closed).** *(agent-decided)* A live dependent's dependencies are live under closure liveness, so they are held. An unheld dependent is not live, and the age or toolchain rule reaches it with its dependencies, since they share a value and age together. The cap step is different: it can stop inside a cohort, which is why decision 7 orders dependents first. `choose` already drops a unit whose `registry_deps` fall outside the store (SEED-3.7).
+11. **Time.** *(agent-decided)* One `SystemTime::now()` at the start of eviction, in whole seconds since the epoch, as `Row` stores it. "More than 30 days before" means `now - last_live_at > MAX_AGE`.
+12. **Dry run (STOREGC-5.1).** *(Weigh A1)* It runs the plan phase and computes what the commit phase would do with no lock, no rename and no write; the counts are named as in a real run. It takes no store lock, so its counts match the next real run only on an idle store (STOREGC-5.2).
+13. **Cancel and failure.** *(Weigh W5, W11 for the exit code; agent-decided for the cancel order)*
     - The cancel flag (`doctor::CANCEL`) is polled between plan steps and before each rename. A cancel before commit evicts nothing. `gc`'s exit is then 130 as today.
     - The state lock is taken, not cancellably, before the first rename (decision 3, step 2), so what was renamed is always recorded. A cancel seen before a rename stops renaming; the write still happens, the removal is skipped, and both locks are released. The `evict-` trees stay for the next gc.
     - A failed rename keeps that entry, with a finding.
     - A failed `store.db` write leaves rows whose directories are gone. `store::read` and `merge` prune them at the next read (STOREGC-10.4). It gets a finding.
     - None of these changes `gc`'s exit code (STOREGC-4.5, W5).
-14. **`live_checkouts` returns its walk faults** to all three callers, instead of turning them into findings and dropping them. `gc_cmd` passes them to `evict::run` for STOREGC-2.4/4.4; `plan_cmd` and `explain_cmd` make the same findings as today.
-15. **Older "same counts" guards.** GCPLAN-9.1 and SEED-10.1 promise bare `gc` the same count names. STOREGC adds store counts by design, so each gets a dated note naming STOREGC. That is documentation upkeep, as the SEED design note is.
-16. **Where eviction sits in `gc_cmd`.** After the `after` volume sample and its cross-check notes (`src/cli.rs:903-912`), so store bytes never enter AUTOGC-5.4's note. Not when `report.cancelled` (`src/cli.rs:950`).
-17. **Evicted trees stay under `store/.tmp/` (Weigh W14 declined for now).** Moving them outside `store/` would let removal run after the store lock is released, so seeds would not wait for it, but it reopens STOREGC-9.1 for a wait nobody has measured. Decision 3's reopen trigger (a measured seed waiting more than 10 s on `store.lock`) is the gate for W14.
+14. **`live_checkouts` returns its walk faults** *(agent-decided)* to all three callers, instead of turning them into findings and dropping them. `gc_cmd` passes them to `evict::run` for STOREGC-2.4/4.4; `plan_cmd` and `explain_cmd` make the same findings as today.
+15. **Older "same counts" guards.** *(agent-decided)* GCPLAN-9.1 and SEED-10.1 promise bare `gc` the same count names. STOREGC adds store counts by design, so each gets a dated note naming STOREGC. That is documentation upkeep, as the SEED design note is.
+16. **Where eviction sits in `gc_cmd`.** *(agent-decided)* After the `after` volume sample and its cross-check notes (`src/cli.rs:903-912`), so store bytes never enter AUTOGC-5.4's note. Not when `report.cancelled` (`src/cli.rs:950`).
+17. **Evicted trees stay under `store/.tmp/` (Weigh W14 declined for now).** *(agent-decided)* Moving them outside `store/` would let removal run after the store lock is released, so seeds would not wait for it, but it reopens STOREGC-9.1 for a wait nobody has measured. Decision 3's reopen trigger (a measured seed waiting more than 10 s on `store.lock`) is the gate for W14.
 18. **No ADR.** Every choice is reversible under Compat None. The store lock file, the `evict-` prefix and the counts can change in a later slice. The CORE-1.12 exception is recorded in requirement STOREGC-2.1 itself.
 
 ## Architecture
@@ -158,7 +158,7 @@ Respects: ARCH-17, ARCH-9
 Surface:
 - `source::live_registry_units` (called through `owned_targets` by fill, `src/seed/mod.rs:186`): `replace`. It calls the extracted helper, with the same output.
 - `liveness()`: `leave` (STOREGC-10.6).
-Interface: `source::unit_key(&Unit) -> StoreKey` (the extracted mapping); `source::holds(fs, targets: &[TargetDir], now, window) -> Holds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String>, by_reason: counts, whole_store: Vec<Finding>, findings: Vec<Finding> }`.
+Interface: `source::unit_key(&Unit) -> StoreKey` (the extracted mapping); `source::holds(fs, targets: &[TargetDir], now, window) -> Holds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String>, by_target: BTreeMap<PathBuf, BTreeSet<StoreKey>>, by_reason: counts, whole_store: Vec<Finding>, findings: Vec<Finding> }`. `by_target` records which target held each key, in memory only; the cap step uses it to name the targets of `store.held_over_cap` (STOREGC-3.3).
 Depth: n/a — extends `source`.
 Locality: extend `src/seed/source.rs` (extract one helper); `fill.rs` leave.
 
@@ -202,7 +202,7 @@ Flow:
 2. Toolchains: lookups (a) and (b). A failure, a fault `apply` would refuse on, or no resolved checkout blocks drops (STOREGC-2.4, 2.5).
 3. `store::inventory`.
 4. If `whole_store` is non-empty → no candidates; report the holds (STOREGC-4.4).
-5. Otherwise: age candidates, then toolchain candidates (unheld entries of values not in use), then the cap. Without `account_bytes` the cap step is skipped into `unmeasured` (STOREGC-3.4). With it, measure every remaining entry, sum, and evict unheld entries in decision 7's order until the sum is at or under `cap_bytes`. If only held entries remain over it, that is STOREGC-3.3's finding.
+5. Otherwise: age candidates, then toolchain candidates (unheld entries of values not in use), then the cap. Without `account_bytes` the cap step is skipped into `unmeasured` (STOREGC-3.4). With it, measure every remaining entry, sum, and evict unheld entries in decision 7's order until the sum is at or under `cap_bytes`. If only held entries remain over it, that is STOREGC-3.3's finding, naming up to 10 targets ordered by the freeable bytes of the entries each holds (an entry held by several targets counts toward each), with ties by path.
 6. Commit and remove as decision 3, or in a dry run report the counts only.
 
 Rowless directories go through the same rules with `last_live_at` unknown. They are evicted when unheld (STOREGC-1.6) and are never refreshed.

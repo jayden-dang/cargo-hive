@@ -220,7 +220,7 @@ _Requirements: STOREGC-1.5, STOREGC-2.3, STOREGC-10.4, STOREGC-10.5_
   - `inventory`, `evict_dir`, `rename_out`, `commit_eviction` (Task 3);
   - `liveness::liveness`, `gc::account::remove_counted`.
 - Produces:
-  - `pub(crate) fn holds(fs: &dyn Fs, targets: &[TargetDir], now: SystemTime, window: Duration) -> Holds`, with `Holds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String>, whole_store: Vec<Finding>, findings: Vec<Finding>, by_reason: BTreeMap<&'static str, u64> }`. In this task an unreadable target or any non-Decided verdict goes to `whole_store`; Task 5 narrows that.
+  - `pub(crate) fn holds(fs: &dyn Fs, targets: &[TargetDir], now: SystemTime, window: Duration) -> Holds`, with `Holds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String>, by_target: BTreeMap<PathBuf, BTreeSet<StoreKey>>, whole_store: Vec<Finding>, findings: Vec<Finding>, by_reason: BTreeMap<&'static str, u64> }`, where `by_target` records which target held each key, in memory only. In this task an unreadable target or any non-Decided verdict goes to `whole_store`; Task 5 narrows that.
   - `pub fn run(ctx: &EvictCtx<'_>, limits: Limits, dry_run: bool, cancel: &dyn Fn() -> bool) -> EvictOutcome` in `seed::evict`.
   - `pub struct EvictCtx<'a> { pub state: &'a State, pub fs: &'a dyn Fs, pub targets: &'a [TargetDir], pub checkouts: &'a [Checkout], pub checkout_faults: &'a [WalkFault], pub scan_faults: &'a [WalkFault], pub cache_roots: &'a [PathBuf], pub window: Duration, pub account_bytes: bool, pub now: SystemTime, pub caller_toolchain: Option<Toolchain>, pub caller_toolchain_kept: bool, pub rustup: &'a Path }`. `gc_cmd` fills `caller_toolchain_kept` from `doctor::caller_toolchain_kept()`, so `evict::run` reads no environment (house rule 11). `gc_cmd` passes `Path::new("rustup")`; tests pass a fake script, as `resolve_toolchain_with` already takes a rustup path (`src/doctor.rs:439,447`).
   - `pub struct Limits { pub cap_bytes: u64, pub max_age_secs: u64 }`.
@@ -352,7 +352,7 @@ _Requirements: STOREGC-2.1, STOREGC-2.2, STOREGC-2.4, STOREGC-2.5, STOREGC-10.8_
 - Consumes: `evict::run`, `EvictCtx`, `Limits`, `synth_entry` (Task 4); `Holds` (Task 5); `Row.registry_deps`
 - Produces:
   - counts `store_entries_evicted_cap` and `store_freeable_bytes_remaining`;
-  - finding `store.held_over_cap`;
+  - finding `store.held_over_cap`, naming up to 10 targets by the freeable bytes of the entries each holds, with ties by path;
   - an `unmeasured` entry for the cap step when `account_bytes` is false.
 
 **Depends-on:** Task 6
@@ -360,7 +360,7 @@ _Requirements: STOREGC-2.1, STOREGC-2.2, STOREGC-2.4, STOREGC-2.5, STOREGC-10.8_
 - [ ] **Step 1: Write the failing tests.** Each builds `EvictCtx` from a scratch `State`, `Apfs::new`, an empty target list, and entries made with `synth_entry` from 256 KiB files of random bytes, so each frees more than 0 bytes:
   - `the_cap_evicts_unheld_entries_oldest_first_until_under`: three age cohorts and a cap between their sums.
   - `within_one_last_live_at_an_entry_goes_before_the_entries_its_registry_deps_name`. One cohort holds `aaa-dep`, which `zzz-user`'s `registry_deps` names, so alphabetical order would evict the dependency first. The cap is set to stop after one eviction. `zzz-user` goes and `aaa-dep` stays.
-  - `held_entries_over_the_cap_are_kept_and_reported`: one target holds the keys.
+  - `held_entries_over_the_cap_are_kept_and_reported`: two targets hold the keys, one holding more bytes. The finding gives the held total and the cap, and names both targets with their shares, larger first.
   - `an_entry_that_frees_0_bytes_is_not_evicted_for_the_cap`: every file of the entry is `clone_file`d into a scratch dir the test keeps.
   - `with_accounting_off_the_cap_evicts_nothing_and_says_so`: age still evicts.
 
@@ -424,7 +424,7 @@ _Requirements: STOREGC-5.1, STOREGC-5.2, STOREGC-5.3_
   - `a_stale_evict_tree_leaves_seed_store_bytes_working_and_the_next_gc_removes_it`. Create a `store/.tmp/evict-1-0/` tree with current mtimes, so fill's one-day sweep keeps it. `seed` exits 0 with `store_bytes` measured, and the next bare `gc` removes the tree.
 
   Run; expect failures.
-- [ ] **Step 2: Implement** the busy path: when `try_store_exclusive` returns `None`, report the finding and the count, rename nothing and write nothing.
+- [ ] **Step 2: Implement** the busy path: when `try_store_exclusive` returns `None`, report the `store.busy` finding, whose text says to run `gc` again when no seed runs, and the count; rename nothing and write nothing.
 - [ ] **Step 3: Run.** `cargo test --test store_gc`, then `cargo test`; expect pass.
 - [ ] **Step 4: Commit.** `feat(gc): skip store eviction while a seed uses the store`
 
@@ -522,7 +522,8 @@ _Requirements: STOREGC-9.2_
 - [ ] **Step 1: Write the failing test.** Change the README assertion in `tests/skill.rs` to the new sentence "Bare `cargo hive gc` keeps the store under 40 GB". Add an assertion that SKILL.md names `store` on a gc line. Run `cargo test --test skill`; expect failure.
 - [ ] **Step 2: Edit SKILL.md.**
   - The gc lines say that bare `gc` also evicts from the store by age, toolchain and the 40 GB cap; that `gc --dry-run` previews it; and that `gc <repo>` leaves the store alone.
-  - "Reading a receipt" names the `store_*` counts.
+  - "Reading a receipt" names the `store_*` counts, and says that `store.busy` means to run `gc` again when no seed runs and that `store.held_over_cap` names the targets to retire.
+  - Say when to run bare `gc`: after a batch of lanes finishes, and whenever `seed`'s `store_bytes` passes 40 GB.
   - "Do not" adds "delete `~/.hive/store/` by hand".
   - Add a `cargo hive gc --json` command line.
   - Stay within 150 lines and the seven headings.
