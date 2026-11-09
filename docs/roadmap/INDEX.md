@@ -1,7 +1,7 @@
 # Roadmap: cargo-hive
 
 Status: Approved
-Date: 2026-11-02
+Date: 2026-11-09
 
 <!--
 The program layer: milestone INTENT, above any single feature and below the product
@@ -76,7 +76,7 @@ ID rules:
 
 ## Focus
 
-**Now:** ROAD-8
+**Now:** ROAD-10, ROAD-11
 **Next:** None
 
 | ID | Milestone | Outcome | Depends-on | Commitment |
