@@ -277,6 +277,7 @@ pub struct CommitPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Committed {
     pub renamed: Vec<(StoreKey, PathBuf)>,
+    pub rename_failures: Vec<(StoreKey, String)>,
     pub kept_changed: usize,
     pub dropped_values: Vec<u64>,
 }
@@ -369,11 +370,12 @@ pub fn commit_eviction(
         }
 
         let mut renamed = Vec::new();
+        let mut rename_failures = Vec::new();
         for key in survivors {
             match rename(&key) {
                 Ok(None) => break,
                 Ok(Some(path)) => renamed.push((key, path)),
-                Err(_) => {}
+                Err(err) => rename_failures.push((key, err.to_string())),
             }
         }
 
@@ -405,6 +407,7 @@ pub fn commit_eviction(
         tx.write_bounded(STORE_FILE, &file, MAX_STORE_BYTES)?;
         Ok(Committed {
             renamed,
+            rename_failures,
             kept_changed,
             dropped_values,
         })
@@ -1497,6 +1500,12 @@ mod tests {
         .unwrap();
         assert!(committed.renamed.is_empty());
         assert_eq!(committed.kept_changed, 0);
+        assert_eq!(committed.rename_failures.len(), 1, "{committed:?}");
+        assert_eq!(committed.rename_failures[0].0, key);
+        assert!(
+            committed.rename_failures[0].1.contains("nope"),
+            "{committed:?}"
+        );
         assert!(entry_path(&state, &key).is_dir());
         assert_eq!(read(&state).unwrap().units.len(), 1);
         finish(&state);

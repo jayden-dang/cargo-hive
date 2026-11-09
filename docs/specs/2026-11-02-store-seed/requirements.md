@@ -211,7 +211,7 @@ Files and surfaces this change touches:
 - A `fill` command, or any fill that does not run inside seed.
 - `set_mtime` on a stamp, and `write_file` of the tag.
 - Adding any protection of seed files from an `apply` between seed and the first build. `apply` already skips such a target while it has no lock files (SEED-10.15); hive adds nothing for a target whose lock files exist.
-- Evicting, capping or stopping the store at a byte level, and any store GC: ROAD-10. Until then the store only grows, stopping means deleting it by hand, and the feature is not for daily use.
+- Evicting, capping or stopping the store at a byte level, and any store GC: ROAD-10. Until then the store only grows, stopping means deleting it by hand, and the feature is not for daily use. (2026-11-09: bare `gc` bounds the store; SEED still does not evict, STOREGC / ROAD-10.)
 - Time claims, and `cargo hive bench`: ROAD-11.
 - Workspace, git and path units, and a registry other than the sources Cargo keeps under its registry source directory.
 - Real copies into the store, and a store on a different volume from the source or the checkout.

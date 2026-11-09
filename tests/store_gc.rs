@@ -359,6 +359,31 @@ fn an_undecided_lane_keeps_its_entries_past_30_days() {
 }
 
 #[test]
+fn a_live_unit_of_a_target_still_in_the_scan_holds_its_key_past_age() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let target = common::cargo_fixture::read_target(&repo.main.join("target"));
+    set_last_live_at(&hive, "", 31 * DAY);
+    let before = rows(&hive).len();
+    assert!(before > 0);
+    let fs = apfs();
+    let outcome = run_evict(&hive, &fs, &[target], limits(), true);
+    assert_eq!(
+        outcome_count(&outcome, "store_entries_evicted_age"),
+        0,
+        "{:?}",
+        outcome.counts
+    );
+    assert!(
+        outcome_count(&outcome, "store_entries_held_live") >= 1
+            || outcome_count(&outcome, "store_entries_held") >= 1,
+        "{:?}",
+        outcome.counts
+    );
+    assert_eq!(rows(&hive).len(), before, "{:?}", rows(&hive));
+}
+
+#[test]
 fn a_live_unit_in_a_target_gc_skips_for_an_unsupported_profile_still_holds_its_key() {
     let hive = Hive::ready();
     let repo = seeded_store(&hive);
@@ -1524,6 +1549,122 @@ fn a_scoped_gc_reads_and_writes_no_store_state_and_says_why() {
         db_mtime,
         "{receipt}"
     );
+}
+
+#[test]
+fn while_the_store_is_busy_freeable_remaining_is_the_untouched_store() {
+    let hive = Hive::ready();
+    let fs = apfs();
+    let value = 88_011u64;
+    synth_entry(
+        &hive,
+        (value, "busyfree-aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"),
+        &[],
+        &[("blob", kib256(1))],
+        31 * DAY,
+    );
+    synth_entry(
+        &hive,
+        (value, "busyfree-cccccccccccccccc", "dddddddddddddddd"),
+        &[],
+        &[("blob", kib256(2))],
+        31 * DAY,
+    );
+    let first = entry_path(
+        &hive,
+        value,
+        "busyfree-aaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbb",
+    );
+    let second = entry_path(
+        &hive,
+        value,
+        "busyfree-cccccccccccccccc",
+        "dddddddddddddddd",
+    );
+    let untouched = freeable_of(&fs, &first) + freeable_of(&fs, &second);
+    assert!(untouched > 0, "{untouched}");
+    let cap = freeable_of(&fs, &first).saturating_sub(1).max(1);
+
+    let state = State::open_at(hive.home.path.clone()).unwrap();
+    let held = state.store_shared_or_cancelled(|| false).unwrap();
+    let outcome = run_evict(
+        &hive,
+        &fs,
+        &[],
+        Limits {
+            cap_bytes: cap,
+            max_age_secs: MAX_AGE_SECS,
+        },
+        true,
+    );
+    drop(held);
+
+    assert!(
+        outcome.findings.iter().any(|f| f.kind == "store.busy"),
+        "{:?}",
+        outcome.findings
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_entries_evicted_age"),
+        0,
+        "{:?}",
+        outcome.counts
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_freeable_bytes_remaining"),
+        untouched,
+        "busy must report the untouched store, not the post-plan preview: {:?}",
+        outcome.counts
+    );
+}
+
+#[test]
+fn a_permission_denied_rename_is_named_and_keeps_the_entry() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let hive = Hive::ready();
+    let fs = apfs();
+    let value = 88_010u64;
+    let meta = "renamefail-aaaaaaaaaaaaaaaa";
+    let fp = "bbbbbbbbbbbbbbbb";
+    synth_entry(
+        &hive,
+        (value, meta, fp),
+        &[],
+        &[("blob", vec![9u8; 32])],
+        31 * DAY,
+    );
+    let value_dir =
+        store_dir(&State::open_at(hive.home.path.clone()).unwrap()).join(value.to_string());
+    fs::set_permissions(&value_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let before_rows = rows(&hive);
+    let entry = entry_path(&hive, value, meta, fp);
+    assert!(entry.is_dir());
+
+    let outcome = run_evict(&hive, &fs, &[], limits(), true);
+    let _ = fs::set_permissions(&value_dir, fs::Permissions::from_mode(0o755));
+
+    let finding = outcome
+        .findings
+        .iter()
+        .find(|f| f.kind == "store.rename_failed")
+        .expect("store.rename_failed");
+    assert_eq!(finding.path.as_ref(), Some(&entry), "{finding:?}");
+    assert!(
+        finding.detail.contains("Permission denied")
+            || finding.detail.contains("os error 13")
+            || finding.detail.contains("Read-only"),
+        "{finding:?}"
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_entries_evicted_age"),
+        0,
+        "{:?}",
+        outcome.counts
+    );
+    assert_eq!(rows(&hive), before_rows, "{:?}", rows(&hive));
+    assert!(entry.is_dir(), "{}", entry.display());
 }
 
 #[test]

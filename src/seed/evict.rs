@@ -189,44 +189,54 @@ pub fn run(
                     outcome.notes.push(note);
                 }
             }
-            ToolchainsInUse::Resolved(texts) => {
-                let used_values = values_for_texts(ctx.state, &texts);
-                let already: BTreeSet<_> = candidates.iter().map(|(k, _)| k.clone()).collect();
-                for row in &inv.rows {
-                    let key = StoreKey {
-                        toolchain_value: row.toolchain_value,
-                        name_meta: row.name_meta.clone(),
-                        fingerprint_hash: row.fingerprint_hash.clone(),
-                    };
-                    if used_values.contains(&row.toolchain_value) {
-                        continue;
+            ToolchainsInUse::Resolved(texts) => match values_for_texts(ctx.state, &texts) {
+                Ok(used_values) => {
+                    let already: BTreeSet<_> = candidates.iter().map(|(k, _)| k.clone()).collect();
+                    for row in &inv.rows {
+                        let key = StoreKey {
+                            toolchain_value: row.toolchain_value,
+                            name_meta: row.name_meta.clone(),
+                            fingerprint_hash: row.fingerprint_hash.clone(),
+                        };
+                        if used_values.contains(&row.toolchain_value) {
+                            continue;
+                        }
+                        if held.hold_reason(&key).is_some() {
+                            continue;
+                        }
+                        if already.contains(&key) {
+                            continue;
+                        }
+                        toolchain_keys.insert(key.clone());
+                        candidates.push((key, Some(row.last_live_at)));
                     }
-                    if held.hold_reason(&key).is_some() {
-                        continue;
+                    for (key, _) in &inv.rowless {
+                        if used_values.contains(&key.toolchain_value) {
+                            continue;
+                        }
+                        if held.hold_reason(key).is_some() {
+                            continue;
+                        }
+                        if already.contains(key) {
+                            continue;
+                        }
+                        toolchain_keys.insert(key.clone());
+                        candidates.push((key.clone(), None));
                     }
-                    if already.contains(&key) {
-                        continue;
-                    }
-                    toolchain_keys.insert(key.clone());
-                    candidates.push((key, Some(row.last_live_at)));
                 }
-                for (key, _) in &inv.rowless {
-                    if used_values.contains(&key.toolchain_value) {
-                        continue;
-                    }
-                    if held.hold_reason(key).is_some() {
-                        continue;
-                    }
-                    if already.contains(key) {
-                        continue;
-                    }
-                    toolchain_keys.insert(key.clone());
-                    candidates.push((key.clone(), None));
+                Err(err) => {
+                    outcome.findings.push(Finding {
+                        kind: "store.write_failed".into(),
+                        path: Some(ctx.state.root().join(store::STORE_FILE)),
+                        detail: err.to_string(),
+                        measured: BTreeMap::new(),
+                    });
                 }
-            }
+            },
         }
     }
     let mut cap_keys = BTreeSet::new();
+    let mut post_plan_remaining = None;
     if !ctx.account_bytes {
         let reason = "doctor check (c) did not pass";
         for field in [
@@ -255,22 +265,24 @@ pub fn run(
             cap_keys.insert(key.clone());
             candidates.push((key, at));
         }
-        push_count(
-            &mut outcome,
-            "store_freeable_bytes_remaining",
-            freeable_remaining,
-        );
+        post_plan_remaining = Some(freeable_remaining);
         if let Some(finding) = held_over_cap {
             outcome.findings.push(finding);
         }
     }
 
     if candidates.is_empty() && refreshed.is_empty() {
+        if let Some(n) = post_plan_remaining {
+            push_count(&mut outcome, "store_freeable_bytes_remaining", n);
+        }
         push_count(&mut outcome, "store_entries_evicted_cap", 0);
         return outcome;
     }
 
     if dry_run {
+        if let Some(n) = post_plan_remaining {
+            push_count(&mut outcome, "store_freeable_bytes_remaining", n);
+        }
         let renamed = preview_renames(&inv, &candidates);
         let mut age_evicted = 0u64;
         let mut rowless_evicted = 0u64;
@@ -299,11 +311,18 @@ pub fn run(
             toolchain_evicted,
         );
         push_count(&mut outcome, "store_entries_evicted_cap", cap_evicted);
-        push_count(
-            &mut outcome,
-            "store_toolchains_dropped",
-            preview_dropped_values(ctx.state, &inv, &renamed),
-        );
+        match preview_dropped_values(ctx.state, &inv, &renamed) {
+            Ok(n) => push_count(&mut outcome, "store_toolchains_dropped", n),
+            Err(err) => {
+                outcome.findings.push(Finding {
+                    kind: "store.write_failed".into(),
+                    path: Some(ctx.state.root().join(store::STORE_FILE)),
+                    detail: err.to_string(),
+                    measured: BTreeMap::new(),
+                });
+                push_count(&mut outcome, "store_toolchains_dropped", 0);
+            }
+        }
         let mut ledger = Ledger::new();
         let store_root = store_dir(ctx.state);
         for key in &renamed {
@@ -323,6 +342,13 @@ pub fn run(
     }
 
     if cancel() {
+        if post_plan_remaining.is_some() {
+            push_count(
+                &mut outcome,
+                "store_freeable_bytes_remaining",
+                untouched_freeable(ctx.fs, ctx.state, &inv.rows, &inv.rowless, &held),
+            );
+        }
         outcome.cancelled = true;
         return outcome;
     }
@@ -331,6 +357,13 @@ pub fn run(
     let Some(store_lock) = (match ctx.state.try_store_exclusive() {
         Ok(lock) => lock,
         Err(err) => {
+            if post_plan_remaining.is_some() {
+                push_count(
+                    &mut outcome,
+                    "store_freeable_bytes_remaining",
+                    untouched_freeable(ctx.fs, ctx.state, &inv.rows, &inv.rowless, &held),
+                );
+            }
             outcome.findings.push(Finding {
                 kind: "store.write_failed".into(),
                 path: Some(ctx.state.root().join("store.lock")),
@@ -340,6 +373,13 @@ pub fn run(
             return outcome;
         }
     }) else {
+        if post_plan_remaining.is_some() {
+            push_count(
+                &mut outcome,
+                "store_freeable_bytes_remaining",
+                untouched_freeable(ctx.fs, ctx.state, &inv.rows, &inv.rowless, &held),
+            );
+        }
         let busy = candidates.len() as u64;
         push_count(&mut outcome, "store_entries_held_busy", busy);
         push_count(
@@ -382,6 +422,13 @@ pub fn run(
     }) {
         Ok(committed) => committed,
         Err(err) => {
+            if post_plan_remaining.is_some() {
+                push_count(
+                    &mut outcome,
+                    "store_freeable_bytes_remaining",
+                    untouched_freeable(ctx.fs, ctx.state, &inv.rows, &inv.rowless, &held),
+                );
+            }
             outcome.findings.push(Finding {
                 kind: "store.write_failed".into(),
                 path: Some(ctx.state.root().join(store::STORE_FILE)),
@@ -393,11 +440,35 @@ pub fn run(
     };
 
     if cancel() {
+        if let Some(n) = post_plan_remaining {
+            push_count(&mut outcome, "store_freeable_bytes_remaining", n);
+        }
         outcome.cancelled = true;
         return outcome;
     }
 
-    remove_emptied_value_dirs(ctx.state, &committed.renamed);
+    for (key, detail) in &committed.rename_failures {
+        let path = path_for_key(ctx.state, &inv, key).unwrap_or_else(|| {
+            store_dir(ctx.state)
+                .join(key.toolchain_value.to_string())
+                .join(format!("{}-{}", key.name_meta, key.fingerprint_hash))
+        });
+        outcome.findings.push(Finding {
+            kind: "store.rename_failed".into(),
+            path: Some(path),
+            detail: detail.clone(),
+            measured: BTreeMap::new(),
+        });
+    }
+
+    if let Err(err) = remove_emptied_value_dirs(ctx.state, &committed.renamed) {
+        outcome.findings.push(Finding {
+            kind: "store.rename_failed".into(),
+            path: Some(store_dir(ctx.state)),
+            detail: err,
+            measured: BTreeMap::new(),
+        });
+    }
 
     let mut age_evicted = 0u64;
     let mut rowless_evicted = 0u64;
@@ -449,9 +520,22 @@ pub fn run(
         "store_toolchains_dropped",
         committed.dropped_values.len() as u64,
     );
+    if let Some(n) = post_plan_remaining {
+        push_count(&mut outcome, "store_freeable_bytes_remaining", n);
+    }
     apply_removal_ledger(&mut outcome, ledger, ctx.account_bytes);
     drop(store_lock);
     outcome
+}
+
+fn untouched_freeable(
+    fs: &dyn Fs,
+    state: &State,
+    rows: &[Row],
+    rowless: &[(StoreKey, PathBuf)],
+    held: &Holds,
+) -> u64 {
+    plan_cap(fs, state, rows, rowless, &BTreeSet::new(), held, u64::MAX).freeable_remaining
 }
 
 fn apply_removal_ledger(outcome: &mut EvictOutcome, ledger: Ledger, account_bytes: bool) {
@@ -541,17 +625,18 @@ fn toolchains_in_use(ctx: &EvictCtx<'_>, cancel: &dyn Fn() -> bool) -> Toolchain
     ToolchainsInUse::Resolved(texts)
 }
 
-fn values_for_texts(state: &State, texts: &[String]) -> BTreeSet<u64> {
-    let Ok(file) = store::read(state) else {
-        return BTreeSet::new();
-    };
+fn values_for_texts(
+    state: &State,
+    texts: &[String],
+) -> Result<BTreeSet<u64>, crate::state::StateError> {
+    let file = store::read(state)?;
     let mut values = BTreeSet::new();
     for text in texts {
         if let Some(&value) = file.toolchains.get(text) {
             values.insert(value);
         }
     }
-    values
+    Ok(values)
 }
 
 fn push_count(outcome: &mut EvictOutcome, name: &str, n: u64) {
@@ -590,10 +675,12 @@ fn preview_renames(inv: &Inventory, candidates: &[(StoreKey, Option<u64>)]) -> B
     survivors
 }
 
-fn preview_dropped_values(state: &State, inv: &Inventory, renamed: &BTreeSet<StoreKey>) -> u64 {
-    let Ok(file) = store::read(state) else {
-        return 0;
-    };
+fn preview_dropped_values(
+    state: &State,
+    inv: &Inventory,
+    renamed: &BTreeSet<StoreKey>,
+) -> Result<u64, crate::state::StateError> {
+    let file = store::read(state)?;
     let mut values = BTreeSet::new();
     for value in file.toolchains.values().copied() {
         values.insert(value);
@@ -612,7 +699,7 @@ fn preview_dropped_values(state: &State, inv: &Inventory, renamed: &BTreeSet<Sto
             dropped += 1;
         }
     }
-    dropped
+    Ok(dropped)
 }
 
 fn row_key_matches(row: &Row, key: &StoreKey) -> bool {
@@ -897,24 +984,42 @@ fn remove_stale_evict_trees_bounded(state: &State, cap: usize) -> Result<(), Str
     Ok(())
 }
 
-fn remove_emptied_value_dirs(state: &State, renamed: &[(StoreKey, PathBuf)]) {
+fn remove_emptied_value_dirs(state: &State, renamed: &[(StoreKey, PathBuf)]) -> Result<(), String> {
     remove_emptied_value_dirs_bounded(state, renamed, crate::gc::CRATE_DIR_CAP)
 }
 
-fn remove_emptied_value_dirs_bounded(state: &State, renamed: &[(StoreKey, PathBuf)], cap: usize) {
+fn remove_emptied_value_dirs_bounded(
+    state: &State,
+    renamed: &[(StoreKey, PathBuf)],
+    cap: usize,
+) -> Result<(), String> {
     let mut values = BTreeMap::new();
     for (key, _) in renamed {
         values.insert(key.toolchain_value, ());
     }
     for value in values.into_keys() {
         let dir = store_dir(state).join(value.to_string());
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(format!("{}: {err}", dir.display())),
         };
-        if entries.take(cap).next().is_none() {
-            let _ = fs::remove_dir(&dir);
+        let mut seen = 0usize;
+        for entry in entries {
+            if seen >= cap {
+                return Err(format!(
+                    "{} has more than {cap} entries; remove until fewer remain and run the command again",
+                    dir.display()
+                ));
+            }
+            entry.map_err(|err| format!("{}: {err}", dir.display()))?;
+            seen += 1;
+        }
+        if seen == 0 {
+            fs::remove_dir(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -961,6 +1066,74 @@ mod tests {
             1,
             "the entry past the cap stays"
         );
+        finish(&state);
+    }
+
+    #[test]
+    fn remove_emptied_value_dirs_reports_a_listing_past_its_cap() {
+        let state = scratch_state("empty-value-cap");
+        let value = 42u64;
+        let value_dir = store_dir(&state).join(value.to_string());
+        std::fs::create_dir_all(&value_dir).unwrap();
+        for name in ["a", "b", "c", "d"] {
+            std::fs::create_dir(value_dir.join(name)).unwrap();
+        }
+        let key = StoreKey {
+            toolchain_value: value,
+            name_meta: "cap".into(),
+            fingerprint_hash: "aaaaaaaaaaaaaaaa".into(),
+        };
+        let err = remove_emptied_value_dirs_bounded(&state, &[(key, value_dir.join("moved"))], 3)
+            .expect_err("a listing past the cap is not a finished empty-dir cleanup");
+        assert!(
+            err.contains(&format!("{} has more than 3 entries", value_dir.display())),
+            "{err}"
+        );
+        assert!(
+            err.contains("remove until fewer remain and run the command again"),
+            "{err}"
+        );
+        assert!(value_dir.is_dir(), "over-cap value dir must stay");
+        assert_eq!(
+            std::fs::read_dir(&value_dir).unwrap().count(),
+            4,
+            "nothing deleted when the listing exceeds the cap"
+        );
+        finish(&state);
+    }
+
+    #[test]
+    fn values_for_texts_reports_an_unreadable_store_db() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = scratch_state("values-unreadable-db");
+        let path = state.root().join(store::STORE_FILE);
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let err = values_for_texts(&state, &[String::from("synth-1")])
+            .expect_err("an unreadable store.db must not look like no toolchains in use");
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+        assert!(err.to_string().contains(store::STORE_FILE), "{err}");
+        finish(&state);
+    }
+
+    #[test]
+    fn preview_dropped_values_reports_an_unreadable_store_db() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = scratch_state("preview-unreadable-db");
+        let path = state.root().join(store::STORE_FILE);
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let inv = Inventory {
+            rows: Vec::new(),
+            rowless: Vec::new(),
+            tmp_bytes: 0,
+        };
+        let err = preview_dropped_values(&state, &inv, &BTreeSet::new())
+            .expect_err("an unreadable store.db must not look like zero toolchain drops");
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
+        assert!(err.to_string().contains(store::STORE_FILE), "{err}");
         finish(&state);
     }
 }
