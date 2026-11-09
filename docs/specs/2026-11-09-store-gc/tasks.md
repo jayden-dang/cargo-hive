@@ -235,7 +235,7 @@ _Requirements: STOREGC-1.5, STOREGC-2.3, STOREGC-10.4, STOREGC-10.5_
 
 **Depends-on:** Task 2, Task 3
 
-- [ ] **Step 1: Write the failing tests** in `tests/store_gc.rs`, on a store that `seed` filled from a `RegistryRepo`:
+- [x] **Step 1: Write the failing tests** in `tests/store_gc.rs`, on a store that `seed` filled from a `RegistryRepo`:
   - `an_entry_no_target_holds_for_31_days_is_evicted_with_its_row`. The repo's target is removed. The entry dir and row are gone, and `store_entries_evicted_age` is the number evicted.
   - `an_entry_held_by_a_live_target_stays_and_its_last_live_at_is_refreshed`. The row is backdated 31 days and the target was built inside the window. Afterwards the row's `last_live_at` is at least the test's start time.
   - `an_entry_29_days_old_stays`.
@@ -248,17 +248,17 @@ _Requirements: STOREGC-1.5, STOREGC-2.3, STOREGC-10.4, STOREGC-10.5_
   - `eviction_touches_nothing_outside_the_store`: a snapshot of the repo, its targets, a seeded checkout, `CARGO_HOME`, `seeds.json`, `plans.json` and `config.json` is unchanged.
 
   Run `cargo test --test store_gc`; expect a compile failure.
-- [ ] **Step 2: Implement** `holds` for Decided targets: live refs map through `unit_key` to keys, and a live ref with no graph unit maps to its name-meta. Every walk fault `split_checkout_faults` or `faults_that_can_hide_an_owner` keeps also goes to `whole_store`, so no intermediate commit evicts past a fault. Then implement `evict::run` for the age rule (design decisions 3, 4, 11). When `try_store_exclusive` returns `None`, evict nothing, rename nothing and write nothing (Task 9 adds the finding, the count and the tests):
+- [x] **Step 2: Implement** `holds` for Decided targets: live refs map through `unit_key` to keys, and a live ref with no graph unit maps to its name-meta. Every walk fault `split_checkout_faults` or `faults_that_can_hide_an_owner` keeps also goes to `whole_store`, so no intermediate commit evicts past a fault. Then implement `evict::run` for the age rule (design decisions 3, 4, 11). When `try_store_exclusive` returns `None`, evict nothing, rename nothing and write nothing (Task 9 adds the finding, the count and the tests):
   - Plan: holds, `inventory`, candidates.
   - Commit: `try_store_exclusive`, remove stale `store/.tmp/evict-*`, `commit_eviction` with `rename_out` into `evict_dir(std::process::id(), seq)`, then remove emptied `store/<value>/`.
   - Removal: `remove_counted` on each renamed tree, still under the store lock, then release.
-- [ ] **Step 3: Wire it in `gc_cmd`.**
+- [x] **Step 3: Wire it in `gc_cmd`.`
   - Keep the whole `Toolchain` from line 849 (`b.toolchain` still takes `.release`) as `caller_toolchain`.
   - Call `evict::run` after the cross-check notes (lines 903-912) and before `put_counts` (line 916). Call it only when `args.is_empty()`, `--plan` is absent and `report.cancelled` is false.
   - Before that call, check `window_days(cfg.gc_window_days)`; failing it is STOREGC-1.7.
   - Add the outcome's counts, findings, notes and `unmeasured` to the receipt.
-- [ ] **Step 4: Run.** `cargo test`; expect pass, tests/gc.rs included.
-- [ ] **Step 5: Commit.** `feat(gc): evict store entries no target has held for 30 days`
+- [x] **Step 4: Run.** `cargo test`; expect pass, tests/gc.rs included.
+- [x] **Step 5: Commit.** `feat(gc): evict store entries no target has held for 30 days`
 
 _Requirements: STOREGC-1.1, STOREGC-1.2, STOREGC-1.3, STOREGC-1.4, STOREGC-1.6, STOREGC-1.7, STOREGC-1.8, STOREGC-9.1, STOREGC-10.1_
 
