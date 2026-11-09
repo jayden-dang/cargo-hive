@@ -443,6 +443,49 @@ fn there_is_no_fill_command() {
 }
 
 #[test]
+fn a_seed_waits_for_an_exclusive_store_lock_and_then_seeds() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("store-lock-wait");
+    let state = cargo_hive::state::State::open_at(hive.home.path.clone()).unwrap();
+    let held = state
+        .try_store_exclusive()
+        .unwrap()
+        .expect("exclusive store lock");
+    let before_db = hive.home.path.join("store.db").exists();
+    let before_store = hive.home.path.join("store").exists();
+    let child = hive
+        .command(&["seed", lane.to_str().unwrap(), "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        pid_alive(child.id()),
+        "seed exited while the exclusive store lock was held"
+    );
+    assert_eq!(hive.home.path.join("store.db").exists(), before_db);
+    assert_eq!(hive.home.path.join("store").exists(), before_store);
+    drop(held);
+    let out = wait_within(child, Duration::from_secs(180));
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|err| {
+        panic!(
+            "seed did not print a receipt ({err}): stdout {} stderr {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert!(
+        receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0,
+        "{receipt}"
+    );
+}
+
+#[test]
 fn compression_finishes_while_another_process_holds_the_state_lock() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);

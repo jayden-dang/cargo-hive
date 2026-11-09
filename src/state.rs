@@ -178,6 +178,66 @@ impl State {
         drop(file); // closing the descriptor releases the lock
         result
     }
+
+    /// Takes a shared flock on `$root/store.lock`, polling `cancel` while another
+    /// process holds it exclusive. Creates the file when absent. Releases on drop.
+    pub fn store_shared_or_cancelled(
+        &self,
+        mut cancel: impl FnMut() -> bool,
+    ) -> Result<StoreLock, StateError> {
+        let path = self.root.join("store.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| io_err(&path, e))?;
+        loop {
+            // SAFETY: `file` owns a valid descriptor for the whole call.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+                return Ok(StoreLock { _file: file });
+            }
+            let err = io::Error::last_os_error();
+            match err.kind() {
+                io::ErrorKind::Interrupted => continue,
+                io::ErrorKind::WouldBlock if cancel() => return Err(StateError::Cancelled),
+                io::ErrorKind::WouldBlock => std::thread::sleep(LOCK_POLL),
+                _ => return Err(io_err(&path, err)),
+            }
+        }
+    }
+
+    /// Tries an exclusive flock on `$root/store.lock` once. Creates the file when
+    /// absent. `Ok(None)` when another process holds a shared or exclusive lock.
+    pub fn try_store_exclusive(&self) -> Result<Option<StoreLock>, StateError> {
+        let path = self.root.join("store.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| io_err(&path, e))?;
+        loop {
+            // SAFETY: `file` owns a valid descriptor for the whole call.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Some(StoreLock { _file: file }));
+            }
+            let err = io::Error::last_os_error();
+            match err.kind() {
+                io::ErrorKind::Interrupted => continue,
+                io::ErrorKind::WouldBlock => return Ok(None),
+                _ => return Err(io_err(&path, err)),
+            }
+        }
+    }
+}
+
+/// A held flock on `$root/store.lock`. Closing the descriptor releases it.
+#[derive(Debug)]
+pub struct StoreLock {
+    _file: fs::File,
 }
 
 pub const CONFIG_FILE: &str = "config.json";
@@ -671,5 +731,75 @@ mod tests {
             utc_date(UNIX_EPOCH + Duration::from_secs(951_782_400)),
             "2000-02-29"
         );
+    }
+
+    #[test]
+    fn two_shared_store_locks_coexist() {
+        let root = scratch("store-sh-coexist");
+        let a = State::open_at(root.clone()).unwrap();
+        let b = State::open_at(root.clone()).unwrap();
+        let first = a.store_shared_or_cancelled(|| false).unwrap();
+        let second = b.store_shared_or_cancelled(|| false).unwrap();
+        drop(first);
+        drop(second);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_exclusive_try_returns_none_while_a_shared_lock_is_held() {
+        let root = scratch("store-ex-while-sh");
+        let holder = State::open_at(root.clone()).unwrap();
+        let probe = State::open_at(root.clone()).unwrap();
+        let shared = holder.store_shared_or_cancelled(|| false).unwrap();
+        let exclusive = probe.try_store_exclusive().unwrap();
+        assert!(exclusive.is_none());
+        drop(shared);
+        let exclusive = probe.try_store_exclusive().unwrap();
+        assert!(exclusive.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_shared_lock_waits_for_an_exclusive_one_and_honors_cancel() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let root = scratch("store-sh-cancel");
+        let holder = State::open_at(root.clone()).unwrap();
+        let waiter = State::open_at(root.clone()).unwrap();
+        let exclusive = holder.try_store_exclusive().unwrap().expect("exclusive");
+        let held = Arc::new(AtomicBool::new(true));
+        let release = Arc::clone(&held);
+        let thread = std::thread::spawn(move || {
+            while release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            drop(exclusive);
+        });
+        let mut calls = 0u8;
+        let err = waiter
+            .store_shared_or_cancelled(|| {
+                calls += 1;
+                calls >= 3
+            })
+            .unwrap_err();
+        assert!(matches!(err, StateError::Cancelled), "{err}");
+        assert_eq!(calls, 3);
+        held.store(false, Ordering::SeqCst);
+        thread.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_lock_file_holds_no_bytes() {
+        let root = scratch("store-lock-empty");
+        let state = State::open_at(root.clone()).unwrap();
+        let lock = state.try_store_exclusive().unwrap().expect("exclusive");
+        let meta = fs::metadata(root.join("store.lock")).unwrap();
+        assert_eq!(meta.len(), 0);
+        drop(lock);
+        let meta = fs::metadata(root.join("store.lock")).unwrap();
+        assert_eq!(meta.len(), 0);
+        fs::remove_dir_all(root).unwrap();
     }
 }
