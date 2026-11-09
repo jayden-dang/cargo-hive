@@ -11,14 +11,15 @@ use crate::gc::{CRATE_DIR_CAP, DEPS_CAP};
 use crate::liveness::{self, Liveness};
 use crate::plan_tier::{checkout_walk, Ctx};
 use crate::platform::{EntryKind, Fs};
+use crate::receipt::Finding;
 use crate::seed::store::StoreKey;
 use crate::size::MAX_DEPTH;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceUnit {
@@ -109,6 +110,93 @@ pub(crate) fn unit_key(unit: &Unit) -> StoreKey {
         name_meta: unit.dir_name.clone(),
         fingerprint_hash: unit.hash_hex.clone(),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TargetHolds {
+    pub keys: BTreeSet<StoreKey>,
+    pub name_metas: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Holds {
+    pub keys: BTreeSet<StoreKey>,
+    pub name_metas: BTreeSet<String>,
+    pub by_target: BTreeMap<PathBuf, TargetHolds>,
+    pub whole_store: Vec<Finding>,
+    pub findings: Vec<Finding>,
+    pub by_reason: BTreeMap<&'static str, u64>,
+}
+
+pub(crate) fn holds(
+    fs: &dyn Fs,
+    targets: &[TargetDir],
+    now: SystemTime,
+    window: Duration,
+) -> Holds {
+    let mut out = Holds::default();
+    for target in targets {
+        if let Some(why) = &target.unreadable {
+            let finding = Finding {
+                kind: "store.target_unreadable".into(),
+                path: Some(target.path.clone()),
+                detail: why.clone(),
+                measured: BTreeMap::new(),
+            };
+            out.whole_store.push(finding.clone());
+            out.findings.push(finding);
+            *out.by_reason.entry("whole_store").or_insert(0) += 1;
+            continue;
+        }
+        match liveness::liveness(fs, target, now, window) {
+            Liveness::Undecided { reasons } => {
+                let detail = reasons
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let finding = Finding {
+                    kind: "store.target_undecided".into(),
+                    path: Some(target.path.clone()),
+                    detail,
+                    measured: BTreeMap::new(),
+                };
+                out.whole_store.push(finding.clone());
+                out.findings.push(finding);
+                *out.by_reason.entry("whole_store").or_insert(0) += 1;
+            }
+            Liveness::Decided { live, .. } => {
+                let mut local = TargetHolds::default();
+                for uref in live {
+                    let key = target
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.path == uref.profile)
+                        .and_then(|profile| profile.graph.as_ref())
+                        .and_then(|graph| {
+                            graph
+                                .units
+                                .iter()
+                                .find(|unit| unit.dir_name == uref.dir_name)
+                                .map(unit_key)
+                        });
+                    if let Some(key) = key {
+                        local.keys.insert(key.clone());
+                        out.keys.insert(key);
+                        *out.by_reason.entry("live").or_insert(0) += 1;
+                    } else {
+                        local.name_metas.insert(uref.dir_name.clone());
+                        out.name_metas.insert(uref.dir_name);
+                        *out.by_reason.entry("name_meta").or_insert(0) += 1;
+                    }
+                }
+                if !local.keys.is_empty() || !local.name_metas.is_empty() {
+                    out.by_target.insert(target.path.clone(), local);
+                }
+            }
+        }
+    }
+    out
 }
 
 pub fn live_registry_units(

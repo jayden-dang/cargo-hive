@@ -26,6 +26,8 @@ use place::{PlaceReport, SeededUnit};
 use store::tag_path;
 
 pub mod choose;
+#[doc(hidden)]
+pub mod evict;
 pub mod fill;
 pub mod place;
 pub mod record;

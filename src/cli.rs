@@ -819,7 +819,13 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
     use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
     use crate::doctor::{self, Capabilities, Capability};
     use crate::gc;
+    use crate::seed::evict::{self, EvictCtx, Limits};
+    use crate::state::window_days;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
+    use std::time::Duration;
+    const CAP_BYTES: u64 = 40_000_000_000;
+    const MAX_AGE_SECS: u64 = 30 * 86_400;
     let command = if dry_run { "gc --dry-run" } else { "gc" };
     if let Err(e) = doctor::install_signal_handlers() {
         return emit_failure(
@@ -848,9 +854,8 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
         return 2;
     };
     let mut b = Receipt::new(command, Scope::default());
-    let release = doctor::resolve_toolchain(state.root())
-        .ok()
-        .map(|t| t.release);
+    let caller_toolchain = doctor::resolve_toolchain(state.root()).ok();
+    let release = caller_toolchain.as_ref().map(|t| t.release.clone());
     b.toolchain(release.clone());
     for cap in [Capability::FingerprintReading, Capability::Deletion] {
         if let Err(refusal) = doctor::require(&caps, cap, release.as_deref()) {
@@ -863,8 +868,12 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
     let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
     let (checkouts, checkout_faults) =
         live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
-    for fault in checkout_faults {
-        b.finding("walk.unreadable", Some(fault.path), fault.detail);
+    for fault in &checkout_faults {
+        b.finding(
+            "walk.unreadable",
+            Some(fault.path.clone()),
+            fault.detail.clone(),
+        );
     }
     let all_repos = selection.all_repos;
     let scan = discover::targets(&checkouts, &cfg, all_repos, &mut snapshot, cancelled);
@@ -917,6 +926,50 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             .collect();
         for note in cross_check_notes(&before, &after, &touched) {
             b.note(note);
+        }
+    }
+    if args.is_empty() && !report.cancelled {
+        match window_days(cfg.gc_window_days) {
+            Err(err) => {
+                b.finding("store.window_invalid", None, err.to_string());
+            }
+            Ok(days) => {
+                let outcome = evict::run(
+                    &EvictCtx {
+                        state,
+                        fs: &*platform.fs,
+                        targets: &scan.targets,
+                        checkouts: &checkouts,
+                        checkout_faults: &checkout_faults,
+                        scan_faults: &scan.walk_faults,
+                        cache_roots: &cfg.cache_roots,
+                        window: Duration::from_secs(days.saturating_mul(86_400)),
+                        account_bytes,
+                        now: opts.now,
+                        caller_toolchain,
+                        caller_toolchain_kept: doctor::caller_toolchain_kept(),
+                        rustup: Path::new("rustup"),
+                    },
+                    Limits {
+                        cap_bytes: CAP_BYTES,
+                        max_age_secs: MAX_AGE_SECS,
+                    },
+                    dry_run,
+                    &cancelled,
+                );
+                for (name, n) in outcome.counts {
+                    b.count(&name, n);
+                }
+                for finding in outcome.findings {
+                    b.finding(&finding.kind, finding.path, finding.detail);
+                }
+                for note in outcome.notes {
+                    b.note(note);
+                }
+                for (field, reason) in outcome.unmeasured {
+                    b.unmeasured(&field, reason);
+                }
+            }
         }
     }
     put_counts(&mut b, "", &report.totals);
