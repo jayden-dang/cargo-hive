@@ -345,19 +345,22 @@ runner (section 7) with `METADATA_DEADLINE` (60 s) and `Capture { stdout_cap: 64
 **Depends-on:** Task 3
 
 - [ ] **Step 1: Write the failing tests** in a new `#[cfg(test)] mod tests` at the end of `src/git.rs` (it has
-  none today). Its helper `scratch_repo(label) -> PathBuf` makes `/private/tmp/hive-it-<label>-<pid>`, runs
+  none today). Its helper `scratch_repo(label) -> ScratchRepo` makes `/private/tmp/hive-it-<label>-<pid>` and
+  returns a guard whose `Drop` removes that directory, so no fixture outlives its test
+  (docs/standards/testing.md:34); `ScratchRepo::path(&self) -> &Path`. It runs
   `git init -q`, writes `a`, `git add a` and `git -c user.name=t -c user.email=t@t commit -qm a`, every call
   with `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1` so the machine's git config cannot leak in:
 
 ```rust
 #[test]
 fn reading_a_touched_but_unchanged_tree_leaves_the_index_bytes_unchanged() {
-    let dir = scratch_repo("bench-git");
+    let repo = scratch_repo("bench-git");
+    let dir = repo.path();
     let index = dir.join(".git/index");
     std::thread::sleep(std::time::Duration::from_millis(1100));
     std::fs::write(dir.join("a"), std::fs::read(dir.join("a")).unwrap()).unwrap(); // same bytes, new mtime
     let before = std::fs::read(&index).unwrap();   // plain `git status` would refresh this stat into the index
-    let g = Git::at(&dir);
+    let g = Git::at(dir);
     assert_eq!(g.head().unwrap().len(), 40);
     assert!(!g.has_tracked_changes().unwrap());
     assert_eq!(std::fs::read(&index).unwrap(), before);
@@ -365,11 +368,12 @@ fn reading_a_touched_but_unchanged_tree_leaves_the_index_bytes_unchanged() {
 
 #[test]
 fn a_changed_tracked_file_is_a_change_and_an_untracked_file_is_not() {
-    let dir = scratch_repo("bench-git-changes");
+    let repo = scratch_repo("bench-git-changes");
+    let dir = repo.path();
     std::fs::write(dir.join("new"), "x").unwrap();
-    assert!(!Git::at(&dir).has_tracked_changes().unwrap());
+    assert!(!Git::at(dir).has_tracked_changes().unwrap());
     std::fs::write(dir.join("a"), "changed").unwrap();
-    assert!(Git::at(&dir).has_tracked_changes().unwrap());
+    assert!(Git::at(dir).has_tracked_changes().unwrap());
 }
 ```
 
@@ -1073,7 +1077,9 @@ fn bench_writes_one_schema_two_receipt_and_exits_zero() {
     assert!(receipt["findings"].as_array().unwrap().iter().any(|f| f["kind"] == "bench.command"));
     assert_eq!(git(&repo.main, &["ls-files", "-s"]), tracked);
     for (lane, before) in lanes.iter().zip(&indexes) {
-        assert!(lane.exists());
+        assert!(lane.join("target").exists(), "{}: bench removed nothing, so its target stays", lane.display());
+        assert_eq!(git(lane, &["status", "--porcelain", "--untracked-files=no"]), "",
+                   "{}: a tracked file changed", lane.display());
         assert_eq!(&fs::read(index_of(lane)).unwrap(), before, "{}", lane.display());
     }
     let allowed: BTreeSet<&str> = [".lock", "capabilities.json", "config.json", "receipts",
