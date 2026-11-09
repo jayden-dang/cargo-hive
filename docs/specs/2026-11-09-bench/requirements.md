@@ -36,7 +36,7 @@ Sources:
 bench-interpret picked under the charter (ledger line Wn). `[Owner-reserved]` marks the sampling method, which
 `docs/specs/2026-10-25-foundation/requirements.md:159` reserves for the project owner (forbid-guess); it is
 carried as Weigh until the operator confirms it. `[Proposed Fn]` marks a value bench-work put to
-bench-interpret with this file. An unlabeled criterion follows from a Lock, from the code, or from an
+bench-interpret with this file; after review every such value is Weigh. An unlabeled criterion follows from a Lock, from the code, or from an
 earlier unlabeled criterion.
 
 Terms (`CONTEXT.md`): bench sample, cold sample, seeded sample, prime, secondary checkout, seed, fill, store,
@@ -62,7 +62,7 @@ takes, and how long its first build takes after the seed.
   its clone part, and the build. The fill part runs from the start of the owned-target walk to the end of the
   fill. The clone part runs from there to the end of the seed record's write, covering the store tag check,
   the store read, the choice of units, the clones and the record. So the whole seed equals fill plus clone.
-  [Weigh W1, W8; part boundaries Proposed F3]
+  [Weigh W1, W8; part boundaries Weigh W14]
 - **BENCH-1.5** THE SYSTEM SHALL report each sample as one finding of kind `bench.sample` carrying its
   checkout path, its arm, its 1-based position in the run, and its measured integers. A seeded sample also
   carries `fill_targets_read`.
@@ -81,8 +81,9 @@ takes, and how long its first build takes after the seed.
   machine around a step the run itself performed: a timed Cargo child, or an in-process prime, seed, fill or
   clone. [Weigh W10]
 - **BENCH-1.11** THE SYSTEM SHALL write the run's results as one receipt of the existing schema 2 with
-  `command` `bench`, holding them only in `counts`, in findings' `measured` integers and in the existing
-  `unmeasured` list, and SHALL add no top-level key to the receipt. No key name it adds contains `seconds`, `duration`, `elapsed`,
+  `command` `bench`. Every measured time and count is an integer in `counts` or in a finding's `measured`.
+  Text such as the command line or a variable's value goes in a finding's `measured` text or its detail. Unrun
+  steps go in the existing `unmeasured` list. The receipt gets no new top-level key. No key name it adds contains `seconds`, `duration`, `elapsed`,
   `saved` or `estimate`.
 - **BENCH-1.12** WHEN a run finishes every sample THE SYSTEM SHALL exit with code 0.
 
@@ -98,7 +99,11 @@ comparison, so that I never read a number from a sample that was not cold, not f
 - **BENCH-2.3** IF the checkouts given are not all at one HEAD commit THEN THE SYSTEM SHALL refuse the run.
   [Weigh W2]
 - **BENCH-2.4** IF any checkout given has uncommitted changes to tracked files THEN THE SYSTEM SHALL refuse
-  the run. [Proposed F2]
+  the run. [Weigh W13]
+- **BENCH-2.10** THE SYSTEM SHALL read each checkout's HEAD and its uncommitted state with git's optional locks
+  off (`git --no-optional-locks`), so the check never rewrites the checkout's index, a repo file under ARCH-2.
+  By default `git status` refreshes the index and writes it out (Context7 `/git/htmldocs`, git-status
+  "BACKGROUND REFRESH"). [Weigh, requirements review r1 finding 3]
 - **BENCH-2.5** IF the target directory Cargo resolves for any checkout given already exists THEN THE SYSTEM
   SHALL refuse the run. [Weigh W2]
 - **BENCH-2.6** IF the two arms differ in count, either arm has fewer than 2 checkouts, or one checkout is
@@ -106,7 +111,7 @@ comparison, so that I never read a number from a sample that was not cold, not f
 - **BENCH-2.7** IF doctor has not passed Seeding, StoreCompression and Deletion for the toolchain release the
   checkouts resolve THEN THE SYSTEM SHALL refuse the run, as `seed` refuses (`src/cli.rs:1496-1506`).
 - **BENCH-2.8** IF the toolchain cannot be resolved for a checkout given, or the checkouts resolve different
-  toolchain releases THEN THE SYSTEM SHALL refuse the run.
+  toolchain releases THEN THE SYSTEM SHALL refuse the run. [Weigh W16]
 - **BENCH-2.9** WHEN the run is refused THE SYSTEM SHALL run no prime, seed or build, report one `refusal`
   finding per failing checkout naming its reason, and exit with code 1.
 
@@ -133,20 +138,20 @@ so that a slow seeded number caused by a command the store cannot serve is not m
 - **BENCH-4.1** WHEN a seeded sample's build finishes THE SYSTEM SHALL record in that sample's finding the
   four counts SEED-6.2 defines for its target (seeded units still fresh, not needed, recompiled, files
   missing), computed as `status` computes them (SEED-6.3 to SEED-6.6, SEED-6.9, SEED-6.11). [Weigh W5]
-- **BENCH-4.3** IF a seeded sample's target has no seed record that `status` would read (the seed cloned 0
-  units, or SEED-6.8 or SEED-6.12 applies) THEN THE SYSTEM SHALL report none of the four counts for that
-  sample, guess none of them, and list them in the receipt's `unmeasured` with the reason.
 - **BENCH-4.2** WHEN the seed of a seeded sample clones 0 units with a finding (for example
   `toolchain.missing` or `units.empty`) THE SYSTEM SHALL still run the build, report the sample, and carry
   the seed's finding in the receipt.
+- **BENCH-4.3** IF a seeded sample's target has no seed record that `status` would read (the seed cloned 0
+  units, or SEED-6.8 or SEED-6.12 applies) THEN THE SYSTEM SHALL report none of the four counts for that
+  sample, guess none of them, and list them in the receipt's `unmeasured` with the reason.
 
 ## 5. Build every sample in the same environment, with no compiler wrapper
 
 **Story:** As a developer, I want bench to time a plain rustc build in one environment for both arms, so that a
 cache wrapper such as sccache cannot pass off a cache read as a cold build.
 
-- **BENCH-5.1** THE SYSTEM SHALL build one environment map per run and give it to every prime, seed and build
-  of that run. [Weigh W6]
+- **BENCH-5.1** THE SYSTEM SHALL build one environment map per run and give it to every timed build of that
+  run. The prime and the seed keep the environment scrubs they use today (BENCH-9.6). [Weigh W6]
 - **BENCH-5.2** THE SYSTEM SHALL build that map from the caller's environment, as new behavior that goes beyond
   ARCH-13's floor (today `resolve` scrubs only the target-dir variables and `GIT_*`, src/cargo_target.rs:350-358,
   and the proof replay removes the wrapper variables, tests/common/prove.rs:797-803): without `CARGO_TARGET_DIR`,
@@ -171,7 +176,7 @@ run I cancel still tells me what finished.
   story 1 does, and list each sample not finished in the receipt's `unmeasured`, with the reason
   `cancelled`. [Weigh W10]
 - **BENCH-6.3** WHEN the run is cancelled or fails THE SYSTEM SHALL report no summary of BENCH-1.8.
-  [Proposed F1]
+  [Weigh W12]
 - **BENCH-6.4** THE SYSTEM SHALL remove no checkout and no target, whether a run finishes, fails or is
   cancelled. [Weigh W2]
 
@@ -182,9 +187,10 @@ failed, so that a failed build is never averaged in as a time.
 
 - **BENCH-7.1** IF the prime, a seed or a timed build fails (a non-zero Cargo exit, a seed error, or a full
   disk) THEN THE SYSTEM SHALL start no further sample, report the finished samples and one finding naming
-  the failed step with its reason (Cargo's exit code for a build), and exit with code 1. [Proposed F1]
-- **BENCH-7.2** IF a timed build runs past bench's per-build deadline THEN THE SYSTEM SHALL kill its process
+  the failed step with its reason (Cargo's exit code for a build), and exit with code 1. [Weigh W12]
+- **BENCH-7.2** IF a timed build runs past a fixed 60-minute deadline THEN THE SYSTEM SHALL kill its process
   group and treat the sample as failed under BENCH-7.1, naming the deadline (`docs/standards/code.md:14`).
+  There is no flag for the deadline. [Weigh W15]
 
 ## 8. Learn bench from the hive skill
 
@@ -196,7 +202,7 @@ run it, read it and clean up without reading the source.
   removing them after, an even n per arm, the five build shapes, that p90 is the max for n ≤ 9, and that
   `bench` is the only command whose receipt holds times. [Weigh W9 for the even-n advice]
 - **BENCH-8.2** THE SYSTEM SHALL tell agents in the skill to run `bench` only when asked, because each run
-  makes 2n full builds and their targets.
+  makes 2n full builds and their targets. [Weigh W16]
 - **BENCH-8.3** THE SYSTEM SHALL list `cargo hive bench` in the README's command table.
 
 ## 9. Keep what bench touches working
@@ -252,10 +258,12 @@ Files this change touches, and what each guards:
   no test, benchmark or binary of the checkout (story 3's shapes are compile-only). Verified by a test
   that runs bench on fixture checkouts with a scratch `CARGO_HOME` and `HIVE_HOME`, as the fixture helpers
   do (tests/common/cargo_fixture.rs), and checks that the fixture repo's tracked files are unchanged and that
-  every checkout and target still exists afterwards.
+  every checkout and target still exists afterwards, and that each checkout's git index is byte-identical
+  before and after the refusal checks.
 - **Reliability:** **BENCH-10.2** Every child process bench spawns has an explicit deadline, and every
   directory walk and file read a bounded size (`docs/standards/code.md:14`). Hitting one is a failed step
-  under BENCH-7.1, never a silent skip. Verified by a test with a deadline shorter than a fixture build.
+  under BENCH-7.1, never a silent skip. Verified by a test that injects a deadline shorter than a fixture
+  build through a test seam, not a flag.
 - **Accessibility:** None. A headless CLI whose output is JSON or one line of text, as every other command.
 
 ## Out of Scope
@@ -274,3 +282,5 @@ Files this change touches, and what each guards:
 - How `cargo hive bench` samples cold versus seeded (BENCH-1.1, 1.2, 1.7 carry a Weigh pick) — project owner —
   2026-10-25 — forbid-guess (cấm đoán). Raised at `docs/specs/2026-10-25-foundation/requirements.md:159`. The
   operator confirms or replaces the pick at the spec sheet.
+- Whether bench pins or refuses a caller-set `RUSTC` or `CARGO_BUILD_RUSTC` (BENCH-5.4 only reports it) —
+  design-solution — 2026-11-09 — decided in design.md, not guessed here.
