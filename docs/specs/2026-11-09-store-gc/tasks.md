@@ -14,6 +14,7 @@ Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
+Delivered-by: PR #9
 
 **Goal:** Make bare `cargo hive gc` evict store entries that no target holds after 30 days, drop toolchain generations no checkout uses, and keep the store at or under 40 GB of freeable bytes. It never evicts a held key, never runs while a `seed` uses the store, and reports every count in its receipt.
 

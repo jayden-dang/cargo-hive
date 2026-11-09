@@ -1,7 +1,7 @@
 # Requirements: Store GC (bare `cargo hive gc` keeps hive's store bounded)
 
 Feature code: STOREGC
-Status: In-progress
+Status: Implemented
 Date: 2026-11-09
 
 <!--
