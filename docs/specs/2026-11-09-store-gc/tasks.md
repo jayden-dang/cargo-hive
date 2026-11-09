@@ -10,7 +10,7 @@
 Feature code: STOREGC
 Status: Approved — operator "approve", 2026-11-09
 Date: 2026-11-09
-Execution-mode: unset
+Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
