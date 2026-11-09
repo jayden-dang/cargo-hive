@@ -928,6 +928,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             b.note(note);
         }
     }
+    let mut store_cancelled = false;
     if !args.is_empty() {
         b.note("store.skipped_scoped");
     } else if !report.cancelled {
@@ -959,6 +960,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
                     dry_run,
                     &cancelled,
                 );
+                store_cancelled = outcome.cancelled;
                 for (name, n) in outcome.counts {
                     b.count(&name, n);
                 }
@@ -1008,7 +1010,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             ),
         );
     }
-    if report.cancelled {
+    if report.cancelled || store_cancelled {
         b.finding("error", None, "gc was cancelled");
         return emit(state, out, b.finish(), &human, 130);
     }

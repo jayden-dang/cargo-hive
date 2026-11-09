@@ -4,8 +4,9 @@ mod common;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cargo_hive::cargo_target::{Owner, TargetDir, TAG_LINE};
 use cargo_hive::classify::{CheckoutKind, Class};
@@ -17,7 +18,7 @@ use cargo_hive::platform::Fs;
 use cargo_hive::receipt::Measured;
 use cargo_hive::seed::choose::{self, Choice};
 use cargo_hive::seed::evict::{self, EvictCtx, Limits};
-use cargo_hive::seed::store::{self, store_dir};
+use cargo_hive::seed::store::{self, store_dir, Row, StoreFile, MAX_STORE_BYTES, STORE_FILE};
 use cargo_hive::state::State;
 use common::store_fixture::{
     count, drop_row, entry_dirs, has_finding, plant_rowless, rows, seeded_store, set_last_live_at,
@@ -1849,6 +1850,362 @@ fn an_unreadable_file_in_an_evicted_entry_is_unmeasured_not_counted() {
         "{:?}",
         outcome.counts
     );
+}
+
+#[test]
+fn a_cancel_during_commit_records_what_was_renamed_and_releases_both_locks() {
+    let hive = Hive::ready();
+    let value = 91_001u64;
+    let files = [
+        ("a", b"one".to_vec()),
+        ("b", b"two".to_vec()),
+        ("c", b"three".to_vec()),
+    ];
+    let keys: Vec<(u64, String, String)> = (0..5)
+        .map(|i| {
+            (
+                value,
+                format!("cancel{i:02}-aaaaaaaaaaaaaaaa"),
+                format!("{i:016x}"),
+            )
+        })
+        .collect();
+    for (tv, meta, fp) in &keys {
+        synth_entry(
+            &hive,
+            (*tv, meta.as_str(), fp.as_str()),
+            &[],
+            &files,
+            31 * DAY,
+        );
+    }
+    let expected: std::collections::BTreeSet<_> =
+        files.iter().map(|(name, _)| PathBuf::from(*name)).collect();
+    let fs = apfs();
+    let rustup = PathBuf::from("rustup");
+    for cancel_after in 2..=6 {
+        for (tv, meta, fp) in &keys {
+            let dir = entry_path(&hive, *tv, meta, fp);
+            if !dir.exists() {
+                synth_entry(
+                    &hive,
+                    (*tv, meta.as_str(), fp.as_str()),
+                    &[],
+                    &files,
+                    31 * DAY,
+                );
+            } else {
+                set_last_live_at(&hive, meta, 31 * DAY);
+            }
+        }
+        let calls = AtomicUsize::new(0);
+        let state = State::open_at(hive.home.path.clone()).unwrap();
+        let outcome = evict::run(
+            &EvictCtx {
+                state: &state,
+                fs: &fs,
+                targets: &[],
+                checkouts: &[],
+                checkout_faults: &[],
+                scan_faults: &[],
+                cache_roots: &[],
+                window: Duration::from_secs(7 * DAY),
+                account_bytes: true,
+                now: SystemTime::now(),
+                caller_toolchain: None,
+                caller_toolchain_kept: false,
+                rustup: &rustup,
+            },
+            limits(),
+            false,
+            &|| calls.fetch_add(1, Ordering::SeqCst) + 1 >= cancel_after,
+        );
+        assert!(
+            outcome.cancelled,
+            "cancel_after {cancel_after}: {:?}",
+            outcome.counts
+        );
+        let file = store::read(&state).unwrap();
+        let listed: std::collections::BTreeSet<_> = file
+            .units
+            .iter()
+            .map(|row| {
+                (
+                    row.toolchain_value,
+                    row.name_meta.clone(),
+                    row.fingerprint_hash.clone(),
+                )
+            })
+            .collect();
+        for (tv, meta, fp) in &keys {
+            let dir = entry_path(&hive, *tv, meta, fp);
+            let key = (*tv, meta.clone(), fp.clone());
+            if listed.contains(&key) {
+                let present: std::collections::BTreeSet<_> =
+                    entry_relative_files(&dir).into_iter().collect();
+                assert_eq!(
+                    present,
+                    expected,
+                    "cancel_after {cancel_after}: incomplete {}",
+                    dir.display()
+                );
+            } else {
+                assert!(
+                    !dir.exists(),
+                    "cancel_after {cancel_after}: row gone but dir remains {}",
+                    dir.display()
+                );
+            }
+        }
+        drop(state);
+        let state = State::open_at(hive.home.path.clone()).unwrap();
+        assert!(
+            state.try_store_exclusive().unwrap().is_some(),
+            "cancel_after {cancel_after}: store lock still held"
+        );
+        state
+            .locked(|_| Ok::<(), cargo_hive::state::StateError>(()))
+            .unwrap();
+    }
+}
+
+#[test]
+fn killing_gc_during_store_eviction_never_leaves_a_partial_entry_listed_or_adoptable() {
+    let hive = Hive::ready();
+    hive.config(&format!(
+        r#"{{"secondary_roots":["{}"]}}"#,
+        hive.home.path.join("no-secondary").display()
+    ));
+    let repo = seeded_store(&hive);
+    remove_all_targets(&repo);
+    let expected_files = ["a", "b", "c"];
+    plant_many_aged(
+        &hive,
+        92_001,
+        2_000,
+        &expected_files,
+        &[b"one", b"two", b"three"],
+        31 * DAY,
+    );
+    let delays_ms = [0u64, 5, 15, 40, 80, 150, 300, 600];
+    for (round, delay) in delays_ms.into_iter().enumerate() {
+        let mut child = hive
+            .command(&["gc", "--json"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        if delay > 0 {
+            std::thread::sleep(Duration::from_millis(delay));
+        }
+        let _ = Command::new("kill")
+            .args(["-9", &child.id().to_string()])
+            .status();
+        let _ = child.wait();
+        assert_store_entries_whole_or_absent(&hive, &expected_files, round, delay);
+        plant_many_aged(
+            &hive,
+            92_001,
+            2_000,
+            &expected_files,
+            &[b"one", b"two", b"three"],
+            31 * DAY,
+        );
+    }
+    let lane = repo.worktree("after-kill");
+    let (seed_out, seed) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(seed_out.status.success(), "{seed}");
+    assert!(
+        seed["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|finding| finding["kind"] != "unit.refused"),
+        "unit.refused after kill: {seed}"
+    );
+    assert_store_entries_whole_or_absent(&hive, &expected_files, 999, 0);
+}
+
+#[test]
+fn gc_exits_130_when_store_eviction_is_cancelled() {
+    let hive = Hive::ready();
+    hive.config(&format!(
+        r#"{{"secondary_roots":["{}"]}}"#,
+        hive.home.path.join("no-secondary").display()
+    ));
+    for i in 0..8 {
+        synth_entry(
+            &hive,
+            (
+                93_001,
+                &format!("sigint{i:02}-aaaaaaaaaaaaaaaa"),
+                &format!("{i:016x}"),
+            ),
+            &[],
+            &[("a", b"1".to_vec()), ("b", b"2".to_vec())],
+            31 * DAY,
+        );
+    }
+    let mut holder = hive.hold_state_lock();
+    let child = hive
+        .command(&["gc", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_until_open(child.id(), &hive.home.path.join(".lock"));
+    assert!(Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let _ = holder.kill();
+    let _ = holder.wait();
+    let out = wait_within(child, Duration::from_secs(60));
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
+}
+
+fn plant_many_aged(
+    hive: &Hive,
+    toolchain_value: u64,
+    count: usize,
+    names: &[&str],
+    contents: &[&[u8]],
+    last_live_secs_ago: u64,
+) {
+    assert_eq!(names.len(), contents.len());
+    let state = State::open_at(hive.home.path.clone()).unwrap();
+    let store = store_dir(&state);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let last_live_at = now.saturating_sub(last_live_secs_ago);
+    let mut rows = Vec::with_capacity(count);
+    for i in 0..count {
+        let name_meta = format!("kill{i:04}-aaaaaaaaaaaaaaaa");
+        let fingerprint_hash = format!("{i:016x}");
+        let dir = store
+            .join(toolchain_value.to_string())
+            .join(format!("{name_meta}-{fingerprint_hash}"));
+        fs::create_dir_all(&dir).unwrap();
+        let mut size = 0u64;
+        for (name, bytes) in names.iter().zip(contents.iter()) {
+            fs::write(dir.join(name), bytes).unwrap();
+            size += bytes.len() as u64;
+        }
+        rows.push(Row {
+            toolchain_value,
+            name_meta,
+            fingerprint_hash,
+            kind: "lib".into(),
+            rel_profile: PathBuf::from("debug"),
+            size,
+            filled_at: last_live_at,
+            last_live_at,
+            repos: Vec::new(),
+            registry_deps: Vec::new(),
+        });
+    }
+    state
+        .locked(|tx| {
+            let mut file: StoreFile = tx
+                .read_bounded(STORE_FILE, MAX_STORE_BYTES)
+                .unwrap_or_default();
+            file.toolchains
+                .entry(format!("synth-{toolchain_value}"))
+                .or_insert(toolchain_value);
+            file.units
+                .retain(|row| row.toolchain_value != toolchain_value);
+            file.units.extend(rows);
+            tx.write_bounded(STORE_FILE, &file, MAX_STORE_BYTES)
+        })
+        .unwrap();
+}
+
+fn assert_store_entries_whole_or_absent(
+    hive: &Hive,
+    expected_files: &[&str],
+    round: usize,
+    delay: u64,
+) {
+    let state = State::open_at(hive.home.path.clone()).unwrap();
+    let file = store::read(&state).unwrap();
+    let expected: std::collections::BTreeSet<_> =
+        expected_files.iter().map(|n| PathBuf::from(*n)).collect();
+    for row in &file.units {
+        let dir = store::entry_dir(&state, row);
+        assert!(
+            dir.is_dir(),
+            "round {round} delay {delay}: listed row missing dir {}",
+            dir.display()
+        );
+        if row.name_meta.contains("kill") && row.name_meta.contains("-aaaaaaaaaaaaaaaa") {
+            let present: std::collections::BTreeSet<_> =
+                entry_relative_files(&dir).into_iter().collect();
+            assert_eq!(
+                present,
+                expected,
+                "round {round} delay {delay}: partial entry {}",
+                dir.display()
+            );
+        }
+    }
+    let store = store_dir(&state);
+    let Ok(values) = fs::read_dir(&store) else {
+        return;
+    };
+    for value in values {
+        let value = value.unwrap().path();
+        let name = value.file_name().unwrap().to_string_lossy();
+        if name == ".tmp" || !value.is_dir() || name.parse::<u64>().is_err() {
+            continue;
+        }
+        for entry in fs::read_dir(&value).unwrap() {
+            let entry = entry.unwrap().path();
+            if !entry.is_dir() {
+                continue;
+            }
+            let entry_name = entry.file_name().unwrap().to_string_lossy();
+            if !entry_name.contains("kill") {
+                continue;
+            }
+            let present: std::collections::BTreeSet<_> =
+                entry_relative_files(&entry).into_iter().collect();
+            assert_eq!(
+                present,
+                expected,
+                "round {round} delay {delay}: partial dir without row check {}",
+                entry.display()
+            );
+        }
+    }
+}
+
+fn wait_until_open(pid: u32, path: &Path) {
+    let started = Instant::now();
+    loop {
+        let open = Command::new("lsof")
+            .args(["-a", "-p", &pid.to_string()])
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        if open {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "{} never opened {}",
+            pid,
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn mib2_text() -> Vec<u8> {
