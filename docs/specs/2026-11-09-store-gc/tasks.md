@@ -519,20 +519,20 @@ _Requirements: STOREGC-9.2_
 
 **Depends-on:** Task 11
 
-- [ ] **Step 1: Write the failing test.** Change the README assertion in `tests/skill.rs` to the new sentence "Bare `cargo hive gc` keeps the store under 40 GB". Add an assertion that SKILL.md names `store` on a gc line. Run `cargo test --test skill`; expect failure.
-- [ ] **Step 2: Edit SKILL.md.**
+- [x] **Step 1: Write the failing test.** Change the README assertion in `tests/skill.rs` to the new sentence "Bare `cargo hive gc` keeps the store under 40 GB". Add an assertion that SKILL.md names `store` on a gc line. Run `cargo test --test skill`; expect failure.
+- [x] **Step 2: Edit SKILL.md.**
   - The gc lines say that bare `gc` also evicts from the store by age, toolchain and the 40 GB cap; that `gc --dry-run` previews it; and that `gc <repo>` leaves the store alone.
   - "Reading a receipt" names the `store_*` counts, and says that `store.busy` means to run `gc` again when no seed runs and that `store.held_over_cap` names the targets to retire.
   - Say when to run bare `gc`: after a batch of lanes finishes, and whenever `seed`'s `store_bytes` passes 40 GB.
   - "Do not" adds "delete `~/.hive/store/` by hand".
   - Add a `cargo hive gc --json` command line.
   - Stay within 150 lines and the seven headings.
-- [ ] **Step 3: Edit the README and the help text.**
+- [x] **Step 3: Edit the README and the help text.**
   - Replace the README sentence at line 10 and in the seed row at line 54 with the new sentence.
   - Lines 5-8 now say that bare `gc` also bounds the store.
   - The `Gc` doc comment adds "and evicts from the store when given no repo".
   - Run `cargo test --test skill` and `cargo test`; expect pass.
-- [ ] **Step 4: Commit.** `docs(skill): teach agents that bare gc bounds the store`
+- [x] **Step 4: Commit.** `docs(skill): teach agents that bare gc bounds the store`
 
 _Requirements: STOREGC-8.1, STOREGC-8.2, STOREGC-10.11_
 
