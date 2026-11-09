@@ -107,17 +107,17 @@ Order. `src/seed/evict.rs` and `tests/store_gc.rs` are edited by Tasks 4 to 11, 
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - In `src/doctor.rs`, a table for `caller_toolchain_kept_from`: `cli`, `env` and `default` give true; `toolchain-file`, `path-override`, another value and `None` give false.
   - In `src/seed/source.rs`, `unit_key` on a fixture `Unit` returns its `toolchain_value`, directory name and `le_hex` fingerprint.
 
   Run `cargo test --lib`; expect a compile failure.
-- [ ] **Step 2: Implement.**
+- [x] **Step 2: Implement.**
   - `drop_directory_toolchain` calls `caller_toolchain_kept`.
   - `live_registry_units` calls `unit_key`.
   - `live_checkouts` returns its faults, and `gc_cmd`, `plan_cmd` and `explain_cmd` each turn them into the findings they made before.
-- [ ] **Step 3: Run.** `cargo test`; expect pass, with tests/gc.rs, tests/plan_tier.rs, tests/plan_apply.rs, tests/explain.rs, tests/seed_fill.rs and tests/capability_gate.rs unchanged.
-- [ ] **Step 4: Commit.** `refactor: expose walk faults, the unit store key and the kept-toolchain predicate`
+- [x] **Step 3: Run.** `cargo test`; expect pass, with tests/gc.rs, tests/plan_tier.rs, tests/plan_apply.rs, tests/explain.rs, tests/seed_fill.rs and tests/capability_gate.rs unchanged.
+- [x] **Step 4: Commit.** `refactor: expose walk faults, the unit store key and the kept-toolchain predicate`
 
 _Requirements: STOREGC-10.2, STOREGC-10.7, STOREGC-10.10, STOREGC-10.12_
 
