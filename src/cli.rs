@@ -1400,8 +1400,121 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
     emit(state, out, b.finish(), &explanation.human, code)
 }
 
-fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
+pub(crate) struct Refusal {
+    pub kind: &'static str,
+    pub path: Option<std::path::PathBuf>,
+    pub detail: String,
+    pub code: i32,
+}
+
+pub(crate) fn locate_checkout(
+    reg: &Registry,
+    cfg: &crate::state::Config,
+    caps: &crate::doctor::Capabilities,
+    path: &std::path::Path,
+) -> Result<
+    (
+        registry::Repo,
+        crate::discover::Checkout,
+        crate::doctor::Toolchain,
+    ),
+    Refusal,
+> {
     use crate::classify::Class;
+    use crate::doctor::{self, Capability};
+
+    let real = match path.canonicalize() {
+        Ok(path) => path,
+        Err(err) => {
+            let detail = format!(
+                "{path}: {err}; pass a checkout of a registered repository",
+                path = path.display()
+            );
+            return Err(Refusal {
+                kind: "refusal",
+                path: Some(path.to_path_buf()),
+                detail,
+                code: 1,
+            });
+        }
+    };
+    let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
+    let mut matched = None;
+    for repo in &reg.repos {
+        let (rows, _) = crate::discover::checkouts(repo, &registered_mains, cfg);
+        if let Some(row) = rows
+            .into_iter()
+            .find(|row| row.path == real && !row.missing)
+        {
+            matched = Some((repo.clone(), row));
+            break;
+        }
+    }
+    let Some((repo, row)) = matched else {
+        let detail = format!(
+            "{path} is not a checkout of a registered repository; register it with `cargo hive repo add` and run the command again",
+            path = real.display()
+        );
+        return Err(Refusal {
+            kind: "refusal",
+            path: Some(real),
+            detail,
+            code: 1,
+        });
+    };
+    if row.class == Class::Protected {
+        let detail = format!(
+            "{path} is protected ({reason}); seed leaves a protected checkout untouched",
+            path = real.display(),
+            reason = row.reason
+        );
+        return Err(Refusal {
+            kind: "refusal",
+            path: Some(real),
+            detail,
+            code: 1,
+        });
+    }
+    let toolchain = match doctor::resolve_toolchain(&real) {
+        Ok(toolchain) => toolchain,
+        Err(err) => {
+            let code = doctor::toolchain_failure_exit(&err);
+            let detail = if code == 130 {
+                format!("{path}: {err}", path = real.display())
+            } else {
+                format!(
+                    "{path}: {err}; install the toolchain that checkout selects and run the command again",
+                    path = real.display()
+                )
+            };
+            let kind = if code == 130 { "error" } else { "refusal" };
+            return Err(Refusal {
+                kind,
+                path: Some(real),
+                detail,
+                code,
+            });
+        }
+    };
+    for cap in [
+        Capability::Seeding,
+        Capability::StoreCompression,
+        Capability::Deletion,
+    ] {
+        if let Err(refusal) = doctor::require(caps, cap, Some(toolchain.release.as_str())) {
+            let detail = refusal.to_string();
+            return Err(Refusal {
+                kind: "refusal",
+                path: Some(real.clone()),
+                detail,
+                code: 1,
+            });
+        }
+    }
+    Ok((repo, row, toolchain))
+}
+
+fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
     use crate::doctor::{self, Capabilities, Capability};
     use crate::plan_tier::Ctx;
     use crate::state::window_days;
@@ -1431,79 +1544,20 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
         );
     }
     let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
-    let real = match checkout.canonicalize() {
-        Ok(path) => path,
-        Err(err) => {
-            let detail = format!(
-                "{path}: {err}; pass a checkout of a registered repository",
-                path = checkout.display()
-            );
-            b.finding("refusal", Some(checkout.to_path_buf()), detail.clone());
-            return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
+    let (repo, row, toolchain) = match locate_checkout(&reg, &cfg, &caps, checkout) {
+        Ok(v) => v,
+        Err(r) => {
+            b.finding(r.kind, r.path, r.detail.clone());
+            let human = if r.code == 130 {
+                format!("{}\n", r.detail)
+            } else {
+                format!("refused: {}\n", r.detail)
+            };
+            return emit(state, out, b.finish(), &human, r.code);
         }
     };
+    let real = row.path.clone();
     let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
-    let mut matched = None;
-    for repo in &reg.repos {
-        let (rows, _) = crate::discover::checkouts(repo, &registered_mains, &cfg);
-        if let Some(row) = rows
-            .into_iter()
-            .find(|row| row.path == real && !row.missing)
-        {
-            matched = Some((repo.clone(), row));
-            break;
-        }
-    }
-    let Some((repo, row)) = matched else {
-        let detail = format!(
-            "{path} is not a checkout of a registered repository; register it with `cargo hive repo add` and run the command again",
-            path = real.display()
-        );
-        b.finding("refusal", Some(real), detail.clone());
-        return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
-    };
-    if row.class == Class::Protected {
-        let detail = format!(
-            "{path} is protected ({reason}); seed leaves a protected checkout untouched",
-            path = real.display(),
-            reason = row.reason
-        );
-        b.finding("refusal", Some(real), detail.clone());
-        return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
-    }
-    let toolchain = match doctor::resolve_toolchain(&real) {
-        Ok(toolchain) => toolchain,
-        Err(err) => {
-            let code = doctor::toolchain_failure_exit(&err);
-            let detail = if code == 130 {
-                format!("{path}: {err}", path = real.display())
-            } else {
-                format!(
-                    "{path}: {err}; install the toolchain that checkout selects and run the command again",
-                    path = real.display()
-                )
-            };
-            let kind = if code == 130 { "error" } else { "refusal" };
-            b.finding(kind, Some(real), detail.clone());
-            let human = if code == 130 {
-                format!("{detail}\n")
-            } else {
-                format!("refused: {detail}\n")
-            };
-            return emit(state, out, b.finish(), &human, code);
-        }
-    };
-    for cap in [
-        Capability::Seeding,
-        Capability::StoreCompression,
-        Capability::Deletion,
-    ] {
-        if let Err(refusal) = doctor::require(&caps, cap, Some(toolchain.release.as_str())) {
-            let detail = refusal.to_string();
-            b.finding("refusal", Some(real.clone()), detail.clone());
-            return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
-        }
-    }
     let Ok(platform) = platform::current() else {
         eprintln!("{MACOS_ONLY_MESSAGE}");
         return 2;
@@ -1547,5 +1601,36 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
             emit(state, out, b.finish(), &human, code)
         }
         Err(err) => emit(state, out, b.finish(), &format!("{err}\n"), code),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doctor::Capabilities;
+    use crate::state::Config;
+    use std::path::Path;
+
+    #[test]
+    fn locating_a_missing_path_refuses_with_the_path_as_given() {
+        let reg = Registry::default();
+        let cfg = Config {
+            secondary_roots: vec![],
+            cache_roots: vec![],
+            gc_window_days: None,
+        };
+        let caps = Capabilities::default();
+        let given = Path::new("/private/tmp/hive-it-no-such-lane");
+        let refusal = locate_checkout(&reg, &cfg, &caps, given).unwrap_err();
+        assert_eq!(refusal.kind, "refusal");
+        assert_eq!(refusal.path.as_deref(), Some(given));
+        assert!(
+            refusal
+                .detail
+                .contains("pass a checkout of a registered repository"),
+            "{}",
+            refusal.detail
+        );
+        assert_eq!(refusal.code, 1);
     }
 }
