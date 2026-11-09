@@ -222,7 +222,7 @@ _Requirements: STOREGC-1.5, STOREGC-2.3, STOREGC-10.4, STOREGC-10.5_
 - Produces:
   - `pub(crate) fn holds(fs: &dyn Fs, targets: &[TargetDir], now: SystemTime, window: Duration) -> Holds`, with `Holds { keys: BTreeSet<StoreKey>, name_metas: BTreeSet<String>, whole_store: Vec<Finding>, findings: Vec<Finding>, by_reason: BTreeMap<&'static str, u64> }`. In this task an unreadable target or any non-Decided verdict goes to `whole_store`; Task 5 narrows that.
   - `pub fn run(ctx: &EvictCtx<'_>, limits: Limits, dry_run: bool, cancel: &dyn Fn() -> bool) -> EvictOutcome` in `seed::evict`.
-  - `pub struct EvictCtx<'a> { pub state: &'a State, pub fs: &'a dyn Fs, pub targets: &'a [TargetDir], pub checkouts: &'a [Checkout], pub checkout_faults: &'a [WalkFault], pub scan_faults: &'a [WalkFault], pub cache_roots: &'a [PathBuf], pub window: Duration, pub account_bytes: bool, pub now: SystemTime, pub caller_toolchain: Option<Toolchain>, pub rustup: &'a Path }`. `gc_cmd` passes `Path::new("rustup")`; tests pass a fake script, as `resolve_toolchain_with` already takes a rustup path (`src/doctor.rs:439,447`).
+  - `pub struct EvictCtx<'a> { pub state: &'a State, pub fs: &'a dyn Fs, pub targets: &'a [TargetDir], pub checkouts: &'a [Checkout], pub checkout_faults: &'a [WalkFault], pub scan_faults: &'a [WalkFault], pub cache_roots: &'a [PathBuf], pub window: Duration, pub account_bytes: bool, pub now: SystemTime, pub caller_toolchain: Option<Toolchain>, pub caller_toolchain_kept: bool, pub rustup: &'a Path }`. `gc_cmd` fills `caller_toolchain_kept` from `doctor::caller_toolchain_kept()`, so `evict::run` reads no environment (house rule 11). `gc_cmd` passes `Path::new("rustup")`; tests pass a fake script, as `resolve_toolchain_with` already takes a rustup path (`src/doctor.rs:439,447`).
   - `pub struct Limits { pub cap_bytes: u64, pub max_age_secs: u64 }`.
   - `pub struct EvictOutcome { pub counts: Vec<(String, u64)>, pub findings: Vec<Finding>, pub notes: Vec<String>, pub unmeasured: Vec<(String, String)>, pub cancelled: bool }`.
   - In `cli.rs`: `const CAP_BYTES: u64 = 40_000_000_000;` and `const MAX_AGE_SECS: u64 = 30 * 86_400;`.
@@ -329,10 +329,10 @@ _Requirements: STOREGC-4.1, STOREGC-4.2, STOREGC-4.3, STOREGC-4.4, STOREGC-4.5, 
     - `a_checkout_whose_toolchain_cannot_resolve_blocks_every_drop_but_age_still_runs`: the checkout's `rust-toolchain.toml` names an uninstalled toolchain.
     - `no_registered_repo_drops_no_value`.
     - `an_empty_store_runs_no_own_dir_lookup`: a library call with `EvictCtx.rustup` set to a fake script that logs each call; the log stays empty.
-    - `no_caller_toolchain_while_it_is_kept_blocks_every_drop`: a library call with `caller_toolchain: None` while the test process's own `RUSTUP_TOOLCHAIN_SOURCE` is `default`, which `cargo test` run through the rustup proxy sets; skip with a printed reason when it is unset. The finding is `store.toolchain_unresolved`, no value is dropped, and age still runs.
+    - `no_caller_toolchain_while_it_is_kept_blocks_every_drop`: a library call with `caller_toolchain_kept: true` and `caller_toolchain: None`. The finding is `store.toolchain_unresolved`, no value is dropped, and age still runs.
 
   Run; expect failures.
-- [ ] **Step 2: Implement** lookups (a) and (b) as design decision 9 describes, with `ctx.rustup` as the rustup path. (b) is `ctx.caller_toolchain` when `caller_toolchain_kept()`, else it is (a) per checkout. When (b) is needed and `ctx.caller_toolchain` is `None`, that is a failed lookup (b): `store.toolchain_unresolved`, and no value is dropped (STOREGC-2.4). The generation step runs after age, and only when the inventory is non-empty.
+- [ ] **Step 2: Implement** lookups (a) and (b) as design decision 9 describes, with `ctx.rustup` as the rustup path. (b) is `ctx.caller_toolchain` when `ctx.caller_toolchain_kept`, else it is (a) per checkout. When (b) is needed and `ctx.caller_toolchain` is `None`, that is a failed lookup (b): `store.toolchain_unresolved`, and no value is dropped (STOREGC-2.4). The generation step runs after age, and only when the inventory is non-empty.
 - [ ] **Step 3: Run.** `cargo test`; expect pass, tests/capability_gate.rs and tests/doctor.rs included.
 - [ ] **Step 4: Commit.** `feat(gc): drop store entries of a toolchain no checkout selects`
 
