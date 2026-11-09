@@ -191,6 +191,13 @@ pub fn run(
     if cancel() {
         return Ok(from_fill(ctx, &empty_fill(), findings, true, 0));
     }
+    let store_lock = match ctx.state.store_shared_or_cancelled(cancel) {
+        Ok(lock) => lock,
+        Err(StateError::Cancelled) => {
+            return Ok(from_fill(ctx, &empty_fill(), findings, true, 0));
+        }
+        Err(err) => return Err(Error::State(err)),
+    };
     let mut filled = fill::fill(ctx, repo, &targets, cancel)?;
     let cancelled = filled.cancelled;
     findings.append(&mut filled.findings);
@@ -244,6 +251,7 @@ pub fn run(
     };
     let window = Duration::from_secs(days.saturating_mul(86_400));
     let placed = place::place(ctx, &checkout.path, &rows, window, CRATE_DIR_CAP, cancel)?;
+    drop(store_lock);
     let disk_full = placed.disk_full.clone();
     let outcome = record_placed(ctx, assemble(&filled, placed, dropped, findings), cancel);
     let Some(why) = disk_full else {
