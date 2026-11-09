@@ -319,6 +319,16 @@ impl Fs for Apfs {
             available_bytes: s.f_bavail.saturating_mul(u64::from(s.f_bsize)),
         })
     }
+
+    fn load_average_hundredths(&self) -> io::Result<u64> {
+        let mut load = [0f64; 1];
+        // SAFETY: `load` has length 1 and nelem is 1.
+        let n = unsafe { libc::getloadavg(load.as_mut_ptr(), 1) };
+        if n != 1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((load[0] * 100.0).floor() as u64)
+    }
 }
 
 fn utf8_name(dir: &Path, name: std::ffi::OsString) -> io::Result<String> {
@@ -741,5 +751,11 @@ mod tests {
             fs.create_dir(&link).unwrap_err().kind(),
             std::io::ErrorKind::AlreadyExists
         );
+    }
+
+    #[test]
+    fn the_load_average_reads_as_hundredths() {
+        let first = apfs().load_average_hundredths().unwrap();
+        assert!(first < 100_000, "{first}");
     }
 }

@@ -423,4 +423,8 @@ impl Fs for Recording {
     fn volume(&self, path: &Path) -> io::Result<platform::VolumeInfo> {
         self.state.fs.volume(path)
     }
+
+    fn load_average_hundredths(&self) -> io::Result<u64> {
+        self.state.fs.load_average_hundredths()
+    }
 }
