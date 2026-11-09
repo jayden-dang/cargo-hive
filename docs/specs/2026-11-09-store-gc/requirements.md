@@ -65,7 +65,7 @@ Terms (defined in `CONTEXT.md`): store, entry, store key, toolchain value, toolc
 The cap is a constant of the CLI. The eviction step takes it as a parameter, and tests and the demonstration of this story run that step with a small cap; no environment variable, flag or key exposes it. *(Weigh W10; agent-decided: a test seam inside the crate, not a setting)*
 
 - **STOREGC-3.1** WHEN store eviction has applied stories 1 and 2 THE SYSTEM SHALL measure the freeable bytes of every remaining entry, counting each inode once, with bytes a surviving clone or hard link still holds counted apart and not as freeable.
-- **STOREGC-3.2** WHILE the freeable bytes of the remaining entries total more than 40,000,000,000 bytes THE SYSTEM SHALL evict whole entries whose keys are not held, oldest `last_live_at` first, ties broken by one total order on the store key, and SHALL stop at the first point where the total is at or under that cap, except in a run STOREGC-6.1 skips. *(agent-decided: 40 GB read as 40 × 10⁹ bytes, a constant in this run, and the oldest-first order; Weigh A2: the tie-break)*
+- **STOREGC-3.2** WHILE the freeable bytes of the remaining entries total more than 40,000,000,000 bytes THE SYSTEM SHALL evict whole entries whose keys are not held, oldest `last_live_at` first, ties broken so that an entry is evicted before every entry its `registry_deps` name, then by one total order on the store key, and SHALL stop at the first point where the total is at or under that cap, except in a run STOREGC-6.1 skips. *(agent-decided: 40 GB read as 40 × 10⁹ bytes, a constant in this run, and the oldest-first order; Weigh A2 as amended by W12: the tie-break)*
 - **STOREGC-3.3** IF the remaining entries are all held and their freeable bytes still total more than the cap THEN THE SYSTEM SHALL evict none of them, and report one finding giving that total and the cap.
 - **STOREGC-3.4** IF doctor check (c), the eviction-accounting capability, has not passed for the active toolchain THEN THE SYSTEM SHALL evict nothing for the cap, still apply stories 1 and 2, and record the cap step in `unmeasured` with the reason "doctor check (c) did not pass". *(agent-decided)*
 
@@ -77,7 +77,7 @@ The cap is a constant of the CLI. The eviction step takes it as a parameter, and
 - **STOREGC-4.2** WHEN a target STOREGC-1.2 reads is Undecided THE SYSTEM SHALL treat as held the store key of every unit its supported profile dirs hold, read from each unit's fingerprint, and report one finding naming the target and what clears its Undecided reason. *(Weigh W1)*
 - **STOREGC-4.3** WHEN a unit's store key cannot be formed, because it is a not-current unit with an empty or absent hash file, or because its profile dir is unsupported (any file in it unreadable or outside the format signature) THE SYSTEM SHALL treat as held the key of every entry whose name-meta is that unit's directory name under `.fingerprint/`, and for an unsupported profile dir, every directory name under its `.fingerprint/`. A profile dir with no `.fingerprint/` holds nothing, since no entry can come from it (SEED lock 7). *(Weigh W1, extended by store-gc-work to the profile level the code fails at: `src/fingerprint.rs:280-286,504-512`)*
 - **STOREGC-4.4** IF a target STOREGC-1.2 reads is unreadable, the listing of a `.fingerprint/`, `deps/` or `examples/` directory in it fails, or the run meets a fault `apply` would refuse on (STOREGC-2.4) THEN THE SYSTEM SHALL evict no entry in this run, and report one finding per cause naming the path and what clears it. *(Weigh W1)*
-- **STOREGC-4.5** WHEN store eviction holds the whole store (STOREGC-4.4), blocks a toolchain drop (STOREGC-2.4) or stops above the cap (STOREGC-3.3) THE SYSTEM SHALL still make the target deletions of that `gc` run, and SHALL exit with the code `gc` would have exited with had store eviction found nothing to do. *(Weigh W5)*
+- **STOREGC-4.5** WHEN store eviction holds the whole store (STOREGC-4.4), blocks a toolchain drop (STOREGC-2.4), stops above the cap (STOREGC-3.3) or finds the store busy (STOREGC-6.1) THE SYSTEM SHALL still make the target deletions of that `gc` run, and SHALL exit with the code `gc` would have exited with had store eviction found nothing to do. *(Weigh W5, W11)*
 
 ## 5. Preview store eviction, and keep scoped runs off the store
 
@@ -169,8 +169,11 @@ Files and surfaces this change touches (the module layout is the design's; these
 
 ## Open Questions
 
-- Whether the ledger's rule measures a compressed store file correctly, that is, what a compressed store file no checkout shares reads for `shares_all` (ledger S4, K4) — design-solution — 2026-11-09 — forbid-guess: measure it on APFS before STOREGC-3.1 and STOREGC-7.2 are designed.
-- Whether an entry whose `registry_deps` name an evicted entry counts as evictable at once or waits for the age rule (ledger S5, K6) — design-solution — 2026-11-09 — forbid-guess.
-- SEED's design text for decision 6 ("never touched again") and its `store_bytes` count need a note once eviction exists (code-claim review item 8) — design-solution — 2026-11-09 — forbid-guess.
+Answered in design (2026-11-09), kept here so the trace shows where:
+- ~~Whether the ledger's rule measures a compressed store file correctly (ledger S4, K4)~~ — answered: a compressed store file reads `shares_all` only while an unexpanded clone shares it, so `Ledger::file` is right as it is (`.skills/_pending-store-gc/auto/spike-k4.md`, Weigh).
+- ~~Whether an entry whose `registry_deps` name an evicted entry counts as evictable (ledger S5, K6)~~ — answered: no cascade for the age and toolchain steps; the cap step evicts dependents before the entries they name (design decisions 7 and 10, Weigh W12).
+- ~~SEED's design text for decision 6 and its `store_bytes` count~~ — answered: a dated note in the SEED design; `store_bytes` keeps its meaning (design "SEED design note"; STOREGC-10.13).
+- ~~The cost of toolchain resolution per checkout on klynt (ledger U1)~~ — measured: about 87 ms per checkout, one machine, one sample (`.skills/_pending-store-gc/auto/measure-u1.md`, Weigh); S2's 10 s trigger stays.
+
+Still open:
 - `seed`'s per-checkout resolution keeps a `default`-source `RUSTUP_TOOLCHAIN`, which beats a checkout's `rust-toolchain.toml` (verified on rustup 1.29.3, ledger V1, S6), against SEED lock 6 — owner, through root-cause, outside this run — 2026-11-09 — forbid-guess.
-- The cost of toolchain resolution per checkout on klynt (ledger U1, S2) — design-solution — 2026-11-09 — forbid-guess: measure, do not estimate.
