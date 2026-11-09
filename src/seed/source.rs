@@ -8,7 +8,7 @@ use crate::cargo_target::{Owner, TargetDir};
 use crate::discover::{self, Snapshot};
 use crate::fingerprint::{self, le_hex, Format, Unit};
 use crate::gc::{CRATE_DIR_CAP, DEPS_CAP};
-use crate::liveness::{self, Liveness};
+use crate::liveness::{self, Liveness, Uncertain};
 use crate::plan_tier::{checkout_walk, Ctx};
 use crate::platform::{EntryKind, Fs};
 use crate::receipt::Finding;
@@ -126,6 +126,20 @@ pub struct Holds {
     pub whole_store: Vec<Finding>,
     pub findings: Vec<Finding>,
     pub by_reason: BTreeMap<&'static str, u64>,
+    key_reason: BTreeMap<StoreKey, &'static str>,
+}
+
+impl Holds {
+    pub(crate) fn hold_reason(&self, key: &StoreKey) -> Option<&'static str> {
+        if let Some(reason) = self.key_reason.get(key) {
+            return Some(*reason);
+        }
+        if self.name_metas.contains(&key.name_meta) {
+            Some("name_meta")
+        } else {
+            None
+        }
+    }
 }
 
 pub(crate) fn holds(
@@ -150,20 +164,7 @@ pub(crate) fn holds(
         }
         match liveness::liveness(fs, target, now, window) {
             Liveness::Undecided { reasons } => {
-                let detail = reasons
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let finding = Finding {
-                    kind: "store.target_undecided".into(),
-                    path: Some(target.path.clone()),
-                    detail,
-                    measured: BTreeMap::new(),
-                };
-                out.whole_store.push(finding.clone());
-                out.findings.push(finding);
-                *out.by_reason.entry("whole_store").or_insert(0) += 1;
+                hold_undecided(fs, target, &reasons, &mut out);
             }
             Liveness::Decided { live, .. } => {
                 let mut local = TargetHolds::default();
@@ -181,13 +182,9 @@ pub(crate) fn holds(
                                 .map(unit_key)
                         });
                     if let Some(key) = key {
-                        local.keys.insert(key.clone());
-                        out.keys.insert(key);
-                        *out.by_reason.entry("live").or_insert(0) += 1;
+                        record_key(&mut out, &mut local, key, "live");
                     } else {
-                        local.name_metas.insert(uref.dir_name.clone());
-                        out.name_metas.insert(uref.dir_name);
-                        *out.by_reason.entry("name_meta").or_insert(0) += 1;
+                        record_name_meta(&mut out, &mut local, uref.dir_name);
                     }
                 }
                 if !local.keys.is_empty() || !local.name_metas.is_empty() {
@@ -197,6 +194,99 @@ pub(crate) fn holds(
         }
     }
     out
+}
+
+fn hold_undecided(fs: &dyn Fs, target: &TargetDir, reasons: &[Uncertain], out: &mut Holds) {
+    let detail = reasons
+        .iter()
+        .map(|reason| format!("{reason}\n{}", reason.clears_when()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let finding = Finding {
+        kind: "store.target_undecided".into(),
+        path: Some(target.path.clone()),
+        detail,
+        measured: BTreeMap::new(),
+    };
+    out.findings.push(finding.clone());
+
+    let listing_blocks = reasons.iter().any(|reason| {
+        matches!(
+            reason,
+            Uncertain::ListingFailed { .. } | Uncertain::TargetUnreadable { .. }
+        )
+    });
+    if listing_blocks {
+        out.whole_store.push(finding);
+        *out.by_reason.entry("whole_store").or_insert(0) += 1;
+        return;
+    }
+
+    let mut local = TargetHolds::default();
+    for profile in &target.profiles {
+        match &profile.format {
+            Format::Unsupported(_) => {
+                if !hold_unsupported_fingerprint(fs, &profile.path, out, &mut local) {
+                    out.whole_store.push(finding);
+                    *out.by_reason.entry("whole_store").or_insert(0) += 1;
+                    return;
+                }
+            }
+            Format::Supported => {
+                if let Some(graph) = &profile.graph {
+                    for unit in &graph.units {
+                        record_key(out, &mut local, unit_key(unit), "undecided");
+                    }
+                }
+                for nc in &profile.not_current_units {
+                    if let Some(name) = nc.dir.file_name().and_then(|n| n.to_str()) {
+                        record_name_meta(out, &mut local, name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if !local.keys.is_empty() || !local.name_metas.is_empty() {
+        out.by_target.insert(target.path.clone(), local);
+    }
+}
+
+fn hold_unsupported_fingerprint(
+    fs: &dyn Fs,
+    profile: &Path,
+    out: &mut Holds,
+    local: &mut TargetHolds,
+) -> bool {
+    let fp = profile.join(".fingerprint");
+    match fs.read_dir_bounded(&fp, CRATE_DIR_CAP) {
+        Ok(entries) => {
+            for (name, kind) in entries {
+                if kind == EntryKind::Dir {
+                    record_name_meta(out, local, name);
+                }
+            }
+            true
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
+fn record_key(out: &mut Holds, local: &mut TargetHolds, key: StoreKey, reason: &'static str) {
+    local.keys.insert(key.clone());
+    out.keys.insert(key.clone());
+    if reason == "live" {
+        out.key_reason.insert(key, "live");
+    } else {
+        out.key_reason.entry(key).or_insert(reason);
+    }
+    *out.by_reason.entry(reason).or_insert(0) += 1;
+}
+
+fn record_name_meta(out: &mut Holds, local: &mut TargetHolds, name_meta: String) {
+    local.name_metas.insert(name_meta.clone());
+    out.name_metas.insert(name_meta);
+    *out.by_reason.entry("name_meta").or_insert(0) += 1;
 }
 
 pub fn live_registry_units(
@@ -1545,5 +1635,187 @@ mod tests {
         assert_eq!(key.toolchain_value, 42);
         assert_eq!(key.name_meta, unit.dir_name);
         assert_eq!(key.fingerprint_hash, le_hex(fingerprint));
+    }
+
+    #[test]
+    fn an_undecided_target_holds_every_graph_unit_key_and_not_current_name_meta() {
+        let scratch = Scratch::new("holds-undecided");
+        let env = Env::new(&scratch.0);
+        let profile = scratch.0.join("debug");
+        let current = "lib-aaaaaaaaaaaaaaaa";
+        let rebuilding = "nc-bbbbbbbbbbbbbbbb";
+        write_unit(&profile, current, "lib-cur", 10, &[], env.now, HOUR);
+        let nc_dir = profile.join(".fingerprint").join(rebuilding);
+        fs::create_dir_all(&nc_dir).unwrap();
+        fs::write(nc_dir.join("output-lib-nc"), "").unwrap();
+        touch(&nc_dir.join("invoked.timestamp"), env.now, HOUR);
+        let target = target_of(&scratch.0, &[&profile]);
+        let got = holds(
+            env.platform.fs.as_ref(),
+            std::slice::from_ref(&target),
+            env.now,
+            6 * HOUR,
+        );
+        assert!(got.whole_store.is_empty(), "{got:?}");
+        let graph_key = unit_key(
+            target.profiles[0]
+                .graph
+                .as_ref()
+                .unwrap()
+                .units
+                .iter()
+                .find(|u| u.dir_name == current)
+                .unwrap(),
+        );
+        assert!(got.keys.contains(&graph_key), "{got:?}");
+        assert!(got.name_metas.contains(rebuilding), "{got:?}");
+        assert!(
+            got.findings
+                .iter()
+                .any(|f| f.kind == "store.target_undecided"
+                    && f.path.as_ref() == Some(&target.path)
+                    && f.detail.contains(
+                        "Cargo builds the never compiled unit or abandons it, or its timestamp ages out of the window"
+                    )),
+            "{got:?}"
+        );
+        assert_eq!(got.by_reason.get("undecided"), Some(&1), "{got:?}");
+        assert!(
+            got.by_reason.get("name_meta").copied().unwrap_or(0) >= 1,
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn an_unsupported_profile_with_fingerprint_holds_each_directory_name() {
+        let scratch = Scratch::new("holds-unsup-fp");
+        let env = Env::new(&scratch.0);
+        let profile = scratch.0.join("debug");
+        let kept = "kept-cccccccccccccccc";
+        let other = "other-dddddddddddddddd";
+        for name in [kept, other] {
+            let dir = profile.join(".fingerprint").join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("invoked.timestamp"), "").unwrap();
+            fs::write(dir.join("lib-x.json"), "{}").unwrap();
+        }
+        let target = target_of(&scratch.0, &[&profile]);
+        assert!(
+            matches!(target.profiles[0].format, Format::Unsupported(_)),
+            "{:?}",
+            target.profiles[0].format
+        );
+        let got = holds(env.platform.fs.as_ref(), &[target], env.now, 6 * HOUR);
+        assert!(got.whole_store.is_empty(), "{got:?}");
+        assert!(got.keys.is_empty(), "{got:?}");
+        assert_eq!(
+            got.name_metas,
+            [kept, other].into_iter().map(str::to_string).collect(),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn an_unsupported_profile_without_fingerprint_holds_nothing() {
+        let scratch = Scratch::new("holds-unsup-bare");
+        let env = Env::new(&scratch.0);
+        let profile = scratch.0.join("release");
+        fs::create_dir_all(&profile).unwrap();
+        let target = target_of(&scratch.0, &[&profile]);
+        assert!(
+            matches!(target.profiles[0].format, Format::Unsupported(_)),
+            "{:?}",
+            target.profiles[0].format
+        );
+        let got = holds(env.platform.fs.as_ref(), &[target], env.now, 6 * HOUR);
+        assert!(got.whole_store.is_empty(), "{got:?}");
+        assert!(got.keys.is_empty(), "{got:?}");
+        assert!(got.name_metas.is_empty(), "{got:?}");
+    }
+
+    #[test]
+    fn an_unreadable_target_holds_the_whole_store() {
+        let scratch = Scratch::new("holds-unreadable");
+        let env = Env::new(&scratch.0);
+        let mut target = target_of(&scratch.0, &[]);
+        target.unreadable = Some("permission denied".into());
+        let got = holds(
+            env.platform.fs.as_ref(),
+            &[target.clone()],
+            env.now,
+            6 * HOUR,
+        );
+        assert_eq!(got.whole_store.len(), 1, "{got:?}");
+        assert_eq!(got.whole_store[0].kind, "store.target_unreadable");
+        assert_eq!(got.whole_store[0].path.as_ref(), Some(&target.path));
+        assert!(got.keys.is_empty(), "{got:?}");
+        assert_eq!(got.by_reason.get("whole_store"), Some(&1));
+    }
+
+    #[test]
+    fn a_failed_fingerprint_deps_or_examples_listing_holds_the_whole_store() {
+        use std::os::unix::fs::PermissionsExt;
+
+        {
+            let scratch = Scratch::new("holds-list-fp");
+            let env = Env::new(&scratch.0);
+            let profile = scratch.0.join("debug");
+            write_unit(
+                &profile,
+                "lib-aaaaaaaaaaaaaaaa",
+                "lib-a",
+                1,
+                &[],
+                env.now,
+                HOUR,
+            );
+            let blocked = profile.join(".fingerprint");
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+            let target = target_of(&scratch.0, &[&profile]);
+            let got = holds(env.platform.fs.as_ref(), &[target], env.now, 6 * HOUR);
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(!got.whole_store.is_empty(), "fingerprint: {got:?}");
+        }
+
+        for area in ["deps", "examples"] {
+            let scratch = Scratch::new(&format!("holds-list-{area}"));
+            let env = Env::new(&scratch.0);
+            let profile = scratch.0.join("debug");
+            write_unit(
+                &profile,
+                "dead-aaaaaaaaaaaaaaaa",
+                "lib-dead",
+                1,
+                &[],
+                env.now,
+                30 * DAY,
+            );
+            write_unit(
+                &profile,
+                "live-bbbbbbbbbbbbbbbb",
+                "lib-live",
+                2,
+                &[],
+                env.now,
+                HOUR,
+            );
+            fs::create_dir_all(profile.join("deps")).unwrap();
+            fs::create_dir_all(profile.join("examples")).unwrap();
+            let blocked = profile.join(area);
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+            let target = target_of(&scratch.0, &[&profile]);
+            let got = holds(env.platform.fs.as_ref(), &[target], env.now, 6 * HOUR);
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                !got.whole_store.is_empty(),
+                "{area}: expected whole_store, got {got:?}"
+            );
+            assert!(
+                got.findings
+                    .iter()
+                    .any(|f| f.kind == "store.target_undecided"),
+                "{area}: {got:?}"
+            );
+        }
     }
 }

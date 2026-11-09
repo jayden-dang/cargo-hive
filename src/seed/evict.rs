@@ -106,6 +106,8 @@ pub fn run(
     let mut rowless_candidates = Vec::new();
     let mut refreshed = Vec::new();
     let mut held_live = 0u64;
+    let mut held_undecided = 0u64;
+    let mut held_name_meta = 0u64;
 
     for row in &inv.rows {
         let key = StoreKey {
@@ -113,25 +115,58 @@ pub fn run(
             name_meta: row.name_meta.clone(),
             fingerprint_hash: row.fingerprint_hash.clone(),
         };
-        if is_held(&held, &key) {
-            refreshed.push(key);
-            held_live += 1;
-            continue;
+        match held.hold_reason(&key) {
+            Some("live") => {
+                refreshed.push(key);
+                held_live += 1;
+                continue;
+            }
+            Some("undecided") => {
+                refreshed.push(key);
+                held_undecided += 1;
+                continue;
+            }
+            Some("name_meta") => {
+                refreshed.push(key);
+                held_name_meta += 1;
+                continue;
+            }
+            Some(_) | None => {}
         }
         if now_secs.saturating_sub(row.last_live_at) > limits.max_age_secs {
             age_candidates.push((key, Some(row.last_live_at)));
         }
     }
     for (key, _) in &inv.rowless {
-        if is_held(&held, key) {
-            held_live += 1;
-            continue;
+        match held.hold_reason(key) {
+            Some("live") => {
+                held_live += 1;
+                continue;
+            }
+            Some("undecided") => {
+                held_undecided += 1;
+                continue;
+            }
+            Some("name_meta") => {
+                held_name_meta += 1;
+                continue;
+            }
+            Some(_) | None => {}
         }
         rowless_candidates.push((key.clone(), None));
     }
 
-    push_count(&mut outcome, "store_entries_held", held_live);
-    push_count(&mut outcome, "store_entries_held_live", held_live);
+    let held_total = held_live + held_undecided + held_name_meta;
+    push_count(&mut outcome, "store_entries_held", held_total);
+    if held_live > 0 {
+        push_count(&mut outcome, "store_entries_held_live", held_live);
+    }
+    if held_undecided > 0 {
+        push_count(&mut outcome, "store_entries_held_undecided", held_undecided);
+    }
+    if held_name_meta > 0 {
+        push_count(&mut outcome, "store_entries_held_name_meta", held_name_meta);
+    }
 
     let mut candidates = age_candidates;
     let age_n = candidates.len() as u64;
@@ -248,10 +283,6 @@ pub fn run(
     );
     drop(store_lock);
     outcome
-}
-
-fn is_held(held: &Holds, key: &StoreKey) -> bool {
-    held.keys.contains(key) || held.name_metas.contains(&key.name_meta)
 }
 
 fn push_count(outcome: &mut EvictOutcome, name: &str, n: u64) {

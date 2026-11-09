@@ -2,7 +2,7 @@
 mod common;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::store_fixture::{
@@ -298,6 +298,186 @@ fn eviction_touches_nothing_outside_the_store() {
         read_optional(&hive.home.path.join("config.json")),
         snap_config
     );
+}
+
+#[test]
+fn an_undecided_lane_keeps_its_entries_past_30_days() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let before = rows(&hive).len();
+    assert!(before > 0);
+    let profile = repo.main.join("target/debug");
+    let nc = profile.join(".fingerprint/stuck-1111111111111111");
+    fs::create_dir_all(&nc).unwrap();
+    fs::write(nc.join("output-lib-stuck"), "").unwrap();
+    let stamp = nc.join("invoked.timestamp");
+    fs::write(&stamp, "").unwrap();
+    let now = SystemTime::now();
+    fs::File::options()
+        .write(true)
+        .open(&stamp)
+        .unwrap()
+        .set_modified(now)
+        .unwrap();
+    set_last_live_at(&hive, "", 31 * DAY);
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(count(&receipt, "store_entries_evicted_age"), 0, "{receipt}");
+    assert_eq!(rows(&hive).len(), before, "{receipt}");
+    assert!(has_finding(&receipt, "store.target_undecided"), "{receipt}");
+    let detail = receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["kind"] == "store.target_undecided")
+        .unwrap()["detail"]
+        .as_str()
+        .unwrap();
+    assert!(
+        detail.contains("never compiled")
+            || detail.contains("ages out of the window")
+            || detail.contains("abandons it"),
+        "{detail}"
+    );
+}
+
+#[test]
+fn a_live_unit_in_a_target_gc_skips_for_an_unsupported_profile_still_holds_its_key() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let before = rows(&hive).len();
+    assert!(before > 0);
+    let fp = repo.main.join("target/debug/.fingerprint");
+    let unit_dir = fs::read_dir(&fp)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.is_dir())
+        .expect("fingerprint unit dir");
+    let json = fs::read_dir(&unit_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "json"))
+        .expect("fingerprint json");
+    let text = fs::read_to_string(&json).unwrap();
+    fs::write(&json, text.replace(",\"compile_kind\":0", "")).unwrap();
+    set_last_live_at(&hive, "", 31 * DAY);
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(count(&receipt, "store_entries_evicted_age"), 0, "{receipt}");
+    assert_eq!(rows(&hive).len(), before, "{receipt}");
+}
+
+#[test]
+fn an_unreadable_target_holds_the_whole_store_and_gc_still_deletes_sessions_with_its_usual_exit_code(
+) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let main_target = repo.main.join("target");
+    let krate = crate_dirs(&main_target)
+        .into_iter()
+        .next()
+        .expect("incremental crate dir");
+    let (session, _) = plant_session(&krate, 3600, "svh0", false);
+    assert!(krate.join(&session).is_dir());
+    let orphan_parent = hive.home.path.join("orphan-cache");
+    let orphan = orphan_parent.join("orphan-target");
+    fs::create_dir_all(&orphan_parent).unwrap();
+    let status = std::process::Command::new("cp")
+        .args([
+            "-R",
+            main_target.to_str().unwrap(),
+            orphan.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let orphan = orphan.canonicalize().unwrap();
+    set_last_live_at(&hive, "", 31 * DAY);
+    let before_rows = rows(&hive).len();
+    hive.config(&format!(
+        r#"{{"secondary_roots": ["{}"], "cache_roots": ["{}"]}}"#,
+        repo.scratch.path.display(),
+        orphan_parent.display()
+    ));
+    let blocked = orphan.join("debug");
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+    let (out, receipt) = hive.json(&["gc"]);
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        has_finding(&receipt, "store.target_unreadable"),
+        "{receipt}"
+    );
+    assert_eq!(count(&receipt, "store_entries_evicted_age"), 0, "{receipt}");
+    assert!(
+        count(&receipt, "store_entries_held_whole_store") >= 1,
+        "{receipt}"
+    );
+    assert_eq!(rows(&hive).len(), before_rows, "{receipt}");
+    assert!(
+        count(&receipt, "sessions_deleted") >= 1,
+        "sessions not deleted: {receipt}"
+    );
+    assert!(!krate.join(&session).exists(), "{receipt}");
+}
+
+#[test]
+fn a_checkout_walk_fault_apply_would_refuse_on_holds_the_whole_store() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    set_last_live_at(&hive, "", 31 * DAY);
+    let before_rows = rows(&hive).len();
+    let blocked = repo.scratch.path.join("blocked-checkouts");
+    fs::create_dir_all(&blocked).unwrap();
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o100)).unwrap();
+    let (out, receipt) = hive.json(&["gc"]);
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(out.status.success(), "{receipt}");
+    assert!(has_finding(&receipt, "store.walk_fault"), "{receipt}");
+    assert_eq!(count(&receipt, "store_entries_evicted_age"), 0, "{receipt}");
+    assert!(
+        count(&receipt, "store_entries_held_whole_store") >= 1,
+        "{receipt}"
+    );
+    assert_eq!(rows(&hive).len(), before_rows, "{receipt}");
+}
+
+#[test]
+fn liveness_writes_nothing_during_eviction() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let target = repo.main.join("target");
+    let before = tree_mtimes(&target);
+    set_last_live_at(&hive, "", 31 * DAY);
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(tree_mtimes(&target), before);
+}
+
+fn tree_mtimes(root: &Path) -> std::collections::BTreeMap<PathBuf, SystemTime> {
+    let mut out = std::collections::BTreeMap::new();
+    if !root.exists() {
+        return out;
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            let meta = fs::symlink_metadata(&path).unwrap();
+            out.insert(path.clone(), meta.modified().unwrap());
+            if meta.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    out
 }
 
 fn read_optional(path: &Path) -> Option<Vec<u8>> {
