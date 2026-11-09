@@ -8,16 +8,17 @@ use std::os::macos::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use cargo_hive::discover::Checkout;
 use cargo_hive::plan_tier::Ctx;
+use cargo_hive::registry::Repo;
 use cargo_hive::seed::Error;
 use common::cargo_fixture::backdate_all;
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
 use common::registry_fixture::{cargo_json, RegistryRepo};
-use common::{init_repo, register, wait_within, Hive};
+use common::{env_lock, init_repo, register, wait_within, CargoHomeGuard, Hive};
 
 #[test]
 fn the_fixture_builds_a_registry_crate_with_a_build_script_offline() {
@@ -1897,16 +1898,7 @@ fn run_seed(
     run_seed_until(hive, recording, lane, &|| false)
 }
 
-fn run_seed_until(
-    hive: &Hive,
-    recording: Recording,
-    lane: &Path,
-    cancel: &(dyn Fn() -> bool + Sync),
-) -> Result<cargo_hive::seed::Outcome, Error> {
-    let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
-    let _home = CargoHomeGuard::set(&hive.cargo_home.path);
-    let lib = LibCtx::open(hive, recording.fs());
-    let lane = lane.canonicalize().unwrap();
+fn locate(lib: &LibCtx, lane: &Path) -> (Repo, Checkout) {
     let mut matched = None;
     for candidate in &lib.repos {
         let (rows, _) = cargo_hive::discover::checkouts(candidate, &lib.mains, &lib.cfg);
@@ -1918,19 +1910,70 @@ fn run_seed_until(
             break;
         }
     }
-    let (repo, checkout) = matched.expect("the lane is a discovered checkout");
-    let toolchain = cargo_hive::doctor::resolve_toolchain(&lane).unwrap();
-    let repos = [repo];
-    let ctx = Ctx {
+    matched.expect("the lane is a discovered checkout")
+}
+
+fn lib_ctx<'a>(lib: &'a LibCtx, repos: &'a [Repo]) -> Ctx<'a> {
+    Ctx {
         state: &lib.state,
         fs: lib.fs.as_ref(),
         cfg: &lib.cfg,
         now: SystemTime::now(),
         account_bytes: true,
-        repos: &repos,
+        repos,
         mains: &lib.mains,
-    };
+    }
+}
+
+fn run_seed_until(
+    hive: &Hive,
+    recording: Recording,
+    lane: &Path,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<cargo_hive::seed::Outcome, Error> {
+    let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let _home = CargoHomeGuard::set(&hive.cargo_home.path);
+    let lib = LibCtx::open(hive, recording.fs());
+    let lane = lane.canonicalize().unwrap();
+    let (repo, checkout) = locate(&lib, &lane);
+    let toolchain = cargo_hive::doctor::resolve_toolchain(&lane).unwrap();
+    let repos = [repo];
+    let ctx = lib_ctx(&lib, &repos);
     cargo_hive::seed::run(&ctx, &repos[0], &checkout, &toolchain, cancel)
+}
+
+#[test]
+fn seeding_through_the_fill_and_clone_halves_reports_what_one_run_reports() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let whole = run_seed(&hive, Recording::over_real(), &repo.worktree("whole")).unwrap();
+    let lane = repo.worktree("halves");
+    let halves = {
+        let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let _home = CargoHomeGuard::set(&hive.cargo_home.path);
+        let lib = LibCtx::open(&hive, Recording::over_real().fs());
+        let (repo_row, checkout) = locate(&lib, &lane);
+        let toolchain = cargo_hive::doctor::resolve_toolchain(&lane).unwrap();
+        let repos = [repo_row];
+        let ctx = lib_ctx(&lib, &repos);
+        match cargo_hive::seed::run_fill(&ctx, &repos[0], &|| false).unwrap() {
+            cargo_hive::seed::Fill::Continue(filled) => {
+                cargo_hive::seed::run_clone(&ctx, &repos[0], &checkout, &toolchain, filled, &|| {
+                    false
+                })
+                .unwrap()
+            }
+            cargo_hive::seed::Fill::Stopped(_) => panic!("nothing cancelled this fill"),
+        }
+    };
+    let keys = |o: &cargo_hive::seed::Outcome| o.counts.keys().cloned().collect::<Vec<_>>();
+    assert_eq!(keys(&whole), keys(&halves));
+    assert_eq!(
+        whole.counts["clone_units_cloned"],
+        halves.counts["clone_units_cloned"]
+    );
+    assert!(!halves.cancelled);
 }
 
 struct LinkedWorktree {
@@ -2567,35 +2610,4 @@ fn home_stamp_json(stamps: &HomeStamps) -> serde_json::Value {
         "cargo_children": stamps.cargo_children,
         "cache_children": stamps.cache_children,
     })
-}
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-struct CargoHomeGuard {
-    prev: Option<std::ffi::OsString>,
-}
-
-impl CargoHomeGuard {
-    fn set(path: &Path) -> CargoHomeGuard {
-        let prev = std::env::var_os("CARGO_HOME");
-        // SAFETY: registry classification reads this process's `CARGO_HOME`. The previous
-        // value is restored when the guard drops, including when an assertion panics.
-        unsafe { std::env::set_var("CARGO_HOME", path) };
-        CargoHomeGuard { prev }
-    }
-}
-
-impl Drop for CargoHomeGuard {
-    fn drop(&mut self) {
-        // SAFETY: paired with `CargoHomeGuard::set`. Restores the environment this test replaced.
-        unsafe {
-            match self.prev.take() {
-                Some(value) => std::env::set_var("CARGO_HOME", value),
-                None => std::env::remove_var("CARGO_HOME"),
-            }
-        }
-    }
 }
