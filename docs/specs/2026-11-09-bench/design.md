@@ -98,9 +98,9 @@ deep modules — an interface much simpler than what it hides.
 
 ### 1. `bench::run`: the run orchestrator (src/bench/mod.rs, new)
 
-Satisfies: BENCH-1.1, BENCH-1.3, BENCH-1.4, BENCH-1.5, BENCH-1.6, BENCH-1.7, BENCH-1.8, BENCH-1.10, BENCH-1.12, BENCH-4.1, BENCH-4.2, BENCH-4.3, BENCH-6.1, BENCH-6.2, BENCH-6.3, BENCH-6.4, BENCH-7.1, BENCH-7.2, BENCH-9.7, BENCH-10.1, BENCH-10.2
+Satisfies: BENCH-1.1, BENCH-1.3, BENCH-1.4, BENCH-1.5, BENCH-1.6, BENCH-1.7, BENCH-1.8, BENCH-1.10, BENCH-1.12, BENCH-4.1, BENCH-4.2, BENCH-4.3, BENCH-6.1, BENCH-6.2, BENCH-6.3, BENCH-6.4, BENCH-7.1, BENCH-7.2, BENCH-7.3, BENCH-9.7, BENCH-10.1, BENCH-10.2
 Reuse: rung 2 — `seed::run_fill` / `seed::run_clone` (section 6), `record::read` + `record::counts` with
-`gc::DEPS_CAP` (src/seed/record.rs:74,86; src/gc/run.rs:22), `discover::targets` with an in-memory
+`gc::DEPS_CAP` (src/seed/record.rs:74,86; src/gc/run.rs:22), `seed::store::read` (src/seed/store.rs:130), `discover::targets` with an in-memory
 `Snapshot::default()` (src/discover.rs:523, as src/seed/source.rs:86 does), the bounded runner (section 7),
 `ReceiptBuilder` (src/receipt.rs:140-215). The sequencing itself is new code (rung 7), because nothing
 sequences builds and seeds.
@@ -129,6 +129,7 @@ Flow of one run:
 prime:   t0 → seed::run_fill(ctx, repo)
            Stopped(o) → Cancelled · Err(e) → Failed (bench.failed "prime: …")
            Continue(f) → t1; counts prime_ms, prime_entries_added, prime_targets_read; f.findings copied
+         seed::store::read: no Row whose `repos` holds repo.main → bench.nothing_to_seed, Failed   (7.3)
 for (arm, i) in order::abba(n):                                        (section 2)
   if cancel() → Cancelled
   load_before ← fs.load_average_hundredths()  (Err → unmeasured sample.<pos>.load_before)
@@ -175,7 +176,7 @@ Locality: new files only; no neighbor impact.
 
 ### 3. `bench::check`: refusals before anything builds (src/bench/check.rs, new; uses `cli::locate_checkout`)
 
-Satisfies: BENCH-2.1, BENCH-2.2, BENCH-2.3, BENCH-2.4, BENCH-2.5, BENCH-2.6, BENCH-2.7, BENCH-2.8, BENCH-2.9, BENCH-2.11
+Satisfies: BENCH-2.1, BENCH-2.2, BENCH-2.3, BENCH-2.4, BENCH-2.5, BENCH-2.6, BENCH-2.7, BENCH-2.8, BENCH-2.9, BENCH-2.11, BENCH-2.12
 Reuse: rung 2 — `cli::locate_checkout` (section 6) for 2.1, 2.7 and the toolchain half of 2.8;
 `cargo_target::resolve` (src/cargo_target.rs:339) for the target and build directories in 2.5 and 2.11;
 the git readers (section 8) for 2.3 and 2.4. The cross-checkout rules (same repo, same HEAD, same toolchain
@@ -197,7 +198,7 @@ cross-checks: one repo `main` (2.2), one HEAD (2.3), no tracked changes (2.4), a
 whole `version_text`, which is what seed's `choose` matches on (src/seed/mod.rs:221) (2.8). Last, `resolve`
 runs per checkout. Its target directory must not exist and must equal its build directory, else
 `target.split`, as seed refuses at src/seed/place.rs:206 (2.5). No two checkouts may resolve the same target
-directory (2.11).
+directory (2.11). The workspace root `resolve` returns must hold a `Cargo.lock` (2.12).
 
 ### 4. `bench::command`: the timed build and its environment (src/bench/command.rs, new)
 
@@ -376,7 +377,8 @@ Surface:
 Interface: a "Which command" row, one fenced command line, a "Reading a receipt" paragraph (the prime, the
 sample findings, the `_ms` series, that p90 is the max for n ≤ 9, the four seed counts, and that seed and
 fill times rise through a run as finished samples add targets to scan, shown by `fill_targets_read`), the setup and
-cleanup lines (`git worktree add` 2n times, then `git worktree remove`, an even n), and a "Do not" line
+cleanup lines (`git worktree add` 2n times, then `git worktree remove`, an even n), the lockfile and cache
+line of BENCH-8.1, and a "Do not" line
 (run `bench` only when asked).
 Depth: n/a — extends existing docs within the 150-line cap (about 65 body lines today, digest §11).
 Locality: `extend` each file.
@@ -401,12 +403,12 @@ One new seam: `bench::run` with `Limits`. The rest are pure functions or existin
 
 Every ID in requirements.md appears in exactly one `Satisfies:` line:
 - 1.1, 1.3–1.8, 1.10, 1.12 → §1; 1.2, 1.9 → §2; 1.11 → §5.
-- 2.1–2.9, 2.11 → §3; 2.10 → §8.
+- 2.1–2.9, 2.11, 2.12 → §3; 2.10 → §8.
 - 3.1, 3.2, 3.4 → §4; 3.3 → §5.
 - 4.1–4.3 → §1.
 - 5.1–5.4 → §4.
 - 6.1–6.4 → §1.
-- 7.1, 7.2 → §1.
+- 7.1–7.3 → §1.
 - 8.1–8.3 → §10.
 - 9.1, 9.2 → §6; 9.3, 9.4 → §10; 9.5 → §8; 9.6 → §7; 9.7 → §1.
 - 10.1, 10.2 → §1.
@@ -414,6 +416,12 @@ Every ID in requirements.md appears in exactly one `Satisfies:` line:
 §9 is infrastructure (the load average for BENCH-1.6). Deliberately unmapped: none.
 
 ## Upstream sync
+
+Changed at the conductor's final review (2026-11-09, `.skills/_pending-bench/auto/final-review.md`): BENCH-2.12
+(no `Cargo.lock` refuses, §3), BENCH-7.3 (an empty store for the repo after the prime stops the run, §1) and
+BENCH-8.1's lockfile, cache and removal line (§10) are new. The 7.3 check reads `store.db` once
+(`seed::store::read`, src/seed/store.rs:130) and looks for a `Row` whose `repos` holds the repo's main
+(src/seed/store.rs:24-34). A toolchain mismatch still reaches BENCH-4.2's per-sample finding.
 
 Changed at plan review (2026-11-09, `.skills/_pending-bench/auto/plan-review.md`): the interfaces of §1
 (`Report` fields, `seed_ms` defined as `fill_ms + clone_ms`), §3 (`check` takes the registry, config and

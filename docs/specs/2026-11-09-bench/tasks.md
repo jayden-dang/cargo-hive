@@ -668,7 +668,8 @@ text, arm sizes, duplicates, a shared target) are new code (rung 7).
   `<path> resolves a different toolchain: <first line of rustc -vV>` ·
   `the target directory <dir> already exists` ·
   `the build directory <b> differs from the target directory <t>` ·
-  `<path> shares the target directory <dir> with <other>`
+  `<path> shares the target directory <dir> with <other>` ·
+  `<workspace root> has no Cargo.lock; bench builds --locked`
 
 **Depends-on:** Task 1, Task 2, Task 4, Task 6
 
@@ -723,18 +724,20 @@ fn an_unfair_set_of_checkouts_is_refused_with_a_reason_for_each() {
   Seeding capability via `hive.write_capabilities(json!({"seeding": ["f"]}))` (2.7, shaped like
   tests/seed.rs:187); two checkouts sharing a target through `.cargo/config.toml` `build.target-dir` set to
   an **absolute** path under the fixture's scratch dir, since a relative one resolves per worktree (2.11);
-  and a split build directory through `build.build-dir`, which is stable in cargo 1.97.1 and appears as
-  `build_directory` in `cargo metadata` (2.5). The config file is committed in the fixture, so the trees
+  a split build directory through `build.build-dir`, which is stable in cargo 1.97.1 and appears as
+  `build_directory` in `cargo metadata` (2.5); and a repo whose main ran `git rm -q Cargo.lock` and
+  committed before the worktrees were added, refused with `has no Cargo.lock` (2.12). The config file is committed in the fixture, so the trees
   stay clean. Run: `cargo test --test bench`. Expect: a compile error, because
   `bench::check` does not exist.
 - [ ] **Step 2: Implement** `check` in the order design §3 gives: arm sizes and duplicates from the arguments,
   `locate_checkout` per path, one repo `main`, one `head()`, no `has_tracked_changes()`, one `version_text`,
-  then `resolve` per checkout for an existing target, `target.split`, and a shared target. Collect every
+  then `resolve` per checkout for an existing target, `target.split`, a shared target, and a `Cargo.lock` at
+  its `workspace_root`. Collect every
   failure before returning.
 - [ ] **Step 3: Run** `cargo test --test bench`. Expect pass.
 - [ ] **Step 4: Commit** `feat(bench): refuse an unfair set of checkouts before anything builds`
 
-_Requirements: BENCH-2.1, BENCH-2.2, BENCH-2.3, BENCH-2.4, BENCH-2.5, BENCH-2.6, BENCH-2.7, BENCH-2.8, BENCH-2.11_
+_Requirements: BENCH-2.1, BENCH-2.2, BENCH-2.3, BENCH-2.4, BENCH-2.5, BENCH-2.6, BENCH-2.7, BENCH-2.8, BENCH-2.11, BENCH-2.12_
 
 ---
 
@@ -745,7 +748,7 @@ _Requirements: BENCH-2.1, BENCH-2.2, BENCH-2.3, BENCH-2.4, BENCH-2.5, BENCH-2.6,
 - Test: `tests/bench.rs`
 
 **Reuse:** rung 2 — `seed::run_fill` / `seed::run_clone` (section 6), `record::read` + `record::counts` with
-`gc::DEPS_CAP` (src/seed/record.rs:74,86; src/gc/run.rs:22), `discover::targets` with an in-memory
+`gc::DEPS_CAP` (src/seed/record.rs:74,86; src/gc/run.rs:22), `seed::store::read` (src/seed/store.rs:130), `discover::targets` with an in-memory
 `Snapshot::default()` (src/discover.rs:523, as src/seed/source.rs:86 does), the bounded runner (section 7),
 `ReceiptBuilder` (src/receipt.rs:140-215). The sequencing itself is new code (rung 7), because nothing
 sequences builds and seeds.
@@ -834,7 +837,7 @@ _Requirements: BENCH-1.1, BENCH-1.2, BENCH-1.3, BENCH-1.4, BENCH-1.5, BENCH-1.6,
 - Test: `tests/bench.rs`
 
 **Reuse:** rung 2 — `seed::run_fill` / `seed::run_clone` (section 6), `record::read` + `record::counts` with
-`gc::DEPS_CAP` (src/seed/record.rs:74,86; src/gc/run.rs:22), `discover::targets` with an in-memory
+`gc::DEPS_CAP` (src/seed/record.rs:74,86; src/gc/run.rs:22), `seed::store::read` (src/seed/store.rs:130), `discover::targets` with an in-memory
 `Snapshot::default()` (src/discover.rs:523, as src/seed/source.rs:86 does), the bounded runner (section 7),
 `ReceiptBuilder` (src/receipt.rs:140-215). The sequencing itself is new code (rung 7), because nothing
 sequences builds and seeds.
@@ -901,7 +904,7 @@ _Requirements: BENCH-4.1, BENCH-4.2, BENCH-4.3, BENCH-9.2_
 - Test: `tests/bench.rs`
 
 **Reuse:** rung 2 — `seed::run_fill` / `seed::run_clone` (section 6), `record::read` + `record::counts` with
-`gc::DEPS_CAP` (src/seed/record.rs:74,86; src/gc/run.rs:22), `discover::targets` with an in-memory
+`gc::DEPS_CAP` (src/seed/record.rs:74,86; src/gc/run.rs:22), `seed::store::read` (src/seed/store.rs:130), `discover::targets` with an in-memory
 `Snapshot::default()` (src/discover.rs:523, as src/seed/source.rs:86 does), the bounded runner (section 7),
 `ReceiptBuilder` (src/receipt.rs:140-215). The sequencing itself is new code (rung 7), because nothing
 sequences builds and seeds.
@@ -920,6 +923,7 @@ sequences builds and seeds.
 fn a_build_that_fails_stops_the_run_and_reports_no_summary() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
     let mut plan = bench_plan(&hive, &repo, 2);
     plan.build = "check-lib=no_such_package".parse().unwrap();
     let report = run_bench(&hive, &plan, Limits { build_deadline: BUILD_DEADLINE }, &|| false);
@@ -935,6 +939,7 @@ fn a_build_that_fails_stops_the_run_and_reports_no_summary() {
 fn a_build_past_its_deadline_is_killed_and_ends_the_run() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
     let plan = bench_plan(&hive, &repo, 2);
     let report = run_bench(&hive, &plan, Limits { build_deadline: Duration::from_millis(1) }, &|| false);
     assert!(matches!(report.end, End::Failed));
@@ -959,17 +964,35 @@ fn a_seed_that_errors_stops_the_run() {
 }
 ```
 
+#[test]
+fn an_empty_store_for_the_repo_after_the_prime_stops_before_any_sample() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);                    // main never built: the prime fills nothing
+    let plan = bench_plan(&hive, &repo, 2);
+    let report = run_bench(&hive, &plan, Limits { build_deadline: BUILD_DEADLINE }, &|| false);
+    assert!(matches!(report.end, End::Failed));
+    assert_eq!(report.exit_code(), 1);
+    assert!(report.counts.contains_key("prime_ms"));
+    assert!(report.findings.iter().any(|f| f.kind == "bench.nothing_to_seed"));
+    assert_eq!(report.findings.iter().filter(|f| f.kind == "bench.sample").count(), 0);
+    for c in plan.cold.iter().chain(&plan.seeded) { assert!(!c.path.join("target").exists()); }
+}
+```
+
   A failing prime takes the same `Err` path as a failing seed. No cheap fixture makes `run_fill` fail, so that
   branch is covered by the shared code, not by its own test. Run: `cargo test --test bench stops_the_run`. Expect: a failure, because the run does not stop yet.
 - [ ] **Step 2: Implement** the Failed paths of design §1: a prime or seed `Err` (a `DiskFull` keeps its
   `kept` outcome's findings), a non-zero Cargo exit (the exit code and the last stderr lines, capped at
   4 KiB, in the detail, worded `exit code <n>`), and `TimedOut` (worded `past its deadline of <ms> ms`).
-  The detail always names the step: `prime`, `seed of <checkout>` or `build of <checkout>`. Each starts no further sample, lists the
+  The detail always names the step: `prime`, `seed of <checkout>` or `build of <checkout>`. After the prime,
+  `seed::store::read(ctx.state)` is checked once for a `Row` whose `repos` holds `plan.repo.main`; none gives
+  `bench.nothing_to_seed` with detail `no stored unit lists <main>; build it once with <command line>, then
+  bench again`, and the run ends Failed before the first sample. Each starts no further sample, lists the
   rest as unmeasured, and skips the summaries.
 - [ ] **Step 3: Run** `cargo test --test bench`. Expect pass.
 - [ ] **Step 4: Commit** `feat(bench): a failed or overdue step ends the run`
 
-_Requirements: BENCH-7.1, BENCH-7.2, BENCH-6.3, BENCH-10.2_
+_Requirements: BENCH-7.1, BENCH-7.2, BENCH-7.3, BENCH-6.3, BENCH-10.2_
 
 ---
 
@@ -980,7 +1003,7 @@ _Requirements: BENCH-7.1, BENCH-7.2, BENCH-6.3, BENCH-10.2_
 - Test: `tests/bench.rs`
 
 **Reuse:** rung 2 — `seed::run_fill` / `seed::run_clone` (section 6), `record::read` + `record::counts` with
-`gc::DEPS_CAP` (src/seed/record.rs:74,86; src/gc/run.rs:22), `discover::targets` with an in-memory
+`gc::DEPS_CAP` (src/seed/record.rs:74,86; src/gc/run.rs:22), `seed::store::read` (src/seed/store.rs:130), `discover::targets` with an in-memory
 `Snapshot::default()` (src/discover.rs:523, as src/seed/source.rs:86 does), the bounded runner (section 7),
 `ReceiptBuilder` (src/receipt.rs:140-215). The sequencing itself is new code (rung 7), because nothing
 sequences builds and seeds.
@@ -1107,6 +1130,7 @@ fn bench_refuses_with_exit_one_and_rejects_an_unknown_shape_with_exit_two() {
 fn ctrl_c_stops_bench_with_exit_130() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
     let lanes = ["c1", "s1", "s2", "c2"].map(|n| repo.worktree(n));
     let s = |p: &PathBuf| p.to_str().unwrap().to_string();
     let child = hive
@@ -1174,7 +1198,8 @@ _Requirements: BENCH-1.11, BENCH-2.9, BENCH-3.3, BENCH-6.1, BENCH-9.7, BENCH-10.
 fn the_skill_teaches_benching_cold_against_seeded() {
     let body = skill_body();
     for needle in ["cargo hive bench --cold /path/to/", "--seeded /path/to/", "git worktree add",
-                   "git worktree remove", "even number", "p90", "only when", "fill_targets_read"] {
+                   "git worktree remove", "even number", "p90", "only when", "fill_targets_read",
+                   "Cargo.lock", "--offline"] {
         assert!(body.contains(needle), "{needle}");
     }
     assert!(body.lines().count() <= 150);
@@ -1190,7 +1215,9 @@ fn the_skill_teaches_benching_cold_against_seeded() {
   (2n `git worktree add`, then `git worktree remove`, an even number per arm); a "Reading a receipt" paragraph (the
   prime, `bench.sample`, the `_ms` series, p90 is the max for n ≤ 9, the four seed counts, and that seed
   and fill times rise through a run, shown by `fill_targets_read`); and `bench` in the line 19 hold list.
-  Keep line 63's rule and add that times come only from `bench`. Add a "Do not" line: run `bench` only
+  Keep line 63's rule and add that times come only from `bench`. Add the setup line: bench builds
+  `--offline --locked`, so the repo needs a committed Cargo.lock and its dependencies in Cargo's cache, and
+  building the main checkout once with the same command does both and fills the store. Add a "Do not" line: run `bench` only
   when asked, because it makes 2n full builds. Add a README row. Reword `src/receipt.rs`'s module doc to
   say bench's receipt is the one that holds integer milliseconds. Add the eval entry and its TESTS.md
   heading.

@@ -117,6 +117,10 @@ comparison, so that I never read a number from a sample that was not cold, not f
 - **BENCH-2.11** IF two checkouts given resolve the same target directory THEN THE SYSTEM SHALL refuse the
   run, because the first build would create it and every later seeded sample would then clone nothing
   (src/seed/place.rs:218-232). [Weigh W17]
+- **BENCH-2.12** IF the workspace root that Cargo resolves for a checkout given has no `Cargo.lock` THEN THE
+  SYSTEM SHALL refuse the run, because every timed build runs `--locked`, and Cargo exits with an error when
+  the lock file is missing (Cargo docs, `--locked`, via Context7 `/rust-lang/cargo`). [Proposed, final
+  review M1]
 - **BENCH-2.9** WHEN the run is refused THE SYSTEM SHALL run no prime, seed or build, report one `refusal`
   finding per failing checkout naming its reason, and exit with code 1.
 
@@ -197,6 +201,10 @@ failed, so that a failed build is never averaged in as a time.
 - **BENCH-7.1** IF the prime, a seed or a timed build fails (a non-zero Cargo exit, a seed error, or a full
   disk) THEN THE SYSTEM SHALL start no further sample, report the finished samples and one finding naming
   the failed step with its reason (Cargo's exit code for a build), and exit with code 1. [Weigh W12]
+- **BENCH-7.3** IF, after the prime, no unit in the store lists the repo's main checkout (so no seeded sample
+  could clone anything) THEN THE SYSTEM SHALL start no sample, report the prime and one finding of kind
+  `bench.nothing_to_seed` saying to build the repo with the timed command first, and exit with code 1.
+  [Proposed, final review M2]
 - **BENCH-7.2** IF a timed build runs past a fixed 60-minute deadline THEN THE SYSTEM SHALL kill its process
   group and treat the sample as failed under BENCH-7.1, naming the deadline (`docs/standards/code.md:14`).
   There is no flag for the deadline. [Weigh W15]
@@ -208,8 +216,12 @@ run it, read it and clean up without reading the source.
 
 - **BENCH-8.1** THE SYSTEM SHALL document `bench` in `plugin/skills/hive/SKILL.md`, inside its existing
   headings: what it measures, making the 2n fresh checkouts with `git worktree add` before the run and
-  removing them after, an even n per arm, the five build shapes, that p90 is the max for n ≤ 9, and that
-  `bench` is the only command whose receipt holds times. [Weigh W9 for the even-n advice]
+  removing them after (with `git worktree remove`, which also deletes a gitignored target), an even n per
+  arm, the five build shapes, that p90 is the max for n ≤ 9, that bench builds `--offline --locked`, so
+  the repo needs a committed `Cargo.lock` and every dependency already in Cargo's cache (building the main
+  checkout once with the timed command does both, and fills the store), and that `bench` is the only command
+  whose receipt holds times. [Weigh W9 for the even-n advice; the lockfile and cache line Proposed, final
+  review M1]
 - **BENCH-8.2** THE SYSTEM SHALL tell agents in the skill to run `bench` only when asked, because each run
   makes 2n full builds and their targets. [Weigh W16]
 - **BENCH-8.3** THE SYSTEM SHALL list `cargo hive bench` in the README's command table.
