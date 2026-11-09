@@ -358,12 +358,18 @@ pub fn floor_note(report: &DoctorReport) -> Option<String> {
 /// default, may. Without a source (rustup before 1.29.0, `rustup run`) the origin is
 /// unknown, so it is dropped too.
 pub(crate) fn drop_directory_toolchain(cmd: &mut Command) {
-    let named = std::env::var_os("RUSTUP_TOOLCHAIN_SOURCE")
-        .is_some_and(|s| s == "cli" || s == "env" || s == "default");
-    if !named {
+    if !caller_toolchain_kept() {
         cmd.env_remove("RUSTUP_TOOLCHAIN")
             .env_remove("RUSTUP_TOOLCHAIN_SOURCE");
     }
+}
+
+pub(crate) fn caller_toolchain_kept_from(source: Option<&std::ffi::OsStr>) -> bool {
+    source.is_some_and(|s| s == "cli" || s == "env" || s == "default")
+}
+
+pub(crate) fn caller_toolchain_kept() -> bool {
+    caller_toolchain_kept_from(std::env::var_os("RUSTUP_TOOLCHAIN_SOURCE").as_deref())
 }
 
 /// `NotFound` is `(os error 2)` with the closing parenthesis. `(os error 20)` contains
@@ -1761,5 +1767,25 @@ mod tests {
         alive.kill().unwrap();
         alive.wait().unwrap();
         std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn a_named_caller_toolchain_is_kept_and_a_directory_one_is_not() {
+        let cases: &[(&str, bool)] = &[
+            ("cli", true),
+            ("env", true),
+            ("default", true),
+            ("toolchain-file", false),
+            ("path-override", false),
+            ("other", false),
+        ];
+        for &(source, kept) in cases {
+            assert_eq!(
+                caller_toolchain_kept_from(Some(std::ffi::OsStr::new(source))),
+                kept,
+                "{source}"
+            );
+        }
+        assert!(!caller_toolchain_kept_from(None));
     }
 }

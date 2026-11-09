@@ -20,6 +20,13 @@ pub const STORE_FILE: &str = "store.db";
 pub const MAX_STORE_BYTES: u64 = 32 * 1024 * 1024;
 const TMP_KEEP: Duration = Duration::from_secs(86_400);
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StoreKey {
+    pub toolchain_value: u64,
+    pub name_meta: String,
+    pub fingerprint_hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
     pub toolchain_value: u64,

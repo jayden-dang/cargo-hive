@@ -6,11 +6,12 @@
 
 use crate::cargo_target::{Owner, TargetDir};
 use crate::discover::{self, Snapshot};
-use crate::fingerprint::{self, le_hex, Format};
+use crate::fingerprint::{self, le_hex, Format, Unit};
 use crate::gc::{CRATE_DIR_CAP, DEPS_CAP};
 use crate::liveness::{self, Liveness};
 use crate::plan_tier::{checkout_walk, Ctx};
 use crate::platform::{EntryKind, Fs};
+use crate::seed::store::StoreKey;
 use crate::size::MAX_DEPTH;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -102,6 +103,14 @@ pub fn owned_targets(
     (owned, findings)
 }
 
+pub(crate) fn unit_key(unit: &Unit) -> StoreKey {
+    StoreKey {
+        toolchain_value: unit.toolchain_value,
+        name_meta: unit.dir_name.clone(),
+        fingerprint_hash: unit.hash_hex.clone(),
+    }
+}
+
 pub fn live_registry_units(
     ctx: &Ctx<'_>,
     target: &TargetDir,
@@ -148,10 +157,11 @@ pub fn live_registry_units(
         let listing = deps_of.get(&profile.path).map(Vec::as_slice).unwrap_or(&[]);
         let rel = relative_to(&target.path, &profile.path);
         for unit in &graph.units {
+            let key = unit_key(unit);
             let class = dep_class(
                 ctx.fs,
                 &profile.path,
-                &unit.dir_name,
+                &key.name_meta,
                 &unit.stem,
                 listing,
                 cargo_home,
@@ -163,13 +173,13 @@ pub fn live_registry_units(
             };
             cands.push(Cand {
                 rel_profile: rel.clone(),
-                dir_name: unit.dir_name.clone(),
+                dir_name: key.name_meta.clone(),
                 stem: unit.stem.clone(),
                 kind: unit.kind.clone(),
-                fingerprint_hash: unit.hash_hex.clone(),
-                toolchain_value: unit.toolchain_value,
+                fingerprint_hash: key.fingerprint_hash,
+                toolchain_value: key.toolchain_value,
                 deps: unit.deps.iter().map(|dep| dep.fingerprint).collect(),
-                live: live_keys.contains(&(profile.path.clone(), unit.dir_name.clone())),
+                live: live_keys.contains(&(profile.path.clone(), key.name_meta)),
                 known,
                 registry,
                 left_out: false,
@@ -1422,5 +1432,30 @@ mod tests {
         );
         assert!(text.contains("make the directory readable"), "{text}");
         assert!(text.contains("build the target again"), "{text}");
+    }
+
+    #[test]
+    fn a_unit_key_carries_the_toolchain_value_directory_name_and_fingerprint() {
+        use crate::fingerprint::{Coverage, Unit};
+        use std::sync::Arc;
+
+        let fingerprint = 0x0102_0304_0506_0708u64;
+        let unit = Unit {
+            dir_name: format!("serde-{}", le_hex(fingerprint)),
+            kind: "lib".into(),
+            hash_hex: le_hex(fingerprint),
+            deps: Vec::new(),
+            stem: "lib-serde".into(),
+            features: Arc::from(""),
+            coverage: Coverage::NotRecorded,
+            profile: 0,
+            target: 0,
+            path: 0,
+            toolchain_value: 42,
+        };
+        let key = unit_key(&unit);
+        assert_eq!(key.toolchain_value, 42);
+        assert_eq!(key.name_meta, unit.dir_name);
+        assert_eq!(key.fingerprint_hash, le_hex(fingerprint));
     }
 }
