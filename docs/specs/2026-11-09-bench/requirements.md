@@ -103,7 +103,7 @@ comparison, so that I never read a number from a sample that was not cold, not f
 - **BENCH-2.10** THE SYSTEM SHALL read each checkout's HEAD and its uncommitted state with git's optional locks
   off (`git --no-optional-locks`), so the check never rewrites the checkout's index, a repo file under ARCH-2.
   By default `git status` refreshes the index and writes it out (Context7 `/git/htmldocs`, git-status
-  "BACKGROUND REFRESH"). [Weigh, requirements review r1 finding 3]
+  "BACKGROUND REFRESH"). [Weigh W13]
 - **BENCH-2.5** IF the target directory Cargo resolves for any checkout given already exists THEN THE SYSTEM
   SHALL refuse the run. [Weigh W2]
 - **BENCH-2.6** IF the two arms differ in count, either arm has fewer than 2 checkouts, or one checkout is
