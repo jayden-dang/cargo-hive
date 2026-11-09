@@ -451,7 +451,7 @@ _Requirements: BENCH-1.6_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests**:
+- [x] **Step 1: Write the failing tests**:
 
 ```rust
 // src/bench/order.rs
@@ -490,12 +490,12 @@ fn the_mean_of_two_huge_middles_does_not_overflow() {
 ```
 
   Run: `cargo test --lib bench::`. Expect: a compile error.
-- [ ] **Step 2: Implement.** `abba` walks pairs i = 0..n: on even i push `(Cold, i), (Seeded, i)`, on odd i
+- [x] **Step 2: Implement.** `abba` walks pairs i = 0..n: on even i push `(Cold, i), (Seeded, i)`, on odd i
   push `(Seeded, i), (Cold, i)`. `summarize` sorts a copy. The median at even n is
   `a / 2 + b / 2 + (a % 2 + b % 2) / 2`, and p90 is `sorted[(9 * n).div_ceil(10) - 1]`. Each file opens with a
   `//!` comment.
-- [ ] **Step 3: Run** `cargo test --lib bench::`. Expect pass.
-- [ ] **Step 4: Commit** `feat(bench): ABBA sample order and integer statistics`
+- [x] **Step 3: Run** `cargo test --lib bench::`. Expect pass.
+- [x] **Step 4: Commit** `feat(bench): ABBA sample order and integer statistics`
 
 _Requirements: BENCH-1.2, BENCH-1.9_
 
