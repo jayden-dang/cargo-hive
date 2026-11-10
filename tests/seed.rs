@@ -2019,6 +2019,35 @@ fn seeding_through_the_fill_and_clone_halves_reports_what_one_run_reports() {
     assert!(!halves.cancelled);
 }
 
+#[test]
+fn a_fill_half_holds_the_store_lock_until_clone_finishes() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("fill-holds-lock");
+    let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let _home = CargoHomeGuard::set(&hive.cargo_home.path);
+    let lib = LibCtx::open(&hive, Recording::over_real().fs());
+    let lane = lane.canonicalize().unwrap();
+    let (repo_row, checkout) = locate(&lib, &lane);
+    let toolchain = cargo_hive::doctor::resolve_toolchain(&lane).unwrap();
+    let repos = [repo_row];
+    let ctx = lib_ctx(&lib, &repos);
+    let filled = match cargo_hive::seed::run_fill(&ctx, &repos[0], &|| false).unwrap() {
+        cargo_hive::seed::Fill::Continue(filled) => filled,
+        cargo_hive::seed::Fill::Stopped(_) => panic!("nothing cancelled this fill"),
+    };
+    assert!(
+        lib.state.try_store_exclusive().unwrap().is_none(),
+        "fill half must keep the shared store lock so gc cannot evict"
+    );
+    cargo_hive::seed::run_clone(&ctx, &repos[0], &checkout, &toolchain, filled, &|| false).unwrap();
+    assert!(
+        lib.state.try_store_exclusive().unwrap().is_some(),
+        "clone must release the store lock"
+    );
+}
+
 struct LinkedWorktree {
     main: PathBuf,
     path: PathBuf,

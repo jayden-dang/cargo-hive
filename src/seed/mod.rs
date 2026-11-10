@@ -36,7 +36,7 @@ pub mod store;
 
 use std::fmt;
 
-use crate::state::StateError;
+use crate::state::{StateError, StoreLock};
 
 #[derive(Debug)]
 pub struct FullDisk {
@@ -186,6 +186,8 @@ pub enum Fill {
 pub struct Filled {
     report: FillReport,
     findings: Vec<(String, Option<PathBuf>, String)>,
+    // Held until clone finishes so eviction cannot run mid-seed.
+    store_lock: StoreLock,
 }
 
 impl Filled {
@@ -220,7 +222,13 @@ pub fn run_fill(
     let store_lock = match ctx.state.store_shared_or_cancelled(cancel) {
         Ok(lock) => lock,
         Err(StateError::Cancelled) => {
-            return Ok(from_fill(ctx, &empty_fill(), findings, true, 0));
+            return Ok(Fill::Stopped(from_fill(
+                ctx,
+                &empty_fill(),
+                findings,
+                true,
+                0,
+            )));
         }
         Err(err) => return Err(Error::State(err)),
     };
@@ -233,6 +241,7 @@ pub fn run_fill(
     Ok(Fill::Continue(Filled {
         report: filled,
         findings,
+        store_lock,
     }))
 }
 
@@ -247,6 +256,7 @@ pub fn run_clone(
     let Filled {
         report: filled,
         mut findings,
+        store_lock,
     } = filled;
     let days = match window_days(ctx.cfg.gc_window_days) {
         Ok(days) => days,

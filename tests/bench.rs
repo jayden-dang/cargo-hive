@@ -766,6 +766,7 @@ fn bench_writes_one_schema_two_receipt_and_exits_zero() {
         "seeds.json",
         "store",
         "store.db",
+        "store.lock",
     ]
     .into();
     let _ = fs::remove_file(hive.home.path.join("cargo-json.out"));
