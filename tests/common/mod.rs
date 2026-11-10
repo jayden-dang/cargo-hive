@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -369,6 +370,37 @@ pub fn wait_within(mut child: Child, limit: Duration) -> Output {
         std::thread::sleep(Duration::from_millis(50));
     }
     child.wait_with_output().unwrap()
+}
+
+pub fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub struct CargoHomeGuard {
+    prev: Option<std::ffi::OsString>,
+}
+
+impl CargoHomeGuard {
+    pub fn set(path: &Path) -> CargoHomeGuard {
+        let prev = std::env::var_os("CARGO_HOME");
+        // SAFETY: registry classification reads this process's `CARGO_HOME`. The previous
+        // value is restored when the guard drops, including when an assertion panics.
+        unsafe { std::env::set_var("CARGO_HOME", path) };
+        CargoHomeGuard { prev }
+    }
+}
+
+impl Drop for CargoHomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `CargoHomeGuard::set`. Restores the environment this test replaced.
+        unsafe {
+            match self.prev.take() {
+                Some(value) => std::env::set_var("CARGO_HOME", value),
+                None => std::env::remove_var("CARGO_HOME"),
+            }
+        }
+    }
 }
 
 pub mod cargo_fixture;

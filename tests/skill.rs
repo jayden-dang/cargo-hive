@@ -419,6 +419,7 @@ enum Parsed {
     Apply,
     Explain,
     Seed,
+    Bench,
 }
 
 fn parse(words: &[String]) -> Result<Parsed, String> {
@@ -445,6 +446,7 @@ fn parse(words: &[String]) -> Result<Parsed, String> {
         Command::Apply { .. } => Ok(Parsed::Apply),
         Command::Explain { .. } => Ok(Parsed::Explain),
         Command::Seed { .. } => Ok(Parsed::Seed),
+        Command::Bench { .. } => Ok(Parsed::Bench),
         Command::HoldLock { .. } | Command::TryLock { .. } => {
             Err("the internal lock subcommands are not part of the skill".to_string())
         }
@@ -579,6 +581,26 @@ fn the_skill_teaches_seeding_a_new_lane() {
 }
 
 #[test]
+fn the_skill_teaches_benching_cold_against_seeded() {
+    let body = skill_body();
+    for needle in [
+        "cargo hive bench --cold /path/to/",
+        "--seeded /path/to/",
+        "git worktree add",
+        "git worktree remove",
+        "even number",
+        "p90",
+        "only when",
+        "fill_targets_read",
+        "Cargo.lock",
+        "--offline",
+    ] {
+        assert!(body.contains(needle), "{needle}");
+    }
+    assert!(body.lines().count() <= 150);
+}
+
+#[test]
 fn skill_documents_every_shipped_command() {
     let mut seen: Vec<Parsed> = Vec::new();
     for (line, parsed) in skill_commands() {
@@ -607,7 +629,11 @@ fn skill_documents_every_shipped_command() {
         }
         if matches!(
             parsed,
-            Parsed::RepoAdd | Parsed::Status | Parsed::Explain | Parsed::Seed
+            Parsed::RepoAdd
+                | Parsed::Status
+                | Parsed::Explain
+                | Parsed::Seed
+                | Parsed::Bench
         ) {
             assert!(
                 path_words >= 1,
@@ -644,6 +670,7 @@ fn skill_documents_every_shipped_command() {
         },
         Parsed::Explain,
         Parsed::Seed,
+        Parsed::Bench,
     ] {
         assert!(
             seen.contains(&want),

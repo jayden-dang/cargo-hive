@@ -323,6 +323,9 @@ pub trait Fs {
     fn remove_file(&self, path: &Path) -> io::Result<()>;
     /// `statfs` of the volume holding `path`.
     fn volume(&self, path: &Path) -> io::Result<VolumeInfo>;
+    fn load_average_hundredths(&self) -> io::Result<u64> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
 }
 
 #[cfg(test)]

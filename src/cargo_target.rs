@@ -1,13 +1,16 @@
 //! Cargo target dirs: identification by tag and fingerprint layout, and
 //! ownership through `cargo metadata` with the caller's target overrides scrubbed (Decision 4).
+//! Child runners bound wall time, cancel, and captured stdout/stderr.
 
 use crate::fingerprint::ProfileReport;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -217,9 +220,25 @@ pub enum ChildOutputError {
     Failed(String),
 }
 
-fn kill_group(child: &std::process::Child) {
+impl fmt::Display for ChildOutputError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChildOutputError::TimedOut => write!(f, "child process exceeded its deadline"),
+            ChildOutputError::Cancelled => write!(f, "child process was cancelled"),
+            ChildOutputError::Failed(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for ChildOutputError {}
+
+fn kill_pgid(pid: u32) {
     // SAFETY: the child leads its own process group; this signals only that group.
-    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+    unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+}
+
+fn kill_group(child: &std::process::Child) {
+    kill_pgid(child.id());
 }
 
 struct PipeReaders {
@@ -331,6 +350,183 @@ pub fn output_with_deadline(
         stdout,
         stderr,
     })
+}
+
+pub struct Capture {
+    pub stdout_cap: usize,
+    pub stderr_cap: usize,
+}
+
+#[derive(Debug)]
+pub struct Ran {
+    pub status: ExitStatus,
+    pub exited_after: Duration,
+    pub stdout: Vec<u8>,
+    pub stderr_tail: Vec<u8>,
+}
+
+/// Runs `cmd` to a deadline with capped stdout (prefix) and stderr (tail). A
+/// cancel or the deadline kills the process group. `exited_after` is stamped
+/// when `wait` returns, before reader joins.
+pub fn run_bounded(
+    cmd: &mut Command,
+    deadline: Duration,
+    capture: Capture,
+    mut cancel: impl FnMut() -> bool,
+) -> Result<Ran, ChildOutputError> {
+    let stdout_stdio = if capture.stdout_cap == 0 {
+        Stdio::null()
+    } else {
+        Stdio::piped()
+    };
+    let stderr_stdio = if capture.stderr_cap == 0 {
+        Stdio::null()
+    } else {
+        Stdio::piped()
+    };
+    let start = Instant::now();
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(stdout_stdio)
+        .stderr(stderr_stdio)
+        .process_group(0)
+        .spawn()
+        .map_err(|e| ChildOutputError::Failed(format!("could not spawn: {e}")))?;
+    let pid = child.id();
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let stdout_rx = match stdout_pipe {
+        Some(mut pipe) => {
+            let cap = capture.stdout_cap;
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                let _ = tx.send(read_stdout_prefix(&mut pipe, cap));
+            });
+            Some(rx)
+        }
+        None => None,
+    };
+    let stderr_rx = match stderr_pipe {
+        Some(mut pipe) => {
+            let cap = capture.stderr_cap;
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                let _ = tx.send(read_stderr_tail(&mut pipe, cap));
+            });
+            Some(rx)
+        }
+        None => None,
+    };
+
+    let (wait_tx, wait_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let status = child.wait();
+        let exited_after = start.elapsed();
+        let _ = wait_tx.send((status, exited_after));
+    });
+
+    let slice = Duration::from_millis(20);
+    let (status, exited_after) = loop {
+        match wait_rx.recv_timeout(slice) {
+            Ok((Ok(status), exited_after)) => break (status, exited_after),
+            Ok((Err(e), _)) => {
+                finish_readers(stdout_rx, stderr_rx);
+                return Err(ChildOutputError::Failed(e.to_string()));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if cancel() {
+                    kill_pgid(pid);
+                    let _ = wait_rx.recv();
+                    finish_readers(stdout_rx, stderr_rx);
+                    return Err(ChildOutputError::Cancelled);
+                }
+                if start.elapsed() >= deadline {
+                    kill_pgid(pid);
+                    let _ = wait_rx.recv();
+                    finish_readers(stdout_rx, stderr_rx);
+                    return Err(ChildOutputError::TimedOut);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                finish_readers(stdout_rx, stderr_rx);
+                return Err(ChildOutputError::Failed(
+                    "waiter thread disconnected before exit".into(),
+                ));
+            }
+        }
+    };
+
+    let (stdout, stderr_tail) = finish_readers(stdout_rx, stderr_rx);
+    Ok(Ran {
+        status,
+        exited_after,
+        stdout,
+        stderr_tail,
+    })
+}
+
+fn read_stdout_prefix(pipe: &mut impl Read, cap: usize) -> Vec<u8> {
+    let mut kept = Vec::with_capacity(cap.min(8192));
+    let mut buf = [0u8; 8192];
+    loop {
+        match pipe.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if kept.len() < cap {
+                    let take = (cap - kept.len()).min(n);
+                    kept.extend_from_slice(&buf[..take]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    kept
+}
+
+fn read_stderr_tail(pipe: &mut impl Read, cap: usize) -> Vec<u8> {
+    let mut ring = Vec::with_capacity(cap.min(8192));
+    let mut buf = [0u8; 8192];
+    loop {
+        match pipe.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => push_tail(&mut ring, cap, &buf[..n]),
+            Err(_) => break,
+        }
+    }
+    ring
+}
+
+fn push_tail(ring: &mut Vec<u8>, cap: usize, data: &[u8]) {
+    if cap == 0 || data.is_empty() {
+        return;
+    }
+    if data.len() >= cap {
+        ring.clear();
+        ring.extend_from_slice(&data[data.len() - cap..]);
+        return;
+    }
+    let need = ring.len() + data.len();
+    if need > cap {
+        ring.drain(..need - cap);
+    }
+    ring.extend_from_slice(data);
+}
+
+fn finish_readers(
+    stdout_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    stderr_rx: Option<mpsc::Receiver<Vec<u8>>>,
+) -> (Vec<u8>, Vec<u8>) {
+    let grace = Duration::from_secs(1);
+    let stdout = match stdout_rx {
+        Some(rx) => rx.recv_timeout(grace).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let stderr = match stderr_rx {
+        Some(rx) => rx.recv_timeout(grace).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    (stdout, stderr)
 }
 
 /// Exactly `cargo metadata --no-deps --format-version 1 --locked --offline` in
@@ -593,5 +789,134 @@ mod tests {
             .expect_err("cancel stops the child");
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(matches!(err, ChildOutputError::Cancelled), "{err:?}");
+    }
+
+    fn sh(script: &str) -> Command {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", script]);
+        cmd
+    }
+
+    #[test]
+    fn a_child_that_exits_reports_its_status_and_when_it_exited() {
+        let ran = run_bounded(
+            &mut sh("sleep 0.2; exit 3"),
+            Duration::from_secs(10),
+            Capture {
+                stdout_cap: 0,
+                stderr_cap: 1024,
+            },
+            || false,
+        )
+        .unwrap();
+        assert_eq!(ran.status.code(), Some(3));
+        assert!(
+            ran.exited_after >= Duration::from_millis(200),
+            "{:?}",
+            ran.exited_after
+        );
+        assert!(ran.exited_after < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn output_past_its_cap_keeps_only_the_cap() {
+        let ran = run_bounded(
+            &mut sh("head -c 100000 /dev/zero; head -c 100000 /dev/zero >&2"),
+            Duration::from_secs(10),
+            Capture {
+                stdout_cap: 4096,
+                stderr_cap: 4096,
+            },
+            || false,
+        )
+        .unwrap();
+        assert_eq!(ran.stdout.len(), 4096);
+        assert_eq!(ran.stderr_tail.len(), 4096);
+    }
+
+    #[test]
+    fn output_at_its_cap_is_kept_whole() {
+        let ran = run_bounded(
+            &mut sh("head -c 4096 /dev/zero >&2"),
+            Duration::from_secs(10),
+            Capture {
+                stdout_cap: 0,
+                stderr_cap: 4096,
+            },
+            || false,
+        )
+        .unwrap();
+        assert_eq!(ran.stderr_tail.len(), 4096);
+    }
+
+    #[test]
+    fn a_child_past_its_deadline_is_killed_with_its_group() {
+        let start = Instant::now();
+        let err = run_bounded(
+            &mut sh("sleep 30 & sleep 30"),
+            Duration::from_millis(300),
+            Capture {
+                stdout_cap: 0,
+                stderr_cap: 0,
+            },
+            || false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ChildOutputError::TimedOut));
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_cancel_kills_the_child() {
+        let start = Instant::now();
+        let err = run_bounded(
+            &mut sh("sleep 30"),
+            Duration::from_secs(60),
+            Capture {
+                stdout_cap: 0,
+                stderr_cap: 0,
+            },
+            || start.elapsed() > Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ChildOutputError::Cancelled));
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_grandchild_holding_stderr_open_does_not_delay_the_result() {
+        let start = Instant::now();
+        let ran = run_bounded(
+            &mut sh("(sleep 20 >&2 &) ; exit 0"),
+            Duration::from_secs(60),
+            Capture {
+                stdout_cap: 0,
+                stderr_cap: 1024,
+            },
+            || false,
+        )
+        .unwrap();
+        assert_eq!(ran.status.code(), Some(0));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    fn assert_error<E: std::error::Error>(_: &E) {}
+
+    #[test]
+    fn child_output_errors_display_what_went_wrong() {
+        let cancelled = ChildOutputError::Cancelled;
+        let timed_out = ChildOutputError::TimedOut;
+        let failed = ChildOutputError::Failed("could not spawn: boom".into());
+        assert_error(&cancelled);
+        assert_error(&timed_out);
+        assert_error(&failed);
+        assert_eq!(cancelled.to_string(), "child process was cancelled");
+        assert_eq!(timed_out.to_string(), "child process exceeded its deadline");
+        assert_eq!(failed.to_string(), "could not spawn: boom");
+        assert!(std::error::Error::source(&cancelled).is_none());
     }
 }

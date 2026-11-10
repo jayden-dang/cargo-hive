@@ -1,4 +1,5 @@
-//! Receipts hold counted or measured values only. There is no float or duration slot.
+//! Receipts hold counted or measured values only. Bench is the one command whose receipt
+//! holds integer milliseconds; there is no float or duration slot.
 //! Plan and apply receipts are version 3. Every other command writes version 2.
 
 use crate::state::utc_timestamp;
