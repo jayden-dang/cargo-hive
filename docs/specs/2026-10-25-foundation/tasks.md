@@ -6079,3 +6079,35 @@ Fix 2026-10-30 (root-cause, owner-accepted proposition: the test killed the lock
 - [x] **Step 3: Verify and commit** `test(status): hold the state lock until a cancelled status exits`.
 
 _Requirements: CORE-6.8, CORE-6.9_
+
+### Task 20: A default-source toolchain no longer beats a checkout's own toolchain file
+
+Added after execution by `root-cause` (2026-11-10). The rustup proxy hands `cargo hive` `RUSTUP_TOOLCHAIN` with source `default` when the caller's directory has no override, and `drop_directory_toolchain` kept it, so `seed`, `bench` and `cargo metadata` ignored a checkout's `rust-toolchain.toml`. The owner widened the fix from seed to every child. Landed as `82742c1`.
+
+**Files:**
+- Modify: `src/doctor.rs` (`caller_toolchain_kept_from`)
+- Test: `tests/seed.rs`, `tests/capability_gate.rs`, `src/doctor.rs` unit test
+
+**Depends-on:** Task 17
+
+- [x] **Step 1: Red.** `seed` of a lane pinning an absent channel, run with `RUSTUP_TOOLCHAIN=stable RUSTUP_TOOLCHAIN_SOURCE=default`, exits 0 with toolchain 1.97.1; `status` with a `default`-source not-installed toolchain is refused.
+- [x] **Step 2: Fix.** Only `cli` and `env` keep the variable; the lane is refused naming itself, `status` passes the gate.
+- [x] **Step 3: Verify and commit** `fix: drop a default-source RUSTUP_TOOLCHAIN from hive's rustup and cargo children`.
+
+_Requirements: CORE-1.15, CORE-1.16_
+
+### Task 21: doctor, apply and store eviction stop waiting for the state lock on Ctrl-C
+
+Added after execution by `root-cause` (2026-11-10). doctor's capabilities write, apply's plan lookup and gc's store-eviction commit used `State::locked` after installing the signal handlers. Landed as `c2a11b7`.
+
+**Files:**
+- Modify: `src/cli.rs`, `src/plan_tier/record.rs`, `src/plan_tier/apply.rs`, `src/seed/store.rs`, `src/seed/evict.rs`
+- Test: `tests/doctor.rs`, `tests/plan_apply.rs`, `src/seed/store.rs` unit test
+
+**Depends-on:** Task 18
+
+- [x] **Step 1: Red.** With another process holding `~/.hive/.lock`, SIGINT leaves `doctor` and `apply` running past 10 s.
+- [x] **Step 2: Fix.** `locked_or_cancelled` at the three sites; doctor and apply exit 130; a cancelled eviction commit renames nothing.
+- [x] **Step 3: Verify and commit** `fix: let Ctrl-C stop doctor, apply and store eviction while they wait for the state lock`.
+
+_Requirements: CORE-6.10, CORE-6.11_

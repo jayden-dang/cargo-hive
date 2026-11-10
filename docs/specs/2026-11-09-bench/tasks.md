@@ -1229,3 +1229,19 @@ fn the_skill_teaches_benching_cold_against_seeded() {
 - [x] **Step 4: Commit** `docs(skill): teach agents to bench a cold lane against a seeded one`
 
 _Requirements: BENCH-8.1, BENCH-8.2, BENCH-8.3, BENCH-9.3, BENCH-9.4_
+
+### Task 16: Sample targets without .rustc_info.json are named once
+
+Added after execution by `root-cause` (2026-11-10). With both wrappers set to the empty string (BENCH-5.2), Cargo's rustc-info cache is disabled, so every seeded sample repeated a `toolchain.row` finding per earlier sample target. Landed as `76567e8`.
+
+**Files:**
+- Modify: `src/bench/mod.rs` (`is_sample_row`, `note_sample_rows_skipped`)
+- Test: `tests/bench.rs`
+
+**Depends-on:** Task 15
+
+- [x] **Step 1: Red.** A two-per-arm bench reports `toolchain.row` for `cold0`'s target on each seeded sample.
+- [x] **Step 2: Fix.** Those findings become one `bench.sample_rows_skipped`; a target outside the run keeps its finding.
+- [x] **Step 3: Verify and commit** `fix(bench): name sample targets without .rustc_info.json once, and say why seed misses one`.
+
+_Requirements: BENCH-5.5, BENCH-5.6_
