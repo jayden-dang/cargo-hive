@@ -285,6 +285,44 @@ fn the_rustup_default_does_not_beat_the_checkouts_own_toolchain_file() {
 }
 
 #[test]
+fn a_cache_root_target_this_repo_does_not_own_is_named_as_an_unresolved_source() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    // A built target no registered checkout owns, in the default cache root.
+    let gone = init_repo(&repo.scratch.path.join("gone-repo"), "");
+    let foreign = hive.home.path.join("no-cache/gone-repo-target");
+    fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    hive.build_crate(&gone, Some(&foreign));
+    let foreign = foreign.canonicalize().unwrap();
+    let lane = repo.worktree("cache-root");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let findings = receipt["findings"].as_array().unwrap();
+    let foreign_text = foreign.display().to_string();
+    let named: Vec<_> = findings
+        .iter()
+        .filter(|f| f["detail"].as_str().unwrap_or("").contains(&foreign_text))
+        .collect();
+    assert_eq!(named.len(), 1, "{receipt}");
+    let finding = named[0];
+    assert_eq!(finding["kind"], "source.unresolved", "{receipt}");
+    assert_eq!(
+        finding["path"].as_str(),
+        Some(foreign_text.as_str()),
+        "{receipt}"
+    );
+    // `status` advice does not fit seed, which reads only this repo's targets.
+    assert!(
+        !finding["detail"]
+            .as_str()
+            .unwrap()
+            .contains("cargo hive status"),
+        "{receipt}"
+    );
+}
+
+#[test]
 fn a_store_with_no_tag_clones_nothing_with_a_finding() {
     let hive = Hive::ready();
     quiet_cache(&hive);

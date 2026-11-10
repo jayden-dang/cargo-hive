@@ -205,11 +205,7 @@ pub fn run_fill(
     repo: &Repo,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Fill, Error> {
-    let (targets, faults) = source::owned_targets(ctx, cancel);
-    let mut findings = Vec::new();
-    for fault in faults {
-        findings.push(("walk.unreadable".to_string(), None, fault));
-    }
+    let (targets, mut findings) = source::owned_targets(ctx, cancel);
     if cancel() {
         return Ok(Fill::Stopped(from_fill(
             ctx,

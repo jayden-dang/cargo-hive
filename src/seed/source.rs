@@ -80,23 +80,40 @@ pub fn is_registry_dep_info(first_line: &str, cargo_home: &Path) -> bool {
     unescaped.starts_with(&prefix)
 }
 
+/// A finding kind, the path it names when it names one, and its detail.
+pub type SourceFinding = (String, Option<PathBuf>, String);
+
 pub fn owned_targets(
     ctx: &Ctx<'_>,
     cancel: &(dyn Fn() -> bool + Sync),
-) -> (Vec<TargetDir>, Vec<String>) {
+) -> (Vec<TargetDir>, Vec<SourceFinding>) {
     let (checkouts, faults) = checkout_walk(ctx);
     let mut snapshot = Snapshot::default();
     let scan = discover::targets(&checkouts, ctx.cfg, false, &mut snapshot, cancel);
     let mut findings = Vec::new();
     for fault in faults.into_iter().chain(scan.walk_faults) {
-        findings.push(format!("{}: {}", fault.path.display(), fault.detail));
+        findings.push((
+            "walk.unreadable".to_string(),
+            None,
+            format!("{}: {}", fault.path.display(), fault.detail),
+        ));
     }
     let mut owned = Vec::new();
     for target in scan.targets {
         match &target.owner {
             Owner::Owned { .. } => owned.push(target),
             Owner::Unresolved { reason } => {
-                findings.push(format!("{}: {reason}", target.path.display()));
+                // Seed names only this repo, so `status` advice would not make it a source.
+                let why = if reason == discover::CACHE_ROOT_UNJUDGED {
+                    "a cache-root target no checkout of this repository owns, so seed does not read it"
+                } else {
+                    reason.as_str()
+                };
+                findings.push((
+                    "source.unresolved".to_string(),
+                    Some(target.path.clone()),
+                    format!("{}: {why}", target.path.display()),
+                ));
             }
             Owner::OrphanCandidate { .. } => {}
         }
@@ -1577,13 +1594,16 @@ mod tests {
         assert!(
             findings
                 .iter()
-                .any(|f| f.contains(&orphan.display().to_string()) && f.contains("cache-root")),
+                .any(|(kind, path, detail)| kind == "source.unresolved"
+                    && path.as_deref() == Some(orphan.as_path())
+                    && detail.contains("cache-root")),
             "{findings:?}"
         );
         assert!(
             findings
                 .iter()
-                .any(|f| f.contains(&sealed.display().to_string())),
+                .any(|(kind, _, detail)| kind == "walk.unreadable"
+                    && detail.contains(&sealed.display().to_string())),
             "{findings:?}"
         );
     }
