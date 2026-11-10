@@ -408,3 +408,4 @@ pub mod plan_fixture;
 pub mod prove;
 pub mod recording_fs;
 pub mod registry_fixture;
+pub mod store_fixture;

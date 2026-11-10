@@ -187,7 +187,7 @@ Files and surfaces this change touches:
 - `Cargo.toml`: a new dependency needs the owner's approval (`docs/standards/code.md`). Guarded below.
 - `CONTEXT.md`, `README.md`: documentation only; no behavior to guard.
 
-- **SEED-10.1** (guard) WHEN `cargo hive gc`, `gc --plan`, `apply`, `repo add`, `repo list`, `doctor` or `explain` runs THE SYSTEM SHALL CONTINUE TO print the receipt it printed before this feature, with the same schema version, count names and exit codes, apart from the byte values SEED-5.1 changes.
+- **SEED-10.1** (guard) WHEN `cargo hive gc`, `gc --plan`, `apply`, `repo add`, `repo list`, `doctor` or `explain` runs THE SYSTEM SHALL CONTINUE TO print the receipt it printed before this feature, with the same schema version, count names and exit codes, apart from the byte values SEED-5.1 changes. (2026-11-09: STOREGC adds store counts to bare `gc`; target-deletion counts are unchanged, STOREGC-10.1.)
 - **SEED-10.2** (guard) WHEN `cargo hive status` reports a target with no seed record THE SYSTEM SHALL CONTINUE TO report it with the same count names and values as before this feature.
 - **SEED-10.3** (guard) WHEN any hive command runs once hive's state is open, seed included, THE SYSTEM SHALL CONTINUE TO satisfy CORE-5.1 to CORE-5.7, and to use exit code 0 for success, 1 for a refusal or failure, 2 for an unsupported OS and for argument errors, and 130 for a cancel.
 - **SEED-10.4** (guard) WHEN `liveness()` runs on any target, a seeded target before its first build included THE SYSTEM SHALL CONTINUE TO return the verdicts of LIVE stories 1 and 2, with its signature unchanged, roots dated by the stamp inside the GC window, and not-current units dated as LIVE dates them.
@@ -211,7 +211,7 @@ Files and surfaces this change touches:
 - A `fill` command, or any fill that does not run inside seed.
 - `set_mtime` on a stamp, and `write_file` of the tag.
 - Adding any protection of seed files from an `apply` between seed and the first build. `apply` already skips such a target while it has no lock files (SEED-10.15); hive adds nothing for a target whose lock files exist.
-- Evicting, capping or stopping the store at a byte level, and any store GC: ROAD-10. Until then the store only grows, stopping means deleting it by hand, and the feature is not for daily use.
+- Evicting, capping or stopping the store at a byte level, and any store GC: ROAD-10. Until then the store only grows, stopping means deleting it by hand, and the feature is not for daily use. (2026-11-09: bare `gc` bounds the store; SEED still does not evict, STOREGC / ROAD-10.)
 - Time claims, and `cargo hive bench`: ROAD-11.
 - Workspace, git and path units, and a registry other than the sources Cargo keeps under its registry source directory.
 - Real copies into the store, and a store on a different volume from the source or the checkout.

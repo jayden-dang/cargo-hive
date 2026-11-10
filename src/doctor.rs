@@ -358,12 +358,18 @@ pub fn floor_note(report: &DoctorReport) -> Option<String> {
 /// default, may. Without a source (rustup before 1.29.0, `rustup run`) the origin is
 /// unknown, so it is dropped too.
 pub(crate) fn drop_directory_toolchain(cmd: &mut Command) {
-    let named = std::env::var_os("RUSTUP_TOOLCHAIN_SOURCE")
-        .is_some_and(|s| s == "cli" || s == "env" || s == "default");
-    if !named {
+    if !caller_toolchain_kept() {
         cmd.env_remove("RUSTUP_TOOLCHAIN")
             .env_remove("RUSTUP_TOOLCHAIN_SOURCE");
     }
+}
+
+pub(crate) fn caller_toolchain_kept_from(source: Option<&std::ffi::OsStr>) -> bool {
+    source.is_some_and(|s| s == "cli" || s == "env" || s == "default")
+}
+
+pub(crate) fn caller_toolchain_kept() -> bool {
+    caller_toolchain_kept_from(std::env::var_os("RUSTUP_TOOLCHAIN_SOURCE").as_deref())
 }
 
 /// `NotFound` is `(os error 2)` with the closing parenthesis. `(os error 20)` contains
@@ -394,10 +400,27 @@ pub(crate) fn toolchain_failure_exit(message: &str) -> i32 {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ResolveEnv {
+    DropDirectoryToolchain,
+    OwnDirectory,
+}
+
+fn apply_resolve_env(cmd: &mut Command, env: ResolveEnv) {
+    match env {
+        ResolveEnv::DropDirectoryToolchain => drop_directory_toolchain(cmd),
+        ResolveEnv::OwnDirectory => {
+            cmd.env_remove("RUSTUP_TOOLCHAIN")
+                .env_remove("RUSTUP_TOOLCHAIN_SOURCE");
+        }
+    }
+}
+
 fn rustup_which(
     rustup: &Path,
     tool: &str,
     cwd: &Path,
+    env: ResolveEnv,
     cancel: impl Fn() -> bool + Copy,
 ) -> Result<Option<PathBuf>, String> {
     let mut cmd = Command::new(rustup);
@@ -405,7 +428,7 @@ fn rustup_which(
         .current_dir(cwd)
         .env("RUSTUP_AUTO_INSTALL", "0")
         .stdin(Stdio::null());
-    drop_directory_toolchain(&mut cmd);
+    apply_resolve_env(&mut cmd, env);
     match child_output(&mut cmd, cancel) {
         Err(crate::cargo_target::ChildOutputError::Failed(msg)) if rustup_is_missing(&msg) => {
             Ok(None)
@@ -436,7 +459,12 @@ pub fn process_cancel() -> bool {
 /// The toolchain a build started in `cwd` would use: rustup's real binaries, or the
 /// `cargo` and `rustc` on PATH when rustup is absent.
 pub fn resolve_toolchain(cwd: &Path) -> Result<Toolchain, String> {
-    resolve_toolchain_with(cwd, Path::new("rustup"), process_cancel)
+    resolve_toolchain_with(
+        cwd,
+        Path::new("rustup"),
+        ResolveEnv::DropDirectoryToolchain,
+        process_cancel,
+    )
 }
 
 /// `resolve_toolchain`, stopping its `rustup` and `rustc -vV` runs when `cancel` returns true.
@@ -444,17 +472,32 @@ pub fn resolve_toolchain_until(
     cwd: &Path,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Toolchain, String> {
-    resolve_toolchain_with(cwd, Path::new("rustup"), cancel)
+    resolve_toolchain_with(
+        cwd,
+        Path::new("rustup"),
+        ResolveEnv::DropDirectoryToolchain,
+        cancel,
+    )
+}
+
+/// The toolchain `cwd` selects in its own directory, with any caller `RUSTUP_TOOLCHAIN` removed.
+pub fn resolve_toolchain_own_dir_until(
+    cwd: &Path,
+    rustup: &Path,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Toolchain, String> {
+    resolve_toolchain_with(cwd, rustup, ResolveEnv::OwnDirectory, cancel)
 }
 
 fn resolve_toolchain_with(
     cwd: &Path,
     rustup: &Path,
+    env: ResolveEnv,
     cancel: impl Fn() -> bool + Copy,
 ) -> Result<Toolchain, String> {
     let (cargo, rustc) = match (
-        rustup_which(rustup, "cargo", cwd, cancel)?,
-        rustup_which(rustup, "rustc", cwd, cancel)?,
+        rustup_which(rustup, "cargo", cwd, env, cancel)?,
+        rustup_which(rustup, "rustc", cwd, env, cancel)?,
     ) {
         (Some(c), Some(r)) => (c, r),
         _ => (PathBuf::from("cargo"), PathBuf::from("rustc")),
@@ -471,6 +514,9 @@ fn resolve_toolchain_with(
         .current_dir(cwd)
         .env("RUSTUP_AUTO_INSTALL", "0")
         .stdin(Stdio::null());
+    if matches!(env, ResolveEnv::OwnDirectory) {
+        apply_resolve_env(&mut cmd, env);
+    }
     let out = child_output(&mut cmd, cancel).map_err(|err| tool_error("rustc", err))?;
     if !out.status.success() {
         return Err(format!(
@@ -1658,7 +1704,9 @@ mod tests {
         std::fs::set_permissions(&rustup, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         let started = std::time::Instant::now();
-        let err = resolve_toolchain_with(&dir, &rustup, || false).unwrap_err();
+        let err =
+            resolve_toolchain_with(&dir, &rustup, ResolveEnv::DropDirectoryToolchain, || false)
+                .unwrap_err();
         let elapsed = started.elapsed();
         assert!(
             err.contains("rustup") && err.contains("deadline"),
@@ -1761,5 +1809,62 @@ mod tests {
         alive.kill().unwrap();
         alive.wait().unwrap();
         std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn a_named_caller_toolchain_is_kept_and_a_directory_one_is_not() {
+        let cases: &[(&str, bool)] = &[
+            ("cli", true),
+            ("env", true),
+            ("default", true),
+            ("toolchain-file", false),
+            ("path-override", false),
+            ("other", false),
+        ];
+        for &(source, kept) in cases {
+            assert_eq!(
+                caller_toolchain_kept_from(Some(std::ffi::OsStr::new(source))),
+                kept,
+                "{source}"
+            );
+        }
+        assert!(!caller_toolchain_kept_from(None));
+    }
+
+    #[test]
+    fn own_dir_mode_passes_no_rustup_toolchain_to_its_children() {
+        let dir = scratch("own-dir-env");
+        let log = dir.join("toolchain-env");
+        let rustc = dir.join("fake-rustc");
+        let rustup = dir.join("fake-rustup");
+        std::fs::write(
+            &rustc,
+            "#!/bin/sh\nprintf 'rustc 1.99.0\\nrelease: 1.99.0\\nhost: aarch64-apple-darwin\\n'\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &rustup,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"${{RUSTUP_TOOLCHAIN-unset}}\" > '{}'\nprintf '%s\\n' '{}'\n",
+                log.display(),
+                rustc.display()
+            ),
+        )
+        .unwrap();
+        for path in [&rustup, &rustc] {
+            std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+        }
+        let parent_had = std::env::var_os("RUSTUP_TOOLCHAIN");
+        let got = resolve_toolchain_with(&dir, &rustup, ResolveEnv::OwnDirectory, || false)
+            .expect("own-directory resolve against the fake rustup");
+        assert_eq!(got.release, "1.99.0");
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            logged.trim(),
+            "unset",
+            "child saw RUSTUP_TOOLCHAIN={logged:?}; parent had {parent_had:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

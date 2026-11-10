@@ -570,8 +570,13 @@ fn the_skill_teaches_seeding_a_new_lane() {
         "README has no seed command line"
     );
     assert!(
-        readme.contains("The store only grows until store GC ships"),
-        "README does not say the store only grows until store GC ships"
+        readme.contains("Bare `cargo hive gc` keeps the store under 40 GB"),
+        "README does not say bare gc keeps the store under 40 GB"
+    );
+    assert!(
+        body.lines()
+            .any(|line| line.contains("gc") && line.contains("store")),
+        "the skill does not name store on a gc line"
     );
 }
 
@@ -624,12 +629,7 @@ fn skill_documents_every_shipped_command() {
         }
         if matches!(
             parsed,
-            Parsed::RepoAdd
-                | Parsed::Status
-                | Parsed::Gc { .. }
-                | Parsed::Explain
-                | Parsed::Seed
-                | Parsed::Bench
+            Parsed::RepoAdd | Parsed::Status | Parsed::Explain | Parsed::Seed | Parsed::Bench
         ) {
             assert!(
                 path_words >= 1,

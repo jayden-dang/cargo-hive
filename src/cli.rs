@@ -42,7 +42,7 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
-    /// Delete superseded incremental sessions and leftover rustc temp dirs. A session with a lock file is deleted under that lock
+    /// Delete superseded incremental sessions and leftover rustc temp dirs. A session with a lock file is deleted under that lock. With no repo argument, also evicts from the store
     Gc {
         /// Registered repos to clean; none means every target hive knows
         repos: Vec<std::path::PathBuf>,
@@ -508,14 +508,23 @@ fn live_checkouts(
     registered_mains: &[std::path::PathBuf],
     cfg: &crate::state::Config,
     b: &mut ReceiptBuilder,
-) -> Vec<crate::discover::Checkout> {
+) -> (
+    Vec<crate::discover::Checkout>,
+    Vec<crate::discover::WalkFault>,
+) {
     let mut checkouts = Vec::new();
+    let mut walk_faults = Vec::new();
     for repo in repos {
         b.scope_mut().repos.push(repo.main.clone());
         let (rows, faults) = crate::discover::checkouts(repo, registered_mains, cfg);
-        for fault in faults {
-            b.finding("walk.unreadable", Some(fault.path), fault.detail);
+        for fault in &faults {
+            b.finding(
+                "walk.unreadable",
+                Some(fault.path.clone()),
+                fault.detail.clone(),
+            );
         }
+        walk_faults.extend(faults);
         for c in rows {
             if !c.missing {
                 b.scope_mut().checkouts.push(c.path.clone());
@@ -523,7 +532,7 @@ fn live_checkouts(
             checkouts.push(c);
         }
     }
-    checkouts
+    (checkouts, walk_faults)
 }
 
 fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: OutputArgs) -> i32 {
@@ -838,7 +847,13 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
     use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
     use crate::doctor::{self, Capabilities, Capability};
     use crate::gc;
+    use crate::seed::evict::{self, EvictCtx, Limits};
+    use crate::state::window_days;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
+    use std::time::Duration;
+    const CAP_BYTES: u64 = 40_000_000_000;
+    const MAX_AGE_SECS: u64 = 30 * 86_400;
     let command = if dry_run { "gc --dry-run" } else { "gc" };
     if let Err(e) = doctor::install_signal_handlers() {
         return emit_failure(
@@ -867,9 +882,8 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
         return 2;
     };
     let mut b = Receipt::new(command, Scope::default());
-    let release = doctor::resolve_toolchain(state.root())
-        .ok()
-        .map(|t| t.release);
+    let caller_toolchain = doctor::resolve_toolchain(state.root()).ok();
+    let release = caller_toolchain.as_ref().map(|t| t.release.clone());
     b.toolchain(release.clone());
     for cap in [Capability::FingerprintReading, Capability::Deletion] {
         if let Err(refusal) = doctor::require(&caps, cap, release.as_deref()) {
@@ -880,7 +894,8 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
     let selection = select(&reg, args, &mut b);
     let code = i32::from(selection.refused);
     let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
-    let checkouts = live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
+    let (checkouts, checkout_faults) =
+        live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
     let all_repos = selection.all_repos;
     let scan = discover::targets(&checkouts, &cfg, all_repos, &mut snapshot, cancelled);
     if cancelled() {
@@ -934,6 +949,54 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             b.note(note);
         }
     }
+    let mut store_cancelled = false;
+    if !args.is_empty() {
+        b.note("store.skipped_scoped");
+    } else if !report.cancelled {
+        match window_days(cfg.gc_window_days) {
+            Err(err) => {
+                b.finding("store.window_invalid", None, err.to_string());
+            }
+            Ok(days) => {
+                let outcome = evict::run(
+                    &EvictCtx {
+                        state,
+                        fs: &*platform.fs,
+                        targets: &scan.targets,
+                        checkouts: &checkouts,
+                        checkout_faults: &checkout_faults,
+                        scan_faults: &scan.walk_faults,
+                        cache_roots: &cfg.cache_roots,
+                        window: Duration::from_secs(days.saturating_mul(86_400)),
+                        account_bytes,
+                        now: opts.now,
+                        caller_toolchain,
+                        caller_toolchain_kept: doctor::caller_toolchain_kept(),
+                        rustup: Path::new("rustup"),
+                    },
+                    Limits {
+                        cap_bytes: CAP_BYTES,
+                        max_age_secs: MAX_AGE_SECS,
+                    },
+                    dry_run,
+                    &cancelled,
+                );
+                store_cancelled = outcome.cancelled;
+                for (name, n) in outcome.counts {
+                    b.count(&name, n);
+                }
+                for finding in outcome.findings {
+                    b.finding(&finding.kind, finding.path, finding.detail);
+                }
+                for note in outcome.notes {
+                    b.note(note);
+                }
+                for (field, reason) in outcome.unmeasured {
+                    b.unmeasured(&field, reason);
+                }
+            }
+        }
+    }
     put_counts(&mut b, "", &report.totals);
     let mut human = String::new();
     for (path, c) in &report.per_target {
@@ -968,7 +1031,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             ),
         );
     }
-    if report.cancelled {
+    if report.cancelled || store_cancelled {
         b.finding("error", None, "gc was cancelled");
         return emit(state, out, b.finish(), &human, 130);
     }
@@ -1159,7 +1222,7 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
             }
         }
     }
-    let _checkouts = live_checkouts(&named, &registered_mains, &cfg, &mut b);
+    let (_checkouts, _) = live_checkouts(&named, &registered_mains, &cfg, &mut b);
     if !args.is_empty() {
         for repo in &reg.repos {
             let (rows, _) = crate::discover::checkouts(repo, &registered_mains, &cfg);
@@ -1319,7 +1382,7 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
     }
     let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
     let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
-    let checkouts = live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
+    let (checkouts, _) = live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
     let scan = discover::targets(
         &checkouts,
         &cfg,

@@ -11,14 +11,22 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use crate::fingerprint;
 use crate::gc::CRATE_DIR_CAP;
 use crate::platform::{CompressOutcome, EntryKind, Fs};
-use crate::size::MAX_DEPTH;
+use crate::size::{allocated_bytes, SizeError, MAX_DEPTH};
 use crate::state::{State, StateError};
 
 pub const STORE_FILE: &str = "store.db";
 pub const MAX_STORE_BYTES: u64 = 32 * 1024 * 1024;
 const TMP_KEEP: Duration = Duration::from_secs(86_400);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StoreKey {
+    pub toolchain_value: u64,
+    pub name_meta: String,
+    pub fingerprint_hash: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Row {
@@ -45,9 +53,7 @@ pub fn store_dir(state: &State) -> PathBuf {
 }
 
 pub fn entry_dir(state: &State, row: &Row) -> PathBuf {
-    store_dir(state)
-        .join(row.toolchain_value.to_string())
-        .join(format!("{}-{}", row.name_meta, row.fingerprint_hash))
+    key_dir(state, &row_key(row))
 }
 
 pub fn tag_path(state: &State) -> PathBuf {
@@ -58,6 +64,23 @@ pub fn tmp_dir(state: &State, key: &str) -> PathBuf {
     store_dir(state)
         .join(".tmp")
         .join(format!("{}-{key}", std::process::id()))
+}
+
+pub fn evict_dir(state: &State, pid: u32, seq: usize) -> PathBuf {
+    store_dir(state)
+        .join(".tmp")
+        .join(format!("evict-{pid}-{seq}"))
+}
+
+pub(crate) fn key_dir(state: &State, key: &StoreKey) -> PathBuf {
+    store_dir(state)
+        .join(key.toolchain_value.to_string())
+        .join(format!("{}-{}", key.name_meta, key.fingerprint_hash))
+}
+
+pub fn rename_out(state: &State, key: &StoreKey, to: &Path) -> io::Result<()> {
+    fs::create_dir_all(store_dir(state).join(".tmp"))?;
+    fs::rename(key_dir(state, key), to)
 }
 
 pub fn sweep_tmp(state: &State, now: SystemTime) -> Result<(), String> {
@@ -235,10 +258,245 @@ pub fn merge(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inventory {
+    pub rows: Vec<Row>,
+    pub rowless: Vec<(StoreKey, PathBuf)>,
+    pub tmp_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitPlan {
+    pub candidates: Vec<(StoreKey, Option<u64>)>,
+    pub refreshed: Vec<StoreKey>,
+    pub now: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Committed {
+    pub renamed: Vec<(StoreKey, PathBuf)>,
+    pub rename_failures: Vec<(StoreKey, String)>,
+    pub kept_changed: usize,
+    pub dropped_values: Vec<u64>,
+}
+
+pub fn inventory(fs: &dyn Fs, state: &State) -> Result<Inventory, StateError> {
+    let file = read(state)?;
+    let mut keyed = BTreeMap::new();
+    for row in &file.units {
+        keyed.insert(row_key(row), ());
+    }
+    let mut rowless = Vec::new();
+    let root = store_dir(state);
+    let top = match fs.read_dir_bounded(&root, CRATE_DIR_CAP) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(err) => {
+            return Err(StateError::Io {
+                path: root,
+                source: err,
+            });
+        }
+    };
+    for (name, kind) in top {
+        if kind != EntryKind::Dir || name == ".tmp" {
+            continue;
+        }
+        let Ok(value) = name.parse::<u64>() else {
+            continue;
+        };
+        let value_dir = root.join(&name);
+        let children = fs
+            .read_dir_bounded(&value_dir, CRATE_DIR_CAP)
+            .map_err(|err| StateError::Io {
+                path: value_dir.clone(),
+                source: err,
+            })?;
+        for (child, child_kind) in children {
+            if child_kind != EntryKind::Dir {
+                continue;
+            }
+            let Some(key) = parse_entry_key(value, &child) else {
+                continue;
+            };
+            if keyed.contains_key(&key) {
+                continue;
+            }
+            let path = value_dir.join(&child);
+            rowless.push((key, path));
+        }
+    }
+    Ok(Inventory {
+        rows: file.units,
+        rowless,
+        tmp_bytes: tmp_allocated(state)?,
+    })
+}
+
+pub fn commit_eviction(
+    state: &State,
+    plan: &CommitPlan,
+    mut rename: impl FnMut(&StoreKey) -> io::Result<Option<PathBuf>>,
+) -> Result<Committed, StateError> {
+    state.locked(|tx| {
+        let mut file: StoreFile = tx.read_bounded(STORE_FILE, MAX_STORE_BYTES)?;
+        let mut kept = Vec::with_capacity(file.units.len());
+        for row in file.units.drain(..) {
+            if directory_present(&entry_dir(state, &row))? {
+                kept.push(row);
+            }
+        }
+        file.units = kept;
+
+        let mut survivors = Vec::new();
+        let mut kept_changed = 0usize;
+        for (key, planned) in &plan.candidates {
+            match planned {
+                Some(planned_at) => match file.units.iter().find(|row| row_matches(row, key)) {
+                    Some(row) if row.last_live_at > *planned_at => kept_changed += 1,
+                    Some(_) => survivors.push(key.clone()),
+                    None => {}
+                },
+                None => {
+                    if file.units.iter().any(|row| row_matches(row, key)) {
+                        kept_changed += 1;
+                    } else {
+                        survivors.push(key.clone());
+                    }
+                }
+            }
+        }
+
+        let mut renamed = Vec::new();
+        let mut rename_failures = Vec::new();
+        for key in survivors {
+            match rename(&key) {
+                Ok(None) => break,
+                Ok(Some(path)) => renamed.push((key, path)),
+                Err(err) => rename_failures.push((key, err.to_string())),
+            }
+        }
+
+        let renamed_keys: BTreeMap<_, ()> = renamed.iter().map(|(k, _)| (k.clone(), ())).collect();
+        file.units
+            .retain(|row| !renamed_keys.contains_key(&row_key(row)));
+        for key in &plan.refreshed {
+            if let Some(row) = file.units.iter_mut().find(|row| row_matches(row, key)) {
+                if plan.now > row.last_live_at {
+                    row.last_live_at = plan.now;
+                }
+            }
+        }
+
+        let mut dropped_values = Vec::new();
+        let mut values = BTreeMap::new();
+        for value in file.toolchains.values().copied() {
+            values.insert(value, ());
+        }
+        for value in values.into_keys() {
+            let has_row = file.units.iter().any(|row| row.toolchain_value == value);
+            if has_row || value_has_entry_dir(state, value)? {
+                continue;
+            }
+            file.toolchains.retain(|_, v| *v != value);
+            dropped_values.push(value);
+        }
+
+        tx.write_bounded(STORE_FILE, &file, MAX_STORE_BYTES)?;
+        Ok(Committed {
+            renamed,
+            rename_failures,
+            kept_changed,
+            dropped_values,
+        })
+    })
+}
+
 fn same_key(left: &Row, right: &Row) -> bool {
     left.toolchain_value == right.toolchain_value
         && left.name_meta == right.name_meta
         && left.fingerprint_hash == right.fingerprint_hash
+}
+
+pub(crate) fn row_key(row: &Row) -> StoreKey {
+    StoreKey {
+        toolchain_value: row.toolchain_value,
+        name_meta: row.name_meta.clone(),
+        fingerprint_hash: row.fingerprint_hash.clone(),
+    }
+}
+
+pub(crate) fn row_matches(row: &Row, key: &StoreKey) -> bool {
+    row.toolchain_value == key.toolchain_value
+        && row.name_meta == key.name_meta
+        && row.fingerprint_hash == key.fingerprint_hash
+}
+
+fn parse_entry_key(toolchain_value: u64, name: &str) -> Option<StoreKey> {
+    let hash = fingerprint::unit_hash(name)?;
+    let name_meta = name[..name.len() - hash.len() - 1].to_string();
+    Some(StoreKey {
+        toolchain_value,
+        name_meta,
+        fingerprint_hash: hash.to_string(),
+    })
+}
+
+fn tmp_allocated(state: &State) -> Result<u64, StateError> {
+    let dir = store_dir(state).join(".tmp");
+    match allocated_bytes(&dir, MAX_DEPTH) {
+        Ok(bytes) => Ok(bytes),
+        Err(SizeError::Io(_, err)) if err.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(SizeError::Io(path, err)) => Err(StateError::Io { path, source: err }),
+        Err(SizeError::DepthLimit(path)) => Err(StateError::Io {
+            path,
+            source: io::Error::other("deeper than the size walk's limit"),
+        }),
+    }
+}
+
+fn value_has_entry_dir(state: &State, value: u64) -> Result<bool, StateError> {
+    let dir = store_dir(state).join(value.to_string());
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(StateError::Io {
+                path: dir,
+                source: err,
+            });
+        }
+    };
+    for (seen, entry) in entries.enumerate() {
+        if seen >= CRATE_DIR_CAP {
+            return Err(StateError::Io {
+                path: dir.clone(),
+                source: io::Error::other(format!(
+                    "{} has more than {CRATE_DIR_CAP} entries",
+                    dir.display()
+                )),
+            });
+        }
+        let entry = entry.map_err(|err| StateError::Io {
+            path: dir.clone(),
+            source: err,
+        })?;
+        let os_name = entry.file_name();
+        let Some(name) = os_name.to_str() else {
+            continue;
+        };
+        if fingerprint::unit_hash(name).is_none() {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(|err| StateError::Io {
+            path: entry.path(),
+            source: err,
+        })?;
+        if file_type.is_dir() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn directory_present(path: &Path) -> Result<bool, StateError> {
@@ -922,5 +1180,328 @@ mod tests {
 
     fn set_mtime(path: &Path, t: SystemTime) {
         std::fs::File::open(path).unwrap().set_modified(t).unwrap();
+    }
+
+    fn store_key(value: u64, meta: &str, hash: &str) -> StoreKey {
+        StoreKey {
+            toolchain_value: value,
+            name_meta: meta.into(),
+            fingerprint_hash: hash.into(),
+        }
+    }
+
+    fn row_for(key: &StoreKey, last_live_at: u64) -> Row {
+        Row {
+            toolchain_value: key.toolchain_value,
+            name_meta: key.name_meta.clone(),
+            fingerprint_hash: key.fingerprint_hash.clone(),
+            kind: "lib".into(),
+            rel_profile: PathBuf::from("debug"),
+            size: 1,
+            filled_at: last_live_at,
+            last_live_at,
+            repos: Vec::new(),
+            registry_deps: Vec::new(),
+        }
+    }
+
+    fn plant_entry(state: &State, key: &StoreKey) -> PathBuf {
+        let dir = key_dir(state, key);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f"), b"x").unwrap();
+        dir
+    }
+
+    fn write_store(state: &State, file: &StoreFile) {
+        state
+            .locked(|tx| tx.write_bounded(STORE_FILE, file, MAX_STORE_BYTES))
+            .unwrap();
+    }
+
+    fn rename_with_out<'a>(
+        state: &'a State,
+        seq: &'a std::sync::atomic::AtomicUsize,
+    ) -> impl FnMut(&StoreKey) -> io::Result<Option<PathBuf>> + 'a {
+        move |key| {
+            let n = seq.fetch_add(1, Ordering::SeqCst);
+            let to = evict_dir(state, std::process::id(), n);
+            rename_out(state, key, &to)?;
+            Ok(Some(to))
+        }
+    }
+
+    #[test]
+    fn inventory_lists_rows_rowless_dirs_and_tmp_bytes_and_skips_other_names() {
+        let (state, fs) = scratch_state("inv");
+        let with_row = store_key(7, "d", "0123456789abcdef");
+        let rowless = store_key(7, "orphan", "fedcba9876543210");
+        let other_value = store_key(9, "e", "aaaaaaaaaaaaaaaa");
+        plant_entry(&state, &with_row);
+        plant_entry(&state, &rowless);
+        plant_entry(&state, &other_value);
+        std::fs::write(
+            tag_path(&state),
+            b"Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(store_dir(&state).join("not-a-value")).unwrap();
+        std::fs::write(store_dir(&state).join("7").join("skip-me"), b"x").unwrap();
+        std::fs::create_dir_all(store_dir(&state).join("7").join("badname")).unwrap();
+        let tmp = store_dir(&state).join(".tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("staging"), vec![0u8; 8192]).unwrap();
+        let mut toolchains = BTreeMap::new();
+        toolchains.insert("rustc 1.97.0\n".into(), 7u64);
+        write_store(
+            &state,
+            &StoreFile {
+                units: vec![row_for(&with_row, 10), row_for(&other_value, 11)],
+                toolchains,
+            },
+        );
+
+        let got = inventory(&*fs, &state).unwrap();
+        assert_eq!(got.rows.len(), 2);
+        assert!(got.rows.iter().any(|r| {
+            r.toolchain_value == with_row.toolchain_value
+                && r.name_meta == with_row.name_meta
+                && r.fingerprint_hash == with_row.fingerprint_hash
+        }));
+        assert!(got.rows.iter().any(|r| {
+            r.toolchain_value == other_value.toolchain_value
+                && r.name_meta == other_value.name_meta
+                && r.fingerprint_hash == other_value.fingerprint_hash
+        }));
+        assert_eq!(got.rowless.len(), 1);
+        assert_eq!(got.rowless[0].0, rowless);
+        assert_eq!(
+            got.rowless[0].1,
+            store_dir(&state).join("7").join("orphan-fedcba9876543210")
+        );
+        assert!(
+            got.tmp_bytes >= 8192,
+            "tmp staging file contributes allocated bytes, got {}",
+            got.tmp_bytes
+        );
+        finish(&state);
+    }
+
+    #[test]
+    fn commit_drops_a_renamed_row_and_raises_a_refreshed_one() {
+        let (state, _) = scratch_state("commit-drop-raise");
+        let drop_key = store_key(3, "old", "1111111111111111");
+        let keep_key = store_key(3, "live", "2222222222222222");
+        plant_entry(&state, &drop_key);
+        plant_entry(&state, &keep_key);
+        write_store(
+            &state,
+            &StoreFile {
+                units: vec![row_for(&drop_key, 100), row_for(&keep_key, 100)],
+                toolchains: BTreeMap::from([("rustc\n".into(), 3u64)]),
+            },
+        );
+        let seq = AtomicUsize::new(0);
+        let plan = CommitPlan {
+            candidates: vec![(drop_key.clone(), Some(100))],
+            refreshed: vec![keep_key.clone()],
+            now: 500,
+        };
+        let committed = commit_eviction(&state, &plan, rename_with_out(&state, &seq)).unwrap();
+        assert_eq!(committed.renamed.len(), 1);
+        assert_eq!(committed.renamed[0].0, drop_key);
+        assert!(!entry_path(&state, &drop_key).exists());
+        assert!(committed.renamed[0].1.is_dir());
+        assert_eq!(committed.kept_changed, 0);
+        let got = read(&state).unwrap();
+        assert_eq!(got.units.len(), 1);
+        assert_eq!(got.units[0].name_meta, "live");
+        assert_eq!(got.units[0].last_live_at, 500);
+        assert!(entry_path(&state, &keep_key).is_dir());
+        finish(&state);
+    }
+
+    fn entry_path(state: &State, key: &StoreKey) -> PathBuf {
+        key_dir(state, key)
+    }
+
+    #[test]
+    fn commit_keeps_a_candidate_whose_last_live_at_rose_since_the_plan() {
+        let (state, _) = scratch_state("commit-rose");
+        let key = store_key(4, "fresh", "3333333333333333");
+        plant_entry(&state, &key);
+        write_store(
+            &state,
+            &StoreFile {
+                units: vec![row_for(&key, 200)],
+                toolchains: BTreeMap::new(),
+            },
+        );
+        let plan = CommitPlan {
+            candidates: vec![(key.clone(), Some(100))],
+            refreshed: Vec::new(),
+            now: 500,
+        };
+        let seq = AtomicUsize::new(0);
+        let committed = commit_eviction(&state, &plan, rename_with_out(&state, &seq)).unwrap();
+        assert!(committed.renamed.is_empty());
+        assert_eq!(committed.kept_changed, 1);
+        assert!(entry_path(&state, &key).is_dir());
+        let got = read(&state).unwrap();
+        assert_eq!(got.units.len(), 1);
+        assert_eq!(got.units[0].last_live_at, 200);
+        finish(&state);
+    }
+
+    #[test]
+    fn commit_keeps_a_rowless_candidate_that_gained_a_row() {
+        let (state, _) = scratch_state("commit-gained");
+        let key = store_key(5, "adopted", "4444444444444444");
+        plant_entry(&state, &key);
+        write_store(
+            &state,
+            &StoreFile {
+                units: vec![row_for(&key, 50)],
+                toolchains: BTreeMap::new(),
+            },
+        );
+        let plan = CommitPlan {
+            candidates: vec![(key.clone(), None)],
+            refreshed: Vec::new(),
+            now: 500,
+        };
+        let seq = AtomicUsize::new(0);
+        let committed = commit_eviction(&state, &plan, rename_with_out(&state, &seq)).unwrap();
+        assert!(committed.renamed.is_empty());
+        assert_eq!(committed.kept_changed, 1);
+        assert!(entry_path(&state, &key).is_dir());
+        assert_eq!(read(&state).unwrap().units.len(), 1);
+        finish(&state);
+    }
+
+    #[test]
+    fn commit_drops_a_value_text_only_when_no_row_and_no_dir_of_it_remain() {
+        let (state, _) = scratch_state("commit-texts");
+        let alone = store_key(1, "gone", "5555555555555555");
+        let sibling_drop = store_key(2, "drop", "6666666666666666");
+        let sibling_keep = store_key(2, "keep", "7777777777777777");
+        let rowless_keep = store_key(8, "rowless", "8888888888888888");
+        plant_entry(&state, &alone);
+        plant_entry(&state, &sibling_drop);
+        plant_entry(&state, &sibling_keep);
+        plant_entry(&state, &rowless_keep);
+        write_store(
+            &state,
+            &StoreFile {
+                units: vec![
+                    row_for(&alone, 10),
+                    row_for(&sibling_drop, 10),
+                    row_for(&sibling_keep, 10),
+                ],
+                toolchains: BTreeMap::from([
+                    ("alone\n".into(), 1u64),
+                    ("sibling\n".into(), 2u64),
+                    ("rowless-value\n".into(), 8u64),
+                ]),
+            },
+        );
+        let plan = CommitPlan {
+            candidates: vec![(alone.clone(), Some(10)), (sibling_drop.clone(), Some(10))],
+            refreshed: Vec::new(),
+            now: 500,
+        };
+        let seq = AtomicUsize::new(0);
+        let committed = commit_eviction(&state, &plan, rename_with_out(&state, &seq)).unwrap();
+        assert_eq!(committed.renamed.len(), 2);
+        assert_eq!(committed.dropped_values, vec![1]);
+        let got = read(&state).unwrap();
+        assert_eq!(got.units.len(), 1);
+        assert_eq!(got.units[0].name_meta, "keep");
+        assert!(!got.toolchains.contains_key("alone\n"));
+        assert_eq!(got.toolchains.get("sibling\n"), Some(&2));
+        assert_eq!(got.toolchains.get("rowless-value\n"), Some(&8));
+        assert!(entry_path(&state, &rowless_keep).is_dir());
+        finish(&state);
+    }
+
+    #[test]
+    fn commit_stops_renaming_when_rename_returns_none_and_still_writes() {
+        let (state, _) = scratch_state("commit-stop");
+        let first = store_key(6, "a", "9999999999999999");
+        let second = store_key(6, "b", "aaaaaaaaaaaaaaaa");
+        let held = store_key(6, "c", "bbbbbbbbbbbbbbbb");
+        plant_entry(&state, &first);
+        plant_entry(&state, &second);
+        plant_entry(&state, &held);
+        write_store(
+            &state,
+            &StoreFile {
+                units: vec![
+                    row_for(&first, 10),
+                    row_for(&second, 10),
+                    row_for(&held, 10),
+                ],
+                toolchains: BTreeMap::new(),
+            },
+        );
+        let plan = CommitPlan {
+            candidates: vec![(first.clone(), Some(10)), (second.clone(), Some(10))],
+            refreshed: vec![held.clone()],
+            now: 700,
+        };
+        let calls = AtomicUsize::new(0);
+        let committed = commit_eviction(&state, &plan, |key| {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            if n >= 1 {
+                return Ok(None);
+            }
+            let to = evict_dir(&state, std::process::id(), n);
+            rename_out(&state, key, &to)?;
+            Ok(Some(to))
+        })
+        .unwrap();
+        assert_eq!(committed.renamed.len(), 1);
+        assert_eq!(committed.renamed[0].0, first);
+        assert!(!entry_path(&state, &first).exists());
+        assert!(entry_path(&state, &second).is_dir());
+        let got = read(&state).unwrap();
+        assert_eq!(got.units.len(), 2);
+        let held_row = got.units.iter().find(|r| r.name_meta == "c").unwrap();
+        assert_eq!(held_row.last_live_at, 700);
+        assert!(got.units.iter().any(|r| r.name_meta == "b"));
+        finish(&state);
+    }
+
+    #[test]
+    fn a_failed_rename_keeps_that_entry_and_its_row() {
+        let (state, _) = scratch_state("commit-fail");
+        let key = store_key(11, "stuck", "cccccccccccccccc");
+        plant_entry(&state, &key);
+        write_store(
+            &state,
+            &StoreFile {
+                units: vec![row_for(&key, 10)],
+                toolchains: BTreeMap::new(),
+            },
+        );
+        let plan = CommitPlan {
+            candidates: vec![(key.clone(), Some(10))],
+            refreshed: Vec::new(),
+            now: 500,
+        };
+        let committed = commit_eviction(&state, &plan, |_| {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "nope"))
+        })
+        .unwrap();
+        assert!(committed.renamed.is_empty());
+        assert_eq!(committed.kept_changed, 0);
+        assert_eq!(committed.rename_failures.len(), 1, "{committed:?}");
+        assert_eq!(committed.rename_failures[0].0, key);
+        assert!(
+            committed.rename_failures[0].1.contains("nope"),
+            "{committed:?}"
+        );
+        assert!(entry_path(&state, &key).is_dir());
+        assert_eq!(read(&state).unwrap().units.len(), 1);
+        finish(&state);
     }
 }
