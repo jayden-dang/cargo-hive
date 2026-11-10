@@ -1,5 +1,6 @@
 //! Thin adapter: arguments → library calls → one receipt.
 
+use crate::bench::command::BuildCmd;
 use crate::platform::{self, MACOS_ONLY_MESSAGE};
 use crate::receipt::{PlanRecord, PlanTierBody, Receipt, ReceiptBuilder, Scope};
 use crate::registry::{self, Registry};
@@ -65,6 +66,20 @@ pub enum Command {
     Seed {
         /// Checkout to clone into. The caller's directory selects nothing
         checkout: std::path::PathBuf,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
+    /// Time cold and seeded first builds of fresh checkouts
+    Bench {
+        /// Fresh checkouts measured without seeding
+        #[arg(long, num_args = 1.., required = true)]
+        cold: Vec<std::path::PathBuf>,
+        /// Fresh checkouts measured after seeding from the store
+        #[arg(long, num_args = 1.., required = true)]
+        seeded: Vec<std::path::PathBuf>,
+        /// Compile-only cargo shape for the timed build
+        #[arg(long, default_value = "build")]
+        build_cmd: BuildCmd,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -171,6 +186,12 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
         }
         Command::Apply { id, out } => apply_cmd(&state, &id, out),
         Command::Seed { checkout, out } => seed_cmd(&state, &checkout, out),
+        Command::Bench {
+            cold,
+            seeded,
+            build_cmd,
+            out,
+        } => bench_cmd(&state, &cold, &seeded, build_cmd, out),
         Command::Explain { repos, top, out } => explain_cmd(&state, &repos, top, out),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
         Command::TryLock { .. } => unreachable!("handled before the state root is opened"),
@@ -1400,8 +1421,121 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
     emit(state, out, b.finish(), &explanation.human, code)
 }
 
-fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
+pub(crate) struct Refusal {
+    pub kind: &'static str,
+    pub path: Option<std::path::PathBuf>,
+    pub detail: String,
+    pub code: i32,
+}
+
+pub(crate) fn locate_checkout(
+    reg: &Registry,
+    cfg: &crate::state::Config,
+    caps: &crate::doctor::Capabilities,
+    path: &std::path::Path,
+) -> Result<
+    (
+        registry::Repo,
+        crate::discover::Checkout,
+        crate::doctor::Toolchain,
+    ),
+    Refusal,
+> {
     use crate::classify::Class;
+    use crate::doctor::{self, Capability};
+
+    let real = match path.canonicalize() {
+        Ok(path) => path,
+        Err(err) => {
+            let detail = format!(
+                "{path}: {err}; pass a checkout of a registered repository",
+                path = path.display()
+            );
+            return Err(Refusal {
+                kind: "refusal",
+                path: Some(path.to_path_buf()),
+                detail,
+                code: 1,
+            });
+        }
+    };
+    let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
+    let mut matched = None;
+    for repo in &reg.repos {
+        let (rows, _) = crate::discover::checkouts(repo, &registered_mains, cfg);
+        if let Some(row) = rows
+            .into_iter()
+            .find(|row| row.path == real && !row.missing)
+        {
+            matched = Some((repo.clone(), row));
+            break;
+        }
+    }
+    let Some((repo, row)) = matched else {
+        let detail = format!(
+            "{path} is not a checkout of a registered repository; register it with `cargo hive repo add` and run the command again",
+            path = real.display()
+        );
+        return Err(Refusal {
+            kind: "refusal",
+            path: Some(real),
+            detail,
+            code: 1,
+        });
+    };
+    if row.class == Class::Protected {
+        let detail = format!(
+            "{path} is protected ({reason}); hive leaves a protected checkout untouched",
+            path = real.display(),
+            reason = row.reason
+        );
+        return Err(Refusal {
+            kind: "refusal",
+            path: Some(real),
+            detail,
+            code: 1,
+        });
+    }
+    let toolchain = match doctor::resolve_toolchain(&real) {
+        Ok(toolchain) => toolchain,
+        Err(err) => {
+            let code = doctor::toolchain_failure_exit(&err);
+            let detail = if code == 130 {
+                format!("{path}: {err}", path = real.display())
+            } else {
+                format!(
+                    "{path}: {err}; install the toolchain that checkout selects and run the command again",
+                    path = real.display()
+                )
+            };
+            let kind = if code == 130 { "error" } else { "refusal" };
+            return Err(Refusal {
+                kind,
+                path: Some(real),
+                detail,
+                code,
+            });
+        }
+    };
+    for cap in [
+        Capability::Seeding,
+        Capability::StoreCompression,
+        Capability::Deletion,
+    ] {
+        if let Err(refusal) = doctor::require(caps, cap, Some(toolchain.release.as_str())) {
+            let detail = refusal.to_string();
+            return Err(Refusal {
+                kind: "refusal",
+                path: Some(real.clone()),
+                detail,
+                code: 1,
+            });
+        }
+    }
+    Ok((repo, row, toolchain))
+}
+
+fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
     use crate::doctor::{self, Capabilities, Capability};
     use crate::plan_tier::Ctx;
     use crate::state::window_days;
@@ -1431,79 +1565,20 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
         );
     }
     let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
-    let real = match checkout.canonicalize() {
-        Ok(path) => path,
-        Err(err) => {
-            let detail = format!(
-                "{path}: {err}; pass a checkout of a registered repository",
-                path = checkout.display()
-            );
-            b.finding("refusal", Some(checkout.to_path_buf()), detail.clone());
-            return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
+    let (repo, row, toolchain) = match locate_checkout(&reg, &cfg, &caps, checkout) {
+        Ok(v) => v,
+        Err(r) => {
+            b.finding(r.kind, r.path, r.detail.clone());
+            let human = if r.code == 130 {
+                format!("{}\n", r.detail)
+            } else {
+                format!("refused: {}\n", r.detail)
+            };
+            return emit(state, out, b.finish(), &human, r.code);
         }
     };
+    let real = row.path.clone();
     let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
-    let mut matched = None;
-    for repo in &reg.repos {
-        let (rows, _) = crate::discover::checkouts(repo, &registered_mains, &cfg);
-        if let Some(row) = rows
-            .into_iter()
-            .find(|row| row.path == real && !row.missing)
-        {
-            matched = Some((repo.clone(), row));
-            break;
-        }
-    }
-    let Some((repo, row)) = matched else {
-        let detail = format!(
-            "{path} is not a checkout of a registered repository; register it with `cargo hive repo add` and run the command again",
-            path = real.display()
-        );
-        b.finding("refusal", Some(real), detail.clone());
-        return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
-    };
-    if row.class == Class::Protected {
-        let detail = format!(
-            "{path} is protected ({reason}); seed leaves a protected checkout untouched",
-            path = real.display(),
-            reason = row.reason
-        );
-        b.finding("refusal", Some(real), detail.clone());
-        return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
-    }
-    let toolchain = match doctor::resolve_toolchain(&real) {
-        Ok(toolchain) => toolchain,
-        Err(err) => {
-            let code = doctor::toolchain_failure_exit(&err);
-            let detail = if code == 130 {
-                format!("{path}: {err}", path = real.display())
-            } else {
-                format!(
-                    "{path}: {err}; install the toolchain that checkout selects and run the command again",
-                    path = real.display()
-                )
-            };
-            let kind = if code == 130 { "error" } else { "refusal" };
-            b.finding(kind, Some(real), detail.clone());
-            let human = if code == 130 {
-                format!("{detail}\n")
-            } else {
-                format!("refused: {detail}\n")
-            };
-            return emit(state, out, b.finish(), &human, code);
-        }
-    };
-    for cap in [
-        Capability::Seeding,
-        Capability::StoreCompression,
-        Capability::Deletion,
-    ] {
-        if let Err(refusal) = doctor::require(&caps, cap, Some(toolchain.release.as_str())) {
-            let detail = refusal.to_string();
-            b.finding("refusal", Some(real.clone()), detail.clone());
-            return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
-        }
-    }
     let Ok(platform) = platform::current() else {
         eprintln!("{MACOS_ONLY_MESSAGE}");
         return 2;
@@ -1547,5 +1622,232 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
             emit(state, out, b.finish(), &human, code)
         }
         Err(err) => emit(state, out, b.finish(), &format!("{err}\n"), code),
+    }
+}
+
+fn bench_cmd(
+    state: &State,
+    cold: &[std::path::PathBuf],
+    seeded: &[std::path::PathBuf],
+    build: BuildCmd,
+    out: OutputArgs,
+) -> i32 {
+    use crate::bench::command::env_map;
+    use crate::bench::{self, Limits, Plan, BUILD_DEADLINE};
+    use crate::doctor::{self, Capabilities, Capability};
+    use crate::plan_tier::Ctx;
+    use crate::receipt::Measured;
+    use crate::state::window_days;
+    use std::collections::BTreeMap;
+
+    let loaded = (|| -> Result<_, StateError> {
+        Ok((
+            state.read::<Registry>(registry::FILE)?,
+            state.config()?,
+            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+        ))
+    })();
+    let (reg, cfg, caps) = match loaded {
+        Ok(v) => v,
+        Err(e) => return emit_failure(state, out, "bench", &e.to_string(), 1),
+    };
+    let mut b = Receipt::new("bench", Scope::default());
+    if let Err(err) = window_days(cfg.gc_window_days) {
+        b.finding("refusal", None, err.to_string());
+        return emit(state, out, b.finish(), &format!("refused: {err}\n"), 1);
+    }
+    if let Err(e) = doctor::install_signal_handlers() {
+        return emit_failure(
+            state,
+            out,
+            "bench",
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
+    }
+    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let Ok(platform) = platform::current() else {
+        eprintln!("{MACOS_ONLY_MESSAGE}");
+        return 2;
+    };
+    let checked = match bench::check::check(&reg, &cfg, &caps, cold, seeded, &cancelled) {
+        Ok(v) => v,
+        Err(bench::check::CheckStop::Cancelled) => {
+            b.finding("error", None, "bench was cancelled");
+            return emit(state, out, b.finish(), "bench was cancelled\n", 130);
+        }
+        Err(bench::check::CheckStop::Unfair(list)) => {
+            for u in &list {
+                b.finding("refusal", u.path.clone(), u.reason.clone());
+            }
+            let detail = list
+                .iter()
+                .map(|u| u.reason.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return emit(state, out, b.finish(), &format!("refused: {detail}\n"), 1);
+        }
+    };
+    let env = env_map(std::env::vars_os(), &checked.toolchain);
+    let plan = Plan {
+        repo: checked.repo,
+        cold: checked.cold,
+        seeded: checked.seeded,
+        toolchain: checked.toolchain,
+        build,
+        env,
+    };
+    let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
+    let repos = [plan.repo.clone()];
+    let ctx = Ctx {
+        state,
+        fs: &*platform.fs,
+        cfg: &cfg,
+        now: std::time::SystemTime::now(),
+        account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
+        repos: &repos,
+        mains: &registered_mains,
+    };
+    let report = bench::run(
+        &ctx,
+        &plan,
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &cancelled,
+    );
+    b.toolchain(Some(plan.toolchain.release.clone()));
+    b.scope_mut().repos.push(plan.repo.main.clone());
+    for c in plan.cold.iter().chain(plan.seeded.iter()) {
+        b.scope_mut().checkouts.push(c.path.clone());
+    }
+    report.write_into(&mut b);
+    for (kind, detail) in plan.env.findings() {
+        b.finding(kind, None, detail);
+    }
+    let command_line = plan.build.command_line();
+    b.finding_measured(
+        "bench.command",
+        None,
+        command_line.clone(),
+        BTreeMap::from([("command".into(), Measured::Text(command_line))]),
+    );
+    let n = plan.cold.len();
+    let human = match report.end {
+        bench::End::Finished => {
+            let cold_ms = report
+                .counts
+                .get("cold_build_ms_median")
+                .copied()
+                .unwrap_or(0);
+            let seeded_ms = report
+                .counts
+                .get("seeded_total_ms_median")
+                .copied()
+                .unwrap_or(0);
+            format!("bench n={n}: cold median {cold_ms} ms, seeded-total median {seeded_ms} ms\n")
+        }
+        bench::End::Cancelled => "bench was cancelled\n".into(),
+        bench::End::Failed => "bench failed\n".into(),
+    };
+    emit(state, out, b.finish(), &human, report.exit_code())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doctor::Capabilities;
+    use crate::git::Git;
+    use crate::state::Config;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    #[test]
+    fn locating_a_missing_path_refuses_with_the_path_as_given() {
+        let reg = Registry::default();
+        let cfg = Config {
+            secondary_roots: vec![],
+            cache_roots: vec![],
+            gc_window_days: None,
+        };
+        let caps = Capabilities::default();
+        let given = Path::new("/private/tmp/hive-it-no-such-lane");
+        let refusal = locate_checkout(&reg, &cfg, &caps, given).unwrap_err();
+        assert_eq!(refusal.kind, "refusal");
+        assert_eq!(refusal.path.as_deref(), Some(given));
+        assert!(
+            refusal
+                .detail
+                .contains("pass a checkout of a registered repository"),
+            "{}",
+            refusal.detail
+        );
+        assert_eq!(refusal.code, 1);
+    }
+
+    #[test]
+    fn a_protected_checkout_refusal_does_not_name_seed() {
+        let dir = PathBuf::from(format!(
+            "/private/tmp/hive-it-protected-locate-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a"), "a").unwrap();
+        git(&["add", "a"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "a",
+        ]);
+        let main = dir.canonicalize().unwrap();
+        let roots = Git::at(&main).root_commits().unwrap();
+        let reg = Registry {
+            repos: vec![registry::Repo {
+                main: main.clone(),
+                root_commits: roots,
+            }],
+        };
+        let cfg = Config {
+            secondary_roots: vec![],
+            cache_roots: vec![],
+            gc_window_days: None,
+        };
+        let caps = Capabilities::default();
+        let refusal = locate_checkout(&reg, &cfg, &caps, &main).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(refusal.kind, "refusal");
+        assert_eq!(refusal.code, 1);
+        assert!(
+            refusal
+                .detail
+                .contains("hive leaves a protected checkout untouched"),
+            "{}",
+            refusal.detail
+        );
+        assert!(
+            !refusal.detail.contains("seed leaves"),
+            "{}",
+            refusal.detail
+        );
     }
 }

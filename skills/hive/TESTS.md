@@ -149,6 +149,14 @@ Prompt: a new worktree at /path/to/checkout has no target yet; seed it before th
 
 Expected command, with `--json` and the checkout path: `cargo hive seed /path/to/checkout --json`. The receipt keeps fill counts (`fill_entries_added`, `fill_entries_held`, `fill_targets_read`, `fill_targets_skipped`) apart from clone counts (`clone_units_chosen`, `clone_units_cloned`, `clone_units_dropped`, `clone_units_existing`, `clone_units_failed`, `clone_units_outside_window`). There is no duration. A later `status` reports `reused_fresh` for a unit that was seeded, reached, and unchanged; that count is not Cargo's printed fresh count. The other three are `seeded_unneeded`, `seeded_recompiled`, and `seeded_missing`.
 
+## Bench cold against seeded
+
+No separate agent was run. This entry is taken from the skill text, the same way the seed entry is.
+
+Prompt: time cold first builds against seeded ones for this repo; I have not made the checkouts yet.
+
+Expected setup: an even number of fresh checkouts per arm with `git worktree add` (2n total), then cleanup with `git worktree remove`. Expected command: `cargo hive bench --cold /path/to/cold1 /path/to/cold2 --seeded /path/to/seeded1 /path/to/seeded2 --json`. The receipt starts with a prime, then `bench.sample` findings with `_ms` series; p90 is the max for n ≤ 9. Seeded samples carry the four seed counts and `fill_targets_read`. Run `bench` only when asked, because it makes 2n full builds. Builds need a committed `Cargo.lock` and `--offline` cache.
+
 ## Install — Claude Code
 
 Run on 2026-10-30 from a clean `git clone --branch skill` of this repo at `/private/tmp/hive-skill-install-20261030/clone`, with `CLAUDE_CONFIG_DIR=/private/tmp/hive-skill-install-20261030/claude` so the real `~/.claude` was never written. These are the CLI forms of `/plugin marketplace add` and `/plugin install`. The outputs below are concatenated in command order.

@@ -116,5 +116,20 @@
       "Reads the fill counts and the clone counts from the receipt, and reports no duration",
       "Treats reused_fresh as seeded, reached, and unchanged, not Cargo's printed fresh count"
     ]
+  },
+  {
+    "eval_id": 11,
+    "eval_name": "bench-cold-against-seeded",
+    "kind": "behavior",
+    "derived_from": "## Bench cold against seeded",
+    "prompt": "time cold first builds against seeded ones for this repo; I have not made the checkouts yet",
+    "assertions": [
+      "Makes an even number of fresh checkouts per arm with git worktree add before the run",
+      "Runs cargo hive bench with --cold, --seeded, paths and --json",
+      "Reads the prime, bench.sample findings, the _ms series and that p90 is the max for n ≤ 9",
+      "Reports the four seed counts and fill_targets_read from each seeded sample",
+      "Removes the checkouts with git worktree remove after the run",
+      "Runs bench only when asked, because it makes 2n full builds"
+    ]
   }
 ]
