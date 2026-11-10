@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 
 use common::plan_fixture::{tree, Planned};
-use common::{init_repo, register, Hive, Scratch};
+use common::{init_repo, interrupt, register, wait_until_open, wait_within, Hive, Scratch};
 
 fn write_caps(p: &Planned, disabled: serde_json::Value) {
     let release = cargo_hive::doctor::resolve_toolchain(&p.hive.home.path)
@@ -1060,4 +1060,23 @@ fn an_orphan_owned_under_the_callers_environment_is_planned_with_a_note() {
             .any(|x| x["class"] == "orphan"),
         "{r}"
     );
+}
+
+#[test]
+fn an_interrupted_apply_waiting_for_the_state_lock_exits_130_without_waiting_for_the_holder() {
+    let hive = Hive::ready();
+    std::fs::write(hive.home.path.join(".lock"), b"").unwrap();
+    let _holder = common::KillOnDrop(hive.hold_state_lock());
+    let child = hive
+        .command(&["apply", "p-0000000000000000", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Apply's first state lock is the plan lookup.
+    wait_until_open(child.id(), &hive.home.path.join(".lock"));
+    interrupt(child.id());
+    let out = wait_within(child, std::time::Duration::from_secs(10));
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
 }

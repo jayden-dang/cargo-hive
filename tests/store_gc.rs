@@ -2107,7 +2107,10 @@ fn a_cancel_during_commit_records_what_was_renamed_and_releases_both_locks() {
         }
         let state = State::open_at(hive.home.path.clone()).unwrap();
         assert!(
-            state.try_store_exclusive().unwrap().is_some(),
+            common::wait_until_lock_free(
+                &hive.home.path.join("store.lock"),
+                Duration::from_secs(5)
+            ),
             "cancel_after {cancel_after}: store lock still held"
         );
         state

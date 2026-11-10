@@ -375,6 +375,70 @@ fn a_bench_primes_once_then_reports_every_sample_in_abba_order() {
 }
 
 #[test]
+fn a_bench_sample_target_is_named_once_not_as_a_toolchain_row_per_sample() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let plan = bench_plan(&hive, &repo, 2);
+    let report = run_bench(
+        &hive,
+        &plan,
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &|| false,
+    );
+    assert!(matches!(report.end, End::Finished));
+    // Bench builds with the wrappers set to the empty string, so Cargo leaves no
+    // `.rustc_info.json` in a sample target and no toolchain row comes from it.
+    let samples: Vec<String> = plan
+        .cold
+        .iter()
+        .chain(&plan.seeded)
+        .map(|c| c.path.display().to_string())
+        .collect();
+    let per_sample: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.kind == "toolchain.row" && samples.iter().any(|p| f.detail.contains(p)))
+        .collect();
+    assert!(per_sample.is_empty(), "{per_sample:?}");
+    let noted: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.kind == "bench.sample_rows_skipped")
+        .collect();
+    assert_eq!(noted.len(), 1, "{:?}", report.findings);
+}
+
+#[test]
+fn a_target_outside_the_bench_still_reports_its_toolchain_row() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let plan = bench_plan(&hive, &repo, 2);
+    let main_info = repo.main.join("target/.rustc_info.json");
+    fs::remove_file(&main_info).unwrap();
+    let report = run_bench(
+        &hive,
+        &plan,
+        Limits {
+            build_deadline: BUILD_DEADLINE,
+        },
+        &|| false,
+    );
+    let main_text = main_info.display().to_string();
+    let seeded: BTreeSet<_> = plan.seeded.iter().map(|c| c.path.clone()).collect();
+    assert!(
+        report.findings.iter().any(|f| f.kind == "toolchain.row"
+            && f.path.as_ref().is_some_and(|p| seeded.contains(p))
+            && f.detail.contains(&main_text)),
+        "{:?}",
+        report.findings
+    );
+}
+
+#[test]
 fn a_seeded_sample_copies_each_seed_finding_once() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);

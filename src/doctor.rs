@@ -353,10 +353,12 @@ pub fn floor_note(report: &DoctorReport) -> Option<String> {
 }
 
 /// The rustup proxy hands every cargo subcommand `RUSTUP_TOOLCHAIN`, which beats
-/// directory resolution in a child. A toolchain the caller's directory selected must
-/// not reach hive's children; one the caller asked for by name (`cli`, `env`), or the
-/// default, may. Without a source (rustup before 1.29.0, `rustup run`) the origin is
-/// unknown, so it is dropped too.
+/// directory resolution in a child. Only a toolchain the caller asked for by name
+/// (`cli`, `env`) may reach hive's children. One the caller's directory selected must
+/// not, and neither may the default: it beats a child directory's own
+/// `rust-toolchain.toml`, and with the variable removed rustup picks the default
+/// anyway wherever no override applies. Without a source (rustup before 1.29.0,
+/// `rustup run`) the origin is unknown, so it is dropped too.
 pub(crate) fn drop_directory_toolchain(cmd: &mut Command) {
     if !caller_toolchain_kept() {
         cmd.env_remove("RUSTUP_TOOLCHAIN")
@@ -365,7 +367,7 @@ pub(crate) fn drop_directory_toolchain(cmd: &mut Command) {
 }
 
 pub(crate) fn caller_toolchain_kept_from(source: Option<&std::ffi::OsStr>) -> bool {
-    source.is_some_and(|s| s == "cli" || s == "env" || s == "default")
+    source.is_some_and(|s| s == "cli" || s == "env")
 }
 
 pub(crate) fn caller_toolchain_kept() -> bool {
@@ -1812,11 +1814,11 @@ mod tests {
     }
 
     #[test]
-    fn a_named_caller_toolchain_is_kept_and_a_directory_one_is_not() {
+    fn a_named_caller_toolchain_is_kept_and_a_directory_or_default_one_is_not() {
         let cases: &[(&str, bool)] = &[
             ("cli", true),
             ("env", true),
-            ("default", true),
+            ("default", false),
             ("toolchain-file", false),
             ("path-override", false),
             ("other", false),

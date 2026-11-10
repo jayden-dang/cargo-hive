@@ -814,7 +814,7 @@ fn read_capped(path: &Path, cap: u64) -> Result<String, String> {
         Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             return Err(format!(
-                "{} is missing; build the target and run the command again",
+                "{} is missing; Cargo leaves it out while a rustc wrapper is set to the empty string (RUSTC_WRAPPER= or RUSTC_WORKSPACE_WRAPPER=) or CARGO_CACHE_RUSTC_INFO=0, so build the target once without them and run the command again",
                 path.display()
             ));
         }

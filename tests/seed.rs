@@ -238,6 +238,91 @@ fn a_failing_toolchain_lookup_is_refused() {
 }
 
 #[test]
+fn the_rustup_default_does_not_beat_the_checkouts_own_toolchain_file() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    let lane = repo.worktree("default-vs-file");
+    // The lane pins an absent channel, so a lookup that honors the file is refused.
+    fs::write(
+        lane.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.0.0\"\n",
+    )
+    .unwrap();
+    // What the rustup proxy hands `cargo hive` when the caller's directory has no
+    // override: the default toolchain, with source `default`.
+    let out = hive
+        .command(&["seed", lane.to_str().unwrap(), "--json"])
+        .env("RUSTUP_AUTO_INSTALL", "0")
+        .env("RUSTUP_TOOLCHAIN", "stable")
+        .env("RUSTUP_TOOLCHAIN_SOURCE", "default")
+        .output()
+        .unwrap();
+    let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|err| {
+        panic!(
+            "not one receipt ({err}): stdout {} stderr {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the default beat the lane's rust-toolchain.toml: {receipt}"
+    );
+    let refusal = receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["kind"] == "refusal")
+        .unwrap_or_else(|| panic!("no refusal: {receipt}"));
+    let detail = refusal["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(lane.to_str().unwrap())
+            && detail.contains("install the toolchain that checkout selects"),
+        "refused for another reason: {receipt}"
+    );
+    assert!(nothing_filled(&hive), "{receipt}");
+}
+
+#[test]
+fn a_cache_root_target_this_repo_does_not_own_is_named_as_an_unresolved_source() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    // A built target no registered checkout owns, in the default cache root.
+    let gone = init_repo(&repo.scratch.path.join("gone-repo"), "");
+    let foreign = hive.home.path.join("no-cache/gone-repo-target");
+    fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    hive.build_crate(&gone, Some(&foreign));
+    let foreign = foreign.canonicalize().unwrap();
+    let lane = repo.worktree("cache-root");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let findings = receipt["findings"].as_array().unwrap();
+    let foreign_text = foreign.display().to_string();
+    let named: Vec<_> = findings
+        .iter()
+        .filter(|f| f["detail"].as_str().unwrap_or("").contains(&foreign_text))
+        .collect();
+    assert_eq!(named.len(), 1, "{receipt}");
+    let finding = named[0];
+    assert_eq!(finding["kind"], "source.unresolved", "{receipt}");
+    assert_eq!(
+        finding["path"].as_str(),
+        Some(foreign_text.as_str()),
+        "{receipt}"
+    );
+    // `status` advice does not fit seed, which reads only this repo's targets.
+    assert!(
+        !finding["detail"]
+            .as_str()
+            .unwrap()
+            .contains("cargo hive status"),
+        "{receipt}"
+    );
+}
+
+#[test]
 fn a_store_with_no_tag_clones_nothing_with_a_finding() {
     let hive = Hive::ready();
     quiet_cache(&hive);

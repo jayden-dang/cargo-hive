@@ -19,7 +19,7 @@ use crate::seed::store::{
     self, commit_eviction, entry_dir, evict_dir, inventory, key_dir, rename_out, row_key,
     row_matches, store_dir, CommitPlan, Inventory, Row, StoreKey,
 };
-use crate::state::State;
+use crate::state::{State, StateError};
 
 pub struct EvictCtx<'a> {
     pub state: &'a State,
@@ -388,7 +388,7 @@ pub fn run(
         now: now_secs,
     };
     let mut seq = 0usize;
-    let committed = match commit_eviction(ctx.state, &plan, |key| {
+    let committed = match commit_eviction(ctx.state, &plan, &|| cancel(), |key| {
         if cancel() {
             return Ok(None);
         }
@@ -398,6 +398,19 @@ pub fn run(
         Ok(Some(to))
     }) {
         Ok(committed) => committed,
+        Err(StateError::Cancelled) => {
+            push_untouched_freeable(
+                &mut outcome,
+                post_plan_remaining,
+                ctx.fs,
+                ctx.state,
+                &inv.rows,
+                &inv.rowless,
+                &held,
+            );
+            outcome.cancelled = true;
+            return outcome;
+        }
         Err(err) => {
             push_untouched_freeable(
                 &mut outcome,

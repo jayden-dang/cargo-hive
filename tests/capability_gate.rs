@@ -119,6 +119,24 @@ fn a_toolchain_selected_by_the_callers_directory_does_not_reach_the_gate() {
 }
 
 #[test]
+fn the_rustup_default_does_not_reach_the_gate() {
+    let hive = Hive::ready();
+    let s = Scratch::new("gate-default");
+    let repo = registered(&hive, &s);
+    // The proxy reports source `default` when the caller's directory has no override.
+    // A directory lookup with the variable removed lands on the same default anyway.
+    let (ok, receipt) = status_under_proxy(
+        &hive,
+        &repo,
+        &[
+            ("RUSTUP_TOOLCHAIN", "hive-test-not-installed"),
+            ("RUSTUP_TOOLCHAIN_SOURCE", "default"),
+        ],
+    );
+    assert!(ok, "{receipt}");
+}
+
+#[test]
 fn a_toolchain_of_unknown_origin_does_not_reach_the_gate() {
     let hive = Hive::ready();
     let s = Scratch::new("gate-no-source");

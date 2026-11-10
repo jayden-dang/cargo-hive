@@ -867,3 +867,35 @@ _Requirements: SEED-8.1, SEED-8.2, SEED-8.3, SEED-10.13_
 - [x] **Step 4: Commit.** `docs(SEED): record the klynt seed run`
 
 _Requirements: SEED-9.6, SEED-10.14_
+
+### Task 18: A missing .rustc_info.json names Cargo's two causes
+
+Added after execution by `root-cause` (2026-11-10). Cargo writes no `.rustc_info.json` while a rustc wrapper is set to the empty string or `CARGO_CACHE_RUSTC_INFO=0`, so a user who always builds that way gets no toolchain row and seed clones nothing (SEED-3.3). Landed as `76567e8`.
+
+**Files:**
+- Modify: `src/seed/fill.rs` (`read_capped`)
+- Test: `tests/seed_fill.rs` (`a_missing_rustc_info_writes_no_row_and_one_finding`)
+
+**Depends-on:** Task 17
+
+- [x] **Step 1: Red.** The finding says only to build again.
+- [x] **Step 2: Fix.** It names `RUSTC_WRAPPER=`, `RUSTC_WORKSPACE_WRAPPER=` and `CARGO_CACHE_RUSTC_INFO=0`.
+- [x] **Step 3: Verify and commit** with BENCH Task 16.
+
+_Requirements: SEED-2.25_
+
+### Task 19: An unresolved source target is source.unresolved with its path
+
+Added after execution by `root-cause` (2026-11-10). Fill labelled unresolved targets `walk.unreadable` with no path, and advised `cargo hive status` for a cache-root target no checkout of the repo owns. Landed as `0b273f5`.
+
+**Files:**
+- Modify: `src/seed/source.rs` (`owned_targets`), `src/seed/mod.rs` (`run_fill`), `src/discover.rs` (`CACHE_ROOT_UNJUDGED`)
+- Test: `tests/seed.rs`, `src/seed/source.rs` unit test
+
+**Depends-on:** Task 17
+
+- [x] **Step 1: Red.** A foreign cache-root target is reported as `walk.unreadable`.
+- [x] **Step 2: Fix.** `source.unresolved`, path = the target; walk faults stay `walk.unreadable`.
+- [x] **Step 3: Verify and commit** `fix(seed): report an unresolved source target as source.unresolved with its path`.
+
+_Requirements: SEED-2.26, SEED-2.27_

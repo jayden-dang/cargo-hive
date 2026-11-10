@@ -1186,7 +1186,9 @@ fn a_held_build_lock_fails_the_proof_and_leaves_no_clone() {
     assert!(err.contains(&profile.display().to_string()), "{err}");
     assert_eq!(entries(&scratch.path), Vec::<String>::new());
     drop(held);
-    assert!(prove::prove_with(fs_.as_ref(), &scratch.path, &input(&fx, &[WINDOW])).is_ok());
+    assert!(common::wait_until_lock_free(&lock, Duration::from_secs(5)));
+    let again = prove::prove_with(fs_.as_ref(), &scratch.path, &input(&fx, &[WINDOW]));
+    assert!(again.is_ok(), "{again:?}");
 }
 
 #[test]

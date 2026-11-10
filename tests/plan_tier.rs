@@ -142,6 +142,10 @@ fn a_lock_without_identity_or_with_a_replaced_file_skips_the_target() {
         skipped(acquire(none.fs().as_ref(), &p.worktree_target(), false)),
         Reason::Missing
     );
+    assert!(common::wait_until_lock_free(
+        &lock,
+        std::time::Duration::from_secs(5)
+    ));
     let replaced = Recording::over_real().replace_after_lock(lock);
     assert_eq!(
         skipped(acquire(replaced.fs().as_ref(), &p.worktree_target(), false)),
@@ -430,7 +434,7 @@ fn a_cancel_between_two_apply_deletions_is_partial_consumed_and_replanned() {
     let p = Planned::with_dead_units("apply-cancel-two", 2);
     let id = Planned::id_of(&p.plan(), "secondary");
     let lib = p.library_ctx();
-    let plan = match record::get(&lib.state, &id).unwrap() {
+    let plan = match record::get(&lib.state, &|| false, &id).unwrap() {
         Lookup::Live(plan) => plan,
         other => panic!("plan was not live: {other:?}"),
     };

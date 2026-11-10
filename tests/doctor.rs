@@ -2,6 +2,7 @@
 mod common;
 use common::Hive;
 use common::Scratch;
+use common::{interrupt, wait_until_open};
 use std::process::{Child, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -258,4 +259,23 @@ fn an_interrupted_doctor_exits_130_and_removes_its_temp_dir() {
             });
         assert!(logged, "{signal}: a cancelled doctor appends a receipt");
     }
+}
+
+#[test]
+fn an_interrupted_doctor_waiting_for_the_state_lock_exits_130_without_waiting_for_the_holder() {
+    let hive = Hive::ready();
+    std::fs::write(hive.home.path.join(".lock"), b"").unwrap();
+    let _holder = common::KillOnDrop(hive.hold_state_lock());
+    let child = hive
+        .command(&["doctor", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Doctor's first state lock is the capabilities write, after every check.
+    wait_until_open(child.id(), &hive.home.path.join(".lock"));
+    interrupt(child.id());
+    let out = wait_within(child, Duration::from_secs(10));
+    assert_eq!(out.status.code(), Some(130), "{out:?}");
 }

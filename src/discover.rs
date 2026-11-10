@@ -12,6 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+/// The reason a cache-root target stays `Unresolved` when only some repositories are named.
+pub(crate) const CACHE_ROOT_UNJUDGED: &str = "a cache-root target is judged against every registered repository; run `cargo hive status` without arguments";
+
 pub const SKIP_DIRS: [&str; 3] = ["node_modules", "target", ".git"];
 
 #[derive(Debug, Clone, Serialize)]
@@ -607,9 +610,18 @@ pub fn targets(
             }
         } else {
             match (&failure, from_cache_root && !all_repos) {
-                (Some(why), _) => Owner::Unresolved { reason: why.clone() },
-                (None, true) => Owner::Unresolved { reason: "a cache-root target is judged against every registered repository; run `cargo hive status` without arguments".into() },
-                (None, false) => Owner::OrphanCandidate { owned_under_caller_env: overrides.iter().find(|(_, p)| *p == real).map(|(name, _)| name.clone()) },
+                (Some(why), _) => Owner::Unresolved {
+                    reason: why.clone(),
+                },
+                (None, true) => Owner::Unresolved {
+                    reason: CACHE_ROOT_UNJUDGED.into(),
+                },
+                (None, false) => Owner::OrphanCandidate {
+                    owned_under_caller_env: overrides
+                        .iter()
+                        .find(|(_, p)| *p == real)
+                        .map(|(name, _)| name.clone()),
+                },
             }
         };
         for p in &profiles {

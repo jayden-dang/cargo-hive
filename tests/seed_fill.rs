@@ -326,8 +326,11 @@ fn a_held_lock_skips_the_target_and_waits_for_nothing() {
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
     let started = Instant::now();
     let report = fill_in(&built.hive, &lib, &built.target, &|| false);
+    // The holder keeps the lock until it is killed below, so a fill that waited for it
+    // would never return. The bound only turns that hang into a failure; it measures the
+    // whole fill, which ran past 5 s while another suite loaded the machine.
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(60),
         "a held lock returns without waiting: {:?}",
         started.elapsed()
     );
@@ -1157,6 +1160,12 @@ fn a_missing_rustc_info_writes_no_row_and_one_finding() {
     let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false)
         .unwrap_err();
     assert!(err.contains(&path.display().to_string()), "{err}");
+    // Cargo skips writing the file when a rustc wrapper is set to the empty string or
+    // CARGO_CACHE_RUSTC_INFO=0, so the advice names both instead of only "build".
+    assert!(
+        err.contains("RUSTC_WRAPPER") && err.contains("CARGO_CACHE_RUSTC_INFO"),
+        "{err}"
+    );
     let recording = Recording::over_real();
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
     let report = fill_in(&built.hive, &lib, &built.target, &|| false);

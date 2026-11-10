@@ -81,8 +81,9 @@ inside Cargo target dirs:
 - It installs no Cargo configuration, environment variable, rustc wrapper, cargo shim or
   hook. `cargo` and rust-analyzer build exactly as without hive.
 - It writes under `~/.hive/` and doctor's temporary directory, and `seed` also
-  places files into a new Cargo target dir. Apart from that placement, it only
-  deletes, through `gc` and `apply`, inside Cargo target dirs.
+  places files into a new Cargo target dir. Apart from that placement, it deletes
+  only inside Cargo target dirs, through `gc` and `apply`, and inside its own store
+  under `~/.hive/`, through bare `gc`.
 - It reads Cargo's internal `.fingerprint/` files only when their exact format is known
   (docs/adr/0001). Anything else is reported as unsupported.
 
