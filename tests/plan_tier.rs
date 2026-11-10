@@ -142,6 +142,10 @@ fn a_lock_without_identity_or_with_a_replaced_file_skips_the_target() {
         skipped(acquire(none.fs().as_ref(), &p.worktree_target(), false)),
         Reason::Missing
     );
+    assert!(common::wait_until_lock_free(
+        &lock,
+        std::time::Duration::from_secs(5)
+    ));
     let replaced = Recording::over_real().replace_after_lock(lock);
     assert_eq!(
         skipped(acquire(replaced.fs().as_ref(), &p.worktree_target(), false)),

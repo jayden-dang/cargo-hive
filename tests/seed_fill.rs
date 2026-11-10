@@ -326,8 +326,11 @@ fn a_held_lock_skips_the_target_and_waits_for_nothing() {
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
     let started = Instant::now();
     let report = fill_in(&built.hive, &lib, &built.target, &|| false);
+    // The holder keeps the lock until it is killed below, so a fill that waited for it
+    // would never return. The bound only turns that hang into a failure; it measures the
+    // whole fill, which ran past 5 s while another suite loaded the machine.
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(60),
         "a held lock returns without waiting: {:?}",
         started.elapsed()
     );

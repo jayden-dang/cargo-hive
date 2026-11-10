@@ -396,6 +396,28 @@ impl Drop for KillOnDrop {
     }
 }
 
+/// Waits up to `limit` until an exclusive flock on `path` can be taken, and says whether
+/// it could. On macOS a child that another test thread is spawning holds a copy of every
+/// descriptor of this process, `O_CLOEXEC` ones too, until it execs, so a lock this
+/// process has just released can still read as held for a moment. A lock hive really
+/// keeps stays held for the whole wait.
+#[allow(dead_code)]
+pub fn wait_until_lock_free(path: &Path, limit: Duration) -> bool {
+    use std::os::fd::AsRawFd;
+    let started = Instant::now();
+    loop {
+        let file = fs::OpenOptions::new().read(true).open(path).unwrap();
+        // SAFETY: `file` owns a valid descriptor for this call; closing it releases the lock.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return true;
+        }
+        if started.elapsed() > limit {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Sends SIGINT to `pid`.
 #[allow(dead_code)]
 pub fn interrupt(pid: u32) {
