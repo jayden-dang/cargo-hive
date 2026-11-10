@@ -126,6 +126,8 @@ Consult outcome: no `docs/product/metrics.md`, `docs/ops/reliability.md`, `docs/
 - **Reliability:** **CORE-6.9** (guard, 2026-10-30) WHEN a cancelled hive command finds hive's state lock free THE SYSTEM SHALL CONTINUE TO append its receipt to the receipts log (CORE-6.7); the fix changes only the test's ordering.
 - **Reliability:** **CORE-6.10** (fix, 2026-11-10) IF SIGINT or SIGTERM arrives while `doctor` writes its results, `apply` looks up its plan, or `gc` commits a store eviction, each waiting for hive's state lock that another process holds, THEN THE SYSTEM SHALL stop waiting and exit with status 130, as CORE-6.6 requires of every command. A cancelled eviction commit renames nothing and leaves `store.db` unchanged.
 - **Reliability:** **CORE-6.11** (guard, 2026-11-10) WHEN hive's state lock is free THE SYSTEM SHALL CONTINUE TO let `doctor` record its results, `apply` find its plan, and `gc` commit its store eviction.
+- **Reliability:** **CORE-6.12** (fix, 2026-11-10) WHEN a child that hive runs with a deadline (`rustup`, `rustc -vV`, `cargo metadata`) has exited or been killed and a process outside its process group still holds one of its output pipes THE SYSTEM SHALL stop waiting for that pipe within one second and return, keeping the bytes read before then. On macOS such a holder can be a lingering grandchild or a child another thread was spawning while the pipe still lacked close-on-exec.
+- **Reliability:** **CORE-6.13** (guard, 2026-11-10) WHEN a child exits and nothing else holds its output pipes THE SYSTEM SHALL CONTINUE TO return its whole stdout and stderr.
 - **Accessibility:** None — headless CLI and JSON output; no UI a person perceives beyond terminal text.
 
 ## 7. Existing behavior this feature must not change
