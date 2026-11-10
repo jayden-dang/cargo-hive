@@ -130,8 +130,8 @@ pub fn insert(
     })
 }
 
-pub fn get(state: &State, id: &str) -> Result<Lookup, StateError> {
-    state.locked(|tx| {
+pub fn get(state: &State, cancel: &dyn Fn() -> bool, id: &str) -> Result<Lookup, StateError> {
+    state.locked_or_cancelled(cancel, |tx| {
         let file = read(tx)?;
         Ok(match file.plans.into_iter().find(|plan| plan.id == id) {
             Some(plan) => match plan.state {
@@ -315,7 +315,7 @@ mod tests {
         let path = at_cap.root().join(PLANS_FILE);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), MAX_PLANS_BYTES);
         assert!(matches!(
-            get(&at_cap, "aaaaaaaaaaaaaaaa").unwrap(),
+            get(&at_cap, &|| false, "aaaaaaaaaaaaaaaa").unwrap(),
             Lookup::Live(_)
         ));
 
@@ -345,11 +345,11 @@ mod tests {
         assert!(!matches!(err, StateError::Malformed { .. }), "{text}");
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert!(matches!(
-            get(&over, "bbbbbbbbbbbbbbbb").unwrap(),
+            get(&over, &|| false, "bbbbbbbbbbbbbbbb").unwrap(),
             Lookup::Live(_)
         ));
         assert!(matches!(
-            get(&over, "aaaaaaaaaaaaaaaa").unwrap(),
+            get(&over, &|| false, "aaaaaaaaaaaaaaaa").unwrap(),
             Lookup::Unknown
         ));
     }
@@ -358,7 +358,7 @@ mod tests {
     fn plans_json_at_the_cap_loads_and_one_byte_past_names_the_file() {
         let s = state("record-cap");
         assert!(matches!(
-            get(&s, "aaaaaaaaaaaaaaaa").unwrap(),
+            get(&s, &|| false, "aaaaaaaaaaaaaaaa").unwrap(),
             Lookup::Unknown
         ));
         let path = s.root().join(PLANS_FILE);
@@ -369,12 +369,12 @@ mod tests {
         assert_eq!(body.len(), cap);
         std::fs::write(&path, &body).unwrap();
         assert!(matches!(
-            get(&s, "aaaaaaaaaaaaaaaa").unwrap(),
+            get(&s, &|| false, "aaaaaaaaaaaaaaaa").unwrap(),
             Lookup::Unknown
         ));
         body.push(b'x');
         std::fs::write(&path, &body).unwrap();
-        let err = get(&s, "aaaaaaaaaaaaaaaa").unwrap_err();
+        let err = get(&s, &|| false, "aaaaaaaaaaaaaaaa").unwrap_err();
         let text = err.to_string();
         assert!(text.contains("plans.json"), "{text}");
         assert!(text.contains("larger than"), "{text}");
@@ -391,7 +391,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            get(&s, "aaaaaaaaaaaaaaaa").unwrap(),
+            get(&s, &|| false, "aaaaaaaaaaaaaaaa").unwrap(),
             Lookup::Live(_)
         ));
         let first = consume(&s, &|| false, "aaaaaaaaaaaaaaaa", 101).unwrap();
@@ -401,11 +401,11 @@ mod tests {
             Taken::AlreadyConsumed
         ));
         assert!(matches!(
-            get(&s, "aaaaaaaaaaaaaaaa").unwrap(),
+            get(&s, &|| false, "aaaaaaaaaaaaaaaa").unwrap(),
             Lookup::Consumed
         ));
         assert!(matches!(
-            get(&s, "bbbbbbbbbbbbbbbb").unwrap(),
+            get(&s, &|| false, "bbbbbbbbbbbbbbbb").unwrap(),
             Lookup::Unknown
         ));
     }
@@ -455,19 +455,25 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(get(&s, "aaaaaaaaaaaaaaaa").unwrap(), Lookup::Live(_)),
+            matches!(
+                get(&s, &|| false, "aaaaaaaaaaaaaaaa").unwrap(),
+                Lookup::Live(_)
+            ),
             "a plan aged exactly 30 days is kept"
         );
         assert!(
-            matches!(get(&s, "bbbbbbbbbbbbbbbb").unwrap(), Lookup::Unknown),
+            matches!(
+                get(&s, &|| false, "bbbbbbbbbbbbbbbb").unwrap(),
+                Lookup::Unknown
+            ),
             "a plan aged 30 days plus one second is dropped"
         );
         assert!(matches!(
-            get(&s, "cccccccccccccccc").unwrap(),
+            get(&s, &|| false, "cccccccccccccccc").unwrap(),
             Lookup::Live(_)
         ));
         assert!(matches!(
-            get(&s, "dddddddddddddddd").unwrap(),
+            get(&s, &|| false, "dddddddddddddddd").unwrap(),
             Lookup::Live(_)
         ));
 
@@ -487,7 +493,10 @@ mod tests {
         .unwrap();
         for n in 1..=256u64 {
             assert!(
-                matches!(get(&s, &format!("{n:016x}")).unwrap(), Lookup::Consumed),
+                matches!(
+                    get(&s, &|| false, &format!("{n:016x}")).unwrap(),
+                    Lookup::Consumed
+                ),
                 "tombstone {n} was dropped inside the 256 cap"
             );
         }
@@ -508,19 +517,27 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(get(&s, "ffffffffffffffff").unwrap(), Lookup::Unknown),
+            matches!(
+                get(&s, &|| false, "ffffffffffffffff").unwrap(),
+                Lookup::Unknown
+            ),
             "the 257th tombstone is the one dropped"
         );
         let kept = (1..=256u64)
-            .filter(|n| matches!(get(&s, &format!("{n:016x}")).unwrap(), Lookup::Consumed))
+            .filter(|n| {
+                matches!(
+                    get(&s, &|| false, &format!("{n:016x}")).unwrap(),
+                    Lookup::Consumed
+                )
+            })
             .count();
         assert_eq!(kept, 256);
         assert!(matches!(
-            get(&s, "cccccccccccccccc").unwrap(),
+            get(&s, &|| false, "cccccccccccccccc").unwrap(),
             Lookup::Live(_)
         ));
         assert!(matches!(
-            get(&s, "1111111111111111").unwrap(),
+            get(&s, &|| false, "1111111111111111").unwrap(),
             Lookup::Live(_)
         ));
     }

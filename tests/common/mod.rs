@@ -360,6 +360,52 @@ pub fn plant_session(
 }
 
 /// Waits for `child` up to `limit`; a hang fails the test instead of blocking the suite.
+/// Waits until process `pid` has `path` open, as `lsof` reports it.
+#[allow(dead_code)]
+pub fn wait_until_open(pid: u32, path: &Path) {
+    let started = Instant::now();
+    loop {
+        let open = Command::new("lsof")
+            .args(["-a", "-p", &pid.to_string()])
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        if open {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "{pid} never opened {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A child killed when dropped, so a failing test cannot leave a lock holder running.
+#[allow(dead_code)]
+pub struct KillOnDrop(pub Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Sends SIGINT to `pid`.
+#[allow(dead_code)]
+pub fn interrupt(pid: u32) {
+    assert!(Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+}
+
 pub fn wait_within(mut child: Child, limit: Duration) -> Output {
     let started = Instant::now();
     while child.try_wait().unwrap().is_none() {

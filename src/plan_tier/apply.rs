@@ -89,7 +89,7 @@ pub fn apply(
     id: &str,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Applied, ApplyError> {
-    let plan = match record::get(ctx.state, id).map_err(ApplyError::State)? {
+    let plan = match record::get(ctx.state, &|| cancel(), id).map_err(ApplyError::State)? {
         Lookup::Unknown => {
             return Ok(refused(
                 id,

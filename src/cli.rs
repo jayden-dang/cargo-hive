@@ -413,8 +413,20 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
         Err(e) => return emit_failure(state, out, "doctor", &e.to_string(), 1),
     };
     let caps = doctor::capabilities_for(&report);
-    if let Err(e) = state.locked(|tx| tx.write(doctor::CAPABILITIES_FILE, &caps)) {
-        return emit_failure(state, out, "doctor", &e.to_string(), 1);
+    match state.locked_or_cancelled(doctor::process_cancel, |tx| {
+        tx.write(doctor::CAPABILITIES_FILE, &caps)
+    }) {
+        Ok(()) => {}
+        Err(StateError::Cancelled) => {
+            return emit_failure(
+                state,
+                out,
+                "doctor",
+                &format!("doctor {}", StateError::Cancelled),
+                130,
+            );
+        }
+        Err(e) => return emit_failure(state, out, "doctor", &e.to_string(), 1),
     }
     let mut b = Receipt::with_os("doctor", Scope::default(), macos);
     b.toolchain(report.toolchain_release.clone());
@@ -1115,6 +1127,10 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
     };
     let applied = match apply::apply(&ctx, id, &cancelled) {
         Ok(applied) => applied,
+        Err(apply::ApplyError::State(StateError::Cancelled)) => {
+            b.finding("error", None, StateError::Cancelled.to_string());
+            return emit(state, out, b.finish(), "apply was cancelled\n", 130);
+        }
         Err(e) => {
             b.finding("error", None, e.to_string());
             return emit(state, out, b.finish(), &format!("{e}\n"), 1);

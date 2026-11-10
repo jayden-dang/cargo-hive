@@ -430,7 +430,7 @@ fn a_cancel_between_two_apply_deletions_is_partial_consumed_and_replanned() {
     let p = Planned::with_dead_units("apply-cancel-two", 2);
     let id = Planned::id_of(&p.plan(), "secondary");
     let lib = p.library_ctx();
-    let plan = match record::get(&lib.state, &id).unwrap() {
+    let plan = match record::get(&lib.state, &|| false, &id).unwrap() {
         Lookup::Live(plan) => plan,
         other => panic!("plan was not live: {other:?}"),
     };

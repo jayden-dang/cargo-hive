@@ -336,9 +336,10 @@ pub fn inventory(fs: &dyn Fs, state: &State) -> Result<Inventory, StateError> {
 pub fn commit_eviction(
     state: &State,
     plan: &CommitPlan,
+    cancel: &dyn Fn() -> bool,
     mut rename: impl FnMut(&StoreKey) -> io::Result<Option<PathBuf>>,
 ) -> Result<Committed, StateError> {
-    state.locked(|tx| {
+    state.locked_or_cancelled(cancel, |tx| {
         let mut file: StoreFile = tx.read_bounded(STORE_FILE, MAX_STORE_BYTES)?;
         let mut kept = Vec::with_capacity(file.units.len());
         for row in file.units.drain(..) {
@@ -1306,7 +1307,8 @@ mod tests {
             refreshed: vec![keep_key.clone()],
             now: 500,
         };
-        let committed = commit_eviction(&state, &plan, rename_with_out(&state, &seq)).unwrap();
+        let committed =
+            commit_eviction(&state, &plan, &|| false, rename_with_out(&state, &seq)).unwrap();
         assert_eq!(committed.renamed.len(), 1);
         assert_eq!(committed.renamed[0].0, drop_key);
         assert!(!entry_path(&state, &drop_key).exists());
@@ -1342,7 +1344,8 @@ mod tests {
             now: 500,
         };
         let seq = AtomicUsize::new(0);
-        let committed = commit_eviction(&state, &plan, rename_with_out(&state, &seq)).unwrap();
+        let committed =
+            commit_eviction(&state, &plan, &|| false, rename_with_out(&state, &seq)).unwrap();
         assert!(committed.renamed.is_empty());
         assert_eq!(committed.kept_changed, 1);
         assert!(entry_path(&state, &key).is_dir());
@@ -1370,7 +1373,8 @@ mod tests {
             now: 500,
         };
         let seq = AtomicUsize::new(0);
-        let committed = commit_eviction(&state, &plan, rename_with_out(&state, &seq)).unwrap();
+        let committed =
+            commit_eviction(&state, &plan, &|| false, rename_with_out(&state, &seq)).unwrap();
         assert!(committed.renamed.is_empty());
         assert_eq!(committed.kept_changed, 1);
         assert!(entry_path(&state, &key).is_dir());
@@ -1410,7 +1414,8 @@ mod tests {
             now: 500,
         };
         let seq = AtomicUsize::new(0);
-        let committed = commit_eviction(&state, &plan, rename_with_out(&state, &seq)).unwrap();
+        let committed =
+            commit_eviction(&state, &plan, &|| false, rename_with_out(&state, &seq)).unwrap();
         assert_eq!(committed.renamed.len(), 2);
         assert_eq!(committed.dropped_values, vec![1]);
         let got = read(&state).unwrap();
@@ -1421,6 +1426,44 @@ mod tests {
         assert_eq!(got.toolchains.get("rowless-value\n"), Some(&8));
         assert!(entry_path(&state, &rowless_keep).is_dir());
         finish(&state);
+    }
+
+    #[test]
+    fn commit_waiting_on_a_held_state_lock_stops_when_cancelled() {
+        use std::os::fd::AsRawFd;
+        let (state, _) = scratch_state("commit-cancel");
+        let key = store_key(6, "a", "9999999999999999");
+        plant_entry(&state, &key);
+        write_store(
+            &state,
+            &StoreFile {
+                units: vec![row_for(&key, 10)],
+                toolchains: BTreeMap::new(),
+            },
+        );
+        let before = std::fs::read(state.root().join(STORE_FILE)).unwrap();
+        // Another holder: flock conflicts between two open file descriptions.
+        let other = std::fs::File::open(state.root().join(".lock")).unwrap();
+        // SAFETY: `other` owns a valid descriptor for the whole test.
+        assert_eq!(
+            unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let plan = CommitPlan {
+            candidates: vec![(key.clone(), Some(10))],
+            refreshed: vec![],
+            now: 700,
+        };
+        let seq = AtomicUsize::new(0);
+        let err =
+            commit_eviction(&state, &plan, &|| true, rename_with_out(&state, &seq)).unwrap_err();
+        assert!(matches!(err, StateError::Cancelled), "{err:?}");
+        assert!(entry_path(&state, &key).is_dir());
+        assert_eq!(
+            std::fs::read(state.root().join(STORE_FILE)).unwrap(),
+            before
+        );
+        drop(other);
     }
 
     #[test]
@@ -1449,7 +1492,7 @@ mod tests {
             now: 700,
         };
         let calls = AtomicUsize::new(0);
-        let committed = commit_eviction(&state, &plan, |key| {
+        let committed = commit_eviction(&state, &plan, &|| false, |key| {
             let n = calls.fetch_add(1, Ordering::SeqCst);
             if n >= 1 {
                 return Ok(None);
@@ -1488,7 +1531,7 @@ mod tests {
             refreshed: Vec::new(),
             now: 500,
         };
-        let committed = commit_eviction(&state, &plan, |_| {
+        let committed = commit_eviction(&state, &plan, &|| false, |_| {
             Err(io::Error::new(io::ErrorKind::PermissionDenied, "nope"))
         })
         .unwrap();
