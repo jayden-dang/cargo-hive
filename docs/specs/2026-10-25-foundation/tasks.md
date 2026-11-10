@@ -6111,3 +6111,20 @@ Added after execution by `root-cause` (2026-11-10). doctor's capabilities write,
 - [x] **Step 3: Verify and commit** `fix: let Ctrl-C stop doctor, apply and store eviction while they wait for the state lock`.
 
 _Requirements: CORE-6.10, CORE-6.11_
+
+### Task 22: A process holding a child's pipes no longer holds output_with_deadline past its deadline
+
+Added after execution by `root-cause` (2026-11-10). `output_with_deadline` joined its pipe readers with no bound, so it waited for end of file until every holder of a write end exited. In the suite, `a_short_deadline_kills_a_sleeping_child` took exactly 20.01 s when the sibling test's `sh -c "(sleep 20 >&2 &)"` inherited its pipe: on macOS std creates pipes with `pipe()` and sets close-on-exec afterwards. The owner accepted the proposition and chose a bounded drain that keeps the bytes read.
+
+**Files:**
+- Modify: `src/cargo_target.rs` (`PipeReader`, `PipeReaders::finish`, `output_with_deadline`)
+- Test: `src/cargo_target.rs` unit tests
+
+**Depends-on:** Task 21
+
+- [x] **Step 1: Red.** With a 20 s process outside the child's group holding the pipes, a normal exit returns after 20.04 s and an expired 200 ms deadline after 20.01 s.
+- [x] **Step 2: Fix.** Readers fill a shared buffer; after exit they get 1 s, then the bytes read are returned; expiry and cancel return at once.
+- [x] **Step 3: Verify and commit** `fix: stop waiting for a child's pipes one second after it exits`.
+
+_Requirements: CORE-6.12, CORE-6.13_
+

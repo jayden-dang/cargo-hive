@@ -10,7 +10,7 @@ use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -241,40 +241,72 @@ fn kill_group(child: &std::process::Child) {
     kill_pgid(child.id());
 }
 
-struct PipeReaders {
-    stdout: Option<thread::JoinHandle<Vec<u8>>>,
-    stderr: Option<thread::JoinHandle<Vec<u8>>>,
+/// How long the pipe readers may take, once the child has exited or been killed, to
+/// reach end of file. A process outside the child's group that holds a pipe's write end
+/// (a lingering grandchild, or a child another thread was spawning while the pipe still
+/// lacked close-on-exec, since macOS has no `pipe2`) would otherwise hold the caller
+/// until it exits.
+const PIPE_DRAIN_GRACE: Duration = Duration::from_secs(1);
+
+/// One pipe read into a shared buffer, so the bytes read so far survive a bounded drain.
+struct PipeReader {
+    buf: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<()>,
 }
 
-impl Drop for PipeReaders {
-    fn drop(&mut self) {
-        if let Some(handle) = self.stdout.take() {
-            let _ = handle.join();
+impl PipeReader {
+    fn spawn(pipe: Option<impl Read + Send + 'static>) -> PipeReader {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let (tx, done) = mpsc::channel();
+        if let Some(mut pipe) = pipe {
+            let shared = Arc::clone(&buf);
+            thread::spawn(move || {
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => shared
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend_from_slice(&chunk[..n]),
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
+                let _ = tx.send(());
+            });
+        } else {
+            let _ = tx.send(());
         }
-        if let Some(handle) = self.stderr.take() {
-            let _ = handle.join();
-        }
+        PipeReader { buf, done }
+    }
+
+    /// Waits for end of file until `until`, then takes what was read.
+    fn take(self, until: Instant) -> Vec<u8> {
+        let _ = self
+            .done
+            .recv_timeout(until.saturating_duration_since(Instant::now()));
+        std::mem::take(&mut *self.buf.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 
+struct PipeReaders {
+    stdout: PipeReader,
+    stderr: PipeReader,
+}
+
 impl PipeReaders {
-    fn finish(mut self) -> (Vec<u8>, Vec<u8>) {
-        let stdout = self
-            .stdout
-            .take()
-            .and_then(|h| h.join().ok())
-            .unwrap_or_default();
-        let stderr = self
-            .stderr
-            .take()
-            .and_then(|h| h.join().ok())
-            .unwrap_or_default();
-        (stdout, stderr)
+    /// Both pipes, each given until one grace period after now to reach end of file.
+    fn finish(self) -> (Vec<u8>, Vec<u8>) {
+        let until = Instant::now() + PIPE_DRAIN_GRACE;
+        (self.stdout.take(until), self.stderr.take(until))
     }
 }
 
 /// Runs `cmd` with piped stdout and stderr. A deadline or a cancel kills the
-/// process group. The pipe readers are joined on every return, including expiry.
+/// process group. After a normal exit the pipe readers get `PIPE_DRAIN_GRACE` to reach
+/// end of file; on expiry, cancel or error the output is dropped at once. Either way a
+/// reader still blocked is left behind and ends at end of file.
 pub fn output_with_deadline(
     cmd: &mut Command,
     deadline: Duration,
@@ -287,23 +319,9 @@ pub fn output_with_deadline(
         .process_group(0)
         .spawn()
         .map_err(|e| ChildOutputError::Failed(format!("could not spawn: {e}")))?;
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
     let readers = PipeReaders {
-        stdout: Some(thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(pipe) = stdout_pipe.as_mut() {
-                let _ = pipe.read_to_end(&mut buf);
-            }
-            buf
-        })),
-        stderr: Some(thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(pipe) = stderr_pipe.as_mut() {
-                let _ = pipe.read_to_end(&mut buf);
-            }
-            buf
-        })),
+        stdout: PipeReader::spawn(child.stdout.take()),
+        stderr: PipeReader::spawn(child.stderr.take()),
     };
     let started = Instant::now();
     let status = loop {
@@ -791,6 +809,9 @@ mod tests {
         assert!(matches!(err, ChildOutputError::Cancelled), "{err:?}");
     }
 
+    /// A 20 s process in its own process group, so a group kill does not reach it.
+    const LEAVE_GROUP: &str = "perl -e 'setpgrp(0, 0); exec qw(sleep 20)'";
+
     fn sh(script: &str) -> Command {
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", script]);
@@ -881,6 +902,38 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, ChildOutputError::Cancelled));
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_process_holding_the_pipes_open_does_not_delay_output_with_deadline() {
+        // The grandchild leaves the child's process group, as a process that inherited
+        // the pipe from a concurrent spawn does, so only a bounded drain returns early.
+        let mut cmd = sh(&format!(
+            "printf out; printf err >&2; {LEAVE_GROUP} & exit 0"
+        ));
+        let start = Instant::now();
+        let out = output_with_deadline(&mut cmd, Duration::from_secs(60), || false).unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(out.stdout, b"out", "the bytes read before exit are kept");
+        assert_eq!(out.stderr, b"err");
+    }
+
+    #[test]
+    fn an_expired_deadline_does_not_wait_for_a_process_holding_the_pipes() {
+        let mut cmd = sh(&format!("{LEAVE_GROUP} & sleep 30"));
+        let start = Instant::now();
+        let err = output_with_deadline(&mut cmd, Duration::from_millis(200), || false).unwrap_err();
+        assert!(matches!(err, ChildOutputError::TimedOut), "{err:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
