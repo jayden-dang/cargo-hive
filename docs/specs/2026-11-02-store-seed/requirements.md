@@ -89,6 +89,7 @@ Terms (defined in `CONTEXT.md`, whose Store and Fill entries this feature correc
 - **SEED-2.22** IF compressing a file of an entry fails for a reason other than the file being empty or not compressible enough THEN THE SYSTEM SHALL leave that entry unavailable and report one finding naming the entry and the error.
 - **SEED-2.23** WHEN Applesauce reports a file of an entry as empty or not compressible enough THE SYSTEM SHALL leave the file uncompressed and count its compression as finished.
 - **SEED-2.24** IF a live registry unit has a dependency edge that resolves to no unit in the target THEN THE SYSTEM SHALL fill nothing for that unit and report it in one finding per target.
+- **SEED-2.25** (fix, 2026-11-10) WHEN a source target's `.rustc_info.json` is missing THE SYSTEM SHALL name in the SEED-2.17 finding the two causes Cargo has for leaving it out: a rustc wrapper set to the empty string (`RUSTC_WRAPPER=` or `RUSTC_WORKSPACE_WRAPPER=`) and `CARGO_CACHE_RUSTC_INFO=0`.
 
 ## 3. Clone only the units this repo used, on this toolchain
 

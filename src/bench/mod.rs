@@ -6,7 +6,7 @@ pub mod order;
 pub mod stats;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cargo_target::{run_bounded, Capture, ChildOutputError};
@@ -135,6 +135,31 @@ fn record_prime(
             measured: BTreeMap::new(),
         });
     }
+}
+
+/// Bench builds its samples with the wrappers set to the empty string (BENCH-5.2), and
+/// Cargo then writes no `.rustc_info.json`, so a later sample's fill learns no toolchain
+/// row from an earlier sample's target. That is expected, not a fault to repeat per sample.
+fn is_sample_row(plan: &Plan, kind: &str, path: Option<&Path>) -> bool {
+    kind == "toolchain.row"
+        && path.is_some_and(|target| {
+            plan.cold
+                .iter()
+                .chain(&plan.seeded)
+                .any(|c| target.starts_with(&c.path))
+        })
+}
+
+fn note_sample_rows_skipped(report: &mut Report, noted: &mut bool) {
+    if std::mem::replace(noted, true) {
+        return;
+    }
+    report.findings.push(Finding {
+        kind: "bench.sample_rows_skipped".into(),
+        path: None,
+        detail: "bench sample targets carry no .rustc_info.json, since Cargo writes none while a rustc wrapper is set to the empty string, so no toolchain row is learned from them; the rows come from the repo's own builds".into(),
+        measured: BTreeMap::new(),
+    });
 }
 
 fn push_seed_finding(report: &mut Report, checkout: &Checkout, kind: &str, detail: String) {
@@ -290,6 +315,7 @@ pub fn run(
     }
 
     let n = plan.cold.len();
+    let mut rows_noted = false;
     let mut cold_build_ms = Vec::new();
     let mut seeded_build_ms = Vec::new();
     let mut seeded_seed_ms = Vec::new();
@@ -340,14 +366,22 @@ pub fn run(
                             clone_ms = Some(cloned_ms);
                             seed_ms = Some(filled_ms + cloned_ms);
                             seed_target = outcome.target.map(|(path, _)| path);
-                            for (kind, _, detail) in outcome.findings {
+                            for (kind, path, detail) in outcome.findings {
+                                if is_sample_row(plan, &kind, path.as_deref()) {
+                                    note_sample_rows_skipped(&mut report, &mut rows_noted);
+                                    continue;
+                                }
                                 push_seed_finding(&mut report, checkout, &kind, detail);
                             }
                         }
                         Err(err) => {
                             if let seed::Error::DiskFull(full) = &err {
                                 if let Some(kept) = &full.kept {
-                                    for (kind, _, detail) in &kept.findings {
+                                    for (kind, path, detail) in &kept.findings {
+                                        if is_sample_row(plan, kind, path.as_deref()) {
+                                            note_sample_rows_skipped(&mut report, &mut rows_noted);
+                                            continue;
+                                        }
                                         push_seed_finding(
                                             &mut report,
                                             checkout,

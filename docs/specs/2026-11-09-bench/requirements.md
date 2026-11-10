@@ -178,6 +178,13 @@ cache wrapper such as sccache cannot pass off a cache read as a cold build.
 - **BENCH-5.4** WHEN the caller's environment sets `RUSTC` or `CARGO_BUILD_RUSTC` THE SYSTEM SHALL report a
   finding of kind `env.rustc.overridden` naming the variable and its value. The timed build uses the pin of
   BENCH-5.2 instead. [Weigh W6, W18]
+- **BENCH-5.5** (fix, 2026-11-10) WHEN a seeded sample's fill finds no `.rustc_info.json` in the target of a
+  checkout of this bench run THE SYSTEM SHALL report no `toolchain.row` finding for that target, and SHALL
+  report one finding of kind `bench.sample_rows_skipped` per run instead. Cargo writes no `.rustc_info.json`
+  while a rustc wrapper is set to the empty string (BENCH-5.2; cargo's log: "failed to calculate rustc
+  fingerprint ... rustc info cache disabled", cargo 1.97.1, root-cause 2026-11-10).
+- **BENCH-5.6** (guard, 2026-11-10) WHEN a seeded sample's fill cannot write a toolchain row from a target
+  outside this bench run's checkouts THE SYSTEM SHALL CONTINUE TO report that target's `toolchain.row` finding.
 
 ## 6. Stop a bench
 
