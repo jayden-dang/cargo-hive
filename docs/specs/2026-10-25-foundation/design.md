@@ -189,7 +189,7 @@ Depth: deletion test — callers would still need to know "run six checks and ge
 Locality: new `src/doctor.rs`. `require` is the gate every capability-dependent command calls from ROAD-2 onward (CORE-1.4, CORE-1.10).
 
 The macOS version comes from `sw_vers -productVersion`. Below 27 sets `below_floor` and every check still runs (CORE-1.7). Cleanup follows Decision 15 (CORE-1.8, CORE-1.9).
-Landed after execution (2026-10-28, CORE-1.11/1.12): `drop_directory_toolchain` removes `RUSTUP_TOOLCHAIN` and `RUSTUP_TOOLCHAIN_SOURCE` from `rustup which` and from `cargo_target::resolve`'s `cargo metadata` unless the source is `cli`, `env` or `default`.
+Landed after execution (2026-10-28, CORE-1.11/1.12): `drop_directory_toolchain` removes `RUSTUP_TOOLCHAIN` and `RUSTUP_TOOLCHAIN_SOURCE` from `rustup which` and from `cargo_target::resolve`'s `cargo metadata` unless the source is `cli`, `env` or `default`. Amended 2026-11-10 (CORE-1.15/1.16, root-cause): `default` is dropped too, since it beat a checkout's own `rust-toolchain.toml`; only `cli` and `env` pass.
 
 ### receipt
 
