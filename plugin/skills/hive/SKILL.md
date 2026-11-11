@@ -31,6 +31,7 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 |---|---|
 | Is hive usable here? | `doctor` |
 | What is registered? | `repo list` |
+| A registered repo was deleted or should go | `repo remove <path>`, or `repo remove --missing` |
 | How big is it, what is orphaned? | `status` |
 | How do I free space? | `gc` with `--dry-run` first, then `gc` |
 | What can be deleted later? | `gc --plan`, then `apply` one plan |
@@ -39,6 +40,8 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 | How do I time cold checkouts against seeded ones? | `bench` |
 
 `status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root, and bare `gc` also bounds the store. Pass explicit paths unless the user asked for everything; `gc <repo>` leaves the store alone and notes `store.skipped_scoped`. `seed` takes one registered checkout and does not mean every repo.
+
+A registered repo whose main checkout is gone makes `apply` of an orphan plan refuse with `walk.unreadable`; `repo remove --missing` unregisters every such repo.
 
 `explain` shows 10 groups by default; `--top 0` shows all of them, as in `cargo hive explain /path/to/repo --top 0 --json`.
 
@@ -52,6 +55,7 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 cargo hive doctor --json
 cargo hive repo add /path/to/repo --json
 cargo hive repo list --json
+cargo hive repo remove --missing --json
 cargo hive status /path/to/repo --json
 cargo hive gc --json
 cargo hive gc /path/to/repo --dry-run --json

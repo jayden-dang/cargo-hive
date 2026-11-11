@@ -117,6 +117,15 @@ pub enum RepoCommand {
     },
     /// List registered repositories
     List(OutputArgs),
+    /// Unregister repositories (any path inside a main checkout, which may be gone)
+    Remove {
+        paths: Vec<std::path::PathBuf>,
+        /// Also remove every repository whose main checkout no longer exists
+        #[arg(long)]
+        missing: bool,
+        #[command(flatten)]
+        out: OutputArgs,
+    },
 }
 
 #[derive(Args, Clone, Copy, Debug)]
@@ -166,6 +175,14 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
         Command::Repo {
             command: RepoCommand::List(out),
         } => repo_list(&state, out),
+        Command::Repo {
+            command:
+                RepoCommand::Remove {
+                    paths,
+                    missing,
+                    out,
+                },
+        } => repo_remove(&state, &paths, missing, out),
         Command::Status {
             repos,
             no_sizes,
@@ -331,6 +348,35 @@ fn repo_add(state: &State, path: &std::path::Path, out: OutputArgs) -> i32 {
         Ok(Err(refusal)) => {
             b.count("registered", 0);
             b.finding("refusal", Some(path.to_path_buf()), refusal.to_string());
+            emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1)
+        }
+    }
+}
+
+fn repo_remove(state: &State, paths: &[std::path::PathBuf], missing: bool, out: OutputArgs) -> i32 {
+    let result = state.locked(|tx| registry::unregister(paths, missing, tx));
+    let mut b = Receipt::new("repo remove", Scope::default());
+    match result {
+        Err(e) => emit_failure(state, out, "repo remove", &e.to_string(), 1),
+        Ok(Ok(removed)) => {
+            b.count("removed", removed.len() as u64);
+            let mut human = String::new();
+            if removed.is_empty() {
+                human.push_str("nothing to remove\n");
+            }
+            for repo in &removed {
+                b.scope_mut().repos.push(repo.main.clone());
+                human.push_str(&format!("removed {}\n", repo.main.display()));
+            }
+            emit(state, out, b.finish(), &human, 0)
+        }
+        Ok(Err(refusal)) => {
+            b.count("removed", 0);
+            let path = match &refusal {
+                registry::UnregisterRefusal::NotRegistered(path) => Some(path.clone()),
+                registry::UnregisterRefusal::NothingNamed => None,
+            };
+            b.finding("refusal", path, refusal.to_string());
             emit(state, out, b.finish(), &format!("refused: {refusal}\n"), 1)
         }
     }

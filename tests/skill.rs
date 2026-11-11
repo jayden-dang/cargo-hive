@@ -414,6 +414,7 @@ enum Parsed {
     Doctor,
     RepoAdd,
     RepoList,
+    RepoRemove,
     Status,
     Gc { dry_run: bool, plan: bool },
     Apply,
@@ -440,6 +441,7 @@ fn parse(words: &[String]) -> Result<Parsed, String> {
         Command::Repo { command } => match command {
             RepoCommand::Add { .. } => Ok(Parsed::RepoAdd),
             RepoCommand::List(_) => Ok(Parsed::RepoList),
+            RepoCommand::Remove { .. } => Ok(Parsed::RepoRemove),
         },
         Command::Status { .. } => Ok(Parsed::Status),
         Command::Gc { dry_run, plan, .. } => Ok(Parsed::Gc { dry_run, plan }),
@@ -613,7 +615,10 @@ fn skill_documents_every_shipped_command() {
             line.line_no,
             line.text
         );
-        let skip = if parsed == Parsed::RepoAdd || parsed == Parsed::RepoList {
+        let skip = if matches!(
+            parsed,
+            Parsed::RepoAdd | Parsed::RepoList | Parsed::RepoRemove
+        ) {
             2
         } else {
             1
@@ -650,6 +655,7 @@ fn skill_documents_every_shipped_command() {
         Parsed::Doctor,
         Parsed::RepoAdd,
         Parsed::RepoList,
+        Parsed::RepoRemove,
         Parsed::Status,
         Parsed::Gc {
             dry_run: true,

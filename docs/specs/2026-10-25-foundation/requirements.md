@@ -57,6 +57,9 @@ Roadmap item: ROAD-1 (MILE-1, docs/roadmap/INDEX.md). Sources: `.skills/CORE/clo
 - **CORE-2.7** IF `<path>` is inside a git submodule checkout (git reports a superproject working tree) THEN THE SYSTEM SHALL refuse the registration and name the superproject's path.
 - **CORE-2.8** IF the repository has no commits yet THEN THE SYSTEM SHALL refuse the registration and state that it has no commits.
 - **CORE-2.9** IF the repository is a shallow clone THEN THE SYSTEM SHALL refuse the registration and state that its root commits cannot be determined.
+- **CORE-2.10** (owner request, 2026-11-11) WHEN the user runs `cargo hive repo remove <path>…` THE SYSTEM SHALL unregister each repository whose registered main checkout is `<path>` or contains it, also when that directory no longer exists, and report the removed count and repositories in the receipt. On klynt a deleted test repository left registered made every orphan `apply` refuse with `walk.unreadable`, and nothing but a hand edit of `registry.json` removed it.
+- **CORE-2.11** (owner request, 2026-11-11) WHEN the user runs `cargo hive repo remove --missing` THE SYSTEM SHALL unregister every repository whose main checkout no longer exists.
+- **CORE-2.12** (owner request, 2026-11-11) IF a `<path>` given to `repo remove` is inside no registered repository, or neither a path nor `--missing` is given, THEN THE SYSTEM SHALL unregister nothing, name the reason in a `refusal` finding, and exit with code 1.
 
 ## 3. See every checkout of a repository and how hive classifies it
 

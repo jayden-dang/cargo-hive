@@ -222,3 +222,103 @@ fn registering_twice_leaves_the_registry_unchanged() {
         before
     );
 }
+
+fn registered(hive: &Hive) -> Vec<String> {
+    let (_, list) = hive.json(&["repo", "list"]);
+    list["scope"]["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn remove_unregisters_a_repo_named_by_a_path_inside_it() {
+    let hive = Hive::new();
+    let s = Scratch::new("remove");
+    let a = init_repo(&s.path.join("a"), "");
+    let b = init_repo(&s.path.join("b"), "");
+    for repo in [&a, &b] {
+        assert!(hive
+            .run(&["repo", "add", repo.to_str().unwrap()])
+            .status
+            .success());
+    }
+    let (out, receipt) = hive.json(&["repo", "remove", a.join("src").to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(receipt["counts"]["removed"], 1, "{receipt}");
+    assert_eq!(
+        receipt["scope"]["repos"],
+        serde_json::json!([a]),
+        "{receipt}"
+    );
+    assert_eq!(registered(&hive), [b.to_str().unwrap()]);
+}
+
+#[test]
+fn remove_takes_a_repo_whose_main_checkout_is_gone() {
+    let hive = Hive::new();
+    let s = Scratch::new("remove-gone");
+    let gone = init_repo(&s.path.join("gone"), "");
+    assert!(hive
+        .run(&["repo", "add", gone.to_str().unwrap()])
+        .status
+        .success());
+    fs::remove_dir_all(&gone).unwrap();
+    let (out, receipt) = hive.json(&["repo", "remove", gone.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(receipt["counts"]["removed"], 1, "{receipt}");
+    assert!(registered(&hive).is_empty());
+}
+
+#[test]
+fn remove_missing_drops_every_repo_whose_main_checkout_is_gone() {
+    let hive = Hive::new();
+    let s = Scratch::new("remove-missing");
+    let kept = init_repo(&s.path.join("kept"), "");
+    let gone = init_repo(&s.path.join("gone"), "");
+    for repo in [&kept, &gone] {
+        assert!(hive
+            .run(&["repo", "add", repo.to_str().unwrap()])
+            .status
+            .success());
+    }
+    fs::remove_dir_all(&gone).unwrap();
+    let (out, receipt) = hive.json(&["repo", "remove", "--missing"]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(receipt["counts"]["removed"], 1, "{receipt}");
+    assert_eq!(registered(&hive), [kept.to_str().unwrap()]);
+}
+
+#[test]
+fn remove_of_an_unregistered_path_is_refused_and_removes_nothing() {
+    let hive = Hive::new();
+    let s = Scratch::new("remove-unknown");
+    let a = init_repo(&s.path.join("a"), "");
+    let other = init_repo(&s.path.join("other"), "");
+    assert!(hive
+        .run(&["repo", "add", a.to_str().unwrap()])
+        .status
+        .success());
+    let (out, receipt) = hive.json(&[
+        "repo",
+        "remove",
+        a.to_str().unwrap(),
+        other.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{receipt}");
+    assert!(
+        refusal(&receipt).contains(other.to_str().unwrap()),
+        "{receipt}"
+    );
+    assert_eq!(registered(&hive), [a.to_str().unwrap()]);
+}
+
+#[test]
+fn remove_with_nothing_named_is_refused() {
+    let hive = Hive::new();
+    let (out, receipt) = hive.json(&["repo", "remove"]);
+    assert_eq!(out.status.code(), Some(1), "{receipt}");
+    assert!(refusal(&receipt).contains("--missing"), "{receipt}");
+}
