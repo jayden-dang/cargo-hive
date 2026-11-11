@@ -520,6 +520,22 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
     emit(state, out, b.finish(), &human, i32::from(fail > 0))
 }
 
+/// The registered repository that `path` lies inside, or whose linked worktree it is.
+fn owning_repo<'a>(reg: &'a Registry, path: &std::path::Path) -> Option<&'a registry::Repo> {
+    if let Some(inside) = reg
+        .repos
+        .iter()
+        .filter(|r| path.starts_with(&r.main))
+        .max_by_key(|r| r.main.components().count())
+    {
+        return Some(inside);
+    }
+    let common = crate::git::Git::at(path).common_dir().ok()?;
+    let common = common.canonicalize().unwrap_or(common);
+    let main = common.parent()?;
+    reg.repos.iter().find(|r| r.main == main)
+}
+
 struct Selection {
     repos: Vec<registry::Repo>,
     all_repos: bool,
@@ -534,7 +550,21 @@ fn select(reg: &Registry, args: &[std::path::PathBuf], b: &mut ReceiptBuilder) -
     }
     for arg in args {
         let real = arg.canonicalize().unwrap_or(arg.clone());
-        match reg.repos.iter().find(|r| r.main == real) {
+        let found = match reg.repos.iter().find(|r| r.main == real) {
+            Some(r) => Some(r),
+            None => {
+                let owner = owning_repo(reg, &real);
+                if let Some(r) = owner {
+                    b.note(format!(
+                        "{} is a checkout of the registered repository {}, which this command covers",
+                        real.display(),
+                        r.main.display()
+                    ));
+                }
+                owner
+            }
+        };
+        match found {
             Some(r) => {
                 if !repos.iter().any(|s| s.main == r.main) {
                     repos.push(r.clone());

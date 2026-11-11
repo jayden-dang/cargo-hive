@@ -39,7 +39,7 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 | How do I seed a new secondary checkout before its first build? | `seed` |
 | How do I time cold checkouts against seeded ones? | `bench` |
 
-`status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root, and bare `gc` also bounds the store. Pass explicit paths unless the user asked for everything; `gc <repo>` leaves the store alone and notes `store.skipped_scoped`. `seed` takes one registered checkout and does not mean every repo.
+`status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root, and bare `gc` also bounds the store. Pass explicit paths unless the user asked for everything; a path inside a registered repo, or a linked worktree of one, means that whole repo, with a note; `gc <repo>` leaves the store alone and notes `store.skipped_scoped`. `seed` takes one registered checkout and does not mean every repo.
 
 A registered repo whose main checkout is gone makes `apply` of an orphan plan refuse with `walk.unreadable`; `repo remove --missing` unregisters every such repo.
 
