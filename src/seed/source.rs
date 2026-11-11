@@ -123,6 +123,7 @@ pub fn owned_targets(
 
 pub(crate) fn unit_key(unit: &Unit) -> StoreKey {
     StoreKey {
+        variant: 0,
         toolchain_value: unit.toolchain_value,
         name_meta: unit.dir_name.clone(),
         fingerprint_hash: unit.hash_hex.clone(),

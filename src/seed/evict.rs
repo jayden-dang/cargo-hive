@@ -1082,6 +1082,7 @@ mod tests {
             std::fs::create_dir(value_dir.join(name)).unwrap();
         }
         let key = StoreKey {
+            variant: 0,
             toolchain_value: value,
             name_meta: "cap".into(),
             fingerprint_hash: "aaaaaaaaaaaaaaaa".into(),

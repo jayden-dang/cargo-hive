@@ -43,7 +43,7 @@ struct Cloned {
 }
 
 enum ClonedUnit {
-    Ready(Cloned),
+    Ready(Box<Cloned>),
     Skip,
     StopTarget,
 }
@@ -153,28 +153,74 @@ fn fill_target(
             return Ok(());
         }
     };
+    let listings = match profile_listings(pass.ctx.fs, target) {
+        Ok(listings) => listings,
+        Err(detail) => {
+            pass.report.findings.push((
+                "deps.listing".to_string(),
+                Some(target.path.clone()),
+                detail,
+            ));
+            return Ok(());
+        }
+    };
     let mut new_units = Vec::new();
     let mut held_rows = Vec::new();
+    let mut refs = Vec::new();
+    let mut newest_at = 0u64;
     for unit in units {
-        if entry_present(&store::entry_dir(pass.ctx.state, &skeleton(&unit))) {
-            match held_row(pass.ctx, stored, &unit, pass.repo, pass.now) {
-                Ok(row) => held_rows.push(row),
-                Err(detail) => pass.report.findings.push((
-                    "entry.unreadable".to_string(),
-                    Some(target.path.clone()),
-                    detail,
-                )),
+        let profile = target.path.join(&unit.rel_profile);
+        let hash_path = profile
+            .join(".fingerprint")
+            .join(&unit.dir_name)
+            .join(&unit.stem);
+        newest_at = newest_at.max(mtime_nanos(&hash_path));
+        let listing = listings.get(&profile).map(Vec::as_slice).unwrap_or(&[]);
+        let files =
+            match source::unit_files(pass.ctx.fs, &target.path, &unit, listing, CRATE_DIR_CAP) {
+                Ok(files) => files,
+                Err(refused) => {
+                    pass.report.findings.push((
+                        "unit.refused".to_string(),
+                        Some(target.path.clone()),
+                        format!("{}: {refused}", target.path.display()),
+                    ));
+                    continue;
+                }
+            };
+        match holding_variant(pass.ctx, stored, &unit, &target.path, &files) {
+            Ok(Holding::Held(variant)) => {
+                match held_row(pass.ctx, stored, &unit, variant, pass.repo, pass.now) {
+                    Ok(row) => {
+                        refs.push(unit_ref(&row));
+                        held_rows.push(row);
+                    }
+                    Err(detail) => pass.report.findings.push((
+                        "entry.unreadable".to_string(),
+                        Some(target.path.clone()),
+                        detail,
+                    )),
+                }
             }
-        } else {
-            new_units.push(unit);
+            Ok(Holding::New(variant)) => new_units.push(NewUnit {
+                unit,
+                variant,
+                files,
+            }),
+            Err(detail) => pass.report.findings.push((
+                "entry.unreadable".to_string(),
+                Some(target.path.clone()),
+                detail,
+            )),
         }
     }
+    let record = source_record(pass.repo, target, newest_at, refs);
     let tag_present = path_present(&store::tag_path(pass.ctx.state));
     if new_units.is_empty() && tag_present {
         pass.report.targets_read += 1;
         pass.report.entries_held += held_rows.len() as u64;
         let table = toolchain_table(target, pass.cancel, pass.report);
-        return merge_rows(pass.ctx, held_rows, table, pass.cancel, pass.report);
+        return merge_rows(pass.ctx, held_rows, table, record, pass.cancel, pass.report);
     }
     let locked = match locks::acquire(pass.ctx.fs, &target.path, false) {
         Acquired::Locked(locked) => locked,
@@ -202,49 +248,126 @@ fn fill_target(
     };
     let batch = clone_under_lock(pass, target, &locked, &new_units, tag_present);
     drop(locked);
-    publish_batch(pass.ctx, target, batch, held_rows, pass.cancel, pass.report)
+    publish_batch(
+        pass.ctx,
+        target,
+        batch,
+        held_rows,
+        record,
+        pass.cancel,
+        pass.report,
+    )
+}
+
+/// A live unit the store does not hold with these bytes yet, and the variant it gets.
+struct NewUnit {
+    unit: SourceUnit,
+    variant: u32,
+    files: Vec<PathBuf>,
+}
+
+enum Holding {
+    Held(u32),
+    New(u32),
+}
+
+/// The variant of the unit's key whose files have the unit's bytes, or the variant a new
+/// copy gets (SEED-2.30). Variants are probed on disk, so one stored earlier in this fill
+/// is seen too.
+fn holding_variant(
+    ctx: &Ctx<'_>,
+    stored: &store::StoreFile,
+    unit: &SourceUnit,
+    target_root: &Path,
+    files: &[PathBuf],
+) -> Result<Holding, String> {
+    let known = stored
+        .units
+        .iter()
+        .filter(|row| {
+            row.toolchain_value == unit.toolchain_value
+                && row.name_meta == unit.dir_name
+                && row.fingerprint_hash == unit.fingerprint_hash
+        })
+        .map(|row| row.variant)
+        .max()
+        .unwrap_or(0);
+    let mut highest_present = None;
+    let mut variant = 0u32;
+    loop {
+        let mut row = skeleton(unit);
+        row.variant = variant;
+        let dir = store::entry_dir(ctx.state, &row);
+        if entry_present(&dir) {
+            highest_present = Some(variant);
+            match store::same_unit_bytes(ctx.fs, target_root, files, &dir) {
+                Ok(true) => return Ok(Holding::Held(variant)),
+                Ok(false) => {}
+                Err(err) => return Err(format!("{}: {err}", dir.display())),
+            }
+        } else if variant >= known {
+            break;
+        }
+        variant += 1;
+    }
+    Ok(Holding::New(highest_present.map_or(0, |v| v + 1)))
+}
+
+fn unit_ref(row: &Row) -> store::SourceUnitRef {
+    store::SourceUnitRef {
+        toolchain_value: row.toolchain_value,
+        name_meta: row.name_meta.clone(),
+        fingerprint_hash: row.fingerprint_hash.clone(),
+        variant: row.variant,
+    }
+}
+
+fn source_record(
+    repo: &Repo,
+    target: &TargetDir,
+    newest_at: u64,
+    units: Vec<store::SourceUnitRef>,
+) -> Option<(PathBuf, store::SourceRecord)> {
+    let Owner::Owned { checkout } = &target.owner else {
+        return None;
+    };
+    Some((
+        target.path.clone(),
+        store::SourceRecord {
+            repo: repo.main.clone(),
+            checkout: checkout.clone(),
+            newest_at,
+            units,
+        },
+    ))
+}
+
+fn mtime_nanos(path: &Path) -> u64 {
+    std::fs::symlink_metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
 fn clone_under_lock(
     pass: &mut Pass<'_>,
     target: &TargetDir,
     _locked: &Locked,
-    new_units: &[SourceUnit],
+    new_units: &[NewUnit],
     tag_present: bool,
 ) -> Batch {
-    let listings = match profile_listings(pass.ctx.fs, target) {
-        Ok(listings) => listings,
-        Err(detail) => {
-            pass.report.findings.push((
-                "deps.listing".to_string(),
-                Some(target.path.clone()),
-                detail,
-            ));
-            return Batch {
-                cloned: Vec::new(),
-                disk_full: None,
-            };
-        }
-    };
     let mut batch = Batch {
         cloned: Vec::new(),
         disk_full: None,
     };
-    for unit in new_units {
+    for new in new_units {
         if (pass.cancel)() {
             pass.report.cancelled = true;
             break;
         }
-        match clone_unit(
-            pass.ctx,
-            target,
-            unit,
-            &listings,
-            pass.repo,
-            pass.now,
-            pass.report,
-        ) {
-            Ok(ClonedUnit::Ready(cloned)) => batch.cloned.push(cloned),
+        match clone_unit(pass.ctx, target, new, pass.repo, pass.now, pass.report) {
+            Ok(ClonedUnit::Ready(cloned)) => batch.cloned.push(*cloned),
             Ok(ClonedUnit::Skip) => {}
             Ok(ClonedUnit::StopTarget) => return batch,
             Err(why) => {
@@ -275,12 +398,12 @@ fn clone_under_lock(
 fn clone_unit(
     ctx: &Ctx<'_>,
     target: &TargetDir,
-    unit: &SourceUnit,
-    listings: &HashMap<PathBuf, Vec<(String, EntryKind)>>,
+    new: &NewUnit,
     repo: &Repo,
     now: u64,
     report: &mut FillReport,
 ) -> Result<ClonedUnit, String> {
+    let unit = &new.unit;
     let profile = target.path.join(&unit.rel_profile);
     let hash_path = profile
         .join(".fingerprint")
@@ -298,19 +421,8 @@ fn clone_unit(
             return Ok(ClonedUnit::Skip);
         }
     }
-    let listing = listings.get(&profile).map(Vec::as_slice).unwrap_or(&[]);
-    let files = match source::unit_files(ctx.fs, &target.path, unit, listing, CRATE_DIR_CAP) {
-        Ok(files) => files,
-        Err(refused) => {
-            report.findings.push((
-                "unit.refused".to_string(),
-                Some(target.path.clone()),
-                format!("{}: {refused}", target.path.display()),
-            ));
-            return Ok(ClonedUnit::Skip);
-        }
-    };
-    let key = format!("{}-{}", unit.dir_name, unit.fingerprint_hash);
+    let files = &new.files;
+    let key = store::entry_name(&unit.dir_name, &unit.fingerprint_hash, new.variant);
     let tmp = store::tmp_dir(ctx.state, &key);
     if let Err(stop) = reset_tmp(&tmp) {
         return match stop {
@@ -326,7 +438,7 @@ fn clone_unit(
         };
     }
     let mut size = 0u64;
-    for rel in &files {
+    for rel in files {
         let src = target.path.join(rel);
         let dst = tmp.join(rel);
         if let Some(parent) = dst.parent() {
@@ -402,11 +514,12 @@ fn clone_unit(
         size = size.saturating_add(stat.blocks.saturating_mul(512));
     }
     let mut row = skeleton(unit);
+    row.variant = new.variant;
     row.size = size;
     row.filled_at = now;
     row.last_live_at = now;
     row.repos = vec![repo.main.clone()];
-    Ok(ClonedUnit::Ready(Cloned { row, tmp }))
+    Ok(ClonedUnit::Ready(Box::new(Cloned { row, tmp })))
 }
 
 fn publish_batch(
@@ -414,6 +527,7 @@ fn publish_batch(
     target: &TargetDir,
     batch: Batch,
     held_rows: Vec<Row>,
+    mut record: Option<(PathBuf, store::SourceRecord)>,
     cancel: &(dyn Fn() -> bool + Sync),
     report: &mut FillReport,
 ) -> Result<(), Error> {
@@ -421,18 +535,24 @@ fn publish_batch(
     report.entries_held += held_rows.len() as u64;
     let table = toolchain_table(target, cancel, report);
     let mut rows = held_rows;
-    for item in batch.cloned {
+    for mut item in batch.cloned {
         if cancel() {
             report.cancelled = true;
             break;
         }
-        match store::publish_entry(ctx.fs, ctx.state, &item.tmp, &item.row, cancel) {
+        match store::publish_entry(ctx.fs, ctx.state, &item.tmp, &mut item.row, cancel) {
             Ok(Published::Added) => {
                 report.entries_added += 1;
+                if let Some((_, record)) = record.as_mut() {
+                    record.units.push(unit_ref(&item.row));
+                }
                 rows.push(item.row);
             }
             Ok(Published::Held) => {
                 report.entries_held += 1;
+                if let Some((_, record)) = record.as_mut() {
+                    record.units.push(unit_ref(&item.row));
+                }
                 rows.push(item.row);
             }
             Err(PublishFailed::Stopped(path)) => {
@@ -446,7 +566,7 @@ fn publish_batch(
                 break;
             }
             Err(PublishFailed::DiskFull(why)) => {
-                merge_rows(ctx, rows, table, cancel, report)?;
+                merge_rows(ctx, rows, table, None, cancel, report)?;
                 return Err(Error::disk_full(why));
             }
             Err(PublishFailed::Failed(why)) => {
@@ -459,7 +579,10 @@ fn publish_batch(
             }
         }
     }
-    merge_rows(ctx, rows, table, cancel, report)?;
+    if report.cancelled || batch.disk_full.is_some() {
+        record = None;
+    }
+    merge_rows(ctx, rows, table, record, cancel, report)?;
     if let Some(why) = batch.disk_full {
         return Err(Error::disk_full(why));
     }
@@ -470,13 +593,14 @@ fn merge_rows(
     ctx: &Ctx<'_>,
     rows: Vec<Row>,
     table: BTreeMap<String, u64>,
+    record: Option<(PathBuf, store::SourceRecord)>,
     cancel: &(dyn Fn() -> bool + Sync),
     report: &mut FillReport,
 ) -> Result<(), Error> {
-    if rows.is_empty() && table.is_empty() {
+    if rows.is_empty() && table.is_empty() && record.is_none() {
         return Ok(());
     }
-    match store::merge(ctx.state, rows, table, cancel) {
+    match store::merge_with_source(ctx.state, rows, table, record, cancel) {
         Ok(()) => Ok(()),
         Err(StateError::Cancelled) => {
             report.cancelled = true;
@@ -512,10 +636,12 @@ fn held_row(
     ctx: &Ctx<'_>,
     stored: &store::StoreFile,
     unit: &SourceUnit,
+    variant: u32,
     repo: &Repo,
     now: u64,
 ) -> Result<Row, String> {
     let mut row = skeleton(unit);
+    row.variant = variant;
     row.filled_at = now;
     row.last_live_at = now;
     row.repos = vec![repo.main.clone()];
@@ -541,6 +667,7 @@ fn skeleton(unit: &SourceUnit) -> Row {
         last_live_at: 0,
         repos: Vec::new(),
         registry_deps: unit.registry_deps.clone(),
+        variant: 0,
     }
 }
 
@@ -548,6 +675,7 @@ fn same_key(left: &Row, right: &Row) -> bool {
     left.toolchain_value == right.toolchain_value
         && left.name_meta == right.name_meta
         && left.fingerprint_hash == right.fingerprint_hash
+        && left.variant == right.variant
 }
 
 fn profile_listings(

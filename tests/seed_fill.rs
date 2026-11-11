@@ -278,7 +278,10 @@ fn a_new_unit_is_cloned_under_the_locks_and_never_compressed() {
     let report = fill_in(&built.hive, &lib, &built.target, &|| false);
     between_locks(&recording.log());
     let seen = states.lock().expect("states");
-    assert!(seen.is_empty(), "the store compresses nothing (SEED-2.28): {seen:?}");
+    assert!(
+        seen.is_empty(),
+        "the store compresses nothing (SEED-2.28): {seen:?}"
+    );
     assert!(report.entries_added >= 1, "{report:?}");
     assert_eq!(report.targets_read, 1);
     assert!(!report.cancelled);
@@ -2300,7 +2303,11 @@ fn a_filled_store_compresses_nothing_and_a_real_clone_shares_every_block() {
         }
         let clone = apfs.sharing(dst).unwrap();
         let stored = apfs.sharing(src).unwrap();
-        assert!(clone.shares_all, "{} does not share every block", dst.display());
+        assert!(
+            clone.shares_all,
+            "{} does not share every block",
+            dst.display()
+        );
         assert_eq!(clone.clone_id, stored.clone_id, "{}", dst.display());
     }
     assert_eq!(report.bytes_not_shared, Some(0), "{report:?}");

@@ -89,6 +89,7 @@ pub fn synth_entry(
         last_live_at,
         repos: Vec::new(),
         registry_deps: registry_deps.iter().map(|s| (*s).to_string()).collect(),
+        variant: 0,
     };
     let state = State::open_at(hive.home.path.clone()).unwrap();
     state

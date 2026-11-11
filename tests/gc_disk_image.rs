@@ -208,6 +208,7 @@ fn plant_aged_entry(
         last_live_at,
         repos: Vec::new(),
         registry_deps: Vec::new(),
+        variant: 0,
     };
     let state = State::open_at(home.to_path_buf()).unwrap();
     state

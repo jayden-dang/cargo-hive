@@ -80,6 +80,52 @@ fn the_first_build_of_a_seeded_worktree_recompiles_no_unit_it_cloned() {
 }
 
 #[test]
+fn a_lane_seeded_after_two_builds_of_a_path_dependent_crate_still_builds() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::with_top(&hive);
+    // One lane's last build stopped at depcrate, whose metadata embeds that lane's
+    // OUT_DIR path. Seeding another lane fills the store from it first.
+    let partial = repo.worktree("partial");
+    cargo_json(&hive, &partial, &["build", "-p", "depcrate"]);
+    let first = repo.worktree("first");
+    let (out, receipt) = hive.json(&["seed", first.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    // The main checkout then builds everything, topcrate against its own depcrate.
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("lane");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0,
+        "{receipt}"
+    );
+    // depcrate embeds its OUT_DIR path, so the two builds are two variants; leafcrate's
+    // bytes are the same in both, so it is stored once (SEED-2.30, SEED-2.32).
+    let stored: serde_json::Value =
+        serde_json::from_slice(&fs::read(hive.home.path.join("store.db")).unwrap()).unwrap();
+    let variants = |name: &str| {
+        stored["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row["name_meta"].as_str().unwrap().starts_with(name)
+                    && row["kind"].as_str() != Some("build-run")
+            })
+            .map(|row| row["variant"].as_u64().unwrap())
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(variants("leafcrate-"), BTreeSet::from([0]), "{stored}");
+    assert!(variants("depcrate-").contains(&1), "{stored}");
+    let built = cargo_json(&hive, &lane, &["build"]);
+    assert!(
+        built.registry_recompiled.is_empty(),
+        "{:?}",
+        built.registry_recompiled
+    );
+}
+
+#[test]
 fn a_second_lane_clones_without_filling_again() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);
@@ -217,7 +263,10 @@ fn a_disabled_store_compression_does_not_refuse_seed() {
     let lane = repo.worktree("no-compress");
     let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(0), "{receipt}");
-    assert!(receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0, "{receipt}");
+    assert!(
+        receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0,
+        "{receipt}"
+    );
 }
 
 #[test]
@@ -399,6 +448,38 @@ fn a_store_tag_that_cannot_be_stated_names_the_error() {
     assert!(outcome.unmeasured.iter().any(|(field, reason)| {
         field == "store_bytes" && reason.contains("the store's size was not measured")
     }));
+}
+
+#[test]
+fn a_store_with_no_source_record_clones_nothing_and_says_so() {
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let warm = repo.worktree("warm-old");
+    let (out, receipt) = hive.json(&["seed", warm.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    fs::remove_dir_all(warm.join("target")).unwrap();
+    // A store an older hive wrote has rows but no source records.
+    let db = hive.home.path.join("store.db");
+    let mut stored: serde_json::Value = serde_json::from_slice(&fs::read(&db).unwrap()).unwrap();
+    stored.as_object_mut().unwrap().remove("sources");
+    fs::write(&db, serde_json::to_vec(&stored).unwrap()).unwrap();
+    // No target of the repo is left to record either.
+    fs::remove_dir_all(repo.main.join("target")).unwrap();
+    let lane = repo.worktree("no-record");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
+    assert_eq!(receipt["counts"]["clone_units_cloned"], 0, "{receipt}");
+    assert!(
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "source.none"),
+        "{receipt}"
+    );
+    assert!(!lane.join("target").exists());
 }
 
 #[test]
@@ -1002,7 +1083,9 @@ fn a_plan_frees_the_bytes_the_clone_did_not_share_and_still_counts_shared_bytes(
     assert!(plan["paths"].as_u64().unwrap() > 0, "{plan}");
     // Every placed file shares its blocks with the store (SEED-2.28), so the plan may
     // claim as freed no more than the clone did not share, here nothing.
-    let not_shared = receipt["counts"]["clone_bytes_not_shared"].as_u64().unwrap();
+    let not_shared = receipt["counts"]["clone_bytes_not_shared"]
+        .as_u64()
+        .unwrap();
     assert_eq!(not_shared, 0, "{receipt}");
     let freed = plan["counts"]["freed_bytes"].as_u64().unwrap();
     let still_shared = plan["counts"]["deleted_bytes_still_shared"]

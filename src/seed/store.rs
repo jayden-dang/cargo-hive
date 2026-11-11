@@ -27,6 +27,9 @@ pub struct StoreKey {
     pub toolchain_value: u64,
     pub name_meta: String,
     pub fingerprint_hash: String,
+    /// Which copy of the key: copies from two source targets whose bytes differ (a crate
+    /// that embeds its `OUT_DIR` path) are two variants (SEED-2.30). 0 is the first.
+    pub variant: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,12 +44,37 @@ pub struct Row {
     pub last_live_at: u64,
     pub repos: Vec<PathBuf>,
     pub registry_deps: Vec<String>,
+    #[serde(default)]
+    pub variant: u32,
+}
+
+/// One unit a source target holds, at the variant whose bytes it has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceUnitRef {
+    pub toolchain_value: u64,
+    pub name_meta: String,
+    pub fingerprint_hash: String,
+    pub variant: u32,
+}
+
+/// What one source target held at its last fill (SEED-2.31). Seed clones the units of one
+/// such record, so every unit it places comes from one build (SEED-3.9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceRecord {
+    pub repo: PathBuf,
+    pub checkout: PathBuf,
+    /// Newest modification time, in epoch nanoseconds, of the units' fingerprint hash files.
+    pub newest_at: u64,
+    pub units: Vec<SourceUnitRef>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreFile {
     pub units: Vec<Row>,
     pub toolchains: BTreeMap<String, u64>,
+    /// Keyed by the source target's path.
+    #[serde(default)]
+    pub sources: BTreeMap<PathBuf, SourceRecord>,
 }
 
 pub fn store_dir(state: &State) -> PathBuf {
@@ -76,7 +104,21 @@ pub fn evict_dir(state: &State, pid: u32, seq: usize) -> PathBuf {
 pub(crate) fn key_dir(state: &State, key: &StoreKey) -> PathBuf {
     store_dir(state)
         .join(key.toolchain_value.to_string())
-        .join(format!("{}-{}", key.name_meta, key.fingerprint_hash))
+        .join(entry_name(
+            &key.name_meta,
+            &key.fingerprint_hash,
+            key.variant,
+        ))
+}
+
+/// `<name-meta>-<hash>` for variant 0, as older stores name it, and `<name-meta>-<hash>~<n>`
+/// for a later variant.
+pub(crate) fn entry_name(name_meta: &str, fingerprint_hash: &str, variant: u32) -> String {
+    if variant == 0 {
+        format!("{name_meta}-{fingerprint_hash}")
+    } else {
+        format!("{name_meta}-{fingerprint_hash}~{variant}")
+    }
 }
 
 pub fn rename_out(state: &State, key: &StoreKey, to: &Path) -> io::Result<()> {
@@ -198,11 +240,17 @@ impl fmt::Display for PublishFailed {
 
 impl std::error::Error for PublishFailed {}
 
+/// How many variants of one key a publish tries before it gives up.
+const MAX_VARIANTS: u32 = 64;
+
+/// Publishes the entry built in `tmp` at `row.variant`, or at the next free variant when
+/// that one holds other bytes (two fills racing for one new variant). `row.variant` is
+/// left at the variant the entry now has.
 pub fn publish_entry(
     fs: &dyn Fs,
     state: &State,
     tmp: &Path,
-    row: &Row,
+    row: &mut Row,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Published, PublishFailed> {
     let mut files = Vec::new();
@@ -214,16 +262,128 @@ pub fn publish_entry(
         }
         check_one(fs, path)?;
     }
-    if cancel() {
-        return Err(PublishFailed::Stopped(tmp.display().to_string()));
+    let rels: Vec<PathBuf> = files
+        .iter()
+        .filter_map(|path| path.strip_prefix(tmp).ok().map(Path::to_path_buf))
+        .collect();
+    loop {
+        if cancel() {
+            return Err(PublishFailed::Stopped(tmp.display().to_string()));
+        }
+        match publish(state, tmp, row)? {
+            Placed::Added => return Ok(Published::Added),
+            Placed::Present(dest) => {
+                let same = same_unit_bytes(fs, tmp, &rels, &dest)
+                    .map_err(|err| PublishFailed::Failed(format!("{}: {err}", dest.display())))?;
+                if same {
+                    discard_tmp(tmp)?;
+                    return Ok(Published::Held);
+                }
+                if row.variant + 1 >= MAX_VARIANTS {
+                    return Err(PublishFailed::Failed(format!(
+                        "{} already has {MAX_VARIANTS} variants with other bytes; collect the store and run the command again",
+                        dest.display()
+                    )));
+                }
+                row.variant += 1;
+            }
+        }
     }
-    publish(state, tmp, row)
+}
+
+/// Files whose bytes name the target they were built in without changing what a build
+/// reads from the unit: Cargo's `.d` dep-info lists and a build script's `root-output`.
+fn compared(rel: &Path) -> bool {
+    let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    !(name.ends_with(".d") || name == "root-output")
+}
+
+/// Whether the unit files `rels` under `src_root` have the same bytes as the entry at
+/// `entry`, and the entry has no other compared file (SEED-2.30). Two files that both
+/// share all their blocks under one clone id are the same without reading them.
+pub(crate) fn same_unit_bytes(
+    fs: &dyn Fs,
+    src_root: &Path,
+    rels: &[PathBuf],
+    entry: &Path,
+) -> io::Result<bool> {
+    let mut held = Vec::new();
+    list_files(fs, entry, 0, &mut held).map_err(|err| io::Error::other(err.to_string()))?;
+    let held: std::collections::BTreeSet<PathBuf> = held
+        .iter()
+        .filter_map(|path| path.strip_prefix(entry).ok().map(Path::to_path_buf))
+        .filter(|rel| compared(rel))
+        .collect();
+    let wanted: std::collections::BTreeSet<PathBuf> =
+        rels.iter().filter(|rel| compared(rel)).cloned().collect();
+    if held != wanted {
+        return Ok(false);
+    }
+    for rel in &wanted {
+        if !same_file(fs, &src_root.join(rel), &entry.join(rel))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn same_file(fs: &dyn Fs, a: &Path, b: &Path) -> io::Result<bool> {
+    if let (Ok(left), Ok(right)) = (fs.sharing(a), fs.sharing(b)) {
+        if left.shares_all
+            && right.shares_all
+            && left.clone_id != 0
+            && left.clone_id == right.clone_id
+        {
+            return Ok(true);
+        }
+    }
+    let (mut left, mut right) = (fs::File::open(a)?, fs::File::open(b)?);
+    if left.metadata()?.len() != right.metadata()?.len() {
+        return Ok(false);
+    }
+    let (mut x, mut y) = (vec![0u8; 64 * 1024], vec![0u8; 64 * 1024]);
+    loop {
+        let n = read_full(&mut left, &mut x)?;
+        let m = read_full(&mut right, &mut y)?;
+        if n != m || x[..n] != y[..m] {
+            return Ok(false);
+        }
+        if n == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+fn read_full(file: &mut fs::File, buf: &mut [u8]) -> io::Result<usize> {
+    use std::io::Read;
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(filled)
 }
 
 pub fn merge(
     state: &State,
     rows: Vec<Row>,
     table: BTreeMap<String, u64>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<(), StateError> {
+    merge_with_source(state, rows, table, None, cancel)
+}
+
+/// `merge`, and when `source` is given, records what that source target holds in place of
+/// its earlier record (SEED-2.31). Records of targets that no longer exist are dropped.
+pub fn merge_with_source(
+    state: &State,
+    rows: Vec<Row>,
+    table: BTreeMap<String, u64>,
+    source: Option<(PathBuf, SourceRecord)>,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), StateError> {
     state.locked_or_cancelled(cancel, |tx| {
@@ -254,6 +414,10 @@ pub fn merge(
         }
         for (text, value) in table {
             file.toolchains.entry(text).or_insert(value);
+        }
+        file.sources.retain(|target, _| target.is_dir());
+        if let Some((target, record)) = source {
+            file.sources.insert(target, record);
         }
         tx.write_bounded(STORE_FILE, &file, MAX_STORE_BYTES)
     })
@@ -418,6 +582,7 @@ fn same_key(left: &Row, right: &Row) -> bool {
     left.toolchain_value == right.toolchain_value
         && left.name_meta == right.name_meta
         && left.fingerprint_hash == right.fingerprint_hash
+        && left.variant == right.variant
 }
 
 pub(crate) fn row_key(row: &Row) -> StoreKey {
@@ -425,6 +590,7 @@ pub(crate) fn row_key(row: &Row) -> StoreKey {
         toolchain_value: row.toolchain_value,
         name_meta: row.name_meta.clone(),
         fingerprint_hash: row.fingerprint_hash.clone(),
+        variant: row.variant,
     }
 }
 
@@ -432,15 +598,21 @@ pub(crate) fn row_matches(row: &Row, key: &StoreKey) -> bool {
     row.toolchain_value == key.toolchain_value
         && row.name_meta == key.name_meta
         && row.fingerprint_hash == key.fingerprint_hash
+        && row.variant == key.variant
 }
 
 fn parse_entry_key(toolchain_value: u64, name: &str) -> Option<StoreKey> {
-    let hash = fingerprint::unit_hash(name)?;
-    let name_meta = name[..name.len() - hash.len() - 1].to_string();
+    let (base, variant) = match name.rsplit_once('~') {
+        Some((base, n)) => (base, n.parse::<u32>().ok().filter(|v| *v > 0)?),
+        None => (name, 0),
+    };
+    let hash = fingerprint::unit_hash(base)?;
+    let name_meta = base[..base.len() - hash.len() - 1].to_string();
     Some(StoreKey {
         toolchain_value,
         name_meta,
         fingerprint_hash: hash.to_string(),
+        variant,
     })
 }
 
@@ -563,7 +735,12 @@ fn check_one(fs: &dyn Fs, path: &Path) -> Result<(), PublishFailed> {
     Ok(())
 }
 
-fn publish(state: &State, tmp: &Path, row: &Row) -> Result<Published, PublishFailed> {
+enum Placed {
+    Added,
+    Present(PathBuf),
+}
+
+fn publish(state: &State, tmp: &Path, row: &Row) -> Result<Placed, PublishFailed> {
     let dest = entry_dir(state, row);
     let Some(parent) = dest.parent() else {
         return Err(PublishFailed::Failed(format!(
@@ -574,15 +751,9 @@ fn publish(state: &State, tmp: &Path, row: &Row) -> Result<Published, PublishFai
     fs::create_dir_all(parent)
         .map_err(|err| PublishFailed::Failed(format!("{}: {err}", parent.display())))?;
     match fs::rename(tmp, &dest) {
-        Ok(()) => Ok(Published::Added),
-        Err(err) if dest_present(&err) => {
-            discard_tmp(tmp)?;
-            Ok(Published::Held)
-        }
-        Err(err) => Err(PublishFailed::Failed(format!(
-            "{}: {err}",
-            dest.display()
-        ))),
+        Ok(()) => Ok(Placed::Added),
+        Err(err) if dest_present(&err) => Ok(Placed::Present(dest)),
+        Err(err) => Err(PublishFailed::Failed(format!("{}: {err}", dest.display()))),
     }
 }
 
@@ -636,6 +807,7 @@ mod tests {
             last_live_at: 1_700_000_000,
             repos: vec![PathBuf::from("/private/tmp/hive-it-repo")],
             registry_deps: Vec::new(),
+            variant: 0,
         }
     }
 
@@ -678,10 +850,10 @@ mod tests {
         // does not poll, so the state "renamed, no row" is its own test below.
         for stop_after in 0..=3 {
             let (state, fs) = scratch_state(&format!("stop-{stop_after}"));
-            let (tmp, row) = three_file_entry(&state, &*fs);
+            let (tmp, mut row) = three_file_entry(&state, &*fs);
             let polls = AtomicUsize::new(0);
             let cancel = || polls.fetch_add(1, Ordering::SeqCst) >= stop_after;
-            let published = publish_entry(&*fs, &state, &tmp, &row, &cancel);
+            let published = publish_entry(&*fs, &state, &tmp, &mut row, &cancel);
             let err = published.unwrap_err();
             assert!(
                 matches!(err, PublishFailed::Stopped(_)),
@@ -694,8 +866,8 @@ mod tests {
             );
             assert!(read(&state).unwrap().units.is_empty());
             assert!(tmp.is_dir(), "a stopped publish leaves its temp directory");
-            let (tmp, row) = three_file_entry(&state, &*fs);
-            publish_entry(&*fs, &state, &tmp, &row, &|| false).unwrap();
+            let (tmp, mut row) = three_file_entry(&state, &*fs);
+            publish_entry(&*fs, &state, &tmp, &mut row, &|| false).unwrap();
             merge(&state, vec![row.clone()], Default::default(), &|| false).unwrap();
             assert_eq!(read(&state).unwrap().units.len(), 1);
             let entry = entry_dir(&state, &row);
@@ -738,8 +910,8 @@ mod tests {
     #[test]
     fn a_row_whose_directory_is_gone_is_not_read_and_is_pruned_at_the_next_merge() {
         let (state, fs) = scratch_state("prune");
-        let (tmp, row) = three_file_entry(&state, &*fs);
-        publish_entry(&*fs, &state, &tmp, &row, &|| false).unwrap();
+        let (tmp, mut row) = three_file_entry(&state, &*fs);
+        publish_entry(&*fs, &state, &tmp, &mut row, &|| false).unwrap();
         merge(&state, vec![row.clone()], Default::default(), &|| false).unwrap();
         assert_eq!(read(&state).unwrap().units.len(), 1);
         std::fs::remove_dir_all(entry_dir(&state, &row)).unwrap();
@@ -754,18 +926,45 @@ mod tests {
     }
 
     #[test]
-    fn a_rename_that_finds_the_entry_present_counts_as_held_and_discards_its_copy() {
+    fn a_rename_onto_the_same_bytes_counts_as_held_and_discards_its_copy() {
         let (state, fs) = scratch_state("held");
-        let row = sample_row();
+        let (tmp, mut row) = three_file_entry(&state, &*fs);
         let dest = entry_dir(&state, &row);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        // The entry already there: a copy of the same files.
+        let status = std::process::Command::new("cp")
+            .args(["-R"])
+            .arg(&tmp)
+            .arg(&dest)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let published = publish_entry(&*fs, &state, &tmp, &mut row, &|| false).unwrap();
+        assert!(matches!(published, Published::Held));
+        assert_eq!(row.variant, 0);
+        assert!(!tmp.exists(), "the losing copy is discarded");
+        finish(&state);
+    }
+
+    #[test]
+    fn a_rename_onto_other_bytes_publishes_the_next_variant() {
+        let (state, fs) = scratch_state("variant");
+        let row0 = sample_row();
+        let dest = entry_dir(&state, &row0);
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join("keep"), b"original").unwrap();
-        let (tmp, row) = three_file_entry(&state, &*fs);
-        let published = publish_entry(&*fs, &state, &tmp, &row, &|| false).unwrap();
-        assert!(matches!(published, Published::Held));
-        assert!(!tmp.exists(), "the losing copy is discarded");
+        let (tmp, mut row) = three_file_entry(&state, &*fs);
+        let published = publish_entry(&*fs, &state, &tmp, &mut row, &|| false).unwrap();
+        assert!(matches!(published, Published::Added));
+        assert_eq!(row.variant, 1);
         assert_eq!(std::fs::read(dest.join("keep")).unwrap(), b"original");
-        assert!(!dest.join("debug").exists());
+        let second = entry_dir(&state, &row);
+        assert!(
+            second.ends_with("d-0123456789abcdef~1"),
+            "{}",
+            second.display()
+        );
+        assert!(rlib(&second).is_file());
         finish(&state);
     }
 
@@ -777,7 +976,7 @@ mod tests {
         row.filled_at = 10;
         row.last_live_at = 10;
         row.size = 4112;
-        publish_entry(&*fs, &state, &tmp, &row, &|| false).unwrap();
+        publish_entry(&*fs, &state, &tmp, &mut row, &|| false).unwrap();
         let mut table = BTreeMap::new();
         table.insert("rustc 1.97.0\n".to_string(), row.toolchain_value);
         merge(&state, vec![row.clone()], table, &|| false).unwrap();
@@ -816,8 +1015,8 @@ mod tests {
     #[test]
     fn a_store_over_its_cap_reports_the_failure_and_leaves_the_file_unchanged() {
         let (state, fs) = scratch_state("cap");
-        let (tmp, row) = three_file_entry(&state, &*fs);
-        publish_entry(&*fs, &state, &tmp, &row, &|| false).unwrap();
+        let (tmp, mut row) = three_file_entry(&state, &*fs);
+        publish_entry(&*fs, &state, &tmp, &mut row, &|| false).unwrap();
         merge(&state, vec![row], BTreeMap::new(), &|| false).unwrap();
         let path = state.root().join(STORE_FILE);
         let before = std::fs::read(&path).unwrap();
@@ -839,10 +1038,10 @@ mod tests {
     #[test]
     fn a_hard_linked_file_leaves_the_entry_unavailable() {
         let (state, fs) = scratch_state("link");
-        let (tmp, row) = three_file_entry(&state, &*fs);
+        let (tmp, mut row) = three_file_entry(&state, &*fs);
         let linked = tmp.join("debug/deps/also.rlib");
         fs.hardlink(&rlib(&tmp), &linked).unwrap();
-        let err = publish_entry(&*fs, &state, &tmp, &row, &|| false).unwrap_err();
+        let err = publish_entry(&*fs, &state, &tmp, &mut row, &|| false).unwrap_err();
         assert!(
             matches!(err, PublishFailed::Failed(ref why) if why.contains("libd-0123456789abcdef.rlib") || why.contains("also.rlib")),
             "{err}"
@@ -1058,6 +1257,7 @@ mod tests {
 
     fn store_key(value: u64, meta: &str, hash: &str) -> StoreKey {
         StoreKey {
+            variant: 0,
             toolchain_value: value,
             name_meta: meta.into(),
             fingerprint_hash: hash.into(),
@@ -1076,6 +1276,7 @@ mod tests {
             last_live_at,
             repos: Vec::new(),
             registry_deps: Vec::new(),
+            variant: 0,
         }
     }
 
@@ -1131,6 +1332,7 @@ mod tests {
             &StoreFile {
                 units: vec![row_for(&with_row, 10), row_for(&other_value, 11)],
                 toolchains,
+                sources: Default::default(),
             },
         );
 
@@ -1172,6 +1374,7 @@ mod tests {
             &StoreFile {
                 units: vec![row_for(&drop_key, 100), row_for(&keep_key, 100)],
                 toolchains: BTreeMap::from([("rustc\n".into(), 3u64)]),
+                sources: Default::default(),
             },
         );
         let seq = AtomicUsize::new(0);
@@ -1209,6 +1412,7 @@ mod tests {
             &StoreFile {
                 units: vec![row_for(&key, 200)],
                 toolchains: BTreeMap::new(),
+                sources: Default::default(),
             },
         );
         let plan = CommitPlan {
@@ -1238,6 +1442,7 @@ mod tests {
             &StoreFile {
                 units: vec![row_for(&key, 50)],
                 toolchains: BTreeMap::new(),
+                sources: Default::default(),
             },
         );
         let plan = CommitPlan {
@@ -1279,6 +1484,7 @@ mod tests {
                     ("sibling\n".into(), 2u64),
                     ("rowless-value\n".into(), 8u64),
                 ]),
+                sources: Default::default(),
             },
         );
         let plan = CommitPlan {
@@ -1312,6 +1518,7 @@ mod tests {
             &StoreFile {
                 units: vec![row_for(&key, 10)],
                 toolchains: BTreeMap::new(),
+                sources: Default::default(),
             },
         );
         let before = std::fs::read(state.root().join(STORE_FILE)).unwrap();
@@ -1357,6 +1564,7 @@ mod tests {
                     row_for(&held, 10),
                 ],
                 toolchains: BTreeMap::new(),
+                sources: Default::default(),
             },
         );
         let plan = CommitPlan {
@@ -1397,6 +1605,7 @@ mod tests {
             &StoreFile {
                 units: vec![row_for(&key, 10)],
                 toolchains: BTreeMap::new(),
+                sources: Default::default(),
             },
         );
         let plan = CommitPlan {

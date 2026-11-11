@@ -275,7 +275,20 @@ pub fn run_clone(
         return Ok(from_fill(ctx, &filled, findings, false, 0));
     }
     let stored = store::read(ctx.state).map_err(Error::State)?;
-    let (rows, dropped) = match choose::choose(&stored, &repo.main, &toolchain.version_text) {
+    let lane_lock = read_lock_file(&checkout.path);
+    let order = choose::source_order(&stored, &repo.main, &|record| {
+        lane_lock.is_some() && read_lock_file(&record.checkout) == lane_lock
+    });
+    let (rows, dropped) = match choose::choose(&stored, &repo.main, &toolchain.version_text, &order)
+    {
+        Choice::NoSource => {
+            findings.push((
+                "source.none".to_string(),
+                None,
+                "no source target of this repository has a record for this toolchain, so nothing was cloned; build a checkout of the repository and run the command again".to_string(),
+            ));
+            return Ok(from_fill(ctx, &filled, findings, false, 0));
+        }
         Choice::NoRow { release } => {
             let detail = if release.is_empty() {
                 "the store has no toolchain row for this version text, so nothing was cloned"
@@ -511,6 +524,16 @@ fn clone_counts(
     counts.insert("clone_units_failed".to_string(), failed);
     counts.insert("clone_units_outside_window".to_string(), outside_window);
     counts
+}
+
+/// A checkout's `Cargo.lock`, when it is a regular file of at most 16 MiB.
+fn read_lock_file(checkout: &std::path::Path) -> Option<Vec<u8>> {
+    let path = checkout.join("Cargo.lock");
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > 16 * 1024 * 1024 {
+        return None;
+    }
+    std::fs::read(&path).ok()
 }
 
 #[cfg(test)]

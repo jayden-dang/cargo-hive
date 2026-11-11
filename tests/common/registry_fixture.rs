@@ -51,6 +51,22 @@ const DEP_DEPS: &str = "\
 [{\"name\":\"leafcrate\",\"req\":\"^1\",\"features\":[],\"optional\":false,\"default_features\":true,\"target\":null,\"kind\":\"normal\"}]\
 ";
 
+const TOP_TOML: &str = "\
+[package]
+name = \"topcrate\"
+version = \"1.0.0\"
+edition = \"2021\"
+
+[dependencies]
+depcrate = \"1\"
+";
+
+const TOP_LIB: &str = "pub fn top() -> u32 { depcrate::dep() + 1 }\n";
+
+const TOP_DEPS: &str = "\
+[{\"name\":\"depcrate\",\"req\":\"^1\",\"features\":[],\"optional\":false,\"default_features\":true,\"target\":null,\"kind\":\"normal\"}]\
+";
+
 pub struct RegistryRepo {
     pub scratch: Scratch,
     pub main: PathBuf,
@@ -58,6 +74,17 @@ pub struct RegistryRepo {
 
 impl RegistryRepo {
     pub fn new(hive: &Hive) -> RegistryRepo {
+        RegistryRepo::build(hive, false)
+    }
+
+    /// The same repo, with a third registry crate `topcrate` on top of `depcrate`, and
+    /// the app depending on `topcrate`. `depcrate` includes a file from its `OUT_DIR`.
+    #[allow(dead_code)]
+    pub fn with_top(hive: &Hive) -> RegistryRepo {
+        RegistryRepo::build(hive, true)
+    }
+
+    fn build(hive: &Hive, top: bool) -> RegistryRepo {
         let scratch = Scratch::new("registry");
         let reg = scratch.path.join("reg");
         fs::create_dir_all(&reg).unwrap();
@@ -72,6 +99,15 @@ impl RegistryRepo {
         );
         write_index(&reg, "leafcrate", "[]", &leaf_cksum);
         write_index(&reg, "depcrate", DEP_DEPS, &dep_cksum);
+        if top {
+            let top_cksum = pack(&scratch, &reg, "topcrate", TOP_TOML, TOP_LIB, None);
+            write_index(&reg, "topcrate", TOP_DEPS, &top_cksum);
+        }
+        let (app_dep, app_lib) = if top {
+            ("topcrate", "pub fn app() -> u32 { topcrate::top() }\n")
+        } else {
+            ("depcrate", "pub fn app() -> u32 { depcrate::dep() }\n")
+        };
         fs::write(
             hive.cargo_home.path.join("config.toml"),
             format!(
@@ -86,14 +122,10 @@ impl RegistryRepo {
         git(&main, &["init", "-q"]);
         fs::write(
             main.join("Cargo.toml"),
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ndepcrate = \"1\"\n",
+            format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{app_dep} = \"1\"\n"),
         )
         .unwrap();
-        fs::write(
-            main.join("src/lib.rs"),
-            "pub fn app() -> u32 { depcrate::dep() }\n",
-        )
-        .unwrap();
+        fs::write(main.join("src/lib.rs"), app_lib).unwrap();
         fs::write(main.join(".gitignore"), "target\n").unwrap();
         let mut lock = Command::new("cargo");
         lock.args(["generate-lockfile", "--offline"])
