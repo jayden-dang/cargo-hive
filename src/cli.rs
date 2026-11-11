@@ -87,7 +87,7 @@ pub enum Command {
     Explain {
         /// Registered repos to explain; none means every registered repo
         repos: Vec<std::path::PathBuf>,
-        /// -n, --top. Default 10. 0 means show all.
+        /// How many copy groups and divergences to show; 0 shows all
         #[arg(short = 'n', long = "top", default_value_t = 10)]
         top: usize,
         #[command(flatten)]
