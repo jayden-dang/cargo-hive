@@ -6128,3 +6128,34 @@ Added after execution by `root-cause` (2026-11-10). `output_with_deadline` joine
 
 _Requirements: CORE-6.12, CORE-6.13_
 
+### Task 23: repo remove
+
+Added after the klynt run (2026-11-11) at the owner's request. A deleted registered repository blocked every orphan `apply`, and only a hand edit of `registry.json` removed it. Landed as `576ce9c`.
+
+**Files:**
+- Modify: `src/registry.rs` (`unregister`), `src/cli.rs` (`RepoCommand::Remove`), `plugin/skills/hive/SKILL.md`
+- Test: `tests/repo.rs`, `tests/skill.rs`
+
+**Depends-on:** Task 22
+
+- [x] **Step 1: Red.** `repo remove` does not parse.
+- [x] **Step 2: Implement** by path inside a main checkout (which may be gone) and `--missing`; an unknown path removes nothing.
+- [x] **Step 3: Verify and commit** `feat(repo): repo remove, by a path inside the repo or --missing`.
+
+_Requirements: CORE-2.10, CORE-2.11, CORE-2.12_
+
+### Task 24: A checkout path names its repository
+
+Added after the klynt run (2026-11-11) at the owner's request. `gc <worktree>` was refused with no hint of the repository to pass. Landed as `4f5c54e`.
+
+**Files:**
+- Modify: `src/cli.rs` (`select`, `owning_repo`)
+- Test: `tests/gc.rs`, `tests/explain.rs`
+
+**Depends-on:** Task 23
+
+- [x] **Step 1: Red.** `gc <linked worktree>` and `explain <path inside the repo>` are refused.
+- [x] **Step 2: Implement:** map to the registered repository, with a note.
+- [x] **Step 3: Verify and commit** `feat(cli): a path inside a registered repo, or its worktree, names that repo`.
+
+_Requirements: CORE-2.13, CORE-2.14_
