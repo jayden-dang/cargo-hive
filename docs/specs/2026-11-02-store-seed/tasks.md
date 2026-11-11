@@ -931,3 +931,20 @@ Added after execution by `root-cause` (2026-11-11). Three seeded klynt lanes fai
 - [x] **Step 3: Verify and commit** `fix(seed): clone every unit of a seed from one source build`.
 
 _Requirements: SEED-2.30, SEED-2.31, SEED-2.32, SEED-3.9, SEED-3.10, SEED-3.11_
+
+### Task 22: One mtime for every placed file
+
+Added after execution by `root-cause` (2026-11-11), from the second klynt run: seeded lanes built, but 87 seeded units per lane were rebuilt as `StaleDependency` (a dependency held from main newer than its dependent held from an older lane).
+
+**Files:**
+- Modify: `src/seed/place.rs` (`align_mtimes`)
+- Test: `tests/seed.rs`, `tests/seed_fill.rs`
+
+**Depends-on:** Task 21
+
+- [x] **Step 1: Red.** A lane seeded after two builds has placed files with many mtimes.
+- [x] **Step 2: Fix.** Every placed file gets the newest placed mtime; stamps follow.
+- [x] **Step 3: Verify and commit** `fix(seed): give every placed file one mtime so no dependency looks newer`.
+
+_Requirements: SEED-1.21_
+

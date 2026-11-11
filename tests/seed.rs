@@ -126,6 +126,44 @@ fn a_lane_seeded_after_two_builds_of_a_path_dependent_crate_still_builds() {
 }
 
 #[test]
+fn every_placed_file_carries_one_mtime_so_no_dependency_looks_newer() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::with_top(&hive);
+    // Units held from an earlier build keep that build's older mtimes; a unit new in a
+    // later build is newer. Cargo calls a dependent stale when a dependency is newer.
+    let partial = repo.worktree("partial-mtime");
+    cargo_json(&hive, &partial, &["build", "-p", "leafcrate"]);
+    let first = repo.worktree("first-mtime");
+    let (out, receipt) = hive.json(&["seed", first.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    std::thread::sleep(Duration::from_millis(1100));
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("lane-mtime");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let mut mtimes = BTreeSet::new();
+    let mut stack = vec![lane.join("target")];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let meta = entry.metadata().unwrap();
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                mtimes.insert(meta.modified().unwrap());
+            }
+        }
+    }
+    assert_eq!(mtimes.len(), 1, "{mtimes:?}");
+    let built = cargo_json(&hive, &lane, &["build"]);
+    assert!(
+        built.registry_recompiled.is_empty(),
+        "{:?}",
+        built.registry_recompiled
+    );
+}
+
+#[test]
 fn a_second_lane_clones_without_filling_again() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);

@@ -1496,7 +1496,17 @@ fn an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it() {
         PathBuf::from("CACHEDIR.TAG"),
         (std::fs::read(&tag).unwrap(), tag_meta.modified().unwrap()),
     );
-    assert_eq!(file_bodies(&target), expect);
+    // Same bytes as the store; every placed file carries the newest of their mtimes
+    // (SEED-1.21), so no dependency looks newer than its dependent.
+    let placed = file_bodies(&target);
+    let bytes = |m: &BTreeMap<PathBuf, (Vec<u8>, SystemTime)>| {
+        m.iter()
+            .map(|(k, (b, _))| (k.clone(), b.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(bytes(&placed), bytes(&expect));
+    let newest = expect.values().map(|(_, t)| *t).max().unwrap();
+    assert!(placed.values().all(|(_, t)| *t == newest), "{placed:?}");
     assert_eq!(report.cloned, filled.rows.len() as u64, "{report:?}");
     assert_eq!(report.placed.len() as u64, report.cloned);
     assert_eq!(report.existing, 0);
@@ -1535,13 +1545,17 @@ fn an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it() {
                     panic!("{} has a store stamp but no recorded stamp", row.name_meta)
                 });
                 assert_eq!(path, expected_path);
-                let expect_ns = meta
+                let _ = meta;
+                // The recorded stamp is the placed file's time, the one all placed files
+                // share (SEED-1.21).
+                let placed_ns = std::fs::symlink_metadata(target.join(&path))
+                    .unwrap()
                     .modified()
                     .unwrap()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_nanos() as u64;
-                assert_eq!(ns, expect_ns, "{}", row.name_meta);
+                assert_eq!(ns, placed_ns, "{}", row.name_meta);
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 assert!(unit.stamp.is_none(), "{}", row.name_meta);
@@ -1999,8 +2013,18 @@ fn units_outside_the_window_are_counted() {
         .iter()
         .find(|unit| unit.dir_name == row.name_meta)
         .unwrap();
-    let (_, ns) = unit.stamp.clone().unwrap();
-    assert_eq!(ns, expected_ns);
+    // The window is judged on the store's stamp; the placed stamp then takes the one
+    // mtime every placed file carries (SEED-1.21), and the record holds that.
+    let (rel, ns) = unit.stamp.clone().unwrap();
+    assert!(ns > expected_ns, "{ns} {expected_ns}");
+    let placed_ns = std::fs::symlink_metadata(work.join("target").join(rel))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    assert_eq!(ns, placed_ns);
 }
 
 fn real_apfs() -> Apfs {

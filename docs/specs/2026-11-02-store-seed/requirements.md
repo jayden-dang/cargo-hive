@@ -61,6 +61,7 @@ Terms (defined in `CONTEXT.md`, whose Store and Fill entries this feature correc
 - **SEED-1.18** WHEN the set of units to clone is empty THE SYSTEM SHALL create nothing in the checkout, so that a later seed can still clone into it.
 - **SEED-1.19** IF a parent of `target_directory` does not exist THEN THE SYSTEM SHALL create nothing, clone 0 units, and report one finding naming the path.
 - **SEED-1.20** (fix, 2026-11-11) IF the seeding or deletion capability has not passed for the release `resolve_toolchain` returns for the checkout's directory THEN THE SYSTEM SHALL fill nothing, clone 0 units, and report the refusal with exit code 1. The store-compression capability is no longer required.
+- **SEED-1.21** (fix, 2026-11-11) WHEN seed has placed a checkout's units THE SYSTEM SHALL give every placed file the newest modification time among the placed files, and record that time as each placed unit's stamp. A unit held from an earlier build keeps that build's older times while a unit new in a later build is newer, and Cargo calls a unit stale when a dependency's output is newer than its own (on klynt `StaleDependency` rebuilt 87 seeded units per lane).
 
 ## 2. Fill the store from live targets
 
