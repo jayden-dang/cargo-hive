@@ -1,6 +1,7 @@
-//! Complete, compressed registry units under `store/`, and the `store.db` rows
-//! that make an entry available. A temp directory is renamed into place only
-//! after every file is compressed; `store.db` is merged under the state lock.
+//! Complete registry units under `store/`, and the `store.db` rows that make an entry
+//! available. Store files are never compressed, so a clone into a checkout shares its
+//! blocks (SEED-2.28). A temp directory is renamed into place only after every file in it
+//! is checked; `store.db` is merged under the state lock.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::fingerprint;
 use crate::gc::CRATE_DIR_CAP;
-use crate::platform::{CompressOutcome, EntryKind, Fs};
+use crate::platform::{EntryKind, Fs};
 use crate::size::{allocated_bytes, SizeError, MAX_DEPTH};
 use crate::state::{State, StateError};
 
@@ -170,7 +171,7 @@ pub enum Published {
 
 #[derive(Debug)]
 pub enum PublishFailed {
-    Compress(String),
+    Failed(String),
     DiskFull(String),
     Stopped(String),
 }
@@ -178,7 +179,7 @@ pub enum PublishFailed {
 impl fmt::Display for PublishFailed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PublishFailed::Compress(why) => {
+            PublishFailed::Failed(why) => {
                 write!(
                     f,
                     "could not publish the entry ({why}); it was left unavailable"
@@ -197,7 +198,7 @@ impl fmt::Display for PublishFailed {
 
 impl std::error::Error for PublishFailed {}
 
-pub fn compress_and_publish(
+pub fn publish_entry(
     fs: &dyn Fs,
     state: &State,
     tmp: &Path,
@@ -211,7 +212,7 @@ pub fn compress_and_publish(
         if cancel() {
             return Err(PublishFailed::Stopped(tmp.display().to_string()));
         }
-        compress_one(fs, tmp, path)?;
+        check_one(fs, path)?;
     }
     if cancel() {
         return Err(PublishFailed::Stopped(tmp.display().to_string()));
@@ -518,21 +519,21 @@ fn list_files(
     out: &mut Vec<PathBuf>,
 ) -> Result<(), PublishFailed> {
     if depth > MAX_DEPTH {
-        return Err(PublishFailed::Compress(format!(
+        return Err(PublishFailed::Failed(format!(
             "{} is deeper than {MAX_DEPTH} levels; remove directories past that depth and run the command again",
             dir.display()
         )));
     }
     let entries = fs
         .read_dir_bounded(dir, CRATE_DIR_CAP)
-        .map_err(|err| PublishFailed::Compress(format!("{}: {err}", dir.display())))?;
+        .map_err(|err| PublishFailed::Failed(format!("{}: {err}", dir.display())))?;
     for (name, kind) in entries {
         let path = dir.join(name);
         match kind {
             EntryKind::Dir => list_files(fs, &path, depth + 1, out)?,
             EntryKind::File => out.push(path),
             EntryKind::Symlink | EntryKind::Other => {
-                return Err(PublishFailed::Compress(format!(
+                return Err(PublishFailed::Failed(format!(
                     "{} is not a regular file; remove it and run the command again",
                     path.display()
                 )));
@@ -542,69 +543,43 @@ fn list_files(
     Ok(())
 }
 
-fn compress_one(fs: &dyn Fs, tmp: &Path, path: &Path) -> Result<(), PublishFailed> {
+fn check_one(fs: &dyn Fs, path: &Path) -> Result<(), PublishFailed> {
     let stat = fs
         .entry_stat(path)
-        .map_err(|err| PublishFailed::Compress(format!("{}: {err}", path.display())))?;
+        .map_err(|err| PublishFailed::Failed(format!("{}: {err}", path.display())))?;
     if stat.kind != EntryKind::File {
-        return Err(PublishFailed::Compress(format!(
+        return Err(PublishFailed::Failed(format!(
             "{} is not a regular file; remove it and run the command again",
             path.display()
         )));
     }
     if stat.nlink != 1 {
-        return Err(PublishFailed::Compress(format!(
+        return Err(PublishFailed::Failed(format!(
             "{} has {} links; a store file has one, so this entry was left unpublished",
             path.display(),
             stat.nlink
         )));
     }
-    if stat.compressed {
-        return Ok(());
-    }
-    match fs.compress(path) {
-        CompressOutcome::Compressed | CompressOutcome::Incompressible => Ok(()),
-        CompressOutcome::SkippedHardLink => Err(PublishFailed::Compress(format!(
-            "{}: skipped hard link",
-            path.display()
-        ))),
-        CompressOutcome::Failed(why) => Err(after_failed(fs, tmp, path, &why)),
-    }
-}
-
-fn after_failed(fs: &dyn Fs, tmp: &Path, path: &Path, why: &str) -> PublishFailed {
-    let size = match fs::symlink_metadata(path) {
-        Ok(meta) => meta.len(),
-        Err(err) => {
-            return PublishFailed::Compress(format!("{}: {why} ({err})", path.display()));
-        }
-    };
-    match fs.volume(tmp) {
-        Ok(info) if info.available_bytes < size => {
-            PublishFailed::DiskFull(format!("{}: {why}", path.display()))
-        }
-        Ok(_) => PublishFailed::Compress(format!("{}: {why}", path.display())),
-        Err(err) => PublishFailed::Compress(format!("{}: {why} ({err})", path.display())),
-    }
+    Ok(())
 }
 
 fn publish(state: &State, tmp: &Path, row: &Row) -> Result<Published, PublishFailed> {
     let dest = entry_dir(state, row);
     let Some(parent) = dest.parent() else {
-        return Err(PublishFailed::Compress(format!(
+        return Err(PublishFailed::Failed(format!(
             "{} has no parent",
             dest.display()
         )));
     };
     fs::create_dir_all(parent)
-        .map_err(|err| PublishFailed::Compress(format!("{}: {err}", parent.display())))?;
+        .map_err(|err| PublishFailed::Failed(format!("{}: {err}", parent.display())))?;
     match fs::rename(tmp, &dest) {
         Ok(()) => Ok(Published::Added),
         Err(err) if dest_present(&err) => {
             discard_tmp(tmp)?;
             Ok(Published::Held)
         }
-        Err(err) => Err(PublishFailed::Compress(format!(
+        Err(err) => Err(PublishFailed::Failed(format!(
             "{}: {err}",
             dest.display()
         ))),
@@ -622,17 +597,15 @@ fn discard_tmp(tmp: &Path) -> Result<(), PublishFailed> {
     match fs::remove_dir_all(tmp) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(PublishFailed::Compress(format!("{}: {err}", tmp.display()))),
+        Err(err) => Err(PublishFailed::Failed(format!("{}: {err}", tmp.display()))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{CompressOutcome, Fs, Hooked, VolumeInfo};
     use crate::state::{State, StateError};
     use std::collections::BTreeMap;
-    use std::os::macos::fs::MetadataExt as _;
     use std::os::unix::io::AsRawFd;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -695,15 +668,6 @@ mod tests {
         entry.join("debug/deps/libd-0123456789abcdef.rlib")
     }
 
-    fn volume(available_bytes: u64) -> VolumeInfo {
-        VolumeInfo {
-            fs_type: "apfs".into(),
-            container: "disk1".into(),
-            mount: PathBuf::from("/"),
-            available_bytes,
-        }
-    }
-
     fn finish(state: &State) {
         let _ = std::fs::remove_dir_all(state.root());
     }
@@ -717,7 +681,7 @@ mod tests {
             let (tmp, row) = three_file_entry(&state, &*fs);
             let polls = AtomicUsize::new(0);
             let cancel = || polls.fetch_add(1, Ordering::SeqCst) >= stop_after;
-            let published = compress_and_publish(&*fs, &state, &tmp, &row, &cancel);
+            let published = publish_entry(&*fs, &state, &tmp, &row, &cancel);
             let err = published.unwrap_err();
             assert!(
                 matches!(err, PublishFailed::Stopped(_)),
@@ -731,11 +695,11 @@ mod tests {
             assert!(read(&state).unwrap().units.is_empty());
             assert!(tmp.is_dir(), "a stopped publish leaves its temp directory");
             let (tmp, row) = three_file_entry(&state, &*fs);
-            compress_and_publish(&*fs, &state, &tmp, &row, &|| false).unwrap();
+            publish_entry(&*fs, &state, &tmp, &row, &|| false).unwrap();
             merge(&state, vec![row.clone()], Default::default(), &|| false).unwrap();
             assert_eq!(read(&state).unwrap().units.len(), 1);
             let entry = entry_dir(&state, &row);
-            assert!(fs.entry_stat(&rlib(&entry)).unwrap().compressed);
+            assert!(!fs.entry_stat(&rlib(&entry)).unwrap().compressed);
             assert!(
                 !fs.entry_stat(&entry.join("debug/.fingerprint/d-0123456789abcdef/lib-d"))
                     .unwrap()
@@ -775,7 +739,7 @@ mod tests {
     fn a_row_whose_directory_is_gone_is_not_read_and_is_pruned_at_the_next_merge() {
         let (state, fs) = scratch_state("prune");
         let (tmp, row) = three_file_entry(&state, &*fs);
-        compress_and_publish(&*fs, &state, &tmp, &row, &|| false).unwrap();
+        publish_entry(&*fs, &state, &tmp, &row, &|| false).unwrap();
         merge(&state, vec![row.clone()], Default::default(), &|| false).unwrap();
         assert_eq!(read(&state).unwrap().units.len(), 1);
         std::fs::remove_dir_all(entry_dir(&state, &row)).unwrap();
@@ -797,7 +761,7 @@ mod tests {
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join("keep"), b"original").unwrap();
         let (tmp, row) = three_file_entry(&state, &*fs);
-        let published = compress_and_publish(&*fs, &state, &tmp, &row, &|| false).unwrap();
+        let published = publish_entry(&*fs, &state, &tmp, &row, &|| false).unwrap();
         assert!(matches!(published, Published::Held));
         assert!(!tmp.exists(), "the losing copy is discarded");
         assert_eq!(std::fs::read(dest.join("keep")).unwrap(), b"original");
@@ -813,7 +777,7 @@ mod tests {
         row.filled_at = 10;
         row.last_live_at = 10;
         row.size = 4112;
-        compress_and_publish(&*fs, &state, &tmp, &row, &|| false).unwrap();
+        publish_entry(&*fs, &state, &tmp, &row, &|| false).unwrap();
         let mut table = BTreeMap::new();
         table.insert("rustc 1.97.0\n".to_string(), row.toolchain_value);
         merge(&state, vec![row.clone()], table, &|| false).unwrap();
@@ -850,101 +814,10 @@ mod tests {
     }
 
     #[test]
-    fn a_compress_failure_other_than_too_small_leaves_the_entry_unavailable() {
-        let (state, inner) = scratch_state("compress-fail");
-        let (tmp, row) = three_file_entry(&state, &*inner);
-        let fs = Hooked {
-            inner,
-            compress: Some(Box::new(|path| {
-                if path.extension().and_then(|ext| ext.to_str()) == Some("rlib") {
-                    CompressOutcome::Failed("compressor broke".into())
-                } else {
-                    CompressOutcome::Incompressible
-                }
-            })),
-            volume: Some(Box::new(|_| Ok(volume(4096)))),
-            sharing: None,
-            entry_stat: None,
-        };
-        let err = compress_and_publish(&fs, &state, &tmp, &row, &|| false).unwrap_err();
-        assert!(
-            matches!(err, PublishFailed::Compress(ref why) if why.contains("libd-0123456789abcdef.rlib") && why.contains("compressor broke")),
-            "{err}"
-        );
-        assert!(!entry_dir(&state, &row).exists());
-        assert!(read(&state).unwrap().units.is_empty());
-        assert!(tmp.is_dir());
-        finish(&state);
-    }
-
-    #[test]
-    fn a_failure_with_little_free_space_is_disk_full() {
-        let (state, inner) = scratch_state("disk-full");
-        let (tmp, row) = three_file_entry(&state, &*inner);
-        let fs = Hooked {
-            inner,
-            compress: Some(Box::new(|path| {
-                if path.extension().and_then(|ext| ext.to_str()) == Some("rlib") {
-                    CompressOutcome::Failed("no space".into())
-                } else {
-                    CompressOutcome::Incompressible
-                }
-            })),
-            volume: Some(Box::new(|_| Ok(volume(4095)))),
-            sharing: None,
-            entry_stat: None,
-        };
-        let err = compress_and_publish(&fs, &state, &tmp, &row, &|| false).unwrap_err();
-        let PublishFailed::DiskFull(why) = &err else {
-            panic!("{err}");
-        };
-        assert!(why.contains("libd-0123456789abcdef.rlib"), "{err}");
-        let sentence = format!("the disk is full ({why}); free space and run the command again");
-        assert_eq!(err.to_string(), sentence);
-        assert_eq!(
-            crate::seed::Error::disk_full(why.clone()).to_string(),
-            sentence
-        );
-        assert!(!entry_dir(&state, &row).exists());
-        assert!(read(&state).unwrap().units.is_empty());
-        finish(&state);
-    }
-
-    #[test]
-    fn a_file_already_compressed_is_finished() {
-        let (state, fs) = scratch_state("already");
-        let (tmp, row) = three_file_entry(&state, &*fs);
-        let source = rlib(&tmp);
-        assert!(matches!(fs.compress(&source), CompressOutcome::Compressed));
-        let fs = Hooked {
-            inner: fs,
-            compress: Some(Box::new(|path| {
-                let flags = std::fs::symlink_metadata(path).unwrap().st_flags();
-                if flags & libc::UF_COMPRESSED != 0 {
-                    CompressOutcome::Failed(format!("compressed again: {}", path.display()))
-                } else {
-                    CompressOutcome::Incompressible
-                }
-            })),
-            volume: None,
-            sharing: None,
-            entry_stat: None,
-        };
-        let published = compress_and_publish(&fs, &state, &tmp, &row, &|| false).unwrap();
-        assert!(matches!(published, Published::Added));
-        assert!(
-            fs.entry_stat(&rlib(&entry_dir(&state, &row)))
-                .unwrap()
-                .compressed
-        );
-        finish(&state);
-    }
-
-    #[test]
     fn a_store_over_its_cap_reports_the_failure_and_leaves_the_file_unchanged() {
         let (state, fs) = scratch_state("cap");
         let (tmp, row) = three_file_entry(&state, &*fs);
-        compress_and_publish(&*fs, &state, &tmp, &row, &|| false).unwrap();
+        publish_entry(&*fs, &state, &tmp, &row, &|| false).unwrap();
         merge(&state, vec![row], BTreeMap::new(), &|| false).unwrap();
         let path = state.root().join(STORE_FILE);
         let before = std::fs::read(&path).unwrap();
@@ -969,9 +842,9 @@ mod tests {
         let (tmp, row) = three_file_entry(&state, &*fs);
         let linked = tmp.join("debug/deps/also.rlib");
         fs.hardlink(&rlib(&tmp), &linked).unwrap();
-        let err = compress_and_publish(&*fs, &state, &tmp, &row, &|| false).unwrap_err();
+        let err = publish_entry(&*fs, &state, &tmp, &row, &|| false).unwrap_err();
         assert!(
-            matches!(err, PublishFailed::Compress(ref why) if why.contains("libd-0123456789abcdef.rlib") || why.contains("also.rlib")),
+            matches!(err, PublishFailed::Failed(ref why) if why.contains("libd-0123456789abcdef.rlib") || why.contains("also.rlib")),
             "{err}"
         );
         assert!(!entry_dir(&state, &row).exists());

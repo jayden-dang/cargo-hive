@@ -1,5 +1,5 @@
 //! Clones a target's new registry units into the store while that target's Cargo
-//! locks are held, then drops the locks before compressing or publishing anything.
+//! locks are held, then drops the locks before publishing anything.
 //! A unit already in the store is not cloned again. A lock that is not taken fills
 //! nothing from that target. An owned target also contributes one toolchain row
 //! when `.rustc_info.json` names that checkout's toolchain and every unit shares
@@ -426,7 +426,7 @@ fn publish_batch(
             report.cancelled = true;
             break;
         }
-        match store::compress_and_publish(ctx.fs, ctx.state, &item.tmp, &item.row, cancel) {
+        match store::publish_entry(ctx.fs, ctx.state, &item.tmp, &item.row, cancel) {
             Ok(Published::Added) => {
                 report.entries_added += 1;
                 rows.push(item.row);
@@ -449,8 +449,8 @@ fn publish_batch(
                 merge_rows(ctx, rows, table, cancel, report)?;
                 return Err(Error::disk_full(why));
             }
-            Err(PublishFailed::Compress(why)) => {
-                let failed = PublishFailed::Compress(why);
+            Err(PublishFailed::Failed(why)) => {
+                let failed = PublishFailed::Failed(why);
                 report.findings.push((
                     "publish.failed".to_string(),
                     Some(target.path.clone()),

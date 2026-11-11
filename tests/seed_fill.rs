@@ -206,7 +206,7 @@ fn between_locks(log: &[String]) {
     assert!(!locks.is_empty(), "fill takes the target locks: {log:?}");
     assert!(!unlocks.is_empty(), "fill drops the target locks: {log:?}");
     assert!(!clones.is_empty(), "fill clones: {log:?}");
-    assert!(!compresses.is_empty(), "fill compresses: {log:?}");
+    assert!(compresses.is_empty(), "fill compresses nothing: {log:?}");
     let last_lock = *locks.last().unwrap();
     let first_unlock = unlocks[0];
     let last_unlock = *unlocks.last().unwrap();
@@ -217,12 +217,7 @@ fn between_locks(log: &[String]) {
             "clone at {index} is outside the locks: {log:?}"
         );
     }
-    for index in compresses {
-        assert!(
-            index > last_unlock,
-            "compress at {index} is not after the last unlock: {log:?}"
-        );
-    }
+    let _ = last_unlock;
 }
 
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
@@ -267,7 +262,7 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
 }
 
 #[test]
-fn a_new_unit_is_cloned_under_the_locks_and_compressed_after_they_are_dropped() {
+fn a_new_unit_is_cloned_under_the_locks_and_never_compressed() {
     let built = built();
     let lock = built.target_path.join("debug/.cargo-build-lock");
     let states = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -283,11 +278,7 @@ fn a_new_unit_is_cloned_under_the_locks_and_compressed_after_they_are_dropped() 
     let report = fill_in(&built.hive, &lib, &built.target, &|| false);
     between_locks(&recording.log());
     let seen = states.lock().expect("states");
-    assert!(!seen.is_empty(), "compression probes the build lock");
-    assert!(
-        seen.iter().all(|state| *state == LockState::Free),
-        "the build lock is free while compressing: {seen:?}"
-    );
+    assert!(seen.is_empty(), "the store compresses nothing (SEED-2.28): {seen:?}");
     assert!(report.entries_added >= 1, "{report:?}");
     assert_eq!(report.targets_read, 1);
     assert!(!report.cancelled);
@@ -2284,8 +2275,65 @@ fn read_capped(path: &Path) -> Vec<u8> {
 }
 
 #[test]
+fn a_filled_store_compresses_nothing_and_a_real_clone_shares_every_block() {
+    let filled = filled();
+    let apfs = real_apfs();
+    let store_root = filled.built.hive.home.path.join("store");
+    let mut store_files = 0u64;
+    for file in walk_files(&store_root) {
+        if file.components().any(|c| c.as_os_str() == ".tmp") {
+            continue;
+        }
+        store_files += 1;
+        let stat = apfs.entry_stat(&file).unwrap();
+        assert!(!stat.compressed, "{} is compressed", file.display());
+    }
+    assert!(store_files > 0);
+    let work = filled.built.repo.worktree("shared-plain");
+    let recording = Recording::over_real();
+    let report = place_with(&filled, &work, &filled.rows, recording.fs(), true);
+    let pairs = cloned_pairs(&recording.log());
+    assert!(pairs.len() >= 2, "the tag and a unit file were cloned");
+    for (src, dst) in &pairs {
+        if apfs.entry_stat(dst).unwrap().blocks == 0 {
+            continue;
+        }
+        let clone = apfs.sharing(dst).unwrap();
+        let stored = apfs.sharing(src).unwrap();
+        assert!(clone.shares_all, "{} does not share every block", dst.display());
+        assert_eq!(clone.clone_id, stored.clone_id, "{}", dst.display());
+    }
+    assert_eq!(report.bytes_not_shared, Some(0), "{report:?}");
+}
+
+fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if kind.is_file() {
+                out.push(entry.path());
+            }
+        }
+    }
+    out
+}
+
+/// An entry an older hive compressed in the store is still placed as a plain file.
+#[test]
 fn a_real_clone_of_a_compressed_entry_adds_no_unshared_bytes() {
     let filled = filled();
+    let apfs = real_apfs();
+    for file in walk_files(&filled.built.hive.home.path.join("store")) {
+        if file.components().any(|c| c.as_os_str() == ".tmp") {
+            continue;
+        }
+        let _ = apfs.compress(&file);
+    }
     let work = filled.built.repo.worktree("shared");
     let recording = Recording::over_real();
     let report = place_with(&filled, &work, &filled.rows, recording.fs(), true);
@@ -2464,7 +2512,7 @@ fn store_bytes_counts_allocated_blocks() {
     let apfs = real_apfs();
     let files = regular_files(&store_root);
     assert!(!files.is_empty(), "the store has a file");
-    let mut compressed_blocks = None;
+    let mut file_blocks = None;
     for path in &files {
         let sharing = apfs
             .sharing(path)
@@ -2476,17 +2524,17 @@ fn store_bytes_counts_allocated_blocks() {
             path.display()
         );
         let stat = apfs.entry_stat(path).unwrap();
-        if stat.compressed && stat.blocks > 0 {
-            compressed_blocks = Some(stat.blocks);
+        if stat.blocks > 0 {
+            file_blocks = Some(stat.blocks);
         }
     }
-    let compressed_blocks = compressed_blocks.expect("a compressed store file allocates blocks");
+    let file_blocks = file_blocks.expect("a store file allocates blocks");
     let got = report.store_bytes.expect("the store size is measured");
     assert!(got > 0, "{report:?}");
     assert!(
-        got >= compressed_blocks * 512,
-        "store size {got} is below one compressed file's {} blocks",
-        compressed_blocks
+        got >= file_blocks * 512,
+        "store size {got} is below one file's {} blocks",
+        file_blocks
     );
     assert_eq!(got, allocated_from_metadata(&store_root), "{report:?}");
 }

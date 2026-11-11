@@ -1596,11 +1596,7 @@ pub(crate) fn locate_checkout(
             });
         }
     };
-    for cap in [
-        Capability::Seeding,
-        Capability::StoreCompression,
-        Capability::Deletion,
-    ] {
+    for cap in [Capability::Seeding, Capability::Deletion] {
         if let Err(refusal) = doctor::require(caps, cap, Some(toolchain.release.as_str())) {
             let detail = refusal.to_string();
             return Err(Refusal {
