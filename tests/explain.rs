@@ -548,3 +548,18 @@ fn top_zero_shows_every_group() {
         "{defaulted}"
     );
 }
+
+#[test]
+fn explain_given_a_path_inside_a_repository_explains_that_repository() {
+    let hive = Hive::ready();
+    let s = Scratch::new("explain-inner-arg");
+    let repo = init_repo(&s.path.join("app"), "");
+    register(&hive, &repo);
+    let (out, receipt) = hive.json(&["explain", repo.join("src").to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(
+        receipt["scope"]["repos"],
+        serde_json::json!([repo]),
+        "{receipt}"
+    );
+}

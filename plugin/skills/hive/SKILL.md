@@ -31,6 +31,7 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 |---|---|
 | Is hive usable here? | `doctor` |
 | What is registered? | `repo list` |
+| A registered repo was deleted or should go | `repo remove <path>`, or `repo remove --missing` |
 | How big is it, what is orphaned? | `status` |
 | How do I free space? | `gc` with `--dry-run` first, then `gc` |
 | What can be deleted later? | `gc --plan`, then `apply` one plan |
@@ -38,11 +39,13 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 | How do I seed a new secondary checkout before its first build? | `seed` |
 | How do I time cold checkouts against seeded ones? | `bench` |
 
-`status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root, and bare `gc` also bounds the store. Pass explicit paths unless the user asked for everything; `gc <repo>` leaves the store alone and notes `store.skipped_scoped`. `seed` takes one registered checkout and does not mean every repo.
+`status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root, and bare `gc` also bounds the store. Pass explicit paths unless the user asked for everything; a path inside a registered repo, or a linked worktree of one, means that whole repo, with a note; `gc <repo>` leaves the store alone and notes `store.skipped_scoped`. `seed` takes one registered checkout and does not mean every repo.
+
+A registered repo whose main checkout is gone makes `apply` of an orphan plan refuse with `walk.unreadable`; `repo remove --missing` unregisters every such repo.
 
 `explain` shows 10 groups by default; `--top 0` shows all of them, as in `cargo hive explain /path/to/repo --top 0 --json`.
 
-`seed` copies registry output from checkouts that have already built into that new checkout. A checkout that already has a target gets nothing. Seed one lane first when starting several. Run bare `gc` after a batch of lanes finishes, and whenever `seed`'s `store_bytes` passes 40 GB.
+`seed` copies registry output from one checkout that has already built into that new checkout: the one whose `Cargo.lock` matches, else the most recently built, so every copied unit comes from one build. A checkout that already has a target gets nothing. `source.none` means no checkout of the repo has built yet. Seed one lane first when starting several. Run bare `gc` after a batch of lanes finishes, and whenever `seed`'s `store_bytes` passes 40 GB.
 
 `bench` times cold and seeded first builds on fresh secondary checkouts. Make an even number of fresh checkouts per arm with `git worktree add` (2n total), then remove them after with `git worktree remove` (which also deletes a gitignored target). Builds run `--offline --locked`, so the repo needs a committed Cargo.lock and its dependencies in Cargo's cache; building the main checkout once with the same command does both and fills the store. `--build-cmd` picks one of five shapes: `build`, `check-all`, `clippy-all`, `test-no-run`, or `check-lib=<package>`.
 
@@ -52,6 +55,7 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 cargo hive doctor --json
 cargo hive repo add /path/to/repo --json
 cargo hive repo list --json
+cargo hive repo remove --missing --json
 cargo hive status /path/to/repo --json
 cargo hive gc --json
 cargo hive gc /path/to/repo --dry-run --json

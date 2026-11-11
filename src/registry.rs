@@ -151,3 +151,79 @@ pub fn register(
     tx.write(FILE, &reg)?;
     Ok(Ok(RegisterOutcome::Registered(repo)))
 }
+
+/// Why `repo remove` removed nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnregisterRefusal {
+    NothingNamed,
+    NotRegistered(PathBuf),
+}
+
+impl fmt::Display for UnregisterRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UnregisterRefusal::NothingNamed => {
+                write!(
+                    f,
+                    "name a registered repository to remove, or pass --missing"
+                )
+            }
+            UnregisterRefusal::NotRegistered(path) => write!(
+                f,
+                "{} is not inside a registered repository; run `cargo hive repo list`",
+                path.display()
+            ),
+        }
+    }
+}
+
+/// Removes the repositories `paths` name (any path inside a main checkout, which need not
+/// exist any more), and with `missing` every repository whose main checkout is gone. One
+/// path that names no repository removes nothing.
+pub fn unregister(
+    paths: &[PathBuf],
+    missing: bool,
+    tx: &Tx<'_>,
+) -> Result<Result<Vec<Repo>, UnregisterRefusal>, StateError> {
+    if paths.is_empty() && !missing {
+        return Ok(Err(UnregisterRefusal::NothingNamed));
+    }
+    let mut reg: Registry = tx.read(FILE)?;
+    let mut doomed: BTreeSet<PathBuf> = BTreeSet::new();
+    for path in paths {
+        let Some(main) = owning_main(&reg, path) else {
+            return Ok(Err(UnregisterRefusal::NotRegistered(path.clone())));
+        };
+        doomed.insert(main);
+    }
+    if missing {
+        for repo in &reg.repos {
+            if !repo.main.is_dir() {
+                doomed.insert(repo.main.clone());
+            }
+        }
+    }
+    let (removed, kept): (Vec<Repo>, Vec<Repo>) = reg
+        .repos
+        .drain(..)
+        .partition(|repo| doomed.contains(&repo.main));
+    reg.repos = kept;
+    if !removed.is_empty() {
+        tx.write(FILE, &reg)?;
+    }
+    Ok(Ok(removed))
+}
+
+/// The registered main checkout that `path` is, or lies inside; the deepest one wins.
+fn owning_main(reg: &Registry, path: &Path) -> Option<PathBuf> {
+    let absolute = std::path::absolute(path).ok()?;
+    let real = path.canonicalize().ok();
+    reg.repos
+        .iter()
+        .map(|repo| &repo.main)
+        .filter(|main| {
+            absolute.starts_with(main) || real.as_ref().is_some_and(|real| real.starts_with(main))
+        })
+        .max_by_key(|main| main.components().count())
+        .cloned()
+}

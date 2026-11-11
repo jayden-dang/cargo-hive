@@ -80,6 +80,90 @@ fn the_first_build_of_a_seeded_worktree_recompiles_no_unit_it_cloned() {
 }
 
 #[test]
+fn a_lane_seeded_after_two_builds_of_a_path_dependent_crate_still_builds() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::with_top(&hive);
+    // One lane's last build stopped at depcrate, whose metadata embeds that lane's
+    // OUT_DIR path. Seeding another lane fills the store from it first.
+    let partial = repo.worktree("partial");
+    cargo_json(&hive, &partial, &["build", "-p", "depcrate"]);
+    let first = repo.worktree("first");
+    let (out, receipt) = hive.json(&["seed", first.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    // The main checkout then builds everything, topcrate against its own depcrate.
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("lane");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0,
+        "{receipt}"
+    );
+    // depcrate embeds its OUT_DIR path, so the two builds are two variants; leafcrate's
+    // bytes are the same in both, so it is stored once (SEED-2.30, SEED-2.32).
+    let stored: serde_json::Value =
+        serde_json::from_slice(&fs::read(hive.home.path.join("store.db")).unwrap()).unwrap();
+    let variants = |name: &str| {
+        stored["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row["name_meta"].as_str().unwrap().starts_with(name)
+                    && row["kind"].as_str() != Some("build-run")
+            })
+            .map(|row| row["variant"].as_u64().unwrap())
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(variants("leafcrate-"), BTreeSet::from([0]), "{stored}");
+    assert!(variants("depcrate-").contains(&1), "{stored}");
+    let built = cargo_json(&hive, &lane, &["build"]);
+    assert!(
+        built.registry_recompiled.is_empty(),
+        "{:?}",
+        built.registry_recompiled
+    );
+}
+
+#[test]
+fn every_placed_file_carries_one_mtime_so_no_dependency_looks_newer() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::with_top(&hive);
+    // Units held from an earlier build keep that build's older mtimes; a unit new in a
+    // later build is newer. Cargo calls a dependent stale when a dependency is newer.
+    let partial = repo.worktree("partial-mtime");
+    cargo_json(&hive, &partial, &["build", "-p", "leafcrate"]);
+    let first = repo.worktree("first-mtime");
+    let (out, receipt) = hive.json(&["seed", first.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    std::thread::sleep(Duration::from_millis(1100));
+    cargo_json(&hive, &repo.main, &["build"]);
+    let lane = repo.worktree("lane-mtime");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let mut mtimes = BTreeSet::new();
+    let mut stack = vec![lane.join("target")];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let meta = entry.metadata().unwrap();
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                mtimes.insert(meta.modified().unwrap());
+            }
+        }
+    }
+    assert_eq!(mtimes.len(), 1, "{mtimes:?}");
+    let built = cargo_json(&hive, &lane, &["build"]);
+    assert!(
+        built.registry_recompiled.is_empty(),
+        "{:?}",
+        built.registry_recompiled
+    );
+}
+
+#[test]
 fn a_second_lane_clones_without_filling_again() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);
@@ -190,7 +274,6 @@ fn a_disabled_capability_is_refused_and_nothing_filled() {
     let repo = RegistryRepo::new(&hive);
     for (name, disabled) in [
         ("a", serde_json::json!({"seeding": ["a"]})),
-        ("b", serde_json::json!({"store_compression": ["b"]})),
         ("d", serde_json::json!({"deletion": ["d"]})),
     ] {
         hive.write_capabilities(disabled);
@@ -207,6 +290,21 @@ fn a_disabled_capability_is_refused_and_nothing_filled() {
         );
         assert!(nothing_filled(&hive), "{name}: {receipt}");
     }
+}
+
+#[test]
+fn a_disabled_store_compression_does_not_refuse_seed() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    hive.write_capabilities(serde_json::json!({"store_compression": ["b"]}));
+    let lane = repo.worktree("no-compress");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
+    assert!(
+        receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0,
+        "{receipt}"
+    );
 }
 
 #[test]
@@ -391,6 +489,38 @@ fn a_store_tag_that_cannot_be_stated_names_the_error() {
 }
 
 #[test]
+fn a_store_with_no_source_record_clones_nothing_and_says_so() {
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let warm = repo.worktree("warm-old");
+    let (out, receipt) = hive.json(&["seed", warm.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    fs::remove_dir_all(warm.join("target")).unwrap();
+    // A store an older hive wrote has rows but no source records.
+    let db = hive.home.path.join("store.db");
+    let mut stored: serde_json::Value = serde_json::from_slice(&fs::read(&db).unwrap()).unwrap();
+    stored.as_object_mut().unwrap().remove("sources");
+    fs::write(&db, serde_json::to_vec(&stored).unwrap()).unwrap();
+    // No target of the repo is left to record either.
+    fs::remove_dir_all(repo.main.join("target")).unwrap();
+    let lane = repo.worktree("no-record");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
+    assert_eq!(receipt["counts"]["clone_units_cloned"], 0, "{receipt}");
+    assert!(
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "source.none"),
+        "{receipt}"
+    );
+    assert!(!lane.join("target").exists());
+}
+
+#[test]
 fn an_empty_choice_clones_nothing_and_reports_why() {
     let hive = Hive::ready();
     quiet_cache(&hive);
@@ -572,7 +702,7 @@ fn a_seed_waits_for_an_exclusive_store_lock_and_then_seeds() {
 }
 
 #[test]
-fn compression_finishes_while_another_process_holds_the_state_lock() {
+fn publishing_finishes_while_another_process_holds_the_state_lock() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);
     cargo_json(&hive, &repo.main, &["build"]);
@@ -590,10 +720,10 @@ fn compression_finishes_while_another_process_holds_the_state_lock() {
     loop {
         assert!(
             started.elapsed() < Duration::from_secs(180),
-            "no compressed rlib appeared under {}",
+            "no published rlib appeared under {}",
             store.display()
         );
-        if compressed_rlib(&store) {
+        if published_rlib(&store) {
             assert!(
                 pid_alive(child.id()),
                 "seed exited before the state lock was released"
@@ -602,7 +732,7 @@ fn compression_finishes_while_another_process_holds_the_state_lock() {
         }
         if !pid_alive(child.id()) {
             let out = wait_within(child, Duration::from_secs(5));
-            panic!("seed exited before a compressed rlib existed: {out:?}");
+            panic!("seed exited before a published rlib existed: {out:?}");
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -989,16 +1119,17 @@ fn a_plan_frees_the_bytes_the_clone_did_not_share_and_still_counts_shared_bytes(
     assert!(out.status.success(), "{planned}");
     let plan = plan_for(&planned, &target);
     assert!(plan["paths"].as_u64().unwrap() > 0, "{plan}");
-    let not_shared = receipt["counts"]["clone_bytes_not_shared"].as_u64();
-    assert!(not_shared.unwrap_or(0) > 0, "{receipt}");
+    // Every placed file shares its blocks with the store (SEED-2.28), so the plan may
+    // claim as freed no more than the clone did not share, here nothing.
+    let not_shared = receipt["counts"]["clone_bytes_not_shared"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(not_shared, 0, "{receipt}");
     let freed = plan["counts"]["freed_bytes"].as_u64().unwrap();
     let still_shared = plan["counts"]["deleted_bytes_still_shared"]
         .as_u64()
         .unwrap();
-    assert!(
-        freed > 0 && freed <= not_shared.unwrap(),
-        "{plan} {receipt}"
-    );
+    assert!(freed <= not_shared, "{plan} {receipt}");
     assert!(still_shared > 0, "{plan}");
 }
 
@@ -1950,7 +2081,8 @@ fn hold_build_locks(hive: &Hive, root: &Path) -> Held {
     held
 }
 
-fn compressed_rlib(store: &Path) -> bool {
+/// An rlib in a published store entry (outside `.tmp`).
+fn published_rlib(store: &Path) -> bool {
     let Ok(tops) = fs::read_dir(store) else {
         return false;
     };
@@ -1963,14 +2095,14 @@ fn compressed_rlib(store: &Path) -> bool {
         if !name.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
-        if rlib_is_compressed(&top, 0) {
+        if rlib_under(&top, 0) {
             return true;
         }
     }
     false
 }
 
-fn rlib_is_compressed(dir: &Path, depth: usize) -> bool {
+fn rlib_under(dir: &Path, depth: usize) -> bool {
     if depth > 8 {
         return false;
     }
@@ -1983,13 +2115,10 @@ fn rlib_is_compressed(dir: &Path, depth: usize) -> bool {
         assert!(seen < 100_000, "walk bound hit");
         let path = entry.unwrap().path();
         let meta = fs::symlink_metadata(&path).unwrap();
-        if meta.is_dir() && rlib_is_compressed(&path, depth + 1) {
+        if meta.is_dir() && rlib_under(&path, depth + 1) {
             return true;
         }
-        if meta.is_file()
-            && path.extension().is_some_and(|ext| ext == "rlib")
-            && meta.st_flags() & libc::UF_COMPRESSED != 0
-        {
+        if meta.is_file() && path.extension().is_some_and(|ext| ext == "rlib") {
             return true;
         }
     }

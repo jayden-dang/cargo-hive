@@ -754,3 +754,34 @@ fn gc_of_one_repo_keeps_a_shared_target_owned_by_the_other_registered_main() {
         "gc of the selected repo dropped the shared target: {r}"
     );
 }
+
+#[test]
+fn gc_given_a_linked_worktree_cleans_its_repository() {
+    let hive = Hive::ready();
+    let s = Scratch::new("gc-worktree-arg");
+    hive.config(&format!(
+        r#"{{"secondary_roots":["{}"]}}"#,
+        s.path.join("no-secondary").display()
+    ));
+    let repo = init_repo(&s.path.join("app"), "");
+    register(&hive, &repo);
+    let lane = s.path.join("lane");
+    common::git(
+        &repo,
+        &["worktree", "add", "-q", "--detach", lane.to_str().unwrap()],
+    );
+    let (out, receipt) = hive.json(&["gc", lane.to_str().unwrap(), "--dry-run"]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(
+        receipt["scope"]["repos"],
+        serde_json::json!([repo]),
+        "{receipt}"
+    );
+    assert!(
+        receipt["notes"].as_array().unwrap().iter().any(|n| n
+            .as_str()
+            .unwrap()
+            .contains(lane.canonicalize().unwrap().to_str().unwrap())),
+        "{receipt}"
+    );
+}

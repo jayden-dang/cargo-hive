@@ -58,15 +58,19 @@ The status name for a target no checkout owns when resolution succeeded. It is a
 _Avoid_: stale target, dead target
 
 **Store**:
-Hive's content store of compressed registry units under `~/.hive/store/`, keyed by toolchain value, name-meta and fingerprint hash. It is the only place that gets compressed and the only source of clones.
+Hive's content store of registry units under `~/.hive/store/`, keyed by toolchain value, name-meta and fingerprint hash, with one variant per distinct set of bytes, and a source record of the units each source target held. Nothing in it is compressed, so a clone shares its blocks. It is the only source of clones.
 _Avoid_: cache, shared target
 
 **Seed**:
-Cloning store units into a secondary checkout's target with APFS clonefile.
+Cloning the store units of one source target's record into a secondary checkout's target with APFS clonefile.
 _Avoid_: warm, prefill, restore
 
+**Variant**:
+One copy of a store key. Two source targets whose files for one key differ in bytes (a crate that embeds its `OUT_DIR` path) give two variants; the same bytes give one.
+_Avoid_: version, copy
+
 **Fill**:
-Cloning new registry units from a live target into the store, under a try-lock on that target, then releasing the lock and compressing them there.
+Cloning new registry units from a live target into the store, under a try-lock on that target, then releasing the lock and publishing them there, and recording which units at which variants that target holds.
 _Avoid_: harvest
 
 **Registry unit**:
@@ -166,5 +170,5 @@ A bench sample whose checkout is seeded from the store just before its build. It
 _Avoid_: warm sample, cached build
 
 **Prime**:
-The one fill bench runs before its first sample, reported apart and kept out of every median, so the store's first compressing fill is measured once.
+The one fill bench runs before its first sample, reported apart and kept out of every median, so the store's first fill is measured once.
 _Avoid_: warm-up

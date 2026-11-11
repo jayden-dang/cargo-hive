@@ -22,7 +22,7 @@ use cargo_hive::seed::store::{self, store_dir, Row, StoreFile, MAX_STORE_BYTES, 
 use cargo_hive::state::State;
 use common::store_fixture::{
     count, drop_row, entry_dirs, has_finding, plant_rowless, rows, seeded_store, set_last_live_at,
-    synth_entry, tree_files,
+    synth_entry, synth_entry_at, tree_files,
 };
 use common::{crate_dirs, plant_session, wait_within, Hive};
 
@@ -628,7 +628,7 @@ fn entries_of_a_value_no_checkout_maps_to_are_dropped_with_their_table_text() {
     let state = State::open_at(hive.home.path.clone()).unwrap();
     let file = store::read(&state).unwrap();
     assert!(matches!(
-        choose::choose(&file, &repo.main, &text),
+        choose::choose(&file, &repo.main, &text, &[]),
         Choice::NoRow { .. }
     ));
 }
@@ -1128,19 +1128,24 @@ fn within_one_last_live_at_an_entry_goes_before_the_entries_its_registry_deps_na
     let value = 77_002u64;
     let dep_fp = "aaaaaaaaaaaaaaaa";
     let user_fp = "zzzzzzzzzzzzzzzz";
-    synth_entry(
+    // One second for both, or the test is about age, not about dependency order.
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    synth_entry_at(
         &hive,
         (value, "aaa-dep", dep_fp),
         &[],
         &[("blob", kib256(1))],
-        0,
+        now,
     );
-    synth_entry(
+    synth_entry_at(
         &hive,
         (value, "zzz-user", user_fp),
         &[dep_fp],
         &[("blob", kib256(2))],
-        0,
+        now,
     );
     let dep_free = freeable_of(&fs, &entry_path(&hive, value, "aaa-dep", dep_fp));
     let user_free = freeable_of(&fs, &entry_path(&hive, value, "zzz-user", user_fp));
@@ -2275,6 +2280,7 @@ fn plant_many_aged(
             last_live_at,
             repos: Vec::new(),
             registry_deps: Vec::new(),
+            variant: 0,
         });
     }
     state

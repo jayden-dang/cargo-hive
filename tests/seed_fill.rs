@@ -206,7 +206,7 @@ fn between_locks(log: &[String]) {
     assert!(!locks.is_empty(), "fill takes the target locks: {log:?}");
     assert!(!unlocks.is_empty(), "fill drops the target locks: {log:?}");
     assert!(!clones.is_empty(), "fill clones: {log:?}");
-    assert!(!compresses.is_empty(), "fill compresses: {log:?}");
+    assert!(compresses.is_empty(), "fill compresses nothing: {log:?}");
     let last_lock = *locks.last().unwrap();
     let first_unlock = unlocks[0];
     let last_unlock = *unlocks.last().unwrap();
@@ -217,12 +217,7 @@ fn between_locks(log: &[String]) {
             "clone at {index} is outside the locks: {log:?}"
         );
     }
-    for index in compresses {
-        assert!(
-            index > last_unlock,
-            "compress at {index} is not after the last unlock: {log:?}"
-        );
-    }
+    let _ = last_unlock;
 }
 
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
@@ -267,7 +262,7 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
 }
 
 #[test]
-fn a_new_unit_is_cloned_under_the_locks_and_compressed_after_they_are_dropped() {
+fn a_new_unit_is_cloned_under_the_locks_and_never_compressed() {
     let built = built();
     let lock = built.target_path.join("debug/.cargo-build-lock");
     let states = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -283,10 +278,9 @@ fn a_new_unit_is_cloned_under_the_locks_and_compressed_after_they_are_dropped() 
     let report = fill_in(&built.hive, &lib, &built.target, &|| false);
     between_locks(&recording.log());
     let seen = states.lock().expect("states");
-    assert!(!seen.is_empty(), "compression probes the build lock");
     assert!(
-        seen.iter().all(|state| *state == LockState::Free),
-        "the build lock is free while compressing: {seen:?}"
+        seen.is_empty(),
+        "the store compresses nothing (SEED-2.28): {seen:?}"
     );
     assert!(report.entries_added >= 1, "{report:?}");
     assert_eq!(report.targets_read, 1);
@@ -1502,7 +1496,17 @@ fn an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it() {
         PathBuf::from("CACHEDIR.TAG"),
         (std::fs::read(&tag).unwrap(), tag_meta.modified().unwrap()),
     );
-    assert_eq!(file_bodies(&target), expect);
+    // Same bytes as the store; every placed file carries the newest of their mtimes
+    // (SEED-1.21), so no dependency looks newer than its dependent.
+    let placed = file_bodies(&target);
+    let bytes = |m: &BTreeMap<PathBuf, (Vec<u8>, SystemTime)>| {
+        m.iter()
+            .map(|(k, (b, _))| (k.clone(), b.clone()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    assert_eq!(bytes(&placed), bytes(&expect));
+    let newest = expect.values().map(|(_, t)| *t).max().unwrap();
+    assert!(placed.values().all(|(_, t)| *t == newest), "{placed:?}");
     assert_eq!(report.cloned, filled.rows.len() as u64, "{report:?}");
     assert_eq!(report.placed.len() as u64, report.cloned);
     assert_eq!(report.existing, 0);
@@ -1541,13 +1545,17 @@ fn an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it() {
                     panic!("{} has a store stamp but no recorded stamp", row.name_meta)
                 });
                 assert_eq!(path, expected_path);
-                let expect_ns = meta
+                let _ = meta;
+                // The recorded stamp is the placed file's time, the one all placed files
+                // share (SEED-1.21).
+                let placed_ns = std::fs::symlink_metadata(target.join(&path))
+                    .unwrap()
                     .modified()
                     .unwrap()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_nanos() as u64;
-                assert_eq!(ns, expect_ns, "{}", row.name_meta);
+                assert_eq!(ns, placed_ns, "{}", row.name_meta);
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 assert!(unit.stamp.is_none(), "{}", row.name_meta);
@@ -2005,8 +2013,18 @@ fn units_outside_the_window_are_counted() {
         .iter()
         .find(|unit| unit.dir_name == row.name_meta)
         .unwrap();
-    let (_, ns) = unit.stamp.clone().unwrap();
-    assert_eq!(ns, expected_ns);
+    // The window is judged on the store's stamp; the placed stamp then takes the one
+    // mtime every placed file carries (SEED-1.21), and the record holds that.
+    let (rel, ns) = unit.stamp.clone().unwrap();
+    assert!(ns > expected_ns, "{ns} {expected_ns}");
+    let placed_ns = std::fs::symlink_metadata(work.join("target").join(rel))
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    assert_eq!(ns, placed_ns);
 }
 
 fn real_apfs() -> Apfs {
@@ -2284,8 +2302,87 @@ fn read_capped(path: &Path) -> Vec<u8> {
 }
 
 #[test]
+fn a_filled_store_compresses_nothing_and_a_real_clone_shares_every_block() {
+    let filled = filled();
+    let apfs = real_apfs();
+    let store_root = filled.built.hive.home.path.join("store");
+    let mut store_files = 0u64;
+    for file in walk_files(&store_root) {
+        if file.components().any(|c| c.as_os_str() == ".tmp") {
+            continue;
+        }
+        store_files += 1;
+        let stat = apfs.entry_stat(&file).unwrap();
+        assert!(!stat.compressed, "{} is compressed", file.display());
+    }
+    assert!(store_files > 0);
+    let work = filled.built.repo.worktree("shared-plain");
+    let recording = Recording::over_real();
+    let report = place_with(&filled, &work, &filled.rows, recording.fs(), true);
+    let pairs = cloned_pairs(&recording.log());
+    assert!(pairs.len() >= 2, "the tag and a unit file were cloned");
+    for (src, dst) in &pairs {
+        if apfs.entry_stat(dst).unwrap().blocks == 0 {
+            continue;
+        }
+        let clone = apfs.sharing(dst).unwrap();
+        let stored = apfs.sharing(src).unwrap();
+        assert!(
+            clone.shares_all,
+            "{} does not share every block",
+            dst.display()
+        );
+        assert_eq!(clone.clone_id, stored.clone_id, "{}", dst.display());
+    }
+    assert_eq!(report.bytes_not_shared, Some(0), "{report:?}");
+}
+
+fn walk_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if kind.is_file() {
+                out.push(entry.path());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn an_entry_an_older_hive_compressed_is_not_held_and_a_plain_variant_is_stored() {
+    let filled = filled();
+    let apfs = real_apfs();
+    for file in walk_files(&filled.built.hive.home.path.join("store")) {
+        if file.components().any(|c| c.as_os_str() == ".tmp") {
+            continue;
+        }
+        let _ = apfs.compress(&file);
+    }
+    let recording = Recording::over_real();
+    let lib = narrowed(&filled.built.hive, recording.fs(), &filled.built.repo.main);
+    let report = fill_in(&filled.built.hive, &lib, &filled.built.target, &|| false);
+    assert!(report.entries_added >= 1, "{report:?}");
+    let rows = store_rows(&lib);
+    assert!(rows.iter().any(|row| row.variant >= 1), "{rows:?}");
+}
+
+/// An entry an older hive compressed in the store is still placed as a plain file.
+#[test]
 fn a_real_clone_of_a_compressed_entry_adds_no_unshared_bytes() {
     let filled = filled();
+    let apfs = real_apfs();
+    for file in walk_files(&filled.built.hive.home.path.join("store")) {
+        if file.components().any(|c| c.as_os_str() == ".tmp") {
+            continue;
+        }
+        let _ = apfs.compress(&file);
+    }
     let work = filled.built.repo.worktree("shared");
     let recording = Recording::over_real();
     let report = place_with(&filled, &work, &filled.rows, recording.fs(), true);
@@ -2464,7 +2561,7 @@ fn store_bytes_counts_allocated_blocks() {
     let apfs = real_apfs();
     let files = regular_files(&store_root);
     assert!(!files.is_empty(), "the store has a file");
-    let mut compressed_blocks = None;
+    let mut file_blocks = None;
     for path in &files {
         let sharing = apfs
             .sharing(path)
@@ -2476,17 +2573,17 @@ fn store_bytes_counts_allocated_blocks() {
             path.display()
         );
         let stat = apfs.entry_stat(path).unwrap();
-        if stat.compressed && stat.blocks > 0 {
-            compressed_blocks = Some(stat.blocks);
+        if stat.blocks > 0 {
+            file_blocks = Some(stat.blocks);
         }
     }
-    let compressed_blocks = compressed_blocks.expect("a compressed store file allocates blocks");
+    let file_blocks = file_blocks.expect("a store file allocates blocks");
     let got = report.store_bytes.expect("the store size is measured");
     assert!(got > 0, "{report:?}");
     assert!(
-        got >= compressed_blocks * 512,
-        "store size {got} is below one compressed file's {} blocks",
-        compressed_blocks
+        got >= file_blocks * 512,
+        "store size {got} is below one file's {} blocks",
+        file_blocks
     );
     assert_eq!(got, allocated_from_metadata(&store_root), "{report:?}");
 }

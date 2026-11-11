@@ -286,11 +286,65 @@ pub fn place(
                     return Err(Error::disk_full(why));
                 }
                 report.disk_full = Some(why);
+                align_mtimes(ctx, &target, &mut report);
                 return finish(ctx, report, &mut added);
             }
         }
     }
+    align_mtimes(ctx, &target, &mut report);
     finish(ctx, report, &mut added)
+}
+
+/// Gives every placed file the newest mtime among them (SEED-1.21). A unit held from an
+/// earlier build keeps that build's mtimes while one new in a later build is newer, and
+/// Cargo calls a unit stale when a dependency's output is newer than its own. With one
+/// mtime, no dependency is newer. The seed record's stamps take that mtime too.
+fn align_mtimes(ctx: &Ctx<'_>, target: &Path, report: &mut PlaceReport) {
+    let files = match list_files(ctx.fs, target, crate::gc::DEPS_CAP) {
+        Ok(files) => files,
+        Err(detail) => {
+            report.findings.push((
+                "mtime.align".to_string(),
+                Some(target.to_path_buf()),
+                format!("{}: {detail}", target.display()),
+            ));
+            return;
+        }
+    };
+    let mut newest = None;
+    for rel in &files {
+        if let Ok(mtime) = ctx.fs.mtime(&target.join(rel)) {
+            newest = newest.max(Some(mtime));
+        }
+    }
+    let Some(newest) = newest else {
+        return;
+    };
+    for rel in &files {
+        let path = target.join(rel);
+        if let Err(err) = ctx.fs.set_mtime(&path, newest) {
+            report.findings.push((
+                "mtime.align".to_string(),
+                Some(path.clone()),
+                format!(
+                    "{}: {err}; Cargo may rebuild units that depend on it",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    let Some(ns) = newest
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_nanos()).ok())
+    else {
+        return;
+    };
+    for unit in &mut report.placed {
+        if let Some((_, stamp)) = unit.stamp.as_mut() {
+            *stamp = ns;
+        }
+    }
 }
 
 enum UnitOutcome {

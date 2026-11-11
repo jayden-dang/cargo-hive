@@ -899,3 +899,52 @@ Added after execution by `root-cause` (2026-11-10). Fill labelled unresolved tar
 - [x] **Step 3: Verify and commit** `fix(seed): report an unresolved source target as source.unresolved with its path`.
 
 _Requirements: SEED-2.26, SEED-2.27_
+
+### Task 20: An uncompressed store, so a seeded checkout shares its blocks
+
+Added after execution by `root-cause` (2026-11-11), from the klynt run (`.skills/verify/2026-11-11-klynt-sim/report.md`). Every clone of a compressed store file was expanded into a private copy, about 4.28 GiB per klynt lane. The owner chose to stop compressing. Landed as `76afa2d` and `68d6f14`.
+
+**Files:**
+- Modify: `src/seed/store.rs` (`publish_entry`, `check_one`, `same_file`), `src/seed/fill.rs`, `src/cli.rs` (seed capabilities)
+- Test: `tests/seed_fill.rs`, `tests/seed.rs`, `src/seed/store.rs` unit tests
+
+**Depends-on:** Task 19
+
+- [x] **Step 1: Red.** A filled store file is compressed; a disabled store-compression capability refuses seed; a fill over an older hive's compressed entries holds all of them.
+- [x] **Step 2: Fix.** Publish without compressing; seed needs seeding and deletion only; a compressed variant holds no unit.
+- [x] **Step 3: Verify and commit.**
+
+_Requirements: SEED-1.20, SEED-2.28, SEED-2.29_
+
+### Task 21: One source build per seed
+
+Added after execution by `root-cause` (2026-11-11). Three seeded klynt lanes failed with E0463: a crate that `include!`s from `OUT_DIR` differs in SVH per target under one store key, and the per-name-meta choice mixed builds. The owner chose one source build per seed. Landed as `a27cd4d`.
+
+**Files:**
+- Modify: `src/seed/store.rs` (`variant`, `SourceRecord`, `same_unit_bytes`, `merge_with_source`), `src/seed/fill.rs` (`holding_variant`, records), `src/seed/choose.rs` (`source_order`, `choose`), `src/seed/mod.rs`
+- Test: `tests/seed.rs`, `tests/common/registry_fixture.rs` (`with_top`), `src/seed/choose.rs` and `src/seed/store.rs` unit tests
+
+**Depends-on:** Task 20
+
+- [x] **Step 1: Red.** A lane seeded after a partial build of `depcrate` in one lane and a full build in main fails with E0460.
+- [x] **Step 2: Fix.** Variants by bytes, a record per source target, and a seed that clones one record's units only.
+- [x] **Step 3: Verify and commit** `fix(seed): clone every unit of a seed from one source build`.
+
+_Requirements: SEED-2.30, SEED-2.31, SEED-2.32, SEED-3.9, SEED-3.10, SEED-3.11_
+
+### Task 22: One mtime for every placed file
+
+Added after execution by `root-cause` (2026-11-11), from the second klynt run: seeded lanes built, but 87 seeded units per lane were rebuilt as `StaleDependency` (a dependency held from main newer than its dependent held from an older lane).
+
+**Files:**
+- Modify: `src/seed/place.rs` (`align_mtimes`)
+- Test: `tests/seed.rs`, `tests/seed_fill.rs`
+
+**Depends-on:** Task 21
+
+- [x] **Step 1: Red.** A lane seeded after two builds has placed files with many mtimes.
+- [x] **Step 2: Fix.** Every placed file gets the newest placed mtime; stamps follow.
+- [x] **Step 3: Verify and commit** `fix(seed): give every placed file one mtime so no dependency looks newer`.
+
+_Requirements: SEED-1.21_
+
