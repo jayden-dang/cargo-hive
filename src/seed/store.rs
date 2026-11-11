@@ -328,6 +328,11 @@ pub(crate) fn same_unit_bytes(
 }
 
 fn same_file(fs: &dyn Fs, a: &Path, b: &Path) -> io::Result<bool> {
+    // A file an older hive compressed would be expanded into a private copy when placed
+    // (SEED-1.5), so it never holds a unit: a plain variant is stored instead.
+    if fs.entry_stat(b)?.compressed {
+        return Ok(false);
+    }
     if let (Ok(left), Ok(right)) = (fs.sharing(a), fs.sharing(b)) {
         if left.shares_all
             && right.shares_all

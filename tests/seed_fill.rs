@@ -2330,6 +2330,24 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+#[test]
+fn an_entry_an_older_hive_compressed_is_not_held_and_a_plain_variant_is_stored() {
+    let filled = filled();
+    let apfs = real_apfs();
+    for file in walk_files(&filled.built.hive.home.path.join("store")) {
+        if file.components().any(|c| c.as_os_str() == ".tmp") {
+            continue;
+        }
+        let _ = apfs.compress(&file);
+    }
+    let recording = Recording::over_real();
+    let lib = narrowed(&filled.built.hive, recording.fs(), &filled.built.repo.main);
+    let report = fill_in(&filled.built.hive, &lib, &filled.built.target, &|| false);
+    assert!(report.entries_added >= 1, "{report:?}");
+    let rows = store_rows(&lib);
+    assert!(rows.iter().any(|row| row.variant >= 1), "{rows:?}");
+}
+
 /// An entry an older hive compressed in the store is still placed as a plain file.
 #[test]
 fn a_real_clone_of_a_compressed_entry_adds_no_unshared_bytes() {
