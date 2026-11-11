@@ -59,6 +59,28 @@ pub fn synth_entry(
     files: &[(&str, Vec<u8>)],
     last_live_secs_ago: u64,
 ) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    synth_entry_at(
+        hive,
+        key,
+        registry_deps,
+        files,
+        now.saturating_sub(last_live_secs_ago),
+    );
+}
+
+/// `synth_entry` with an absolute `last_live_at`, so two entries can share one second.
+#[allow(dead_code)]
+pub fn synth_entry_at(
+    hive: &Hive,
+    key: (u64, &str, &str),
+    registry_deps: &[&str],
+    files: &[(&str, Vec<u8>)],
+    last_live_at: u64,
+) {
     let (toolchain_value, name_meta, fingerprint_hash) = key;
     let dir = store_dir_path(hive)
         .join(toolchain_value.to_string())
@@ -73,11 +95,6 @@ pub fn synth_entry(
         fs::write(&path, bytes).unwrap();
         size += bytes.len() as u64;
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let last_live_at = now.saturating_sub(last_live_secs_ago);
     let row = Row {
         toolchain_value,
         name_meta: name_meta.into(),
