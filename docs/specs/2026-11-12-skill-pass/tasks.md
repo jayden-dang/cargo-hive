@@ -237,17 +237,17 @@ _Requirements: SKILLPASS-7.1, SKILLPASS-7.2, SKILLPASS-7.3, SKILLPASS-4.2, SKILL
 
 **Depends-on:** Task 2
 
-- [ ] **Step 1: Change the heading pin first.** In `skill_body_fits_the_budget` (tests/skill.rs lines 756-770), replace the exact seven-heading list with two checks: the first heading is `## Command form` and the second is `## Version first` (Decision 8, Lock L8). Then check that every goal-heading const exists in the body. The other headings' names and order stay free for the evals to move (SKILLPASS-5.1). Keep `## Version first` found by name at lines 538-546.
+- [x] **Step 1: Change the heading pin first.** In `skill_body_fits_the_budget` (tests/skill.rs lines 756-770), replace the exact seven-heading list with two checks: the first heading is `## Command form` and the second is `## Version first` (Decision 8, Lock L8). Then check that every goal-heading const exists in the body. The other headings' names and order stay free for the evals to move (SKILLPASS-5.1). Keep `## Version first` found by name at lines 538-546.
 
   Run: `cargo test --test skill skill_body_fits_the_budget` — expect: FAIL, headings differ.
-- [ ] **Step 2: Move each instruction to its one home.**
+- [x] **Step 2: Move each instruction to its one home.**
   - Move each of today's 51 instructions (scan.md §5) into the section the design's section plan names, as it reads today. Merge every duplicate pair listed in scan.md §4 into its home, and drop the trailing `## Do not` paragraph once each of its bans sits under the goal it guards.
   - Split the command-line block so each section carries its own `--json` lines, covering every shipped subcommand (SKILLPASS-5.2).
   - Update the description per SKILLPASS-5.4, keeping `target` and `cargo clean` (tests/skill.rs lines 122-126).
   - Update eval.json contract entries 6 and 7 to quote the moved sentences verbatim (SKILLPASS-10.7).
-- [ ] **Step 3: Check the guards.** Run: `cargo test --test skill` — expect: pass. That covers the budget of at most 150 lines with no `.md`; the version match; every command line parsing with `--json`; no stray mention; the frontmatter rules and banned words; the eval.json shape and quotes; the README strings; the name check. A phrase pin that no longer finds its words fails here. Keep the pin when the moved sentence still carries the phrase, and otherwise replace it with the full name the requirement names (Decision 8). Never delete a pin without its replacement.
-- [ ] **Step 4: Sweep for duplicates.** Grep the body for each of today's instructions. Each appears once in ordinary prose (SKILLPASS-5.3). List the map in the commit body as a draft for Task 11's `## Instruction map`.
-- [ ] **Step 5: Commit.** `git commit -m "docs(skill): organise the hive skill by what the user wants done"`
+- [x] **Step 3: Check the guards.** Run: `cargo test --test skill` — expect: pass. That covers the budget of at most 150 lines with no `.md`; the version match; every command line parsing with `--json`; no stray mention; the frontmatter rules and banned words; the eval.json shape and quotes; the README strings; the name check. A phrase pin that no longer finds its words fails here. Keep the pin when the moved sentence still carries the phrase, and otherwise replace it with the full name the requirement names (Decision 8). Never delete a pin without its replacement.
+- [x] **Step 4: Sweep for duplicates.** Grep the body for each of today's instructions. Each appears once in ordinary prose (SKILLPASS-5.3). List the map in the commit body as a draft for Task 11's `## Instruction map`.
+- [x] **Step 5: Commit.** `git commit -m "docs(skill): organise the hive skill by what the user wants done"`
 
 _Requirements: SKILLPASS-5.1, SKILLPASS-5.2, SKILLPASS-5.3, SKILLPASS-5.4, SKILLPASS-9.1, SKILLPASS-9.2, SKILLPASS-9.3, SKILLPASS-9.4, SKILLPASS-9.5, SKILLPASS-9.6_
 
