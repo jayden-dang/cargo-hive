@@ -41,7 +41,7 @@ cargo hive gc --json
 
 Use `seed` to fill a new secondary checkout before its first build. It takes one registered checkout and does not mean every repo. It copies registry output from one checkout that has already built into that new checkout: the one whose `Cargo.lock` matches, else the most recently built, so every copied unit comes from one build. A checkout that already has a target gets nothing, so do not seed it.
 
-When starting several lanes, seed one lane first, build it, then seed the other lanes. Run bare `gc` after the batch of lanes finishes, and whenever `seed`'s `store_bytes` passes 40 GB.
+When starting several lanes, seed one lane first, build it, then seed the other lanes. Run bare `gc` after the batch of lanes finishes, and whenever `seed`'s `store_bytes` passes 40 GB. Read the seed receipt, and the `status` counts afterward, under Reading a receipt.
 
 ```
 cargo hive seed /path/to/checkout --json
@@ -104,10 +104,10 @@ Exit codes: 0 success; 1 refusal or failure (read the receipt, or stderr if no r
 
 ## Reading a receipt
 
-With `--json`, hive prints exactly one JSON object on stdout and its prose on stderr. Read the object and report its counters as measured. Never estimate bytes or time yourself, and say so when a field says a size was not measured. Times come only from `bench`.
+With `--json`, hive prints exactly one JSON object on stdout and its prose on stderr. Read the object and report its counters as measured. Never estimate bytes or time yourself, and say so when a field says a size was not measured. Times come only from `bench`. Counts sit in the receipt's `counts` object. A count per target or per profile carries a suffix after its name, a colon and a path (`reused_fresh:/path/to/target`).
 
 A seed receipt keeps the fill counts (`fill_entries_added`, `fill_entries_held`, `fill_targets_read`, `fill_targets_skipped`) apart from the clone counts (`clone_units_chosen`, `clone_units_cloned`, `clone_units_dropped`, `clone_units_existing`, `clone_units_failed`, `clone_units_outside_window`). It carries no duration. Afterward, `status` reports `reused_fresh` (seeded, reached, and unchanged, not Cargo's printed fresh count), `seeded_unneeded`, `seeded_recompiled`, and `seeded_missing`.
 
 A bare `gc` receipt reports store counts `store_entries_evicted_age`, `store_entries_evicted_toolchain`, `store_entries_evicted_cap`, `store_entries_evicted_rowless`, `store_toolchains_dropped`, `store_entries_held`, `store_entries_held_live`, `store_entries_held_undecided`, `store_entries_held_name_meta`, `store_entries_held_busy`, `store_entries_held_whole_store`, `store_freed_bytes`, `store_bytes_still_shared`, `store_freeable_bytes_remaining`, and `store_tmp_bytes`.
 
-A bench receipt starts with a prime, then one `bench.sample` finding per sample with its time series. Counts give `cold_build_ms_median`, `cold_build_ms_p90`, `cold_build_ms_min`, `cold_build_ms_max` and `cold_build_ms_spread`, and the same five suffixes on `seeded_build_ms`, `seeded_seed_ms` and `seeded_total_ms`; p90 is the max for n ≤ 9. Each seeded sample also carries the four seed counts and `fill_targets_read`. Seed and fill times rise through a run as finished samples add targets to scan, shown by `fill_targets_read`.
+A bench receipt starts with a prime, then one `bench.sample` finding per sample with its time series. Counts give `cold_build_ms_median`, `cold_build_ms_p90`, `cold_build_ms_min`, `cold_build_ms_max` and `cold_build_ms_spread`, and the same five suffixes on `seeded_build_ms`, `seeded_seed_ms` and `seeded_total_ms`; p90 is the max for n ≤ 9. Each seeded sample also carries `seeded_fresh`, `seeded_unneeded`, `seeded_recompiled`, `seeded_missing` and `fill_targets_read`; bench's `seeded_fresh` and `status`'s `reused_fresh` are different names. Seed and fill times rise through a run as finished samples add targets to scan, shown by `fill_targets_read`.

@@ -817,6 +817,24 @@ fn the_skill_routes_a_deleted_repo_to_repo_remove_missing() {
 }
 
 #[test]
+fn the_skill_names_receipt_counts_as_the_binary_keys_them() {
+    let body = skill_body();
+    let receipt = section(&body, RECEIPT);
+    for phrase in [
+        "`counts`",
+        "`reused_fresh:/path/to/target`",
+        "`reused_fresh`",
+        "not Cargo's printed fresh count",
+        "`seeded_fresh`",
+        "`seeded_unneeded`",
+        "`seeded_recompiled`",
+        "`seeded_missing`",
+    ] {
+        assert!(receipt.contains(phrase), "{RECEIPT} lacks {phrase}");
+    }
+}
+
+#[test]
 fn skill_body_fits_the_budget() {
     for local in [
         "see [notes](#anchor)",
