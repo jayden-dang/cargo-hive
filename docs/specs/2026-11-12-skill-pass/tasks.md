@@ -92,7 +92,7 @@ Every neighbour is Shipped on `main` (54a9e1e; main has since moved to e2c2130, 
 
 **Depends-on:** none
 
-- [ ] **Step 1: Build the fixture.**
+- [x] **Step 1: Build the fixture.**
   - Write `fixture.sh` under the run directory. It makes a fresh random root under `/private/tmp` with project-shaped names only (for example `orbit/`, `ledger/`, no test vocabulary). It first installs the worktree's binary with `cargo install --locked --offline --path . --root <root>/bin`, run before `env.sh` sets the scratch `CARGO_HOME`, so that the crate's own dependencies come from the real Cargo cache without the network. It then writes `env.sh` setting `PATH`, `HIVE_HOME=<root>/hive` and `CARGO_HOME=<root>/cargo-home`.
   - Registry units come from a local registry, because only registry units go in the store (CONTEXT.md, Registry unit) and a path dependency fills nothing. The script mirrors `tests/common/registry_fixture.rs` (lines 86-135): it packs `leafcrate` and `depcrate` (with a build script, plus a feature `extra` for this fixture) into `<root>/registry`, writes their index, and writes `<root>/cargo-home/config.toml` with `[source.crates-io] replace-with = "fixture"` and `[source.fixture] local-registry = "<root>/registry"`. Every repo depends on `depcrate = "1"` and runs `cargo generate-lockfile --offline` and commits `Cargo.lock`, so builds, agents' recovery builds and bench run `--offline --locked` without the network or the real `~/.cargo`.
   - The fixture holds every state in SKILLPASS-10.5:
@@ -106,7 +106,7 @@ Every neighbour is Shipped on `main` (54a9e1e; main has since moved to e2c2130, 
   - Record the fixture as `## Fixture (2026-11-12)`. Copy the pristine state aside, and restore it before each run that can write.
 
   Run: `source <root>/env.sh && cargo-hive doctor --json` — expect exit 0, every check passing. Then `cargo-hive seed <orbit lane> --json` — expect `fill_entries_added` above 0. If it is 0, the fixture holds no registry unit: fix the fixture before any run.
-- [ ] **Step 2: Write predictions before any run.** Under `## Predictions`, predict each scenario's RED with today's skill:
+- [x] **Step 2: Write predictions before any run.** Under `## Predictions`, predict each scenario's RED with today's skill:
   - E3b `walk.unreadable` fails: its request is a `status` and `gc --dry-run` of the registered repos while `atlas`'s main is gone, so the finding comes from `status`/`gc` (src/cli.rs lines 610 and 995), and SKILL.md line 44 at 23defc9 tells the agent to run `repo remove --missing` only for `apply` of an orphan plan. An `apply`-refusal variant of E3b is also run, and is marked a regression guard if its RED passes;
   - E2 fails, because there is no "build it, then seed the rest";
   - E3a `source.none` fails, because no action is given;
@@ -117,14 +117,14 @@ Every neighbour is Shipped on `main` (54a9e1e; main has since moved to e2c2130, 
   - the other regressions pass.
 
   A RED that passes is marked regression guard.
-- [ ] **Step 3: Run every RED.** For each scenario and model, dispatch `skill-tester` and `skill-tester-haiku`. Use a fresh context per run, the prompt shape at TESTS.md line 17, "You have this skill loaded:" followed by today's skill text, and the scenario's request. E3c uses the unfilled `HIVE_HOME`, and the version-mismatch run uses the skill text with `metadata.hive-version` edited to `0.0.9` in the prompt only. Quote each agent's commands verbatim under its `### RED` heading, scored from the transcript, never from the agent's own report.
-- [ ] **Step 4: Run the no-skill free-space RED** on both models on the new fixture, and record it under `## Free space (2026-11-12)`.
-- [ ] **Step 5: Check the gate.** Each instruction that SKILLPASS-10.8 says is added or changed has a recorded failing RED, or a recorded attempt that shows why not (`toolchain.missing`). When the RED for an added or changed instruction passes:
+- [x] **Step 3: Run every RED.** For each scenario and model, dispatch `skill-tester` and `skill-tester-haiku`. Use a fresh context per run, the prompt shape at TESTS.md line 17, "You have this skill loaded:" followed by today's skill text, and the scenario's request. E3c uses the unfilled `HIVE_HOME`, and the version-mismatch run uses the skill text with `metadata.hive-version` edited to `0.0.9` in the prompt only. Quote each agent's commands verbatim under its `### RED` heading, scored from the transcript, never from the agent's own report.
+- [x] **Step 4: Run the no-skill free-space RED** on both models on the new fixture, and record it under `## Free space (2026-11-12)`.
+- [x] **Step 5: Check the gate.** Each instruction that SKILLPASS-10.8 says is added or changed has a recorded failing RED, or a recorded attempt that shows why not (`toolchain.missing`). When the RED for an added or changed instruction passes:
   - an added instruction (SKILLPASS-3.3, 3.4) is left out as nothing to fix (author-skills). Record why under its scenario, and Task 6 drops its text and its test phrases;
   - a changed instruction that a Lock or an approved requirement demands (SKILLPASS-3.1, 3.2, 6.1) stops this task and goes to the operator as a conflict between author-skills and that requirement. No text is written for it until the operator answers. Today's routing row at SKILL.md line 34 at 23defc9 ("deleted or should go → `repo remove --missing`") may make E3b's widened RED pass. If it does, report it to the operator as a conflict between author-skills and the approved SKILLPASS-3.2, not as a dropped instruction. [tasks-review round 2]
 
   Run: `cargo test --test skill` — expect: pass (no text changed; the new headings do not disturb `eval_entries_carry_their_evidence`).
-- [ ] **Step 6: Commit.** `git commit -m "test(skill): record RED runs of today's hive skill on a rebuilt fixture"`
+- [x] **Step 6: Commit.** `git commit -m "test(skill): record RED runs of today's hive skill on a rebuilt fixture"`
 
 _Requirements: SKILLPASS-10.1, SKILLPASS-10.2, SKILLPASS-10.3, SKILLPASS-10.5, SKILLPASS-10.8_
 
