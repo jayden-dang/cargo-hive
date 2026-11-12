@@ -34,6 +34,7 @@ Terms:
 Files this feature touches:
 - `plugin/skills/hive/SKILL.md` — rewritten. Behaviour to guard: SKILLPASS-9.1 to 9.4.
 - `tests/skill.rs` — gains the name check and the README pass; its heading and phrase pins change. Behaviour to guard: SKILLPASS-9.1 to 9.5.
+- `tests/config_keys.rs` — new integration test (SKILLPASS-8.4); no behaviour to guard.
 - `README.md` — Quick start and Commands rewritten. Behaviour to guard: SKILLPASS-9.6.
 - `skills/hive/TESTS.md` and `skills/hive/eval.json` — new runs and headings added. Behaviour to guard: SKILLPASS-9.7.
 - `docs/specs/catalog/hive.md` — one new card row; no behaviour to guard.
@@ -103,10 +104,12 @@ Files this feature touches:
   - a bench build shape through `cargo_hive::bench::command::BuildCmd::from_str`;
   - a plan outcome against the serialised variants of `cargo_hive::receipt::Outcome`;
   - a plan class through `cargo_hive::plan_tier::build::class_label`;
+  - a receipt envelope key (`hive_version`, `counts`) against the top-level keys of a serialised `cargo_hive::receipt::ReceiptBuilder` receipt;
+  - a frontmatter key path (`metadata.hive-version`) against the skill's own frontmatter;
   - a config key (`secondary_roots`, `cache_roots`, `gc_window_days`) by the check in SKILLPASS-8.4;
-  - any other span containing `_` or `.` against a string literal in `src/` that equals the span, or equals the span followed by an optional `:` and one `{…}` format placeholder (`"sessions_deleted{suffix}"`, `"reused_fresh:{path}"`).
+  - any other span containing `_` or `.` against the string literals in `src/` outside each file's `#[cfg(test)] mod tests`. The span matches a literal it equals. It also matches a literal with a trailing `{…}` or `:{…}` placeholder once that placeholder is dropped (`"sessions_deleted{suffix}"`, `"reused_fresh:{path}"`). It also matches a literal with a leading `{…}` placeholder when that placeholder is filled by another literal (`"{series}_median"` with `"cold_build_ms"`, src/bench/mod.rs:572-590).
 
-  [Lock L7; W1; config-key and placeholder forms from `req-review.md` item 2, src/state.rs:243-249, src/cli.rs:893-906]
+  [Lock L7; W1; config-key and placeholder forms from `req-review.md` item 2, src/state.rs:243-249, src/cli.rs:893-906; envelope, frontmatter, leading-placeholder and cfg(test) rules added at design, design.md Decisions 3-4, agent-decided]
 A rename that leaves an exact copy of the old literal elsewhere in `src/` passes these checks; the integration tests that assert real receipt names are what catch it (W1 residual).
 
 - **SKILLPASS-7.3** IF a single-word inline code span in the body is none of the kinds in SKILLPASS-7.1 and 7.2, and not a path, a glob, a placeholder or a command of another tool by the skill test's fixed skip rules, THEN THE SYSTEM SHALL fail the skill test, naming the span, rather than passing it unchecked. [W1]
@@ -118,7 +121,7 @@ A rename that leaves an exact copy of the old literal elsewhere in `src/` passes
 - **SKILLPASS-8.1** THE SYSTEM SHALL order the README's Quick start by the same user goals as the skill, and keep its Commands section as a per-command reference with one row per command form (`repo add`, `repo list`, `repo remove`, `status`, `gc`, `gc --plan`, `apply`, `explain`, `seed`, `bench`, `doctor`), in an agent-decided order. Each row's code span shall be a real command line, with optional arguments described in the row's text. [W3; order agent-decided, card Delegated; Lock L12]
 - **SKILLPASS-8.2** IF a `cargo hive` command line in the README does not parse with `Cli`, or a cited name in the README fails the checks of SKILLPASS-7.1 to 7.3, THEN THE SYSTEM SHALL fail the skill test, naming the README line; it SHALL also fail when a shipped subcommand has no command line in the README. The README pass does not require `--json` and does not forbid `.md` links. [W3; the per-subcommand check holds BENCH-8.3, which no test held, `req-review.md` item 9]
 - **SKILLPASS-8.3** IF a README `cargo hive` / `cargo-hive` command line, or a README code span naming a flag of `Cli::command()`, uses a short flag THEN THE SYSTEM SHALL fail the skill test, naming the README line, so the README writes only long hive flags (`--top`, not `-n`). Spans of other tools (rustc's `-C save-temps`, README.md:194) stay under SKILLPASS-7.3's skip rules. [W3, src/cli.rs:91; scope narrowed in requirements-review.md finding 1]
-- **SKILLPASS-8.4** IF a config key the README cites (`secondary_roots`, `cache_roots`, `gc_window_days`) is refused when written alone into a `config.json` in a temporary state root opened with `cargo_hive::state::State::open_at` and read with `config()` THEN THE SYSTEM SHALL fail the skill test, naming the key. [W3, src/state.rs:116,243-249,286]
+- **SKILLPASS-8.4** IF a config key named in the README's `## Configuration` table (`secondary_roots`, `cache_roots`, `gc_window_days`) is refused by the binary when it is set alone in `config.json` under a scratch `HIVE_HOME` THEN THE SYSTEM SHALL fail an integration test, naming the key. [W3, src/state.rs:243-249,286; mechanism corrected at design: `docs/standards/testing.md` keeps document tests from touching the machine, design.md Decision 6]
 - **SKILLPASS-8.5** THE SYSTEM SHALL give the same recovery for `source.none` and `walk.unreadable` in the README as SKILLPASS-3.1 and 3.2 give in the skill. [Lock L3, L12]
 
 ## 9. Keep what the skill tests already hold
@@ -167,7 +170,7 @@ A rename that leaves an exact copy of the old literal elsewhere in `src/` passes
 **Story:** As a stakeholder, I want measurable quality targets for this feature, so that how-well is not left implicit.
 
 - **Performance:** **SKILLPASS-12.1** THE SYSTEM SHALL keep the skill body at 150 lines or fewer (SKILLPASS-9.1), and SHALL keep `cargo test --test skill` free of agent runs, binary builds beyond the crate's own, and Cargo builds of fixtures, so the whole suite stays about a minute. Verified by the test's runtime in the close gate. (Lock L8 for the budget; the suite time from docs/agents/project.md verify commands; no `docs/product/metrics.md` exists, so no metric ID is cited.)
-- **Security:** **SKILLPASS-12.2** THE SYSTEM SHALL ship the skill without an `allowed-tools` key (SKILLPASS-9.4), so the rewrite grants no tool permission. The skill test's temporary state root lives under a temp directory, never `~/.hive`. Verified by tests/skill.rs. (No `docs/security/threat-model.md` exists; no TB/THR ID is cited.)
+- **Security:** **SKILLPASS-12.2** THE SYSTEM SHALL ship the skill without an `allowed-tools` key (SKILLPASS-9.4), so the rewrite grants no tool permission. `tests/skill.rs` SHALL touch nothing on the machine. The config-key integration test's `HIVE_HOME` SHALL be a scratch directory under `/private/tmp/hive-it-*`, never `~/.hive`. Verified by tests/skill.rs and the scratch helper in `tests/common`. (No `docs/security/threat-model.md` exists; no TB/THR ID is cited; corrected at design, design.md Decision 6.)
 - **Reliability:** None — no runtime component; the skill is text and the checks are tests.
 - **Accessibility:** None — the skill is text an agent reads, and the README is plain markdown; no UI.
 
