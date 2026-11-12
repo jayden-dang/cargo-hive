@@ -1009,6 +1009,25 @@ Differences found and fixed in `README.md`:
 
 Same in both, checked: `--json` on every command, `--top 0` for every explain group, `repo remove --missing`, `apply` for every class, `bench` command shape with two checkouts per arm, `gc` with a repo argument leaves the store alone. Not in the README by design: the version-mismatch holds (a skill-only rule about the plugin and binary pair).
 
+## Rename demonstration (2026-11-12)
+
+Each row is one real rename of a printed name in a scratch copy of this branch (`git archive HEAD` into `/private/tmp`, its own `CARGO_TARGET_DIR`, discarded after the run). No rename touches a Rust identifier, so `tests/skill.rs`'s exhaustive `parse` match still compiles. The gate is `cargo test --test skill`; every run exits 101 and fails the test named in the row. The line is the failure line the test printed, verbatim; the name check reports a skill-body line as `SKILL.md body:<line>` and a README line as `README.md:<line>`.
+
+| Class | Rename (before to after) | Failure line | Evidences |
+|---|---|---|---|
+| Long flag | `src/cli.rs:50` `#[arg(long)]` to `#[arg(long = "dry-rn")]` on `dry_run` | `README.md:181: `--dry-run` is not a flag of any hive command`; the body cites `--dry-run` only in a command line, which fails as `skill body line 29 does not parse: cargo hive gc /path/to/lane-a /path/to/lane-b --dry-run --json` | 7.1 |
+| Subcommand | `src/cli.rs:31` `Status` gains `#[command(name = "state")]` | `SKILL.md body:12: `status` is not a hive name the binary defines; write it as prose or add a skip rule` (also lines 17, 38, 57, 64, 93) | 7.2 |
+| Bench shape | `src/bench/command.rs:30` `"check-all"` to `"check-al"` | `SKILL.md body:83: `check-all` is not a hive name the binary defines; write it as prose or add a skip rule` | 7.2 |
+| Outcome variant | `src/receipt.rs:54` `Partial` gains `#[serde(rename = "halfway")]` | `SKILL.md body:48: `partial` is not a hive name the binary defines; write it as prose or add a skip rule` | 7.2 |
+| Class label | `src/plan_tier/build.rs:81` `"orphan"` to `"orphn"` | `SKILL.md body:48: `orphan` is not a hive name the binary defines; write it as prose or add a skip rule` | 7.2 |
+| Envelope key | `src/receipt.rs:91` `hive_version` gains `#[serde(rename = "hive_ver")]` | `SKILL.md body:8: `hive_version` is not a hive name the binary defines; write it as prose or add a skip rule` | 7.2 |
+| Bench series literal | `src/bench/mod.rs:573` `"cold_build_ms"` to `"cold_bld_ms"` | `SKILL.md body:107: `cold_build_ms_median` is a bench series that src/bench/mod.rs no longer defines (`cold_build_ms` or `{series}_median`)` (one such line each for `_p90`, `_min`, `_max`, `_spread`) | 7.2 |
+| Count literal | `src/seed/mod.rs:513` `"fill_targets_skipped"` to `"fill_targets_skippd"` (the only non-test literal of that name in `src/`) | `SKILL.md body:103: `fill_targets_skipped` is not a hive name the binary defines; write it as prose or add a skip rule` | 7.2 |
+| Finding kind | `src/seed/mod.rs:286` `"source.none"` to `"source.nne"` | `SKILL.md body:91: `source.none` is not a hive name the binary defines; write it as prose or add a skip rule`; `README.md:151: `source.none` is not a hive name the binary defines; write it as prose or add a skip rule` | 7.2 |
+| Short flag in README | `README.md:126` `--dry-run` to `-n` | `README.md:126: short flag in `gc ~/code/my-repo -n`` | 8.3 |
+
+`fill_entries_held` was not used: `src/cli.rs:1764` holds a second copy of that literal, so renaming `src/seed/mod.rs`'s copy would pass. That is design Decision 4's residual, not a gap in this table.
+
 ## Install — Claude Code
 
 Run on 2026-10-30 from a clean `git clone --branch skill` of this repo at `/private/tmp/hive-skill-install-20261030/clone`, with `CLAUDE_CONFIG_DIR=/private/tmp/hive-skill-install-20261030/claude` so the real `~/.claude` was never written. These are the CLI forms of `/plugin marketplace add` and `/plugin install`. The outputs below are concatenated in command order.
