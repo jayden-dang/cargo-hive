@@ -104,7 +104,7 @@ Every neighbour is Shipped on `main` (54a9e1e; main has since moved to e2c2130, 
 
   Run: `source <root>/env.sh && cargo-hive doctor --json` — expect exit 0, every check passing.
 - [ ] **Step 2: Write predictions before any run.** Under `## Predictions`, predict each scenario's RED with today's skill:
-  - E3b `walk.unreadable` passes, since the skill states it at SKILL.md line 44 (23defc9);
+  - E3b `walk.unreadable` fails: its request is a `status` and `gc --dry-run` of the registered repos while `atlas`'s main is gone, so the finding comes from `status`/`gc` (src/cli.rs lines 610 and 995), and SKILL.md line 44 at 23defc9 tells the agent to run `repo remove --missing` only for `apply` of an orphan plan. An `apply`-refusal variant of E3b is also run, and is marked a regression guard if its RED passes;
   - E2 fails, because there is no "build it, then seed the rest";
   - E3a `source.none` fails, because no action is given;
   - E3c `store.tag` fails, because the skill does not name it;
@@ -354,7 +354,9 @@ fn the_skill_gives_the_recovery_each_refusal_names() {
                    "cargo hive repo remove --missing --json"] {
         assert!(refuses.contains(phrase), "## When a command refuses lacks {phrase}");
     }
-    assert!(!refuses.contains("retry `seed`"), "the skill must not tell the agent to retry seed first");
+    let none = refuses.find("`source.none`").expect("source.none");
+    let build = refuses[none..].find("build the main checkout").expect("build the main checkout after source.none");
+    assert!(refuses[none + build..].contains("`seed` again"), "after source.none: build the main checkout, then seed again");
 }
 ```
 
@@ -614,7 +616,7 @@ fn an_unknown_config_key_is_refused() {
   Run: `cargo test --test config_keys` — expect: compile, and fail on any assertion whose premise U5 or the note format disproves (the notes come from src/cli.rs lines 649-650).
 - [ ] **Step 2: Make it pass without touching `src/`.**
   - U5: if Task 1 recorded that bare `gc` with no registered repo returns before src/cli.rs line 1044, register one empty repo first with `common::register` (tests/common/mod.rs line 270) on an `init_repo` checkout (line 280). This is design Decision 6's fallback.
-  - If the note text or the refusal channel differs from the assertions, correct the assertion to what the binary prints, citing the line. If an assertion can't be met without a `src/` change, stop and report.
+  - If the note text or the refusal channel differs from the assertions (with `--json` the error may sit in the stdout receipt, not on stderr), correct the assertion to what the binary prints, citing the line. The corrected assertion must still name the unknown key, wherever the binary prints it. If an assertion can't be met without a `src/` change, stop and report.
 
   Run: `cargo test --test config_keys` — expect: pass.
 - [ ] **Step 3: Show it can fail.** In a scratch copy of the README, rename `gc_window_days` to `gc_window_dayz` in the Configuration table and run the test against it by setting the read path in a temporary local edit. Expect: FAIL, "no test value for gc_window_dayz". Then rename `"secondary_rootz"` back to a valid key in the unknown-key test and expect FAIL on its exit-code assertion. Revert both edits, and record the two failure lines in the commit body.
@@ -673,7 +675,7 @@ _Requirements: SKILLPASS-10.1, SKILLPASS-10.4, SKILLPASS-10.6, SKILLPASS-10.7, S
 
 **Depends-on:** Task 12
 
-- [ ] **Step 1: Run each rename.** In a scratch copy of the worktree under `/private/tmp`, apply one rename per class, run the gate, record the failure line verbatim, and discard the copy. The classes:
+- [ ] **Step 1: Run each rename.** In a scratch copy of the worktree under `/private/tmp`, apply one rename per class, run the gate, record the failure line verbatim, and discard the copy. Each rename changes only the printed name, never a Rust identifier, so `tests/skill.rs`'s exhaustive `parse` match (line 446) still compiles: a flag through `#[arg(long = …)]`, a subcommand through `#[command(name = …)]`, an outcome through `#[serde(rename = …)]`, and literals by editing the string. The classes:
   - a long flag (`--dry-run` in src/cli.rs);
   - a subcommand;
   - a bench shape (`check-all`);
