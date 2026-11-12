@@ -618,8 +618,8 @@ _Requirements: SKILLPASS-7.1, SKILLPASS-7.2, SKILLPASS-8.3_
 
 **Depends-on:** none. It runs only once requirements.md is `Status: Approved` by the operator.
 
-- [ ] **Step 1: Strike each clause.** Wrap each clause in the Supersedes table in its own file, leaving the rest of each criterion live: SKILL-2.4 and SKILL-4.2 → SKILLPASS-5.2; SEED-8.1, BENCH-8.1, STOREGC-10.11 and BENCH-9.4 → SKILLPASS-5.1.
-- [ ] **Step 2: Check the trace.** REQUIRED SUB-SKILL: use `audit-trace`. Expect: no unknown citation, and no live criterion that contradicts SKILLPASS.
-- [ ] **Step 3: Commit.** `git commit -m "docs(specs): strike the skill clauses SKILLPASS supersedes"`
+- [x] **Step 1: Strike each clause.** Wrap each clause in the Supersedes table in its own file, leaving the rest of each criterion live: SKILL-2.4 and SKILL-4.2 → SKILLPASS-5.2; SEED-8.1, BENCH-8.1, STOREGC-10.11 and BENCH-9.4 → SKILLPASS-5.1.
+- [x] **Step 2: Check the trace.** REQUIRED SUB-SKILL: use `audit-trace`. Expect: no unknown citation, and no live criterion that contradicts SKILLPASS.
+- [x] **Step 3: Commit.** `git commit -m "docs(specs): strike the skill clauses SKILLPASS supersedes"`
 
 _Requirements: SKILLPASS-5.1, SKILLPASS-5.2_
