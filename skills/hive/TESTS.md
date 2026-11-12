@@ -1015,7 +1015,8 @@ Each row is one real rename of a printed name in a scratch copy of this branch (
 
 | Class | Rename (before to after) | Failure line | Evidences |
 |---|---|---|---|
-| Long flag | `src/cli.rs:50` `#[arg(long)]` to `#[arg(long = "dry-rn")]` on `dry_run` | `README.md:181: `--dry-run` is not a flag of any hive command`; the body cites `--dry-run` only in a command line, which fails as `skill body line 29 does not parse: cargo hive gc /path/to/lane-a /path/to/lane-b --dry-run --json` | 7.1 |
+| Long flag in a body span | `src/cli.rs:53` `#[arg(long, conflicts_with = "dry_run")]` to `#[arg(long = "pln", conflicts_with = "dry_run")]` on `plan` | `SKILL.md body:19: `--plan` is not a flag of any hive command` (fails `the_skill_cites_only_names_the_binary_defines`; the parse tests fail too) | 7.1 |
+| Long flag in a command line | `src/cli.rs:50` `#[arg(long)]` to `#[arg(long = "dry-rn")]` on `dry_run` | `README.md:181: `--dry-run` is not a flag of any hive command`; fails `readme_describes_the_commands_as_the_skill_does`, and `skill_documents_every_shipped_command` and `skill_command_lines_parse_with_the_cli` fail as `skill body line 29 does not parse: cargo hive gc /path/to/lane-a /path/to/lane-b --dry-run --json` | 7.1 |
 | Subcommand | `src/cli.rs:31` `Status` gains `#[command(name = "state")]` | `SKILL.md body:12: `status` is not a hive name the binary defines; write it as prose or add a skip rule` (also lines 17, 38, 57, 64, 93) | 7.2 |
 | Bench shape | `src/bench/command.rs:30` `"check-all"` to `"check-al"` | `SKILL.md body:83: `check-all` is not a hive name the binary defines; write it as prose or add a skip rule` | 7.2 |
 | Outcome variant | `src/receipt.rs:54` `Partial` gains `#[serde(rename = "halfway")]` | `SKILL.md body:48: `partial` is not a hive name the binary defines; write it as prose or add a skip rule` | 7.2 |
@@ -1025,6 +1026,8 @@ Each row is one real rename of a printed name in a scratch copy of this branch (
 | Count literal | `src/seed/mod.rs:513` `"fill_targets_skipped"` to `"fill_targets_skippd"` (the only non-test literal of that name in `src/`) | `SKILL.md body:103: `fill_targets_skipped` is not a hive name the binary defines; write it as prose or add a skip rule` | 7.2 |
 | Finding kind | `src/seed/mod.rs:286` `"source.none"` to `"source.nne"` | `SKILL.md body:91: `source.none` is not a hive name the binary defines; write it as prose or add a skip rule`; `README.md:151: `source.none` is not a hive name the binary defines; write it as prose or add a skip rule` | 7.2 |
 | Short flag in README | `README.md:126` `--dry-run` to `-n` | `README.md:126: short flag in `gc ~/code/my-repo -n`` | 8.3 |
+
+The runner touched `tests/skill.rs` and `src/lib.rs` before each run, because a shared target dir reused a stale test binary (with the previous copy's manifest path baked in) when only the README changed; all ten classes were run that way.
 
 `fill_entries_held` was not used: `src/cli.rs:1764` holds a second copy of that literal, so renaming `src/seed/mod.rs`'s copy would pass. That is design Decision 4's residual, not a gap in this table.
 
