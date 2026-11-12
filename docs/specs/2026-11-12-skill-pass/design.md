@@ -70,7 +70,7 @@ deep modules — an interface much simpler than what it hides.
 
 ### The skill body
 
-Satisfies: SKILLPASS-1.1, SKILLPASS-1.2, SKILLPASS-2.1, SKILLPASS-2.2, SKILLPASS-2.3, SKILLPASS-3.1, SKILLPASS-3.2, SKILLPASS-3.3, SKILLPASS-3.4, SKILLPASS-4.1, SKILLPASS-4.2, SKILLPASS-4.3, SKILLPASS-5.1, SKILLPASS-5.2, SKILLPASS-5.3, SKILLPASS-5.4, SKILLPASS-6.1, SKILLPASS-11.1
+Satisfies: SKILLPASS-1.1, SKILLPASS-1.2, SKILLPASS-2.1, SKILLPASS-2.2, SKILLPASS-2.3, SKILLPASS-3.1, SKILLPASS-3.2, SKILLPASS-3.3, SKILLPASS-4.1, SKILLPASS-4.2, SKILLPASS-4.3, SKILLPASS-5.1, SKILLPASS-5.2, SKILLPASS-5.3, SKILLPASS-5.4, SKILLPASS-6.1, SKILLPASS-11.1
 Reuse: rung 2 — the existing `plugin/skills/hive/SKILL.md`, its frontmatter and its 51 instructions (scan.md §5), rewritten in place under Decision 2's headings
 Respects: ARCH-8, ARCH-10
 Surface:
@@ -190,7 +190,7 @@ A temporary rename per class (Decision 3's classes 1-8, 10 and 12), made in a sc
 
 Walked top to bottom; every requirement ID appears in exactly one `Satisfies:` line:
 
-- Skill body: 1.1-1.2, 2.1-2.3, 3.1-3.4, 4.1-4.3, 5.1-5.4, 6.1, 11.1.
+- Skill body: 1.1-1.2, 2.1-2.3, 3.1-3.3 (3.4 retired), 4.1-4.3, 5.1-5.4, 6.1, 11.1.
 - Name check: 7.1-7.3.
 - README pass: 8.2-8.3.
 - README text: 8.1, 8.5.
