@@ -7,7 +7,8 @@
 > for tracking.
 
 Feature code: SKILLPASS
-Status: Draft
+Status: Approved
+Approved: 2026-11-12 12:44 +07 by the operator on the spec sheet at commit 9441660, in their words: "approve" (relayed by the conductor, `.skills/_pending-hive-skill-pass/auto/operator-reply.md`).
 Date: 2026-11-12
 Execution-mode: unset
 Max-concurrency: auto
