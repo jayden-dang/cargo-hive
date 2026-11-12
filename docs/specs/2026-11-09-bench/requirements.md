@@ -223,8 +223,8 @@ failed, so that a failed build is never averaged in as a time.
 **Story:** As an agent, I want the hive skill to teach me how to run a bench, so that I set up the checkouts,
 run it, read it and clean up without reading the source.
 
-- **BENCH-8.1** THE SYSTEM SHALL document `bench` in `plugin/skills/hive/SKILL.md`, inside its existing
-  headings: what it measures, making the 2n fresh checkouts with `git worktree add` before the run and
+- **BENCH-8.1** THE SYSTEM SHALL document `bench` in `plugin/skills/hive/SKILL.md`, ~~inside its existing
+  headings~~ (superseded by SKILLPASS-5.1): what it measures, making the 2n fresh checkouts with `git worktree add` before the run and
   removing them after (with `git worktree remove`, which also deletes a gitignored target), an even n per
   arm, the five build shapes, that p90 is the max for n ≤ 9, that bench builds `--offline --locked`, so
   the repo needs a committed `Cargo.lock` and every dependency already in Cargo's cache (building the main
@@ -263,8 +263,8 @@ Files this change touches, and what each guards:
 - **BENCH-9.3** (guard) WHEN any command other than `bench` writes a receipt THE SYSTEM SHALL CONTINUE TO
   write the same schema version and keys as before, and no receipt SHALL CONTINUE TO have a top-level key
   containing `saved`, `duration`, `seconds`, `elapsed` or `estimate`.
-- **BENCH-9.4** (guard) WHEN `tests/skill.rs` runs THE SYSTEM SHALL CONTINUE TO hold the skill body to the
-  seven `##` headings in their order and at most 150 lines, parse every command line in it with the real
+- **BENCH-9.4** (guard) WHEN `tests/skill.rs` runs THE SYSTEM SHALL CONTINUE TO hold the skill body to ~~the
+  seven `##` headings in their order~~ (superseded by SKILLPASS-5.1) and at most 150 lines, parse every command line in it with the real
   CLI, and match its version to the crate's.
 - **BENCH-9.5** (guard) WHEN discovery classifies checkouts THE SYSTEM SHALL CONTINUE TO return the classes
   and root-commit matches it returns today.
