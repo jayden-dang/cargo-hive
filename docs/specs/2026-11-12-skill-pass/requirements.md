@@ -107,9 +107,10 @@ Files this feature touches:
   - a receipt envelope key (`hive_version`, `counts`) against the top-level keys of a serialised `cargo_hive::receipt::ReceiptBuilder` receipt;
   - a frontmatter key path (`metadata.hive-version`) against the skill's own frontmatter;
   - a config key (`secondary_roots`, `cache_roots`, `gc_window_days`) by the check in SKILLPASS-8.4;
-  - any other span containing `_` or `.` against the string literals in `src/` outside each file's `#[cfg(test)] mod tests`. The span matches a literal it equals. It also matches a literal with a trailing `{…}` or `:{…}` placeholder once that placeholder is dropped (`"sessions_deleted{suffix}"`, `"reused_fresh:{path}"`). It also matches a literal with a leading `{…}` placeholder when that placeholder is filled by another literal (`"{series}_median"` with `"cold_build_ms"`, src/bench/mod.rs:572-590).
+  - any other span containing `_` or `.` against the string literals in `src/` outside any test module. The span matches a literal it equals. It also matches a literal with a trailing `{…}` or `:{…}` placeholder once that placeholder is dropped (`"sessions_deleted{suffix}"`, `"reused_fresh:{path}"`).
+  - a bench series name (`cold_build_ms_median`) against the four series literals and five `"{series}_<suffix>"` templates in src/bench/mod.rs:572-590.
 
-  [Lock L7; W1; config-key and placeholder forms from `req-review.md` item 2, src/state.rs:243-249, src/cli.rs:893-906; envelope, frontmatter, leading-placeholder and cfg(test) rules added at design, design.md Decisions 3-4, agent-decided]
+  [Lock L7; W1; config-key and placeholder forms from `req-review.md` item 2, src/state.rs:243-249, src/cli.rs:893-906; envelope, frontmatter, bench-series and test-module rules added at design, design.md Decisions 3-4, agent-decided]
 A rename that leaves an exact copy of the old literal elsewhere in `src/` passes these checks; the integration tests that assert real receipt names are what catch it (W1 residual).
 
 - **SKILLPASS-7.3** IF a single-word inline code span in the body is none of the kinds in SKILLPASS-7.1 and 7.2, and not a path, a glob, a placeholder or a command of another tool by the skill test's fixed skip rules, THEN THE SYSTEM SHALL fail the skill test, naming the span, rather than passing it unchecked. [W1]

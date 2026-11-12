@@ -21,34 +21,39 @@ Architecture invariants this feature relies on: ARCH-8 (scope from arguments: th
 
 1. **One spec, no ADR.** Every choice below can be undone in `tests/skill.rs` or the skill text alone, so none meets the ADR gate (hard to reverse AND surprising AND a real trade-off). [agent-decided]
 2. **Body outline, by user goal** (SKILLPASS-5.1; heading names and order are agent-decided under the card's Delegated, and the evals may move them): `## Command form`, `## Version first`, `## Free disk`, `## Start new lanes`, `## Delete what gc keeps`, `## Look before acting` (doctor, repo, status, explain), `## Time cold against seeded builds`, `## When a command refuses`, `## Reading a receipt`. Each of today's 51 instructions gets one home under one of these headings. A ban (no `cargo clean`, no hand deletion of the store) lives under the goal it guards, not in a trailing `Do not` list. The duplication sweep (SKILLPASS-5.3) then has one candidate home per rule. Planned size: about 120 of 150 lines. [agent-decided]
-3. **Name check is a classifier plus typed rules plus a template match** (SKILLPASS-7.1 to 7.3; W1). Each single-word inline span outside fences is classified once, in a fixed order, and the first matching class decides:
-   1. skip: a path, glob or placeholder (contains `/`, `~`, `$`, `*`, `<`, or ends in a file extension), a version or number (digits and dots), a frontmatter key path (`metadata.` prefix, checked against `split_skill`'s metadata keys);
-   2. long flag (`--x`): the long flags of `Cli::command().build()` over all subcommands, `--help` and `--version` included;
-   3. short flag (`-x`): skill and README both fail on any hive short flag (SKILLPASS-8.3), and other tools' flags only reach here inside a multi-word span, which is not checked;
+3. **Name check is a classifier plus typed rules plus a template match** (SKILLPASS-7.1 to 7.3; W1). Each single-word inline span outside fences is classified once, in this order, and the first matching class decides:
+   1. bench shape: `BuildCmd::from_str` (`pub mod command`, src/bench/mod.rs:4), with a `=<…>` placeholder replaced by `x` first, so `check-lib=<package>` is checked, not skipped;
+   2. long flag (`--x`): a long flag of some subcommand of the built `Cli::command()` (`let mut c = Cli::command(); c.build();`, so `--help` and `--version` are listed). A cargo flag (`--offline`, `--locked`) is written inside a multi-word span that names cargo (`cargo build --offline --locked`), which this check does not read;
+   3. short flag (`-x`): fails in the skill and the README (SKILLPASS-8.3);
    4. subcommand: the non-hidden subcommand names of the built command, plus `repo`'s;
-   5. bench shape: `BuildCmd::from_str`, with a `=<…>` placeholder replaced by `x` first;
-   6. plan outcome: `serde_json::from_value::<Outcome>`;
-   7. plan class: the three `class_label` values, reached by an exhaustive match over `PlanClass`;
-   8. receipt envelope key: the top-level keys of `serde_json::to_value(ReceiptBuilder::new("x", Scope::default()).finish())`, which reaches `hive_version`, `counts`, `findings` and `unmeasured` (src/receipt.rs:89-126, 116, 206);
-   9. config key: a span equal to a key in the README's `## Configuration` table (checked by Decision 6);
-   10. name with `_` or `.`: the template match in Decision 4;
-   11. skip: a command of another tool listed by name (`cargo`, `rustc`, `git`, `rustup`), and the product words `hive` and `cargo-hive`;
-   12. anything else fails, naming the span and its line.
+   5. plan outcome: `serde_json::from_value::<Outcome>`;
+   6. plan class: the three `class_label` values, reached by an exhaustive match over `cargo_hive::plan_tier::record::PlanClass` (src/plan_tier/record.rs:21; `class_label` at src/plan_tier/build.rs:76-82);
+   7. receipt envelope key: the top-level keys of `serde_json::to_value` of `Receipt::with_os("x", Scope::default(), None)` with `.plan_tier(PlanTierBody { … empty })` set and then `.finish()` (src/receipt.rs:89-108, 120, 196, 206). `with_os` avoids the `sw_vers` call. The plan-tier body brings in `plans`, `undecided` and `nothing_to_do`, which an empty receipt omits (`skip_serializing_if`, src/receipt.rs:102-107);
+   8. frontmatter key path (`metadata.` prefix): a key of `split_skill`'s metadata;
+   9. config key: a span equal to a first-column key of the README's `## Configuration` table (checked by Decision 6);
+   10. bench series name: one of the four series literals (`cold_build_ms`, `seeded_build_ms`, `seeded_seed_ms`, `seeded_total_ms`) followed by one of the five suffixes (`_median`, `_p90`, `_min`, `_max`, `_spread`). The test checks that each series is a literal in src/bench/mod.rs and each suffix is a `"{series}<suffix>"` template there (src/bench/mod.rs:572-590), so a rename in src fails the test, not the skill;
+   11. name with `_` or `.`: the literal match in Decision 4;
+   12. skip, by fixed rules: a path, glob or placeholder (contains `/`, `~`, `$`, `*` or `<`); a file name ending in one of `.md`, `.rs`, `.toml`, `.lock`, `.json`, `.jsonl`, `.svg`; a version or number (digits and dots only); a command of another tool, by name (`cargo`, `rustc`, `git`, `rustup`); the product words `hive` and `cargo-hive`. Because rule 11 runs first, a dotted hive name (`source.none`, `store.tag`, `walk.unreadable`, `toolchain.missing`) is never skipped as a file name;
+   13. anything else fails, naming the span and its line.
 
-   The skill must therefore write a plain English word in prose, not in backticks. [W1; classes 1, 8 and 11 agent-decided, design-scan §5]
-4. **Template match against src literals.** A hand lexer (no new dependency) collects every string literal in `src/**/*.rs`. It reads `"…"` with escapes and `r#"…"#` raw strings, skips `//` and `/* */` comments, and reads `'x'` and `'\…'` char literals so that a `'"'` does not open a string. Lifetimes are left alone. For each file it stops at the first `#[cfg(test)]` line that opens the file's `mod tests`, so that test fixtures in `src/` do not vouch for a name. A literal with `{…}` holes is a template. A span matches a literal when it equals it. A span matches a template under either of two rules:
-   - The template minus a trailing `{…}` or `:{…}` equals the span. This covers `"sessions_deleted{suffix}"` (src/cli.rs:893-906) and `"reused_fresh:{path}"` (src/cli.rs:862-865).
-   - The template starts with a `{…}` hole, and the span is some placeholder-free literal followed by the rest of the template. This covers `format!("{series}_median")` with `"cold_build_ms"` (src/bench/mod.rs:572-590).
+   A self-test runs every class on a fixed table of spans, including one known-bad span per class, so a rule that quietly accepts everything goes red. The skill therefore writes a plain English word in prose, not in backticks. [W1; the order, classes 7-10 and 12, and the self-test agent-decided; design-review F2, F3, F4, F7]
+4. **Literal match against src.** A hand lexer (no new dependency) collects every string literal in `src/**/*.rs`. It handles:
+   - `"…"` strings with escapes, and `r#"…"#` raw strings;
+   - `b` as an identifier character, so `b"…"` and `b'x'` lex as strings and chars;
+   - `//` comments;
+   - `'x'` and `'\…'` char literals, so that a quote char does not open a string. Lifetimes are left alone. The source has no block comments and no `'"'` literal (design-review, lexer forms), and a self-test covers each form anyway.
 
-   [W1; the cfg(test) cut and the leading-hole rule agent-decided, design-scan §3]
+   It drops the braced block of any `mod` item preceded by an attribute run that mentions `test`, found by brace counting in the lexer: `#[cfg(test)]`, `#[cfg(all(test, …))]`, stacked attributes, and any module name (`exit_code_tests`). It keeps scanning after that block, so test fixtures in `src/` do not vouch for a name and non-test items after a test module are still read (src/plan_tier/guard.rs:92, src/gc/account.rs:156, src/platform/mod.rs:331-456, src/liveness.rs:655, src/plan_tier/apply.rs:1133). A span matches a literal it equals. It also matches a literal ending in `{…}` or `:{…}` once that trailing placeholder is dropped: `"sessions_deleted{suffix}"` (src/cli.rs:893-906) and `"reused_fresh:{path}"` (src/cli.rs:862-865). No other placeholder position matches; bench series names take Decision 3's typed rule 10 instead. The walk is bounded: `read_dir` recursion over `src/` only, with no symlink following, and one lex per test process held in a `OnceLock`, which both tests share. [W1; agent-decided; design-review F4, F5, F11]
 5. **Spans are found by one new helper.** `inline_spans(text) -> Vec<(usize, String)>` walks lines with the same fence toggle as `scan` (tests/skill.rs:371-401) and returns each backtick span outside fences with its 1-based line number. It is used for the skill body and for README.md. An odd backtick count on a line fails the test with that line rather than silently flipping the parity (design-scan §8). [agent-decided]
-6. **Config keys are checked by the binary in an integration test** (SKILLPASS-8.4, corrected). A new `tests/config_keys.rs` uses `tests/common`'s `Hive::new()` and `Hive::config(json)` (tests/common/mod.rs:52, 61). It reads the first-column code spans of README's `## Configuration` table and writes each key alone into the scratch `config.json` with a value from a table in the test (`secondary_roots: ["/private/tmp"]`, `cache_roots: ["/private/tmp"]`, `gc_window_days: 7`). It then runs `cargo-hive status --json`, which reads the config (src/cli.rs:633), and requires exit 0. A key the binary renamed is refused by `deny_unknown_fields` (src/state.rs:243-249). A key the README names with no value in the test's table fails with "no test value for <key>", so the two cannot drift silently. The test also runs one unknown key and expects a refusal, which proves the refusal path is live. [Weigh, the standard's document-test boundary; agent-decided mechanism]
-7. **README pass reuses the skill helpers** with three differences (SKILLPASS-8.2, 8.3; W3):
+6. **Config keys are checked by the binary in an integration test** (SKILLPASS-8.4, corrected). A new `tests/config_keys.rs` uses `tests/common`'s `Hive::ready()` (tests/common/mod.rs:73-77, which writes ready capabilities, because `status` refuses without them: src/cli.rs:655-659) and then `Hive::config(json)` (:61). It reads the first-column code spans of README's `## Configuration` table and writes each key alone into the scratch `config.json` with a value from a table in the test (`secondary_roots: ["/private/tmp"]`, `cache_roots: ["/private/tmp"]`, `gc_window_days: 7`). It then runs `cargo-hive status --json`, which reads the config (src/cli.rs:633). It requires exit 0, no `refusal` finding, and the key's effect in the receipt: for `secondary_roots`, the root appears in the receipt's notes or scope. A run that exits 0 for another reason therefore does not pass. A key the binary renamed is refused by `deny_unknown_fields` (src/state.rs:243-249). A key the README names with no value in the test's table fails with "no test value for <key>", so the two cannot drift silently. The test also runs one unknown key, with ready capabilities so that only the config can refuse. It expects exit 1 with the key named on stderr, which proves the refusal path is live. [Weigh, the standard's document-test boundary; agent-decided mechanism]
+7. **README pass reuses the skill helpers** with these differences (SKILLPASS-8.2, 8.3; W3):
    - no `--json` rule;
    - `.md` links allowed;
-   - a whole command line must start a fenced line or a code span. The Uninstall line `cargo uninstall cargo-hive && rm -rf ~/.hive` is then not a stray, because `cargo-hive` there is an argument to `cargo uninstall`. The README pass counts a mention only where the prefix opens the line or span (design-scan §5).
+   - mentions are read only inside code spans and fenced lines, so prose that names `cargo-hive` (README:12) is not a stray;
+   - a whole command line must open its span or fenced line, so `cargo uninstall cargo-hive && rm -rf ~/.hive` is an argument, not a mention;
+   - a `<word>` placeholder is replaced by `x` before parsing. A line whose subcommand word is a placeholder (`cargo hive <command> --help`, README:169, and `cargo-hive <sub>`, README:117) is a synopsis: it is not parsed, and its flags are only checked as long hive flags.
 
-   It also requires one README command line per shipped subcommand form, which is how BENCH-8.3 gets a test. [W3; the Uninstall rule agent-decided]
+   It also requires one README command line per shipped subcommand form, which is how BENCH-8.3 gets a test. [W3; the mention and synopsis rules agent-decided; design-review F6]
 8. **Pins move from phrases to meaning.** The heading list pin (tests/skill.rs:756-770) becomes "the first heading is `## Command form`, the second is `## Version first`" (Lock L8). The ~30 phrase pins in `the_skill_teaches_seeding_a_new_lane`, `the_skill_teaches_benching_cold_against_seeded` and `the_skill_teaches_the_plan_flow_for_every_class` are kept where the rewritten sentence still carries the phrase. Where it does not, the pin is replaced by the full receipt name or the recovery the requirement names: `already consumed` becomes `already_consumed`, and pins are added for `source.none`, `store.tag`, `toolchain.missing`, `walk.unreadable` and `repo remove --missing`. No pin is dropped without its replacement. [Weigh from SKILLPASS-5.1, 1.3, 3.x; agent-decided form]
 9. **Evals run from a fixture script under the run directory, not from the repo.** The fixture is built by a shell script kept with the run records. Every agent-visible path is project-shaped (for example `/private/tmp/<random>/orbit/`), with no test vocabulary, per author-skills' sanitising rule. The RED arm pastes `git show 23defc9:plugin/skills/hive/SKILL.md`, and the GREEN arm pastes the worktree file, never the installed plugin copy. `toolchain.missing` is first made by deleting the `toolchains` key from the scratch `HIVE_HOME/store.db` (design-scan §6, src/seed/store.rs:72-77), and the attempt is recorded (SKILLPASS-10.8). [W2; agent-decided mechanism]
 
@@ -69,6 +74,12 @@ Surface:
 - Installed plugin copies under `~/.claude/plugins/cache/cargo-hive/cargo-hive/0.1.0/` and Codex's cache — frozen: the change keeps `metadata.hive-version` at `0.1.0`, so it does not reach them. Shipping it to them is gated on the operator's version-bump decision (requirements Open Questions).
 - Agents reading the skill from the marketplace (`main`) — replace on merge; no compat path, since the Compat obligation is None.
 - `docs/specs/2026-10-29-agent-skill/design.md:75-81`, which describes the old body layout — frozen as a record of what ROAD-12 shipped; the new layout's home is this design.
+- `docs/product/vision.md:26,69` (the agent is guided by the hive skill; install the plugin) — no edit needed: both still hold, and a vision edit is outside this run.
+- `docs/agents/project.md:132` (release step 2, the version must match) — no edit needed: `metadata.hive-version` stays and the test still enforces it.
+- `docs/agents/verify.md:9` (agents use the CLI through the hive skill) — no edit needed, still true.
+- README.md:249-268 ("Using it from coding agents") — kept: its sentences agree with the new body. It is checked by the README pass for names and command lines, and is outside the Quick start and Commands rewrite.
+- `tests/skill.rs:538-546`, which finds the `## Version first` section by name — replace: kept as a name lookup, since that heading keeps its name (Decision 8).
+- `tests/skill.rs:307`, the plugin directory pin listing `SKILL.md` alone — no edit needed: `plugin/skills/hive/` still holds only `SKILL.md`, and the new `tests/skill/names.rs` lives under `tests/`, not `plugin/`.
 
 Interface: one markdown file whose frontmatter keeps `name`, `description` and `metadata.hive-version`, and whose body is about 120 lines under nine goal headings, command form and version first.
 Depth: n/a — extends the existing skill.
@@ -96,10 +107,10 @@ Section plan, each instruction in one place:
 ### Name check (tests/skill.rs)
 
 Satisfies: SKILLPASS-7.1, SKILLPASS-7.2, SKILLPASS-7.3
-Reuse: rung 2 — `split_skill`, `scan`'s fence toggle and `repo_file` in `tests/skill.rs`; rung 5 — `clap::CommandFactory` (clap with `derive` is already a dependency, Cargo.toml:19) and `serde_json`; rung 2 — public lib items `cargo_hive::cli::Cli`, `cargo_hive::bench::command::BuildCmd`, `cargo_hive::receipt::{Outcome, ReceiptBuilder, Scope}`, `cargo_hive::plan_tier::build::{class_label, PlanClass}`; rung 7 — the literal lexer and the classifier (no dependency in the project lexes Rust, and adopting `syn` is the operator's call).
+Reuse: rung 2 — `split_skill`, `scan`'s fence toggle and `repo_file` in `tests/skill.rs`; rung 5 — `clap::CommandFactory` (clap with `derive` is already a dependency, Cargo.toml:19) and `serde_json`; rung 2 — public lib items `cargo_hive::cli::Cli`, `cargo_hive::bench::command::BuildCmd`, `cargo_hive::receipt::{Outcome, Receipt, PlanTierBody, Scope}`, `cargo_hive::plan_tier::build::class_label`, `cargo_hive::plan_tier::record::PlanClass`; rung 7 — the literal lexer and the classifier (no dependency in the project lexes Rust, and adopting `syn` is the operator's call).
 Interface: `fn cited_name_failures(text: &str, origin: &str) -> Vec<String>`. Each entry reads `"<origin>:<line>: `<span>` is <reason>"`, and an empty list means pass. Two tests call it: one on the skill body, one on README.md (as `README.md`).
 Depth: if this module vanished, callers would still need to know only that a cited span must name something the binary defines, and which public item defines each kind (Decision 3's table). The lexer, the template match and the skip rules stay hidden.
-Locality: new private helpers in `tests/skill.rs` (extend); `src/` leave.
+Locality: a new private module `tests/skill/names.rs`, declared from `tests/skill.rs` with `#[path = "skill/names.rs"] mod names;` (a bare `mod names;` in a crate root would resolve to `tests/names.rs`, which Cargo also auto-discovers as a separate test target), so that `tests/skill.rs` stays readable (extract), and `src/` left untouched. The lexer, classifier and template match live there, and `tests/skill.rs` keeps the tests. [agent-decided, design-review F11]
 
 Flow: `inline_spans` (Decision 5) → classify (Decision 3) → check against the class's source. `src_literals()` lexes `src/**/*.rs` once per test run with `std::fs::read_dir` recursion (rung 3). Each failure names the span, so an agent fixing a red sees the renamed token (SKILLPASS-7.1, 7.2). An unclassifiable span fails with "is not a hive name the binary defines; write it as prose or add a skip rule" (SKILLPASS-7.3).
 
@@ -126,9 +137,9 @@ Locality: README.md Quick start and Commands only. Other sections are leave, apa
 ### Config-key check (tests/config_keys.rs)
 
 Satisfies: SKILLPASS-8.4
-Reuse: rung 2 — `tests/common`'s `Hive::new`, `Hive::config` and `Hive::json` (tests/common/mod.rs:52, 61, 167); rung 4 — the binary's own `deny_unknown_fields` config read (src/state.rs:243-249, 286), reached through `status --json`
+Reuse: rung 2 — `tests/common`'s `Hive::ready`, `Hive::config` and `Hive::json` (tests/common/mod.rs:73, 61, 167); rung 4 — the binary's own `deny_unknown_fields` config read (src/state.rs:243-249, 286), reached through `status --json`
 Respects: ARCH-2
-Interface: `#[test] fn every_config_key_the_readme_names_is_accepted()`, plus `#[test] fn an_unknown_config_key_is_refused()`.
+Interface: `#[test] fn every_config_key_the_readme_names_is_accepted()`, plus `#[test] fn an_unknown_config_key_is_refused()`, both on `Hive::ready()`.
 Depth: if it vanished, callers would need to know only that each README config key, set alone, must be accepted by the binary.
 Locality: new file `tests/config_keys.rs` (rung 7 by file, rung 2 by content); `tests/common` leave.
 
@@ -177,7 +188,7 @@ Locality: four requirement files under `docs/specs/` (extend); no code.
 | Agent runs recorded in `skills/hive/TESTS.md` (skill-tester Sonnet and Haiku), with `eval.json` entries | e2e (manual) | SKILLPASS-1.1, 1.2, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 4.1, 4.3, 5.3, 5.4, 6.1, 9.7, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8, 11.1 |
 | Reading the README against the skill, recorded in TESTS.md's instruction map | manual | SKILLPASS-8.1, 8.5 |
 
-A temporary rename per class (Decision 3's classes 2-10), made in a scratch copy of the worktree and reverted, shows the document-class seam failing on each. This is the close package's done signal, recorded in TESTS.md, not a committed test.
+A temporary rename per class (Decision 3's classes 1-11), made in a scratch copy of the worktree and reverted, shows the document-class seam failing on each. This is the close package's done signal, recorded in TESTS.md, not a committed test.
 
 ## Coverage check
 
@@ -199,4 +210,4 @@ Designing showed that two approved requirement texts named a mechanism that brea
 
 - **SKILLPASS-8.4** named `State::open_at` and `config()` from the skill test. The standard forbids a document test touching the machine, so 8.4 now says the binary refuses the key when it is set in a scratch `HIVE_HOME`, checked by an integration test.
 - **SKILLPASS-12.2** said the skill test's temporary state root lives under a temp directory. It now says the config-key integration test's `HIVE_HOME` is a scratch directory under `/private/tmp/hive-it-*`, and that `tests/skill.rs` touches nothing.
-- **SKILLPASS-7.2** listed only trailing placeholders. It now also accepts a template whose leading `{…}` is filled by another literal (bench series names, src/bench/mod.rs:572-590). It adds the receipt-envelope-key kind (`hive_version`), checked through `ReceiptBuilder`, and the frontmatter-key kind (`metadata.hive-version`), checked against the skill's own frontmatter.
+- **SKILLPASS-7.2** listed only trailing placeholders. It now also has a typed bench-series kind, the four series literals times the five suffix templates in src/bench/mod.rs:572-590, after design review showed a general leading-placeholder rule passes `build_ms_median`. It adds the receipt-envelope-key kind (`hive_version`), checked through `ReceiptBuilder`, and the frontmatter-key kind (`metadata.hive-version`), checked against the skill's own frontmatter.
