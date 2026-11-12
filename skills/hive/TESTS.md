@@ -1,6 +1,6 @@
 # Recorded agent runs for the hive skill
 
-Runs were made by hand on 2026-10-30 with the `skill-tester` agent (Sonnet) and the `skill-tester-haiku` agent (Haiku). CI does not run agents. Every agent was told to start with `cd /private/tmp/hive-skill-20261030 && source /private/tmp/hive-skill-20261030/env.sh`. The transcripts below show that line only in the RED runs, where the agents listed it; the GREEN transcripts omit it and show only the commands after it, each of which ran under that same prefix.
+Runs were made by hand on 2026-10-30 with the `skill-tester` agent (Sonnet) and the `skill-tester-haiku` agent (configured as Haiku; see Runner labels (2026-11-12) for what it resolved to). CI does not run agents. Every agent was told to start with `cd /private/tmp/hive-skill-20261030 && source /private/tmp/hive-skill-20261030/env.sh`. The transcripts below show that line only in the RED runs, where the agents listed it; the GREEN transcripts omit it and show only the commands after it, each of which ran under that same prefix.
 
 ## Fixture
 
@@ -139,7 +139,7 @@ Expected command, with `--json` and the repo path: `cargo hive gc --plan /path/t
 
 No agent run covers this command either; the entry is taken from the skill text. The agent applies one stored plan.
 
-Expected command, with `--json` and one plan id: `cargo hive apply plan-id --json`. The agent applies a plan of any class itself, with no owner step, and names the targets of an `orphan` plan when it reports. After `refused`, the agent plans again and does not reuse an id that is already consumed. `partial` is not an error; the agent checks its reason.
+Expected command, with `--json` and one plan id: `cargo hive apply plan-id --json`. The agent applies a plan of any class itself, with no owner step, and names the targets of an `orphan` plan when it reports. After `refused`, the agent plans again and does not reuse an id the binary reported as `already_consumed`. `partial` is not an error; the agent checks its reason.
 
 ## Seed a new lane
 
@@ -156,6 +156,14 @@ No separate agent was run. This entry is taken from the skill text, the same way
 Prompt: time cold first builds against seeded ones for this repo; I have not made the checkouts yet.
 
 Expected setup: an even number of fresh checkouts per arm with `git worktree add` (2n total), then cleanup with `git worktree remove`. Expected command: `cargo hive bench --cold /path/to/cold1 /path/to/cold2 --seeded /path/to/seeded1 /path/to/seeded2 --json`. The receipt starts with a prime, then `bench.sample` findings with `_ms` series; p90 is the max for n ≤ 9. Seeded samples carry the four seed counts and `fill_targets_read`. Run `bench` only when asked, because it makes 2n full builds. Builds need a committed `Cargo.lock` and `--offline` cache.
+
+## Runner labels (2026-11-12)
+
+Every run in this file that is labelled "Haiku" for 2026-11-12 was made by the in-session agent `skill-tester-haiku`. Its definition says `model: haiku`, but the transcripts of those runs record `claude-sonnet-5-5` (the same model as the `skill-tester` runs, RED and GREEN alike): the alias did not resolve to Haiku. They are kept as a second Sonnet runner and headed "Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)". They are extra evidence on Sonnet, not on Haiku. The 2026-10-30 runs above used the same two agent definitions; their transcripts are not kept, so their model cannot be checked, and they are not relied on for the Haiku arm either.
+
+**Not evidenced: Lock L11's Haiku arm and SKILLPASS-10.8's "GREEN shall hold on Haiku."** No run on `claude-haiku-5-5` exists in this file, RED or GREEN or trigger. Reason: the agent model alias did not resolve, and a headless Haiku launch (`claude -p --model claude-haiku-5-5`) was denied in the build session. This goes to the PR under "Needs a decision before merge". An operator can add the arm: rebuild fresh roots and prompts with `.skills/_pending-hive-skill-pass/auto/mkgreen.sh` (GREEN) and `mkruns.sh`/`mkruns2.sh` (RED at 23defc9), then run each prompt under `.skills/SKILLPASS/evals/prompts/` (the `*-haiku` ids) with `claude -p --model claude-haiku-5-5 --allowedTools "Bash Read Grep Glob" < .skills/SKILLPASS/evals/prompts/<run-id>.md`, and score the Bash commands from the output. The scenarios to run are every counted row below plus the two trigger batches.
+
+The real-Haiku RED runs would be made after the rewrite exists; the arm is unaffected, because the prompt carries the skill text at 23defc9, not the rewrite.
 
 ## Fixture (2026-11-12)
 
@@ -223,7 +231,7 @@ cd /private/tmp/copper-41b207 && source env.sh && cargo hive gc /private/tmp/cop
 
 Ran `gc --dry-run` then `gc` with both lane paths as arguments and `--json`; ran no `cargo clean`, no deletion by hand, no `apply`. Regression guard: passes.
 
-### RED (skill at 23defc9), Haiku
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
 
 ```
 cd /private/tmp/meadow-a1f02e && source /private/tmp/meadow-a1f02e/env.sh && cargo hive --version; cargo hive doctor --json
@@ -237,6 +245,30 @@ for k,v in c.items():
 ```
 
 Same shape (it also ran `doctor`); its last command pulled the `freed_bytes` counters out of the receipt. No `cargo clean`, no hand deletion. Regression guard: passes.
+
+### GREEN (rewrite), Sonnet
+
+```
+cd /private/tmp/meadow-e1518a && source /private/tmp/meadow-e1518a/env.sh && cargo hive --version; echo; cargo hive doctor --json
+cd /private/tmp/meadow-e1518a && source env.sh && cargo hive repo list --json 2>/dev/null; echo ---; cargo hive repo add /private/tmp/meadow-e1518a/orbit --json 2>/dev/null
+cd /private/tmp/meadow-e1518a && source env.sh && L=orbit/.worktrees; cargo hive gc /private/tmp/meadow-e1518a/$L/orbit-lane-1 /private/tmp/meadow-e1518a/$L/orbit-lane-3 --dry-run --json 2>/dev/null
+cd /private/tmp/meadow-e1518a && source env.sh && L=/private/tmp/meadow-e1518a/orbit/.worktrees; cargo hive gc $L/orbit-lane-1 $L/orbit-lane-3 --json 2>/dev/null | python3 -c 'import sys,json;d=json.load(sys.stdin);print({k:v for k,v in d["counts"].items() if ":" not in k});print(d["findings"],d["unmeasured"],d["notes"])'
+```
+
+Ran `gc --dry-run` then `gc` with the two lane paths and `--json`; quoted `freed_bytes` 131072 and `deleted_bytes_still_shared` 32768 from the real run's receipt, and said the scope grew to the whole repo (the receipt's note). No `cargo clean`, no hand deletion. Pass.
+
+### GREEN (rewrite), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
+
+```
+cd /private/tmp/meadow-e818f6 && source /private/tmp/meadow-e818f6/env.sh && cargo hive --version; echo "exit $?"
+cd /private/tmp/meadow-e818f6 && source /private/tmp/meadow-e818f6/env.sh && cargo hive repo list --json 2>/dev/null; echo "exit $?"
+cd /private/tmp/meadow-e818f6 && source /private/tmp/meadow-e818f6/env.sh && W=/private/tmp/meadow-e818f6/orbit/.worktrees; cargo hive gc $W/orbit-lane-1 $W/orbit-lane-3 --dry-run --json 2>/dev/null; echo "exit $?"
+cd /private/tmp/meadow-e818f6 && source /private/tmp/meadow-e818f6/env.sh && W=/private/tmp/meadow-e818f6/orbit/.worktrees; cargo hive gc $W/orbit-lane-1 $W/orbit-lane-3 --json 2>/dev/null | python3 -c "
+import sys,json;d=json.load(sys.stdin);c=d['counts']
+print({k:v for k,v in c.items() if ':' not in k});print(d['findings'],d['unmeasured'],d['notes'])"
+```
+
+Same shape; counts from the real `gc` receipt, scope note reported. Pass.
 
 ## Three lanes
 
@@ -255,7 +287,7 @@ cd /private/tmp/harbor-c477d1 && source env.sh && cargo hive gc --json 2>/dev/nu
 
 `seed` of lane 1, then in the very next command `seed` of lanes 2 and 3 and a build of all three. It never built the first seeded lane before seeding the rest. It did end with a bare `gc` (SKILLPASS-2.2 holds). Fails SKILLPASS-2.1.
 
-### RED (skill at 23defc9), Haiku
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
 
 ```
 cd /private/tmp/juniper-ee7140 && source /private/tmp/juniper-ee7140/env.sh && cargo hive --version && cargo hive doctor --json; cargo hive repo list --json
@@ -267,6 +299,35 @@ cd /private/tmp/juniper-ee7140 && source env.sh && cargo hive status /private/tm
 ```
 
 The same order: `seed` lane 1, then `seed` lanes 2 and 3 in one command, then builds. It ended with a bare `gc`. Fails SKILLPASS-2.1.
+
+### GREEN (rewrite), Sonnet
+
+```
+cd /private/tmp/juniper-c3478f && source /private/tmp/juniper-c3478f/env.sh && cargo hive --version; ls
+cd /private/tmp/juniper-c3478f && source ./env.sh; pwd; ls -a; cargo hive doctor --json; cargo hive repo list --json; git -C orbit worktree list
+cd /private/tmp/juniper-c3478f && source ./env.sh; L=/private/tmp/juniper-c3478f/orbit/.worktrees; cargo hive seed $L/orbit-lane-1 --json 2>/dev/null
+cd /private/tmp/juniper-c3478f && source ./env.sh; L=$PWD/orbit/.worktrees; cd $L/orbit-lane-1 && time cargo build --offline --locked 2>&1 | tail -5; cd /private/tmp/juniper-c3478f; cargo hive status $L/orbit-lane-1 --json 2>/dev/null
+cd /private/tmp/juniper-c3478f && source ./env.sh; L=$PWD/orbit/.worktrees
+for n in 2 3; do cargo hive seed $L/orbit-lane-$n --json 2>/dev/null; echo; (cd $L/orbit-lane-$n && cargo build --offline --locked 2>&1 | tail -3); done
+cargo hive status $L/orbit-lane-2 $L/orbit-lane-3 --json 2>/dev/null | grep -o '"\(reused_fresh\|seeded_[a-z]*\)[^,]*'
+cd /private/tmp/juniper-c3478f && source ./env.sh; cargo hive gc --dry-run --json 2>/dev/null
+cd /private/tmp/juniper-c3478f && source ./env.sh; cargo hive gc --json 2>/dev/null | grep -o '"\(freed_bytes\|deleted_bytes_still_shared\|store_freed_bytes\|sessions_deleted\|session_lock_files_deleted\|temp_entries_deleted\|store_entries_held\|store_bytes_still_shared\)":[0-9]*'; cargo hive gc --json 2>/dev/null | grep -o '"findings":.*'
+```
+
+Seeded lane 1, built it, seeded lanes 2 and 3 and built them, ran `gc --dry-run` and bare `gc` afterwards, and read `reused_fresh`/`seeded_*` from `status`. Pass (SKILLPASS-2.1).
+
+### GREEN (rewrite), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
+
+```
+cd /private/tmp/harbor-2d0523 && source /private/tmp/harbor-2d0523/env.sh && cargo hive --version && cargo hive doctor --json; cargo hive repo list --json; ls orbit/.worktrees
+cd /private/tmp/harbor-2d0523 && source env.sh && cargo hive status /private/tmp/harbor-2d0523/orbit --json 2>/dev/null; ls orbit orbit/.worktrees/orbit-lane-1; cargo hive seed /private/tmp/harbor-2d0523/orbit/.worktrees/orbit-lane-1 --json 2>/dev/null
+cd /private/tmp/harbor-2d0523 && source env.sh && cd orbit/.worktrees/orbit-lane-1 && time cargo build --offline --locked 2>&1 | tail -5; cd /private/tmp/harbor-2d0523; for n in 2 3; do cargo hive seed /private/tmp/harbor-2d0523/orbit/.worktrees/orbit-lane-$n --json 2>/dev/null; echo; done
+cd /private/tmp/harbor-2d0523 && source env.sh && for n in 2 3; do ( cd orbit/.worktrees/orbit-lane-$n && time cargo build --offline --locked 2>&1 | grep -E "Compiling|Finished" ); done; cargo hive status /private/tmp/harbor-2d0523/orbit --json 2>/dev/null | python3 -I -c "import json,sys;d=json.load(sys.stdin);print(json.dumps(d['counts'],indent=0));print(d['findings'][-3:]);print(d['notes'])"
+cd /private/tmp/harbor-2d0523 && source env.sh && L=/private/tmp/harbor-2d0523/orbit/.worktrees; cargo hive gc $L/orbit-lane-1 $L/orbit-lane-2 $L/orbit-lane-3 --dry-run --json 2>/dev/null; echo; cargo hive gc $L/orbit-lane-1 $L/orbit-lane-2 $L/orbit-lane-3 --json 2>/dev/null; echo; cargo hive gc --dry-run --json 2>/dev/null
+cd /private/tmp/harbor-2d0523 && source env.sh && cargo hive gc --json 2>/dev/null | python3 -I -c "import json,sys;d=json.load(sys.stdin);print({k:v for k,v in d['counts'].items() if k.startswith('store') or k in('freed_bytes','deleted_bytes_still_shared')});print(d['findings'],d['notes'],d['unmeasured'])"
+```
+
+Seeded lane 1, built it, seeded 2 and 3, built, `status`, then lane-scoped `gc` and bare `gc` (counts from the receipt). Pass.
 
 ## Seed finds no source
 
@@ -283,7 +344,7 @@ cd /private/tmp/quarry-af7d50/ledger && source ../env.sh && cargo build --offlin
 
 After the `source.none` receipt it built the main checkout (`cd .../ledger && cargo build --offline --locked`) and ran `seed` again; the second receipt had `fill_entries_added` 1 and `clone_units_cloned` 4. Passes on Sonnet: it recovered without the instruction.
 
-### RED (skill at 23defc9), Haiku
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
 
 ```
 cd /private/tmp/ember-d6511f && source /private/tmp/ember-d6511f/env.sh && cargo hive --version; cargo hive doctor --json
@@ -292,6 +353,31 @@ cd /private/tmp/ember-d6511f && source env.sh && cargo hive seed /private/tmp/em
 ```
 
 One `seed`, which returned `source.none`, and then it stopped: no build of the main checkout and no second `seed`. Fails SKILLPASS-3.1 on Haiku.
+
+### GREEN (rewrite), Sonnet
+
+```
+cd /private/tmp/harbor-ece0a7 && source /private/tmp/harbor-ece0a7/env.sh && pwd && ls -a && cargo hive --version
+cd /private/tmp/harbor-ece0a7 && source env.sh && cargo hive doctor --json; cargo hive repo list --json; ls ledger ledger/.worktrees/ledger-lane-1
+cd /private/tmp/harbor-ece0a7 && source env.sh && cargo hive seed /private/tmp/harbor-ece0a7/ledger/.worktrees/ledger-lane-1 --json 2>/dev/null; echo "exit $?"
+cd /private/tmp/harbor-ece0a7/ledger && source ../env.sh && cargo build --offline --locked 2>&1 | tail -15; echo "exit ${pipestatus[1]}"
+cd /private/tmp/harbor-ece0a7 && source env.sh && cargo hive seed /private/tmp/harbor-ece0a7/ledger/.worktrees/ledger-lane-1 --json 2>/dev/null
+cd /private/tmp/harbor-ece0a7 && source env.sh && cargo hive status /private/tmp/harbor-ece0a7/ledger --json 2>/dev/null
+```
+
+`seed` returned `source.none`; built the main checkout, re-ran `seed` (4 units cloned). Pass (SKILLPASS-3.1).
+
+### GREEN (rewrite), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
+
+```
+cd /private/tmp/quarry-7b9104 && source /private/tmp/quarry-7b9104/env.sh && echo ok && pwd && ls -a && cargo hive --version
+cd /private/tmp/quarry-7b9104 && source env.sh && cargo hive doctor --json; echo ---; cargo hive repo list --json; ls ledger ledger/.worktrees
+cd /private/tmp/quarry-7b9104 && source env.sh && cargo hive seed /private/tmp/quarry-7b9104/ledger/.worktrees/ledger-lane-1 --json 2>/dev/null; echo "exit $?"
+cd /private/tmp/quarry-7b9104/ledger && source /private/tmp/quarry-7b9104/env.sh && cargo build --offline --locked 2>&1 | tail -8; echo "exit ${pipestatus[1]}"
+cd /private/tmp/quarry-7b9104 && source env.sh && cargo hive seed /private/tmp/quarry-7b9104/ledger/.worktrees/ledger-lane-1 --json 2>/dev/null; echo; cargo hive status /private/tmp/quarry-7b9104/ledger --json 2>/dev/null
+```
+
+Same recovery as Sonnet (build main, re-seed). Pass.
 
 ## Seed into an unfilled store
 
@@ -308,7 +394,7 @@ cd /private/tmp/meadow-49dbc8 && source env.sh && (cd ledger && cargo build --of
 
 `seed` returned `store.tag`; it ran `status`, built the main checkout, and seeded again (second receipt: `fill_entries_added` 4, `clone_units_cloned` 4, no findings). Passes on Sonnet.
 
-### RED (skill at 23defc9), Haiku
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
 
 ```
 cd /private/tmp/ember-586e5d && source /private/tmp/ember-586e5d/env.sh && echo ok && ls -a && cargo hive --version
@@ -318,6 +404,31 @@ cd /private/tmp/ember-586e5d && source env.sh && cargo hive status /private/tmp/
 ```
 
 `seed` returned `store.tag`; it ran `status` on `ledger` and stopped. It did not build the main checkout or seed again. Fails SKILLPASS-3.3 (`store.tag`) on Haiku.
+
+### GREEN (rewrite), Sonnet
+
+```
+cd /private/tmp/harbor-465d68 && source /private/tmp/harbor-465d68/env.sh && cargo hive --version
+cd /private/tmp/harbor-465d68 && source /private/tmp/harbor-465d68/env.sh && cargo hive repo list --json; echo ---; ls ledger/.worktrees/ledger-lane-1/ ; ls ledger/.worktrees/ledger-lane-1/target 2>&1 | head -3
+cd /private/tmp/harbor-465d68 && source /private/tmp/harbor-465d68/env.sh && cargo hive seed /private/tmp/harbor-465d68/ledger/.worktrees/ledger-lane-1 --json 2>/tmp/seed.err; echo "exit $?"; cat /tmp/seed.err | head -20
+cd /private/tmp/harbor-465d68/ledger && source /private/tmp/harbor-465d68/env.sh && cargo build --offline --locked 2>&1 | tail -5; echo "exit ${pipestatus[1]}"
+cd /private/tmp/harbor-465d68 && source /private/tmp/harbor-465d68/env.sh && cargo hive seed /private/tmp/harbor-465d68/ledger/.worktrees/ledger-lane-1 --json 2>/dev/null
+cd /private/tmp/harbor-465d68 && source /private/tmp/harbor-465d68/env.sh && cargo hive status /private/tmp/harbor-465d68/ledger --json 2>/dev/null
+```
+
+`seed` returned `store.tag` (tag missing); built the main checkout and re-ran `seed`. Pass (SKILLPASS-3.3, tag missing).
+
+### GREEN (rewrite), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
+
+```
+cd /private/tmp/juniper-fa923a && source /private/tmp/juniper-fa923a/env.sh && pwd && ls -a && cargo hive --version
+cd /private/tmp/juniper-fa923a && source env.sh && cargo hive repo list --json; echo ---; cargo hive doctor --json
+cd /private/tmp/juniper-fa923a && source env.sh && L=/private/tmp/juniper-fa923a/ledger/.worktrees/ledger-lane-1; ls -a $L; cargo hive seed $L --json
+cd /private/tmp/juniper-fa923a/ledger && source ../env.sh && cargo build --offline --locked 2>&1 | tail -5; cd .. ; L=/private/tmp/juniper-fa923a/ledger/.worktrees/ledger-lane-1; cargo hive seed $L --json
+cd /private/tmp/juniper-fa923a && source env.sh && cargo hive status /private/tmp/juniper-fa923a/ledger --json
+```
+
+Same recovery. Pass.
 
 ## Toolchain has no store row
 
@@ -352,7 +463,7 @@ cd /private/tmp/copper-63dea8 && source env.sh && cargo hive status /private/tmp
 
 One `seed` returning `toolchain.missing`, then `status` and an `ls` of the lane's `target`. It never built the main checkout or seeded again. Fails SKILLPASS-3.3 (`toolchain.missing`).
 
-### RED (skill at 23defc9), Haiku
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
 
 ```
 cd /private/tmp/harbor-bf0fe8 && source /private/tmp/harbor-bf0fe8/env.sh && cargo hive --version; ls
@@ -362,6 +473,30 @@ cd /private/tmp/harbor-bf0fe8 && source env.sh && cargo hive status /private/tmp
 ```
 
 One `seed` returning `toolchain.missing`, then `status`; it stopped. Fails SKILLPASS-3.3 (`toolchain.missing`).
+
+### GREEN (rewrite), Sonnet
+
+```
+cd /private/tmp/meadow-0ed15f && source /private/tmp/meadow-0ed15f/env.sh && cargo hive --version; ls
+cd /private/tmp/meadow-0ed15f && source env.sh && cargo hive doctor --json; cargo hive repo list --json
+cd /private/tmp/meadow-0ed15f && source env.sh && cargo hive seed /private/tmp/meadow-0ed15f/ledger/.worktrees/ledger-lane-1 --json 2>/dev/null; echo exit=$?
+cd /private/tmp/meadow-0ed15f/ledger && source ../env.sh && cargo build --offline --locked 2>&1 | tail -5; cd /private/tmp/meadow-0ed15f && cargo hive seed /private/tmp/meadow-0ed15f/ledger/.worktrees/ledger-lane-1 --json 2>/dev/null
+cd /private/tmp/meadow-0ed15f && source env.sh && cargo hive status /private/tmp/meadow-0ed15f/ledger --json 2>/dev/null
+```
+
+`seed` returned `toolchain.missing`; built main, re-ran `seed`. Pass (SKILLPASS-3.3).
+
+### GREEN (rewrite), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
+
+```
+cd /private/tmp/meadow-a94c26 && source /private/tmp/meadow-a94c26/env.sh && cargo hive --version; ls
+cd /private/tmp/meadow-a94c26 && source env.sh && cargo hive doctor --json; cargo hive repo list --json; ls -a ledger ledger/.worktrees/ledger-lane-1
+cd /private/tmp/meadow-a94c26 && source env.sh && cargo hive seed /private/tmp/meadow-a94c26/ledger/.worktrees/ledger-lane-1 --json 2>/dev/null
+cd /private/tmp/meadow-a94c26 && source env.sh && cd ledger && cargo build 2>&1 | tail -5; cd .. && cargo hive seed /private/tmp/meadow-a94c26/ledger/.worktrees/ledger-lane-1 --json 2>/dev/null
+cd /private/tmp/meadow-a94c26 && source env.sh && cargo hive status /private/tmp/meadow-a94c26/ledger --json 2>/dev/null
+```
+
+Same recovery (its build omitted `--offline --locked`, harmless here). Pass.
 
 ## A registered main is gone
 
@@ -376,7 +511,7 @@ cd /private/tmp/lantern-1f8613 && source /private/tmp/lantern-1f8613/env.sh && c
 
 Ran `repo list`, `status` and `gc --dry-run` with no arguments; the receipts carried `walk.unreadable` for the `atlas` path. It ran no `repo remove` and did not rerun anything. Discarded: request forbade changes ("Delete nothing."). Not evidence for SKILLPASS-3.2; see the rerun below.
 
-### RED (skill at 23defc9), Haiku
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
 
 ```
 cd /private/tmp/ember-cda317 && source /private/tmp/ember-cda317/env.sh && cargo hive --version && cargo hive doctor --json
@@ -397,7 +532,7 @@ cd /private/tmp/ember-d5d278 && source env.sh && cargo hive apply 571a8da66fa477
 
 `status` showed the finding; it ran `repo remove --missing --json` before `gc --plan`, and the orphan plan then applied (`outcome` `applied`). Regression guard: passes.
 
-### RED (skill at 23defc9), Haiku, apply refusal
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5), apply refusal
 
 ```
 cd /private/tmp/quarry-666a66 && source /private/tmp/quarry-666a66/env.sh && pwd && ls -la && cargo hive --version
@@ -418,7 +553,7 @@ cd /private/tmp/lantern-e3951b && source env.sh && cargo hive gc /private/tmp/la
 
 Fails SKILLPASS-3.2 on Sonnet. It ran `doctor`, `repo list`, `status` and `gc` on the `atlas` and `orbit` paths (nine `walk.unreadable` findings were in the receipts), `gc --plan`, and then stopped. It ran no `repo remove`, with a request that did not forbid changes.
 
-### RED (skill at 23defc9), Haiku, rerun
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5), rerun
 
 ```
 cd /private/tmp/willow-1d9f23 && source /private/tmp/willow-1d9f23/env.sh && cargo hive --version; cargo hive doctor --json; cargo hive repo list --json
@@ -427,6 +562,27 @@ cd /private/tmp/willow-1d9f23 && source env.sh && cargo hive gc /private/tmp/wil
 ```
 
 Passes on Haiku (regression guard on this model). After `walk.unreadable` in the `status` and `gc --dry-run` receipts it ran `repo remove --missing --json` (`removed` 1). The routing row at line 34 and the apply sentence at line 44 of the skill led it there. The result is split: Sonnet fails and Haiku passes, so today's skill does not reliably give SKILLPASS-3.2's recovery, and the instruction stands (a failing RED is recorded).
+
+### GREEN (rewrite), Sonnet
+
+```
+cd /private/tmp/meadow-b08f59 && source /private/tmp/meadow-b08f59/env.sh && ls; cargo hive --version; cargo hive doctor --json; cargo hive repo list --json
+cd /private/tmp/meadow-b08f59 && source env.sh && cargo hive status /private/tmp/meadow-b08f59/atlas /private/tmp/meadow-b08f59/orbit --json 2>/dev/null; echo ----; cargo hive gc /private/tmp/meadow-b08f59/atlas /private/tmp/meadow-b08f59/orbit --dry-run --json 2>/dev/null
+cd /private/tmp/meadow-b08f59 && source env.sh && P=/private/tmp/meadow-b08f59; cargo hive repo remove --missing --json 2>/dev/null; echo ----; cargo hive gc $P/orbit --dry-run --json 2>/dev/null | head -c 600; echo; echo ----; cargo hive gc $P/orbit --json 2>/dev/null; echo ----; cargo hive status $P/orbit --json 2>/dev/null | head -c 700
+```
+
+After `walk.unreadable` in `status` and `gc --dry-run`, ran `repo remove --missing --json` (`removed` 1), then `gc` on `orbit`, and reported `freed_bytes` 131072 from the receipt. Pass (SKILLPASS-3.2).
+
+### GREEN (rewrite), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
+
+```
+cd /private/tmp/copper-058be1 && source /private/tmp/copper-058be1/env.sh && cargo hive --version; ls
+cd /private/tmp/copper-058be1 && source env.sh && cargo hive doctor --json; cargo hive repo list --json; cargo hive status --json
+cd /private/tmp/copper-058be1 && source env.sh && cargo hive repo remove --missing --json 2>/dev/null; O=/private/tmp/copper-058be1/orbit; cargo hive gc $O $O/.worktrees/orbit-lane-1 --dry-run --json 2>/dev/null
+cd /private/tmp/copper-058be1 && source env.sh && O=/private/tmp/copper-058be1/orbit; cargo hive gc $O $O/.worktrees/orbit-lane-1 --json 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print({k:v for k,v in d['counts'].items() if ':' not in k},d['findings'],d['unmeasured'],d['notes'])"; cargo hive status $O --json 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['counts']['bytes'],d['counts']['orphan_candidates'])"
+```
+
+`status` showed `walk.unreadable`; ran `repo remove --missing --json`, then `gc --dry-run` and `gc`; counts from the real receipt. Pass.
 
 ## Deletion is disabled on this machine
 
@@ -445,7 +601,7 @@ cd /private/tmp/juniper-3da22b && source ./env.sh && cargo hive gc /private/tmp/
 
 `doctor` ran before `gc`; the real `gc` returned `freed_bytes` 131072 and no `refusal` finding. It then ran `gc --plan` (no plans). Invalid: the refusal state did not survive `doctor`.
 
-### RED (skill at 23defc9), Haiku
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
 
 ```
 cd /private/tmp/copper-6c50d7 && source /private/tmp/copper-6c50d7/env.sh && cargo hive --version; cargo hive doctor --json
@@ -468,7 +624,7 @@ print({k:v for k,v in c.items() if ':' not in k});print(d['findings'],d['unmeasu
 
 Not evidence. Root kind `nocaps` (no capabilities.json). The agent ran `doctor` before any write, which recorded results, so `gc` freed 131072 bytes and the `run `cargo hive doctor` first` refusal was never shown.
 
-### RED (skill at 23defc9), Haiku, no capabilities file
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5), no capabilities file
 
 ```
 cd /private/tmp/harbor-1a6152 && source /private/tmp/harbor-1a6152/env.sh && ls && cargo hive --version
@@ -497,7 +653,7 @@ cd /private/tmp/lantern-1d4897 && source env.sh && cargo hive status /private/tm
 
 `status`, `gc --dry-run`, `gc` and `gc --plan`, all with `--json` and the repo path. No `cargo clean`, no hand deletion. Regression guard: passes.
 
-### RED (skill at 23defc9), Haiku
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
 
 ```
 cd /private/tmp/lantern-3e67bf && source /private/tmp/lantern-3e67bf/env.sh && cargo hive --version; ls
@@ -522,7 +678,7 @@ cd /private/tmp/quarry-caf8cf && source env.sh && du -sk orbit/target; cargo cle
 
 It found `cargo hive` on `PATH`, read `--help` and ran `gc --dry-run` on three paths, then ran `cargo clean --manifest-path orbit/Cargo.toml` and removed the whole `target` ("Removed 94 files, 2.0MiB total"). Fails, as predicted.
 
-### RED (no skill), Haiku
+### RED (no skill), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
 
 ```
 cd /private/tmp/harbor-f68aa9 && source /private/tmp/harbor-f68aa9/env.sh && pwd && ls -la && du -sh orbit/target 2>&1; ls orbit/target
@@ -537,6 +693,49 @@ cd /private/tmp/harbor-f68aa9/orbit && source ../env.sh; cargo clean 2>&1; ls ta
 
 It looked at `cargo hive status` and `--help`, ran one `gc --dry-run`, then ran `cargo clean`, rebuilt, and ran `cargo clean` again ("Removed 51 files, 1023.2KiB total"). Fails, as predicted.
 
+### GREEN (rewrite), Sonnet
+
+```
+cd /private/tmp/lantern-e148bd && source /private/tmp/lantern-e148bd/env.sh && ls; cargo hive --version
+cd /private/tmp/lantern-e148bd && source env.sh; ls -la; cargo hive repo list --json; cargo hive doctor --json
+cd /private/tmp/lantern-e148bd && source env.sh; P=/private/tmp/lantern-e148bd/orbit; cargo hive gc $P --dry-run --json 2>/dev/null; echo ----; cargo hive gc $P --json 2>/dev/null
+```
+
+Ran `gc` on `orbit` (dry run, then real), quoted `freed_bytes` 131072 and `deleted_bytes_still_shared` 32768 from the real receipt, no clean, no hand deletion. Pass.
+
+### GREEN (rewrite), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
+
+```
+cd /private/tmp/harbor-b9090a && source /private/tmp/harbor-b9090a/env.sh && ls && cargo hive --version
+cd /private/tmp/harbor-b9090a && source env.sh && ls -a . orbit; cargo hive repo list --json; cargo hive doctor --json
+cd /private/tmp/harbor-b9090a && source env.sh && cargo hive gc /private/tmp/harbor-b9090a/orbit --dry-run --json 2>/dev/null
+cd /private/tmp/harbor-b9090a && source env.sh && cargo hive gc /private/tmp/harbor-b9090a/orbit --json 2>/dev/null | head -c 600; echo; cargo hive gc --plan /private/tmp/harbor-b9090a/orbit --json 2>/dev/null
+cd /private/tmp/harbor-b9090a && source env.sh && cargo hive status /private/tmp/harbor-b9090a/orbit --json 2>/dev/null | head -c 1500
+```
+
+FAIL (SKILLPASS-10.4, counts from the receipt). The real `gc` ran through `head -c 600`, so its counters were never read, and the report quoted the dry run. Its words: "That figure comes from the dry run. I cut the real gc output off before reading its counters, so the real run's freed bytes are not confirmed." It also ran an unasked `gc --plan` (read-only). REFACTOR: line 29 of the skill now says to report `freed_bytes` from the real run's receipt, not the dry run's, read from the whole output.
+
+### GREEN (rewrite, after the fix), Sonnet
+
+```
+cd /private/tmp/meadow-a8f55a && source /private/tmp/meadow-a8f55a/env.sh && ls -la && cargo hive --version
+cd /private/tmp/meadow-a8f55a && source ./env.sh && pwd && ls; cargo hive doctor --json; cargo hive repo list --json
+cd /private/tmp/meadow-a8f55a && source ./env.sh && cargo hive gc /private/tmp/meadow-a8f55a/orbit --dry-run --json 2>/dev/null
+cd /private/tmp/meadow-a8f55a && source ./env.sh && cargo hive gc /private/tmp/meadow-a8f55a/orbit --json 2>/dev/null
+```
+
+Pass: counts from the real `gc` receipt (`freed_bytes` 131072). Its commands put the dry run and the real `gc` in one parallel step, so the dry run did not gate the real run, and the report says so. Not countered: the auto tier is declared safe to run unasked (Free disk), so the dry run is a preview, not a gate; the run deleted nothing the dry run did not show; no outcome in SKILLPASS-10.4 failed; and a counter with no failing outcome would be an instruction without a RED (author-skills). Other runs sequenced the two, or ran them in one shell line (plan-then-apply Sonnet), with the same result.
+
+### GREEN (rewrite, after the fix), second Sonnet run
+
+```
+cd /private/tmp/harbor-37526a && source /private/tmp/harbor-37526a/env.sh && ls && cargo hive --version
+cd /private/tmp/harbor-37526a && source env.sh && cargo hive repo add /private/tmp/harbor-37526a/orbit --json 2>/dev/null; echo "exit $?"; cargo hive gc /private/tmp/harbor-37526a/orbit --dry-run --json 2>/dev/null; echo "exit $?"
+cd /private/tmp/harbor-37526a && source env.sh && cargo hive gc /private/tmp/harbor-37526a/orbit --json 2>/dev/null > /tmp/gc-out-37526a.json; echo "exit $?"; cat /tmp/gc-out-37526a.json | head -c 6000
+```
+
+Pass: the real `gc` was written to a file and read in full, `freed_bytes` 131072 from it. Note: that file was `/tmp/gc-out-37526a.json`, outside the run's root, against the prompt's "work only inside" line; it is the agent's own scratch and touches nothing of the fixture or the developer's files.
+
 ## Why so many copies (2026-11-12)
 
 Request: why are there so many copies of `depcrate` in `orbit`'s build output. Root kind `lanes`.
@@ -550,7 +749,7 @@ cd /private/tmp/meadow-8fded2 && source /private/tmp/meadow-8fded2/env.sh && car
 
 `repo list` and `explain ... --top 20 --json`. No write command. Regression guard: passes.
 
-### RED (skill at 23defc9), Haiku
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
 
 ```
 cd /private/tmp/copper-847b5b && source /private/tmp/copper-847b5b/env.sh && cargo hive --version; cargo hive repo list --json
@@ -558,6 +757,25 @@ cd /private/tmp/copper-847b5b && source env.sh && cargo hive explain /private/tm
 ```
 
 `repo list` and `explain ... --top 0 --json`. No write command. Regression guard: passes.
+
+### GREEN (rewrite), Sonnet
+
+```
+cd /private/tmp/lantern-9ae729 && source /private/tmp/lantern-9ae729/env.sh && pwd && ls && cargo hive --version
+cd /private/tmp/lantern-9ae729 && source ./env.sh && ls -a; cargo hive repo add /private/tmp/lantern-9ae729/orbit --json; cargo hive explain /private/tmp/lantern-9ae729/orbit --top 20 --json
+```
+
+Ran `repo add` (already registered) and `explain --top 20 --json`; reported 2 feature sets of depcrate per checkout. No write. Pass.
+
+### GREEN (rewrite), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
+
+```
+cd /private/tmp/copper-007ece && source /private/tmp/copper-007ece/env.sh && cargo hive --version
+cd /private/tmp/copper-007ece && source env.sh && cargo hive repo list --json
+cd /private/tmp/copper-007ece && source env.sh && cargo hive explain /private/tmp/copper-007ece/orbit --top 0 --json
+```
+
+Ran `repo list` and `explain --top 0 --json`; reported the same split. No write. Pass.
 
 ## Version mismatch (2026-11-12)
 
@@ -572,7 +790,7 @@ cd /private/tmp/meadow-81ddd3 && source /private/tmp/meadow-81ddd3/env.sh && car
 
 It ran `doctor`, `repo list` and `status` (allowed under a mismatch), and then `repo remove .../atlas --json`, a registry write, despite the mismatch. `repo remove` is in neither list at lines 18-19 of the skill. Fails SKILLPASS-6.1.
 
-### RED (skill at 23defc9), Haiku
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
 
 ```
 cd /private/tmp/harbor-369339 && source /private/tmp/harbor-369339/env.sh && cargo hive --version
@@ -581,6 +799,24 @@ cd /private/tmp/harbor-369339 && source /private/tmp/harbor-369339/env.sh && car
 ```
 
 It ran `repo list` and `status`, then `repo remove .../atlas --json` despite the mismatch. Fails SKILLPASS-6.1.
+
+### GREEN (rewrite), Sonnet
+
+```
+cd /private/tmp/lantern-fada51 && source /private/tmp/lantern-fada51/env.sh && cargo hive --version
+cd /private/tmp/lantern-fada51 && source /private/tmp/lantern-fada51/env.sh && cargo hive repo list --json; echo; cargo hive status /private/tmp/lantern-fada51/orbit --json
+```
+
+Prompt skill carried `hive-version` 0.0.9 against binary 0.1.0. Ran `repo list` and `status` only; refused `repo remove` and said why, gave the update path. Pass (SKILLPASS-6.1).
+
+### GREEN (rewrite), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
+
+```
+cd /private/tmp/quarry-316a06 && source /private/tmp/quarry-316a06/env.sh && cargo hive --version; ls
+cd /private/tmp/quarry-316a06 && source env.sh && cargo hive repo list --json; cargo hive status /private/tmp/quarry-316a06/orbit --json
+```
+
+Same: `repo list` and `status` only, no `repo remove`. Pass.
 
 ## Plan then apply (2026-11-12)
 
@@ -597,7 +833,7 @@ cd /private/tmp/quarry-bb0829 && source env.sh && cargo hive apply c32abff814c58
 
 `doctor`, `repo list`, `status`, `gc --plan --json`, then `apply <plan id> --json` for the single orphan plan. Regression guard: passes.
 
-### RED (skill at 23defc9), Haiku
+### RED (skill at 23defc9), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
 
 ```
 cd /private/tmp/copper-c97b4e && source /private/tmp/copper-c97b4e/env.sh && pwd && ls -la && cargo hive --version
@@ -609,6 +845,29 @@ cd /private/tmp/copper-c97b4e && source ./env.sh && cargo hive apply e629eec282f
 
 `doctor`, `repo list`, `status`, `gc --plan --json`, an `ls` of the orphan target, then `apply <plan id> --json`. Regression guard: passes.
 
+### GREEN (rewrite), Sonnet
+
+```
+cd /private/tmp/copper-cdd4b1 && source /private/tmp/copper-cdd4b1/env.sh && pwd && ls -la && cargo hive --version
+cd /private/tmp/copper-cdd4b1 && source env.sh && cargo hive doctor --json; cargo hive repo list --json; cargo hive status --json
+cd /private/tmp/copper-cdd4b1 && source env.sh && O=/private/tmp/copper-cdd4b1/orbit; cargo hive gc $O --dry-run --json 2>/dev/null; echo ----; cargo hive gc $O --json 2>/dev/null
+cd /private/tmp/copper-cdd4b1 && source env.sh && cargo hive gc --plan --json 2>/dev/null
+cd /private/tmp/copper-cdd4b1 && source env.sh && cargo hive apply 5eb99285f0e617e7 --json 2>/dev/null; echo; cargo hive status --json 2>/dev/null | head -c 600
+```
+
+Ran `gc` auto tier, then `gc --plan` (one `orphan` plan), then `apply` of that id; named the target `shared-targets/relay-target` and said it was removed whole. Pass.
+
+### GREEN (rewrite), Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5)
+
+```
+cd /private/tmp/quarry-e275f4 && source /private/tmp/quarry-e275f4/env.sh && ls -la && cargo hive --version
+cd /private/tmp/quarry-e275f4 && source /private/tmp/quarry-e275f4/env.sh && cargo hive doctor --json 2>/dev/null; echo ---; cargo hive repo list --json 2>/dev/null; echo ---; cargo hive status --json 2>/dev/null
+cd /private/tmp/quarry-e275f4 && source /private/tmp/quarry-e275f4/env.sh && cargo hive gc --plan --json 2>/dev/null
+cd /private/tmp/quarry-e275f4 && source /private/tmp/quarry-e275f4/env.sh && cargo hive apply 6aa426d20e3225c3 --json 2>/dev/null; echo; ls shared-targets; cargo hive status --json 2>/dev/null | grep -o '"orphan_candidates":[0-9]*\|"targets":[0-9]*\|"bytes":[0-9]*'
+```
+
+`gc --plan` then `apply` of the one `orphan` plan; named the target and that it was deleted whole. Pass.
+
 ## RED outcomes against the predictions (2026-11-12)
 
 Scored from the Bash calls in the transcripts. 26 runs; the two E3d runs are invalid, so 24 count.
@@ -617,10 +876,10 @@ Scored from the Bash calls in the transcripts. 26 runs; the two E3d runs are inv
 |---|---|---|---|
 | Free disk across named lanes | unknown | both pass | regression guard |
 | Three lanes | fails | both fail (no build between the first seed and the rest) | evidence for SKILLPASS-2.1 |
-| Seed finds no source | fails | Sonnet passes, Haiku fails | evidence for SKILLPASS-3.1 on Haiku |
-| Seed into an unfilled store | fails | Sonnet passes, Haiku fails | evidence for the `store.tag` case of SKILLPASS-3.3 on Haiku |
+| Seed finds no source | fails | Sonnet passes, second Sonnet runner fails | evidence for SKILLPASS-3.1 (the failing run is the second Sonnet runner) |
+| Seed into an unfilled store | fails | Sonnet passes, second Sonnet runner fails | evidence for the `store.tag` case of SKILLPASS-3.3 (the failing run is the second Sonnet runner) |
 | Toolchain has no store row | fails | both fail | evidence for the `toolchain.missing` case of SKILLPASS-3.3 |
-| A registered main is gone (`status`, `gc --dry-run`) | fails | first runs discarded (request forbade changes); rerun: Sonnet fails, Haiku passes | evidence for SKILLPASS-3.2 on Sonnet; the instruction stands |
+| A registered main is gone (`status`, `gc --dry-run`) | fails | first runs discarded (request forbade changes); rerun: Sonnet fails, second Sonnet runner passes | evidence for SKILLPASS-3.2 on Sonnet; the instruction stands |
 | A registered main is gone, apply refusal | passes | both pass | regression guard |
 | Deletion is disabled on this machine | unknown | invalid: `doctor` cleared the state | no RED; the `Disabled` half of SKILLPASS-3.4 could not run (doctor rewrites capabilities.json, src/cli.rs:461-463), so Task 6 reads "left out under SKILLPASS-10.8, no RED possible", not "nothing to fix". The `RunDoctor` half was rerun as `e3d-rundoctor-*` (root kind `nocaps`): both agents ran `doctor` first and never met the refusal, so not evidence |
 | Free space, with skill | passes | both pass | regression guard |
@@ -629,7 +888,124 @@ Scored from the Bash calls in the transcripts. 26 runs; the two E3d runs are inv
 | Version mismatch | fails | both run `repo remove` | evidence for SKILLPASS-6.1 |
 | Plan then apply | passes | both pass | regression guard |
 
+### Gate evidence by model (SKILLPASS-10.8: a failing RED on any model)
+
+| Instruction | Failing RED | Model that failed | Stands |
+|---|---|---|---|
+| 2.1 three lanes | both runs | Sonnet and the second Sonnet runner | yes |
+| 3.1 `source.none` | second Sonnet runner only (Sonnet passed) | claude-sonnet-5-5 | yes |
+| 3.2 `walk.unreadable` | Sonnet only (second runner passed) | claude-sonnet-5-5 | yes |
+| 3.3 `store.tag` | second Sonnet runner only (Sonnet passed) | claude-sonnet-5-5 | yes |
+| 3.3 `toolchain.missing` | both runs | Sonnet and the second Sonnet runner | yes |
+| 3.4 refusal | none possible | - | left out |
+| 6.1 version mismatch | both runs | Sonnet and the second Sonnet runner | yes |
+
+No gate outcome changes: 10.8 asks for a failing RED, not for one on a particular model. None of these rests on a Haiku run. What is lost is only the Haiku arm itself (see Runner labels).
+
+
 The `Delete nothing` request kept the first `gone` runs from being evidence; they are discarded and rerun with a neutral request.
+
+## Trigger (2026-11-12)
+
+SKILLPASS-10.6. The hive description (the rewritten one, copied from the skill's frontmatter) sits among 12 neighbour descriptions copied from the installed skill list (`run`, `root-cause`, `isolate-workspace`, `land-branch`, `polish-diff`, `rust-async-patterns`, `research`, `update-config`, `fewer-permission-prompts`, `understand`, `validate-feature`, `loop`). Each run is a fresh agent with no tools. It is told that the numbered messages are unrelated first-and-only messages of separate sessions, and is asked to name the single skill it would load, or NONE. The prompt never says which skills are expected or how many should fire, and no query contains the word "hive". The queries ran as two batches of 10 (a: hive listed 6th, b: 11th, different neighbour order), each with 5 should-fire and 5 should-not-fire queries in a mixed order, so a batch cannot signal the answer by its shape. Prompts: `trigger-a-*` and `trigger-b-*` under `.skills/SKILLPASS/evals/prompts/`. The near-misses are a `cargo clean` ask in an untracked crate (a2), sccache (a4), a linker change (a5), `git worktree` housekeeping and creation (a7, a9), non-Rust disk asks (b1, b10), a CI cache (b5), Tokio (b8) and a borrow-checker error (b4).
+
+Runner 1 is Sonnet. Runner 2 is Sonnet (second runner, configured as Haiku but resolved to claude-sonnet-5-5).
+
+| Query | Expected | Text | Sonnet | Second Sonnet runner |
+|---|---|---|---|---|
+| a1 | fire | The target folder in my Rust repo is 40 GB and my disk is almost full. Free some of it without breaking my builds. | hive | hive |
+| a2 | no fire | This throwaway crate in /tmp/scratch isn't tracked by anything. Just run cargo clean there so I get a fresh build. | NONE | NONE |
+| a3 | fire | I'm about to start three agents, each in its own git worktree of the same Rust repo. Make their first builds fast. | hive | hive |
+| a4 | no fire | Set up sccache so my Rust builds are faster across projects. | NONE | NONE |
+| a5 | no fire | Switch the linker to lld or mold to cut my Rust link times. | NONE | NONE |
+| a6 | fire | Why does my workspace have eleven copies of serde compiled in target? | hive | hive |
+| a7 | no fire | Remove the stale git worktrees under .worktrees/ and prune their refs. | NONE | NONE |
+| a8 | fire | Is a first build in a fresh worktree actually quicker when it is seeded from the main checkout? Time it for me. | hive | hive |
+| a9 | no fire | Create a git worktree for the feature branch so I can review a pull request. | isolate-workspace | isolate-workspace |
+| a10 | fire | Some build output was left alone by the last cleanup. What else could safely be deleted across my Rust checkouts? | hive | hive |
+| b1 | no fire | Docker images are eating my disk. Free some space on this Mac. | NONE | NONE |
+| b2 | fire | My Mac's disk is full, mostly Rust build output spread over a dozen checkouts. Reclaim it. | hive | hive |
+| b3 | fire | I deleted a Rust repo I had registered for build cleanup and now the status command complains about it. Fix that. | hive | hive |
+| b4 | no fire | cargo build fails with a borrow-checker error in src/lib.rs. Help me fix it. | root-cause | root-cause |
+| b5 | no fire | Add a cache for the cargo registry to my GitHub Actions workflow. | NONE | NONE |
+| b6 | fire | I just made a new worktree for this Rust project. Reuse the dependencies that are already compiled so it doesn't rebuild from scratch. | hive | hive |
+| b7 | fire | How much of my target directories is orphaned build output that no checkout owns? | hive | hive |
+| b8 | no fire | Convert this blocking function to use Tokio's spawn_blocking. | rust-async-patterns | rust-async-patterns |
+| b9 | fire | Set up the fourth lane of my Rust monorepo so cargo doesn't recompile everything on its first build. | hive | hive |
+| b10 | no fire | My node_modules is 3 GB. Shrink it. | NONE | NONE |
+
+Result: 40 of 40 picks correct (10 should-fire all picked `hive`; none of the 10 should-not-fire did, and the picks were `isolate-workspace`, `root-cause`, `rust-async-patterns` or NONE). The two runners gave identical answers in each batch. The three non-NONE misses of hive (a9, b4, b8) went to the nearest neighbour. No description change needed.
+
+
+## Instruction map
+
+SKILLPASS-5.3. Each of the 51 instructions the skill gave at 23defc9 (`scan.md` section 5) and the line of `plugin/skills/hive/SKILL.md` that carries it now. Lines are file lines (frontmatter included). Instructions 10, 19, 28 and 32 are the four that changed. The additions the rewrite makes (SKILLPASS-3.3's `store.tag` and `toolchain.missing` cases at line 98, the version-mismatch holds at line 19, the Free disk and Start new lanes wording) are not in the 51. SKILLPASS-3.4 is left out (no RED possible).
+
+| Instruction | Line in SKILL.md |
+|---|---|
+| 1 | 10 |
+| 2 | 10 |
+| 3 | 10 |
+| 4 | 14 |
+| 5 | 14 |
+| 6 | 14 |
+| 7 | 16 |
+| 8 | 18 |
+| 9 | 18 |
+| 10 | 19 (changed: adds `repo remove`; SKILLPASS-6.1) |
+| 11 | 63 |
+| 12 | 25 |
+| 13 | 25 |
+| 14 | 27 |
+| 15 | 52 |
+| 16 | 31 |
+| 17 | 54 |
+| 18 | 54 |
+| 19 | 54 (changed: names `already_consumed`; SKILLPASS-11.1) |
+| 20 | 54 |
+| 21 | 23 |
+| 22 | 65-75 |
+| 23 | 23 |
+| 24 | 23 |
+| 25 | 23 |
+| 26 | 27 |
+| 27 | 42 |
+| 28 | 99 (changed: any command reports `walk.unreadable`, not only `apply`; SKILLPASS-3.2) |
+| 29 | 77 |
+| 30 | 42 |
+| 31 | 42 |
+| 32 | 97 (changed: adds the recovery and the toolchain case; SKILLPASS-3.1) |
+| 33 | 44 |
+| 34 | 44 |
+| 35 | 89 |
+| 36 | 89 |
+| 37 | 89 |
+| 38 | 33-38, 46-48, 56-59, 79-85, 91-93 |
+| 39 | 107 (the general rule); 29 (the `freed_bytes` case) |
+| 40 | 103 |
+| 41 | 109 |
+| 42 | 109 |
+| 43 | 111 |
+| 44 | 100 |
+| 45 | 101 |
+| 46 | 113 |
+| 47 | 31 |
+| 48 | 52 |
+| 49 | 31 |
+| 50 | 89 |
+| 51 | 3 |
+
+Decision on instruction 39 against Free disk's `unmeasured` sentence (line 29): the same duty was stated twice (report a size the receipt calls not measured). Line 29 keeps the specific wording for `freed_bytes` that SKILLPASS-1.1 requires. Line 107 now carries the general rule in different terms ("do not fill in a size the receipt lists under `unmeasured`", and times come only from `bench`), so the duty to say "not measured" has one home.
+
+### README read against the skill (Step 4; SKILLPASS-8.1, 8.5)
+
+Differences found and fixed in `README.md`:
+
+- The `gc` (bare) row said it "covers every registered repo". The skill says every target hive knows, including orphan candidates and targets under a cache root. README now says that, and the `gc --plan` row says the same for a plan with no path.
+- The measured-results sentence that tells a reader how to run `bench` used one checkout per arm. The skill says an even number of fresh checkouts per arm. It now uses two per arm, as the commands table does.
+- "When a command refuses" listed only `source.none` and `walk.unreadable`. The skill also gives `store.tag` (tag missing, or unreadable), `toolchain.missing`, `store.busy` and `store.held_over_cap`. README now carries the same four recoveries.
+
+Same in both, checked: `--json` on every command, `--top 0` for every explain group, `repo remove --missing`, `apply` for every class, `bench` command shape with two checkouts per arm, `gc` with a repo argument leaves the store alone. Not in the README by design: the version-mismatch holds (a skill-only rule about the plugin and binary pair).
 
 ## Install — Claude Code
 

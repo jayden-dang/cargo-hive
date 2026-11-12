@@ -26,7 +26,7 @@ To free disk on the checkouts the user named, run `gc --dry-run` with those chec
 
 `gc` with repo arguments leaves the store alone and notes `store.skipped_scoped`. Bare `gc` (no repo) also bounds the store, evicting by age, toolchain and the 40 GB cap; `gc --dry-run` previews that.
 
-Report freed bytes from the receipt's `freed_bytes` count, with `deleted_bytes_still_shared` reported apart. When the receipt lists `freed_bytes` under `unmeasured`, say the size was not measured. Report the store's freed bytes from a bare `gc` as `store_freed_bytes`.
+Report freed bytes from the `freed_bytes` count of the real `gc` run's receipt, not the dry run's, and read it from the whole output, never from output you cut short. Report `deleted_bytes_still_shared` apart. When the receipt lists `freed_bytes` under `unmeasured`, say the size was not measured. Report the store's freed bytes from a bare `gc` as `store_freed_bytes`.
 
 When hive covers the request, reclaim only through hive: do not run `cargo clean`, and do not delete a target dir, an `incremental/` dir, or `rustc*` or `rmeta*` entries yourself, and do not delete `~/.hive/store/` by hand.
 
@@ -104,7 +104,7 @@ Exit codes: 0 success; 1 refusal or failure (read the receipt, or stderr if no r
 
 ## Reading a receipt
 
-With `--json`, hive prints exactly one JSON object on stdout and its prose on stderr. Read the object and report its counters as measured. Never estimate bytes or time yourself, and say so when a field says a size was not measured. Times come only from `bench`. Counts sit in the receipt's `counts` object. A count per target or per profile carries a suffix after its name, a colon and a path (`reused_fresh:/path/to/target`).
+With `--json`, hive prints exactly one JSON object on stdout and its prose on stderr. Read the object and report its counters as measured. Never estimate bytes or time yourself, and do not fill in a size the receipt lists under `unmeasured`. Times come only from `bench`. Counts sit in the receipt's `counts` object. A count per target or per profile carries a suffix after its name, a colon and a path (`reused_fresh:/path/to/target`).
 
 A seed receipt keeps the fill counts (`fill_entries_added`, `fill_entries_held`, `fill_targets_read`, `fill_targets_skipped`) apart from the clone counts (`clone_units_chosen`, `clone_units_cloned`, `clone_units_dropped`, `clone_units_existing`, `clone_units_failed`, `clone_units_outside_window`). It carries no duration. Afterward, `status` reports `reused_fresh` (seeded, reached, and unchanged, not Cargo's printed fresh count), `seeded_unneeded`, `seeded_recompiled`, and `seeded_missing`.
 

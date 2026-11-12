@@ -95,7 +95,7 @@ builds had failed and been interrupted. It deleted 31 superseded sessions (1,223
 The next build compiled the same 28 crates as a control run that skipped the `gc`.
 
 This is one repo on one machine, with only two samples per arm. It promises nothing about
-yours. Run `cargo hive bench --cold /path/to/cold --seeded /path/to/seeded` to measure your own.
+yours. Run `cargo hive bench --cold /path/to/cold1 /path/to/cold2 --seeded /path/to/seeded1 /path/to/seeded2` to measure your own.
 
 ## Install
 
@@ -155,6 +155,12 @@ When a command refuses:
   `explain` and `apply` report `walk.unreadable` for its path. Run
   `cargo hive repo remove --missing`, which unregisters every such repo, then rerun the
   command.
+- `seed` reports `store.tag` when the store has not been filled yet (no tag), or
+  `toolchain.missing` when the store has no row for the current toolchain. Build the main
+  checkout with the current toolchain, then run `seed` again. When `store.tag` says the tag
+  could not be read, a build does not fix it: read the finding's detail.
+- `store.busy` means run `cargo hive gc` again when no seed runs. `store.held_over_cap` names
+  the targets to retire.
 
 Every command accepts `--json`. With it, a command prints exactly one receipt on stdout.
 
@@ -172,8 +178,8 @@ Each row shows one command form. Optional arguments are described in the row's t
 | `cargo hive status /path/to/repo` | Lists checkouts (protected, secondary, missing) and Cargo target dirs (owner or orphan candidate, size, units and edges). Leave out the path for every registered repo; add `--no-sizes` to skip sizes |
 | `cargo hive gc /path/to/repo --dry-run` | Previews what `gc` would delete and deletes nothing |
 | `cargo hive gc /path/to/repo` | Deletes superseded incremental sessions and `deps/rustc*`/`rmeta*` temp dirs. Freed bytes are counted per inode and reported as totals. With a repo argument it leaves the store alone |
-| `cargo hive gc` | With no repo argument, covers every registered repo and also evicts from the store. Bare `cargo hive gc` keeps the store under 40 GB. `--dry-run` previews it |
-| `cargo hive gc /path/to/repo --plan` | Writes a plan and deletes nothing. Leave out the path for every registered repo |
+| `cargo hive gc` | With no repo argument, covers every target hive knows, including orphan candidates and targets under a cache root, and also evicts from the store. Bare `cargo hive gc` keeps the store under 40 GB. `--dry-run` previews it |
+| `cargo hive gc /path/to/repo --plan` | Writes a plan and deletes nothing. Leave out the path for every target hive knows, including orphan candidates and targets under a cache root |
 | `cargo hive apply plan-id` | Deletes the plan's paths for every class |
 | `cargo hive explain /path/to/repo --top 0` | Reports copies of one crate, feature splits, and units whose last compile failed. `--top` defaults to 10 groups; `--top 0` shows every group. Leave out the path for every registered repo |
 | `cargo hive seed /path/to/checkout` | Copies registry output into a new secondary checkout before its first build. A checkout that already has a target gets nothing |
