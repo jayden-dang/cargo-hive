@@ -16,7 +16,7 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 - Same major and minor: carry on.
 - If different:
   - `doctor`, `repo list`, `status` and `explain` may still run. Tell the user both versions and how to update: `/plugin marketplace update cargo-hive` for the plugin, or reinstall the binary.
-  - Do not run `gc`, `apply`, `repo add`, `seed` or `bench`. Ask the user to update first.
+  - Do not run `gc`, `apply`, `repo add`, `repo remove`, `seed` or `bench`. Ask the user to update first.
 
 ## Free disk
 

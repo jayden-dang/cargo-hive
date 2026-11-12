@@ -852,6 +852,23 @@ fn the_skill_writes_every_bench_series_name_in_full() {
 }
 
 #[test]
+fn a_version_mismatch_holds_every_write() {
+    let body = skill_body();
+    let version = section(&body, VERSION_FIRST);
+    let held = &version[version.find("Do not run").expect("Do not run")..];
+    for cmd in [
+        "`gc`",
+        "`apply`",
+        "`repo add`",
+        "`repo remove`",
+        "`seed`",
+        "`bench`",
+    ] {
+        assert!(held.contains(cmd), "the held list lacks {cmd}");
+    }
+}
+
+#[test]
 fn skill_body_fits_the_budget() {
     for local in [
         "see [notes](#anchor)",
