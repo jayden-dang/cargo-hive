@@ -67,7 +67,7 @@ Retrieval (fsubr-1.2, run once before the task bodies):
 - `cluster(SKILLPASS)` holds only its focus, because SKILLPASS has no OWNS until this file lands.
 - owns_coverage is 9/10.
 
-Every neighbour is Shipped on `main` (54a9e1e), so no other plan collides on these files.
+Every neighbour is Shipped on `main` (54a9e1e; main has since moved to e2c2130, a roadmap-only commit), so no other plan collides on these files.
 
 ---
 
@@ -77,7 +77,7 @@ Every neighbour is Shipped on `main` (54a9e1e), so no other plan collides on the
 - Modify: `skills/hive/TESTS.md`
 - Test: `skills/hive/TESTS.md` (the recorded runs are the test)
 
-**Reuse:** rung 2 — `skills/hive/TESTS.md`'s fixture recipe (TESTS.md lines 5-17) and run format, `skills/hive/eval.json`'s entry shape; rung 4 — the `skill-tester` (Sonnet) and `skill-tester-haiku` agents; rung 7 — the fixture script (Decision 9)
+**Reuse:** rung 2 — `skills/hive/TESTS.md`'s fixture recipe (:5-17) and run format, `skills/hive/eval.json`'s entry shape; rung 4 — the `skill-tester` (Sonnet) and `skill-tester-haiku` agents; rung 7 — the fixture script (Decision 9)
 
 **Interfaces:**
 - Consumes: today's skill text, from `git show 23defc9:plugin/skills/hive/SKILL.md`.
@@ -99,7 +99,7 @@ Every neighbour is Shipped on `main` (54a9e1e), so no other plan collides on the
     - repo `atlas`, registered and then its main deleted;
     - an even bench pair per arm.
   - For `toolchain.missing`, set `"toolchains": {}` in a copied `store.db`, keep `store/CACHEDIR.TAG`, and run `seed` once to see whether the finding appears. Record the attempt and its receipt under `## Toolchain has no store row`.
-  - Drive `cargo-hive gc --json` with no repo registered and `gc_window_days: 0` in a third scratch `HIVE_HOME`, and record whether the receipt carries `store.window_invalid` (U5, needed by Task 11).
+  - In a third scratch `HIVE_HOME`, run `cargo-hive doctor --json` first, so that capabilities are recorded (without them `gc` refuses at src/cli.rs lines 974-979, before the window code). Then drive `cargo-hive gc --json` with no repo registered and `gc_window_days: 0`, and record whether the receipt carries `store.window_invalid` (U5, needed by Task 11; a static trace with ready capabilities says it reaches src/cli.rs line 1046).
   - Record the fixture as `## Fixture (2026-11-12)`. Copy the pristine state aside, and restore it before each run that can write.
 
   Run: `source <root>/env.sh && cargo-hive doctor --json` — expect exit 0, every check passing.
@@ -128,7 +128,7 @@ _Requirements: SKILLPASS-10.1, SKILLPASS-10.2, SKILLPASS-10.3, SKILLPASS-10.5, S
 
 **Files:**
 - Create: `tests/skill/names.rs`
-- Modify: `tests/skill.rs`, `plugin/skills/hive/SKILL.md` (body lines 78 and 80 at 23defc9 only: write the `store_entries_held_*` and bench `_ms` names in full)
+- Modify: `tests/skill.rs`, `plugin/skills/hive/SKILL.md` (file lines 78 and 80 at 23defc9 only: write the `store_entries_held_*` and bench `_ms` names in full)
 - Test: `tests/skill.rs`
 
 **Reuse:** rung 2 — `split_skill`, `scan`'s fence toggle and `repo_file` in `tests/skill.rs`; rung 5 — `clap::CommandFactory` (clap with `derive` is already a dependency, Cargo.toml:19) and `serde_json`; rung 2 — public lib items `cargo_hive::cli::Cli`, `cargo_hive::bench::command::BuildCmd`, `cargo_hive::receipt::{Outcome, Receipt, PlanTierBody, Scope}`, `cargo_hive::plan_tier::build::class_label`, `cargo_hive::plan_tier::record::PlanClass`; rung 7 — the literal lexer and the classifier (no dependency in the project lexes Rust, and adopting `syn` is the operator's call)
@@ -169,6 +169,7 @@ fn the_name_check_places_every_kind_of_span() {
     let cases: &[(&str, bool)] = &[
         ("check-lib=<package>", true), ("check-al", false),
         ("--dry-run", true), ("--dry-rn", false), ("--help", true),
+        ("--missing", true), ("--top", true), ("--misssing", false),
         ("-n", false),
         ("seed", true), ("sed", false),
         ("refused", true), ("refusd", false),
@@ -200,7 +201,7 @@ fn the_skill_cites_only_names_the_binary_defines() {
 Run: `cargo test --test skill` — expect: a compile error, because `tests/skill/names.rs` does not exist.
 - [ ] **Step 2: Implement `tests/skill/names.rs`.** Open it with a `//!` comment giving its contract. Implement:
   - the span finder per Decision 5;
-  - the lexer per Decision 4: strings, raw strings, byte strings, `//` comments and char literals; brace counting to drop the block of a `mod` that follows an attribute run mentioning `test`; a `read_dir` walk of `src/` only, without following symlinks;
+  - the lexer per Decision 4: strings, raw strings, byte strings, `//` comments and char literals; literal text kept raw, with escapes not decoded; literals inside an attribute `#[…]` dropped; brace counting to drop the block of a `mod` that follows an attribute run mentioning `test`; a `read_dir` walk of `src/` only, without following symlinks;
   - the classifier per Decision 3's fifteen-step order, each class checked against the public item it names;
   - the trailing-placeholder match `{…}` / `:{…}` and the bench series rule.
 
@@ -226,10 +227,11 @@ _Requirements: SKILLPASS-7.1, SKILLPASS-7.2, SKILLPASS-7.3, SKILLPASS-4.2, SKILL
 **Interfaces:**
 - Consumes: `names::cited_name_failures` (Task 2).
 - Produces: the body headings, in order: `## Command form`, `## Version first`, `## Free disk`, `## Start new lanes`, `## Delete what gc keeps`, `## Look before acting`, `## Time cold against seeded builds`, `## When a command refuses`, `## Reading a receipt`. Tasks 4-9 fill these sections.
+- Produces, in `tests/skill.rs`: one const per goal heading (`FREE_DISK`, `START_LANES`, `PLAN_APPLY`, `LOOK`, `BENCH`, `REFUSES`, `RECEIPT`, plus `VERSION_FIRST`). Tasks 4-9 read sections through these consts, so a heading renamed in Task 12's REFACTOR loop changes one line.
 
 **Depends-on:** Task 2
 
-- [ ] **Step 1: Change the heading pin first.** In `skill_body_fits_the_budget` (tests/skill.rs lines 756-770), replace the exact seven-heading list with the nine headings above, in order. Keep `## Version first` found by name at lines 538-546.
+- [ ] **Step 1: Change the heading pin first.** In `skill_body_fits_the_budget` (tests/skill.rs lines 756-770), replace the exact seven-heading list with two checks: the first heading is `## Command form` and the second is `## Version first` (Decision 8, Lock L8). Then check that every goal-heading const exists in the body. The other headings' names and order stay free for the evals to move (SKILLPASS-5.1). Keep `## Version first` found by name at lines 538-546.
 
   Run: `cargo test --test skill skill_body_fits_the_budget` — expect: FAIL, headings differ.
 - [ ] **Step 2: Move each instruction to its one home.**
@@ -270,7 +272,7 @@ fn section(body: &str, heading: &str) -> String {
 
 #[test]
 fn the_skill_frees_disk_on_the_checkouts_the_user_named() {
-    let free = section(&skill_body(), "## Free disk");
+    let free = section(&skill_body(), FREE_DISK);
     for phrase in ["--dry-run", "`freed_bytes`", "`deleted_bytes_still_shared`",
                    "`store_freed_bytes`", "`unmeasured`", "whole repo", "`store.skipped_scoped`"] {
         assert!(free.contains(phrase), "## Free disk lacks {phrase}");
@@ -307,19 +309,18 @@ _Requirements: SKILLPASS-1.1, SKILLPASS-1.2_
 ```rust
 #[test]
 fn the_skill_seeds_one_lane_builds_it_then_seeds_the_rest() {
-    let lanes = section(&skill_body(), "## Start new lanes");
+    let lanes = section(&skill_body(), START_LANES);
     let seed_one = lanes.find("seed one lane").expect("seed one lane");
     let build = lanes[seed_one..].find("build it").expect("build it");
     assert!(lanes[seed_one + build..].contains("seed the other"), "order: seed one, build, seed the rest");
-    for phrase in ["bare `gc`", "`store_bytes`", "gets nothing", "`reused_fresh`",
-                   "not Cargo's printed fresh count", "one build"] {
+    for phrase in ["bare `gc`", "`store_bytes`", "gets nothing", "one build"] {
         assert!(lanes.contains(phrase), "## Start new lanes lacks {phrase}");
     }
 }
 ```
 
 Run: `cargo test --test skill the_skill_seeds_one_lane` — expect: FAIL, no "build it".
-- [ ] **Step 2: Write the section.** Write SKILLPASS-2.1 to 2.3 into `## Start new lanes`, keeping the seed pins in `the_skill_teaches_seeding_a_new_lane`.
+- [ ] **Step 2: Write the section.** Write SKILLPASS-2.1 to 2.3 into `## Start new lanes`. The `status` counts read after a seed (instruction 42) stay in `## Reading a receipt`, their one home (Task 7). The seed pins in `the_skill_teaches_seeding_a_new_lane` keep reading the whole body.
 
   Run: `cargo test --test skill` — expect: pass.
 - [ ] **Step 3: Commit.** `git commit -m "docs(skill): seed one lane, build it, then seed the rest and bound the store"`
@@ -347,7 +348,7 @@ _Requirements: SKILLPASS-2.1, SKILLPASS-2.2, SKILLPASS-2.3_
 ```rust
 #[test]
 fn the_skill_gives_the_recovery_each_refusal_names() {
-    let refuses = section(&skill_body(), "## When a command refuses");
+    let refuses = section(&skill_body(), REFUSES);
     for phrase in ["`source.none`", "`store.tag`", "`toolchain.missing`", "build the main checkout",
                    "could not be read", "`walk.unreadable`", "`explain`",
                    "cargo hive repo remove --missing --json"] {
@@ -386,8 +387,9 @@ _Requirements: SKILLPASS-3.1, SKILLPASS-3.2, SKILLPASS-3.3_
 ```rust
 #[test]
 fn the_skill_names_receipt_counts_as_the_binary_keys_them() {
-    let receipt = section(&skill_body(), "## Reading a receipt");
-    for phrase in ["`counts`", "`reused_fresh:/path/to/target`", "`seeded_fresh`",
+    let receipt = section(&skill_body(), RECEIPT);
+    for phrase in ["`counts`", "`reused_fresh:/path/to/target`", "`reused_fresh`",
+                   "not Cargo's printed fresh count", "`seeded_fresh`",
                    "`seeded_unneeded`", "`seeded_recompiled`", "`seeded_missing`"] {
         assert!(receipt.contains(phrase), "## Reading a receipt lacks {phrase}");
     }
@@ -423,7 +425,7 @@ _Requirements: SKILLPASS-4.1, SKILLPASS-4.2, SKILLPASS-4.3_
 ```rust
 #[test]
 fn a_version_mismatch_holds_every_write() {
-    let version = section(&skill_body(), "## Version first");
+    let version = section(&skill_body(), VERSION_FIRST);
     let held = &version[version.find("Do not run").expect("Do not run")..];
     for cmd in ["`gc`", "`apply`", "`repo add`", "`repo remove`", "`seed`", "`bench`"] {
         assert!(held.contains(cmd), "the held list lacks {cmd}");
@@ -455,7 +457,7 @@ _Requirements: SKILLPASS-6.1_
 
 **Depends-on:** Task 8 (same files)
 
-- [ ] **Step 1: Write the failing test.** Change `the_skill_teaches_the_plan_flow_for_every_class` (tests/skill.rs lines 685-704) to require `already_consumed` in place of `already consumed`, keep its banned words, and read the phrases from `section(&skill_body(), "## Delete what gc keeps")`.
+- [ ] **Step 1: Write the failing test.** Change `the_skill_teaches_the_plan_flow_for_every_class` (tests/skill.rs lines 685-704) to require `already_consumed` in place of `already consumed`, keep its banned words, and read the phrases from `section(&skill_body(), PLAN_APPLY)`.
 
   Run: `cargo test --test skill the_skill_teaches_the_plan_flow` — expect: FAIL, `already_consumed` absent.
 - [ ] **Step 2: Write SKILLPASS-11.1 into the section** with `already_consumed` (src/plan_tier/apply.rs lines 105 and 125).
@@ -512,7 +514,7 @@ fn readme_describes_the_commands_as_the_skill_does() {
 
   `names::readme_command_lines(&str) -> Vec<(usize, Vec<String>)>` is added to `tests/skill/names.rs` per Decision 7. It reads mentions only in spans and fenced lines, takes a command line only where the prefix opens its span or line, replaces `<word>` placeholders with `x`, and returns a synopsis line (placeholder subcommand) with its words flagged so that it is not parsed.
 
-  Run: `cargo test --test skill readme_describes` — expect: FAIL naming `-n` (README.md lines 165 and 182) and the bracketed synopsis rows (lines 159-167).
+  Run: `cargo test --test skill readme_describes` — expect: a compile error until `names::readme_command_lines` exists. Once it does, expect FAIL naming `-n` (single-word spans at README.md lines 165 and 182) and the bracketed synopsis rows (lines 160-167). `-n 0` at line 183 sits in a multi-word span, so it is caught only as a short flag on a parsed command line.
 - [ ] **Step 2: Rewrite the README.**
   - Quick start goes in the skill's goal order.
   - The Commands table gets one row per command form, each a real command line with long flags (`cargo hive explain /path/to/repo --top 0`), and optional parts in the row's text.
@@ -544,6 +546,7 @@ _Requirements: SKILLPASS-8.1, SKILLPASS-8.2, SKILLPASS-8.3, SKILLPASS-8.5_
 
 ```rust
 //! Every config key the README names is accepted by the binary and has its effect.
+#![cfg(target_os = "macos")]
 mod common;
 use common::Hive;
 
@@ -614,7 +617,8 @@ fn an_unknown_config_key_is_refused() {
   - If the note text or the refusal channel differs from the assertions, correct the assertion to what the binary prints, citing the line. If an assertion can't be met without a `src/` change, stop and report.
 
   Run: `cargo test --test config_keys` — expect: pass.
-- [ ] **Step 3: Commit.** `git commit -m "test(config): check every config key the README names against the binary"`
+- [ ] **Step 3: Show it can fail.** In a scratch copy of the README, rename `gc_window_days` to `gc_window_dayz` in the Configuration table and run the test against it by setting the read path in a temporary local edit. Expect: FAIL, "no test value for gc_window_dayz". Then rename `"secondary_rootz"` back to a valid key in the unknown-key test and expect FAIL on its exit-code assertion. Revert both edits, and record the two failure lines in the commit body.
+- [ ] **Step 4: Commit.** `git commit -m "test(config): check every config key the README names against the binary"`
 
 _Requirements: SKILLPASS-8.4, SKILLPASS-12.2_
 
@@ -626,7 +630,7 @@ _Requirements: SKILLPASS-8.4, SKILLPASS-12.2_
 - Modify: `skills/hive/TESTS.md`, `skills/hive/eval.json`, `plugin/skills/hive/SKILL.md` (only for REFACTOR fixes that a GREEN run shows are needed)
 - Test: `skills/hive/TESTS.md`, `tests/skill.rs`
 
-**Reuse:** rung 2 — `skills/hive/TESTS.md`'s fixture recipe (TESTS.md lines 5-17) and run format, `skills/hive/eval.json`'s entry shape; rung 4 — the `skill-tester` (Sonnet) and `skill-tester-haiku` agents; rung 7 — the fixture script (Decision 9)
+**Reuse:** rung 2 — `skills/hive/TESTS.md`'s fixture recipe (:5-17) and run format, `skills/hive/eval.json`'s entry shape; rung 4 — the `skill-tester` (Sonnet) and `skill-tester-haiku` agents; rung 7 — the fixture script (Decision 9)
 
 **Interfaces:**
 - Consumes: the scenario headings and fixture (Task 1); the rewritten body (Tasks 3-9).
@@ -644,11 +648,12 @@ _Requirements: SKILLPASS-8.4, SKILLPASS-12.2_
   - Every text change reruns `cargo test --test skill`.
   - A fix that needs a dropped instruction or more than 150 lines stops here for the operator.
 - [ ] **Step 3: Run the trigger test.** Write 8-10 should-fire and 8-10 should-not-fire queries (SKILLPASS-10.6). The near-misses are: a `cargo clean` or disk ask in an unregistered repo, sccache or linker speed-up, and `git worktree` housekeeping. Run each fresh on both models with the hive description among neighbours, and record which skill each picks.
-- [ ] **Step 4: Write the instruction map.** Map each of today's 51 instructions to its line in the final body, marking 10, 19, 28 and 32 as changed (SKILLPASS-5.3).
-- [ ] **Step 5: Add the eval entries.** Add `behavior` entries per new scenario, re-point 8-11, and keep the SKILL-5.3 shape.
+- [ ] **Step 4: Read the README against the skill.** For each command, check that the README and the final body give the same flags and recoveries (SKILLPASS-8.1, 8.5, the design's manual seam). Record each difference found and fixed under `## Instruction map`.
+- [ ] **Step 5: Write the instruction map.** Map each of today's 51 instructions to its line in the final body, marking 10, 19, 28 and 32 as changed (SKILLPASS-5.3).
+- [ ] **Step 6: Add the eval entries.** Add `behavior` entries per new scenario. Re-point 8 (plan before closure deletion) and 9 (apply one plan) to `## Plan then apply (2026-11-12)`, 10 (seed a new lane) to `## Three lanes`, and 11 (bench) to `## Bench cold against seeded (2026-11-12)`. Keep the SKILL-5.3 shape.
 
   Run: `cargo test --test skill eval_entries_carry_their_evidence` — expect: pass.
-- [ ] **Step 6: Commit.** `git commit -m "test(skill): record GREEN runs of the rewritten hive skill on Sonnet and Haiku"`
+- [ ] **Step 7: Commit.** `git commit -m "test(skill): record GREEN runs of the rewritten hive skill on Sonnet and Haiku"`
 
 _Requirements: SKILLPASS-10.1, SKILLPASS-10.4, SKILLPASS-10.6, SKILLPASS-10.7, SKILLPASS-10.8, SKILLPASS-9.7, SKILLPASS-5.3, SKILLPASS-5.4_
 
@@ -676,7 +681,7 @@ _Requirements: SKILLPASS-10.1, SKILLPASS-10.4, SKILLPASS-10.6, SKILLPASS-10.7, S
   - a class label (`orphan`);
   - an envelope key (`hive_version`);
   - a bench series literal (`cold_build_ms`);
-  - a count literal (`fill_entries_held`);
+  - a count literal with one non-test literal in src (`fill_targets_skipped`, src/seed/mod.rs line 513). `fill_entries_held` would not fail, because src/cli.rs line 1764 holds a second copy: that is design Decision 4's residual;
   - a finding kind (`source.none`);
   - a config key (`gc_window_days`, failing `tests/config_keys.rs`);
   - a short flag written into README (`-n`).
