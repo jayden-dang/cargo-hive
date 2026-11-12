@@ -941,7 +941,7 @@ Result: 40 of 40 picks correct (10 should-fire all picked `hive`; none of the 10
 
 ## Instruction map
 
-SKILLPASS-5.3. Each of the 51 instructions the skill gave at 23defc9 (`scan.md` section 5) and the line of `plugin/skills/hive/SKILL.md` that carries it now. Lines are file lines (frontmatter included). Instructions 10, 19, 28 and 32 are the four that changed. The additions the rewrite makes (SKILLPASS-3.3's `store.tag` and `toolchain.missing` cases at line 98, the version-mismatch holds at line 19, the Free disk and Start new lanes wording) are not in the 51. SKILLPASS-3.4 is left out (no RED possible).
+SKILLPASS-5.3. Each of the 51 instructions the skill gave at 23defc9 (`scan.md` section 5) and the line of `plugin/skills/hive/SKILL.md` that carries it now. Lines are file lines (frontmatter included). Instructions 10, 19, 28 and 32 are the four that changed. The additions the rewrite makes (SKILLPASS-3.3's `store.tag` and `toolchain.missing` cases at line 103, the version-mismatch holds at line 19, the Free disk and Start new lanes wording) are not in the 51. SKILLPASS-3.4 is left out (no RED possible).
 
 | Instruction | Line in SKILL.md |
 |---|---|
@@ -955,49 +955,49 @@ SKILLPASS-5.3. Each of the 51 instructions the skill gave at 23defc9 (`scan.md` 
 | 8 | 18 |
 | 9 | 18 |
 | 10 | 19 (changed: adds `repo remove`; SKILLPASS-6.1) |
-| 11 | 63 |
+| 11 | 68 |
 | 12 | 25 |
 | 13 | 25 |
 | 14 | 27 |
-| 15 | 52 |
+| 15 | 57 |
 | 16 | 31 |
-| 17 | 54 |
-| 18 | 54 |
-| 19 | 54 (changed: names `already_consumed`; SKILLPASS-11.1) |
-| 20 | 54 |
+| 17 | 59 |
+| 18 | 59 |
+| 19 | 59 (changed: names `already_consumed`; SKILLPASS-11.1) |
+| 20 | 59 |
 | 21 | 23 |
-| 22 | 65-75 |
+| 22 | 70-80 |
 | 23 | 23 |
 | 24 | 23 |
 | 25 | 23 |
 | 26 | 27 |
-| 27 | 42 |
-| 28 | 99 (changed: any command reports `walk.unreadable`, not only `apply`; SKILLPASS-3.2) |
-| 29 | 77 |
-| 30 | 42 |
-| 31 | 42 |
-| 32 | 97 (changed: adds the recovery and the toolchain case; SKILLPASS-3.1) |
-| 33 | 44 |
-| 34 | 44 |
-| 35 | 89 |
-| 36 | 89 |
-| 37 | 89 |
-| 38 | 33-38, 46-48, 56-59, 79-85, 91-93 |
-| 39 | 107 (the general rule); 29 (the `freed_bytes` case) |
-| 40 | 103 |
-| 41 | 109 |
-| 42 | 109 |
-| 43 | 111 |
-| 44 | 100 |
-| 45 | 101 |
-| 46 | 113 |
+| 27 | 47 |
+| 28 | 104 (changed: any command reports `walk.unreadable`, not only `apply`; SKILLPASS-3.2) |
+| 29 | 82 |
+| 30 | 47 |
+| 31 | 47 |
+| 32 | 102 (changed: adds the recovery and the toolchain case; SKILLPASS-3.1) |
+| 33 | 49 |
+| 34 | 49 |
+| 35 | 94 |
+| 36 | 94 |
+| 37 | 94 |
+| 38 | 33-43, 51-53, 61-64, 84-90, 96-98 |
+| 39 | 112 (the general rule); 29 (the `freed_bytes` case) |
+| 40 | 108 |
+| 41 | 114 |
+| 42 | 114 |
+| 43 | 116 |
+| 44 | 105 |
+| 45 | 106 |
+| 46 | 118 |
 | 47 | 31 |
-| 48 | 52 |
+| 48 | 57 |
 | 49 | 31 |
-| 50 | 89 |
+| 50 | 94 |
 | 51 | 3 |
 
-Decision on instruction 39 against Free disk's `unmeasured` sentence (line 29): the same duty was stated twice (report a size the receipt calls not measured). Line 29 keeps the specific wording for `freed_bytes` that SKILLPASS-1.1 requires. Line 107 now carries the general rule in different terms ("do not fill in a size the receipt lists under `unmeasured`", and times come only from `bench`), so the duty to say "not measured" has one home.
+Decision on instruction 39 against Free disk's `unmeasured` sentence (line 29): the same duty was stated twice (report a size the receipt calls not measured). Line 29 keeps the specific wording for `freed_bytes` that SKILLPASS-1.1 requires. Line 112 now carries the general rule in different terms ("do not fill in a size the receipt lists under `unmeasured`", and times come only from `bench`), so the duty to say "not measured" has one home.
 
 ### README read against the skill (Step 4; SKILLPASS-8.1, 8.5)
 
@@ -1012,6 +1012,8 @@ Same in both, checked: `--json` on every command, `--top 0` for every explain gr
 ## Rename demonstration (2026-11-12)
 
 Each row is one real rename of a printed name in a scratch copy of this branch (`git archive HEAD` into `/private/tmp`, its own `CARGO_TARGET_DIR`, discarded after the run). No rename touches a Rust identifier, so `tests/skill.rs`'s exhaustive `parse` match still compiles. The gate is `cargo test --test skill`; every run exits 101 and fails the test named in the row. The line is the failure line the test printed, verbatim; the name check reports a skill-body line as `SKILL.md body:<line>` and a README line as `README.md:<line>`.
+
+The `body:N` line numbers in this table were recorded on b154eee, before the Free disk fence split added 5 lines to SKILL.md; they are not refreshed.
 
 | Class | Rename (before to after) | Failure line | Evidences |
 |---|---|---|---|

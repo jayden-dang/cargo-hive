@@ -523,7 +523,7 @@ fn readme_command_lines_and_names_match_the_binary() {
 
   `names::readme_command_lines(&str) -> Vec<(usize, Vec<String>)>` is added to `tests/skill/names.rs` per Decision 7. It reads mentions only in spans and fenced lines, takes a command line only where the prefix opens its span or line, and replaces `<word>` placeholders with `x`. It does not return a synopsis line, one whose subcommand word is a placeholder (README.md lines 117 and 169). It checks such a line's flags itself, as long hive flags, and adds any failure to `cited_name_failures`'s output for the README.
 
-  Run: `cargo test --test skill readme_describes` — expect: a compile error until `names::readme_command_lines` exists. Once it does, expect FAIL naming `-n` (single-word spans at README.md lines 165 and 182) and the bracketed synopsis rows (lines 160-167). `-n 0` at line 183 sits in a multi-word span, so it is caught only as a short flag on a parsed command line.
+  Run: `cargo test --test skill readme_command_lines_and_names_match_the_binary` — expect: a compile error until `names::readme_command_lines` exists. Once it does, expect FAIL naming `-n` (single-word spans at README.md lines 165 and 182) and the bracketed synopsis rows (lines 160-167). `-n 0` at line 183 sits in a multi-word span, so it is caught only as a short flag on a parsed command line.
 - [x] **Step 2: Rewrite the README.**
   - Quick start goes in the skill's goal order.
   - The Commands table gets one row per command form, each a real command line with long flags (`cargo hive explain /path/to/repo --top 0`), and optional parts in the row's text.
