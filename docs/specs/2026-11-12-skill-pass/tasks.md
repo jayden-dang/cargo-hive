@@ -429,7 +429,7 @@ _Requirements: SKILLPASS-4.1, SKILLPASS-4.2, SKILLPASS-4.3_
 
 **Depends-on:** Task 7 (same files)
 
-- [ ] **Step 1: Write the failing test.** Extend `the_skill_teaches_seeding_a_new_lane`'s `## Version first` check (tests/skill.rs lines 538-546), or add:
+- [x] **Step 1: Write the failing test.** Extend `the_skill_teaches_seeding_a_new_lane`'s `## Version first` check (tests/skill.rs lines 538-546), or add:
 
 ```rust
 #[test]
@@ -443,10 +443,10 @@ fn a_version_mismatch_holds_every_write() {
 ```
 
 Run: `cargo test --test skill a_version_mismatch_holds` — expect: FAIL, no `repo remove`.
-- [ ] **Step 2: Add `repo remove`** to the held list (SKILLPASS-6.1).
+- [x] **Step 2: Add `repo remove`** to the held list (SKILLPASS-6.1).
 
   Run: `cargo test --test skill` — expect: pass.
-- [ ] **Step 3: Commit.** `git commit -m "docs(skill): hold repo remove with the other writes on a version mismatch"`
+- [x] **Step 3: Commit.** `git commit -m "docs(skill): hold repo remove with the other writes on a version mismatch"`
 
 _Requirements: SKILLPASS-6.1_
 
