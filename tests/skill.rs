@@ -709,13 +709,14 @@ fn skill_documents_every_shipped_command() {
 #[test]
 fn the_skill_teaches_the_plan_flow_for_every_class() {
     let body = skill_body();
+    let plan = section(&body, PLAN_APPLY);
     for needle in [
         "every class",
         "no owner step",
         "plan again",
-        "already consumed",
+        "`already_consumed`",
     ] {
-        assert!(body.contains(needle), "SKILL.md lacks {needle}");
+        assert!(plan.contains(needle), "{PLAN_APPLY} lacks {needle}");
     }
     for gone in ["needs-human", "exit 3", "approve"] {
         assert!(!body.contains(gone), "SKILL.md still says {gone}");

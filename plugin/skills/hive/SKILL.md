@@ -51,7 +51,7 @@ cargo hive seed /path/to/checkout --json
 
 The plan tier is closure deletion and whole orphan targets. These go through `gc --plan`, then `apply`, not by hand. `gc --plan` returns plan ids per class and `undecided` targets; `apply` applies one plan.
 
-An agent applies plans of every class itself: `secondary`, `protected` and `orphan`, with no owner step. An `orphan` plan removes the whole target dir, with anything in it no build recreates, so name those targets when you report. After `refused`, plan again and never reuse a consumed id (already consumed). `partial` is not an error; check its reason.
+An agent applies plans of every class itself: `secondary`, `protected` and `orphan`, with no owner step. An `orphan` plan removes the whole target dir, with anything in it no build recreates, so name those targets when you report. After `refused`, plan again and never reuse an id the binary reported as `already_consumed`. `partial` is not an error; check its reason.
 
 ```
 cargo hive gc --plan /path/to/repo --json
@@ -69,7 +69,7 @@ A checkout is protected (a registered main checkout, or anything hive cannot cla
 | A registered repo was deleted or should go | `repo remove <path>`, or `repo remove --missing` |
 | How big is it, what is orphaned? | `status` |
 | How do I free space? | `gc` |
-| What can be deleted later? | `gc --plan`, then `apply` one plan |
+| What can be deleted later? | `gc --plan` |
 | Why are there so many copies of a crate? | `explain` |
 | A new secondary checkout, before its first build | `seed` |
 | Cold against seeded build times | `bench` |
