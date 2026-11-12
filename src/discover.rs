@@ -1,4 +1,4 @@
-//! Checkouts of a registered repo and (Task 13) its Cargo target dirs. Every walk is
+//! Checkouts of a registered repo and its Cargo target dirs. Every walk is
 //! depth-bounded and never enters `node_modules`, `target` or `.git`.
 
 use crate::cargo_target::{self, Layout, Owner, Resolved, TargetDir};

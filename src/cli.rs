@@ -27,7 +27,7 @@ pub enum Command {
         #[command(subcommand)]
         command: RepoCommand,
     },
-    /// Show checkouts (and, from Task 13, Cargo target dirs) of registered repos
+    /// Show checkouts and Cargo target dirs of registered repos
     Status {
         /// Registered repos to report; none means every registered repo
         repos: Vec<std::path::PathBuf>,
