@@ -34,12 +34,17 @@ When hive covers the request, reclaim only through hive: do not run `cargo clean
 cargo hive repo add /path/to/repo --json
 cargo hive gc /path/to/lane-a /path/to/lane-b --dry-run --json
 cargo hive gc /path/to/lane-a /path/to/lane-b --json
+```
+
+Only when the user asked for everything:
+
+```
 cargo hive gc --json
 ```
 
 ## Start new lanes
 
-Use `seed` to fill a new secondary checkout before its first build. It takes one registered checkout and does not mean every repo. It copies registry output from one checkout that has already built into that new checkout: the one whose `Cargo.lock` matches, else the most recently built, so every copied unit comes from one build. A checkout that already has a target gets nothing, so do not seed it.
+Use `seed` to fill a new secondary checkout before its first build. It takes one registered checkout and does not mean every repo. It clones registry units from the store into that new checkout, taking them from the record of one checkout that has already built: the one whose `Cargo.lock` matches, else the most recently built, so every cloned unit comes from one build. A checkout that already has a target gets nothing, so do not seed it.
 
 When starting several lanes, seed one lane first, build it, then seed the other lanes. Run bare `gc` after the batch of lanes finishes, and whenever `seed`'s `store_bytes` passes 40 GB. Read the seed receipt, and the `status` counts afterward, under Reading a receipt.
 
@@ -68,7 +73,7 @@ A checkout is protected (a registered main checkout, or anything hive cannot cla
 | What is registered? | `repo list` |
 | A registered repo was deleted or should go | `repo remove <path>`, or `repo remove --missing` |
 | How big is it, what is orphaned? | `status` |
-| How do I free space? | `gc` |
+| How do I free space? | `gc --dry-run`, then `gc` |
 | What can be deleted later? | `gc --plan` |
 | Why are there so many copies of a crate? | `explain` |
 | A new secondary checkout, before its first build | `seed` |
@@ -94,7 +99,7 @@ cargo hive bench --cold /path/to/cold1 /path/to/cold2 --seeded /path/to/seeded1 
 
 ## When a command refuses
 
-- `source.none` means no source target of the repo has a record for the current toolchain: no checkout of it has built yet, or none has with this toolchain. Build the main checkout, then run `seed` again; do not retry `seed` first.
+- `source.none` means the repo has no source target record for the current toolchain: no checkout of it has built yet, or none has with this toolchain. Build the main checkout, then run `seed` again; do not retry `seed` first.
 - `store.tag` with a missing tag (the store has not been filled yet) and `toolchain.missing` (the store has no row for this toolchain) take the same recovery: build the main checkout with the current toolchain, then run `seed` again. When `store.tag` says the tag could not be read, report the finding's detail to the user, since a build does not fix it.
 - A registered repo whose main checkout is gone makes `status`, `gc`, `gc --plan`, `explain` and `apply` report `walk.unreadable` for its path. Run `cargo hive repo remove --missing --json`, which unregisters every such repo, then rerun the command.
 - Finding `store.busy` means run `gc` again when no seed runs.

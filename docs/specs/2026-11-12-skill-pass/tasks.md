@@ -488,7 +488,7 @@ _Requirements: SKILLPASS-11.1_
 
 **Interfaces:**
 - Consumes: `names::inline_spans`, `names::cited_name_failures` (Task 2); `parse(&[String]) -> Result<Parsed, String>` (tests/skill.rs line 426).
-- Produces: `#[test] fn readme_describes_the_commands_as_the_skill_does()`.
+- Produces: `#[test] fn readme_command_lines_and_names_match_the_binary()`.
 
 **Depends-on:** Task 9 (same `tests/skill.rs`; consumes Task 2's `names` and Task 6's recovery wording)
 
@@ -496,7 +496,7 @@ _Requirements: SKILLPASS-11.1_
 
 ```rust
 #[test]
-fn readme_describes_the_commands_as_the_skill_does() {
+fn readme_command_lines_and_names_match_the_binary() {
     let readme = repo_file("README.md");
     let mut failures = names::cited_name_failures(&readme, "README.md");
     let mut seen = Vec::new();

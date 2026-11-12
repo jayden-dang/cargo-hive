@@ -124,7 +124,7 @@ Flow: `inline_spans` (Decision 5) → classify (Decision 3) → check against th
 
 Satisfies: SKILLPASS-8.2, SKILLPASS-8.3
 Reuse: rung 2 — `scan`/`command_words`/`parse` (tests/skill.rs:357-456) and the name check above
-Interface: `#[test] fn readme_describes_the_commands_as_the_skill_does()`: README command lines parse, each shipped subcommand form has one, no short hive flag, no stray, and cited names pass `cited_name_failures`.
+Interface: `#[test] fn readme_command_lines_and_names_match_the_binary()`: README command lines parse, each shipped subcommand form has one, no short hive flag, no stray, and cited names pass `cited_name_failures`.
 Depth: n/a — extends the existing command-line check.
 Locality: `tests/skill.rs` (extend). The two README strings at :569-576 stay (SKILLPASS-9.6).
 

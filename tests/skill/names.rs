@@ -2,7 +2,7 @@
 //! fence must name something the binary defines (a flag, subcommand, bench
 //! shape or series, plan outcome or class, receipt key, skill metadata key, or
 //! a string literal in `src/`), or be a recognised shape, file name or other
-//! tool. Nothing here runs hive or writes outside `target/`.
+//! tool. Nothing here runs hive or writes nothing.
 
 use cargo_hive::bench::command::BuildCmd;
 use cargo_hive::cli::Cli;

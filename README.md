@@ -148,8 +148,8 @@ list its parent in `secondary_roots`, together with any default roots you want t
 
 When a command refuses:
 
-- `seed` reports `source.none` when no checkout of the repo has built with the current
-  toolchain yet. Build the main checkout, then run `cargo hive seed ~/code/my-repo/.worktrees/wt-a`
+- `seed` reports `source.none` when the repo has no source target record for the current
+  toolchain: no checkout of it has built yet, or none has with this toolchain. Build the main checkout, then run `cargo hive seed ~/code/my-repo/.worktrees/wt-a`
   again. Do not retry `seed` first.
 - A registered repo whose main checkout is gone makes `status`, `gc`, `gc --plan`,
   `explain` and `apply` report `walk.unreadable` for its path. Run
@@ -182,7 +182,7 @@ Each row shows one command form. Optional arguments are described in the row's t
 | `cargo hive gc /path/to/repo --plan` | Writes a plan and deletes nothing. Leave out the path for every target hive knows, including orphan candidates and targets under a cache root |
 | `cargo hive apply plan-id` | Deletes the plan's paths for every class |
 | `cargo hive explain /path/to/repo --top 0` | Reports copies of one crate, feature splits, and units whose last compile failed. `--top` defaults to 10 groups; `--top 0` shows every group. Leave out the path for every registered repo |
-| `cargo hive seed /path/to/checkout` | Copies registry output into a new secondary checkout before its first build. A checkout that already has a target gets nothing |
+| `cargo hive seed /path/to/checkout` | Clones registry units from the store into a new secondary checkout before its first build. A checkout that already has a target gets nothing |
 | `cargo hive bench --cold /path/to/cold1 /path/to/cold2 --seeded /path/to/seeded1 /path/to/seeded2` | Times cold and seeded first builds of fresh secondary checkouts and reports integer milliseconds in a receipt. `--build-cmd` sets the compile-only cargo command (default `build`) |
 
 Run `cargo hive <command> --help` for every flag.

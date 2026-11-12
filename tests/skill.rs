@@ -1,3 +1,7 @@
+//! Document tests for the hive skill, plugin manifests and README: they read
+//! repo files from `CARGO_MANIFEST_DIR`, parse command lines with the public
+//! `Cli` parser in-process, and touch nothing on the machine.
+
 use std::fs;
 
 #[path = "skill/names.rs"]
@@ -1098,7 +1102,7 @@ fn the_skill_cites_only_names_the_binary_defines() {
 }
 
 #[test]
-fn readme_describes_the_commands_as_the_skill_does() {
+fn readme_command_lines_and_names_match_the_binary() {
     let readme = repo_file("README.md");
     let mut failures = names::cited_name_failures(&readme, "README.md");
     failures.extend(names::synopsis_flag_failures(&readme, "README.md"));
