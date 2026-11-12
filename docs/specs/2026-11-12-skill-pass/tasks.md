@@ -391,7 +391,7 @@ _Requirements: SKILLPASS-3.1, SKILLPASS-3.2, SKILLPASS-3.3, SKILLPASS-3.4_
 
 **Depends-on:** Task 6 (same files)
 
-- [ ] **Step 1: Write the failing test.**
+- [x] **Step 1: Write the failing test.**
 
 ```rust
 #[test]
@@ -406,10 +406,10 @@ fn the_skill_names_receipt_counts_as_the_binary_keys_them() {
 ```
 
 Run: `cargo test --test skill the_skill_names_receipt_counts` — expect: FAIL, no `seeded_fresh`.
-- [ ] **Step 2: Write the section.** Write SKILLPASS-4.1 and 4.3 into `## Reading a receipt`, with every name in full (SKILLPASS-4.2). The span `reused_fresh:/path/to/target` contains `/`, so the name check skips it as a path, and the bare name is cited apart.
+- [x] **Step 2: Write the section.** Write SKILLPASS-4.1 and 4.3 into `## Reading a receipt`, with every name in full (SKILLPASS-4.2). The span `reused_fresh:/path/to/target` contains `/`, so the name check skips it as a path, and the bare name is cited apart.
 
   Run: `cargo test --test skill` — expect: pass.
-- [ ] **Step 3: Commit.** `git commit -m "docs(skill): name receipt counts as the binary keys them, bench's seeded_fresh included"`
+- [x] **Step 3: Commit.** `git commit -m "docs(skill): name receipt counts as the binary keys them, bench's seeded_fresh included"`
 
 _Requirements: SKILLPASS-4.1, SKILLPASS-4.2, SKILLPASS-4.3_
 
