@@ -82,7 +82,7 @@ ID rules:
 | ID | Milestone | Outcome | Depends-on | Commitment |
 |---|---|---|---|---|
 | MILE-1 | Safe automatic reclaim | On any Mac, a user installs cargo-hive from scratch, registers a repo, and reclaims superseded incremental sessions and leftover rustc temp entries across all its checkouts, from the CLI or from an agent driving that same CLI through the hive skill, with a receipt showing per-file bytes freed and zero units rebuilt because of a deletion. | none | Closed |
-| MILE-2 | Planned reclaim | A user or agent previews closure-based garbage and orphan target dirs as a plan, and an agent applies that plan itself on any checkout and on orphan target dirs, with no owner step, hive rechecking it under locks before it deletes. | MILE-1 | Planned |
+| MILE-2 | Planned reclaim | A user or agent previews closure-based garbage and orphan target dirs as a plan, and an agent applies that plan itself on any checkout and on orphan target dirs, with no owner step, hive rechecking it under locks before it deletes. | MILE-1 | Committed |
 | MILE-3 | Warm worktrees from a shared store | A new secondary checkout (a build-in-waves lane, a native Claude worktree) is seeded from a compressed, hive-owned store, so its first build recompiles zero seeded registry units while the seeded copies add about zero private bytes, and `cargo hive bench` gives the measured cold-versus-seeded time. | MILE-2 | Planned |
 
 ## MILE-1 — Safe automatic reclaim
@@ -109,7 +109,7 @@ ID rules:
 - **ROAD-5** closure-liveness — After: MILE-1 — Surfaces: None — the module layout is set in design-solution. Expected components: `invoked.timestamp` window roots, fingerprint-graph closure (little-endian match), D5 deletion rule.
 - **ROAD-6** gc-plan-apply — After: ROAD-5 — Surfaces: None — the module layout is set in design-solution. Expected components: plan files, apply-time revalidation (liveness, try-locks, format), secondary-versus-protected scope (S2), orphan-target plans, CLI plan and apply whose JSON receipt carries each plan's outcome, for all three classes, the hive skill extended to cover them.
 **Depends-on:** MILE-1
-**Commitment:** Planned
+**Commitment:** Committed 2026-11-12
 **Closed:** None
 **Deferred:**
 - ~~**ROAD-7**~~ owner-approval — dropped 2026-11-02: a target-dir deletion costs at most a rebuild, so a human step added work without adding protection; agents apply plans of every class (ADR-0002). — Notes: [MILE-2](milestones/MILE-2.notes.md)
