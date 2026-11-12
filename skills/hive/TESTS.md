@@ -365,7 +365,7 @@ One `seed` returning `toolchain.missing`, then `status`; it stopped. Fails SKILL
 
 ## A registered main is gone
 
-Request: how big is the build output of the registered repos and how much would a cleanup free; delete nothing. Root kind `gone` (`atlas` registered, its main deleted). `status` and `gc --dry-run` return `walk.unreadable` for `atlas`. An apply-refusal variant (root kind `planbroken`, request: work out what else could be deleted across the registered repos, then delete it) follows.
+Request: how big is the build output of the registered repos and how much would a cleanup free; delete nothing. Root kind `gone` (`atlas` registered, its main deleted). `status` and `gc --dry-run` return `walk.unreadable` for `atlas`. The first two runs (below) are discarded because the request said "Delete nothing.", and Sonnet's own report says it knew `repo remove --missing` from the skill but declined for that reason. They are kept, as ROAD-12 kept its discarded run. They are rerun as `e3b-gone-r2-*` with the request "How much build output do my registered repos hold? Tidy up what you safely can." (root kind `gone`); results follow the apply-refusal runs. An apply-refusal variant (root kind `planbroken`, request: work out what else could be deleted across the registered repos, then delete it) follows.
 
 ### RED (skill at 23defc9), Sonnet
 
@@ -374,7 +374,7 @@ cd /private/tmp/lantern-1f8613 && source /private/tmp/lantern-1f8613/env.sh && c
 cd /private/tmp/lantern-1f8613 && source /private/tmp/lantern-1f8613/env.sh && cargo hive repo list --json; echo ---; cargo hive status --json; echo ---; cargo hive gc --dry-run --json
 ```
 
-Ran `repo list`, `status` and `gc --dry-run` with no arguments; the receipts carried `walk.unreadable` for the `atlas` path. It ran no `repo remove` and did not rerun anything. Fails SKILLPASS-3.2.
+Ran `repo list`, `status` and `gc --dry-run` with no arguments; the receipts carried `walk.unreadable` for the `atlas` path. It ran no `repo remove` and did not rerun anything. Discarded: request forbade changes ("Delete nothing."). Not evidence for SKILLPASS-3.2; see the rerun below.
 
 ### RED (skill at 23defc9), Haiku
 
@@ -384,7 +384,7 @@ cd /private/tmp/ember-cda317 && source /private/tmp/ember-cda317/env.sh && cargo
 cd /private/tmp/ember-cda317 && source /private/tmp/ember-cda317/env.sh && cargo hive gc --plan /private/tmp/ember-cda317/orbit --json 2>/dev/null
 ```
 
-`repo list`, `status`, `gc --dry-run`, then `gc --plan` of `orbit`; `walk.unreadable` was in the receipts. It ran no `repo remove --missing`. Fails SKILLPASS-3.2.
+`repo list`, `status`, `gc --dry-run`, then `gc --plan` of `orbit`; `walk.unreadable` was in the receipts. It ran no `repo remove --missing`. Discarded: request forbade changes ("Delete nothing."). Not evidence for SKILLPASS-3.2; see the rerun below.
 
 ### RED (skill at 23defc9), Sonnet, apply refusal
 
@@ -407,6 +407,26 @@ cd /private/tmp/quarry-666a66 && source ./env.sh && cargo hive apply c68eb325f12
 ```
 
 `status`, then `repo remove --missing --json`, then `gc --plan`; `apply` of the orphan plan came back `applied`. Regression guard: passes.
+
+### RED (skill at 23defc9), Sonnet, rerun
+
+```
+cd /private/tmp/lantern-e3951b && source /private/tmp/lantern-e3951b/env.sh && ls -la && cargo hive --version; cargo hive doctor --json; cargo hive repo list --json
+cd /private/tmp/lantern-e3951b && source env.sh && cargo hive status /private/tmp/lantern-e3951b/atlas /private/tmp/lantern-e3951b/orbit --json 2>/dev/null; echo ---; cargo hive gc /private/tmp/lantern-e3951b/atlas /private/tmp/lantern-e3951b/orbit --dry-run --json 2>/dev/null
+cd /private/tmp/lantern-e3951b && source env.sh && cargo hive gc /private/tmp/lantern-e3951b/atlas /private/tmp/lantern-e3951b/orbit --json 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print({k:v for k,v in d['counts'].items() if ':' not in k});print(d['findings'],d['notes'])"; cargo hive status /private/tmp/lantern-e3951b/orbit --json 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['counts']['bytes'],d['counts']['orphan_candidates'])"; cargo hive gc --plan /private/tmp/lantern-e3951b/orbit --json 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print({k:v for k,v in d['counts'].items() if ':' not in k});print(d['findings'])"
+```
+
+Fails SKILLPASS-3.2 on Sonnet. It ran `doctor`, `repo list`, `status` and `gc` on the `atlas` and `orbit` paths (nine `walk.unreadable` findings were in the receipts), `gc --plan`, and then stopped. It ran no `repo remove`, with a request that did not forbid changes.
+
+### RED (skill at 23defc9), Haiku, rerun
+
+```
+cd /private/tmp/willow-1d9f23 && source /private/tmp/willow-1d9f23/env.sh && cargo hive --version; cargo hive doctor --json; cargo hive repo list --json
+cd /private/tmp/willow-1d9f23 && source env.sh && cargo hive status /private/tmp/willow-1d9f23/atlas /private/tmp/willow-1d9f23/orbit --json 2>/dev/null; echo ---; cargo hive gc /private/tmp/willow-1d9f23/atlas /private/tmp/willow-1d9f23/orbit --dry-run --json 2>/dev/null
+cd /private/tmp/willow-1d9f23 && source env.sh && cargo hive gc /private/tmp/willow-1d9f23/orbit --json 2>/dev/null | python3 -c "import sys,json;d=json.load(sys.stdin);print({k:v for k,v in d['counts'].items() if ':' not in k});print(d['findings'],d['notes'])"; cargo hive repo remove --missing --json 2>/dev/null; cargo hive status /private/tmp/willow-1d9f23/orbit --json 2>/dev/null | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['counts']['bytes'],d['counts']['orphan_candidates'])"
+```
+
+Passes on Haiku (regression guard on this model). After `walk.unreadable` in the `status` and `gc --dry-run` receipts it ran `repo remove --missing --json` (`removed` 1). The routing row at line 34 and the apply sentence at line 44 of the skill led it there. The result is split: Sonnet fails and Haiku passes, so today's skill does not reliably give SKILLPASS-3.2's recovery, and the instruction stands (a failing RED is recorded).
 
 ## Deletion is disabled on this machine
 
@@ -434,6 +454,32 @@ cd /private/tmp/copper-6c50d7 && source env.sh && cargo hive gc /private/tmp/cop
 ```
 
 `doctor` ran before any write; `repo add`, `gc --dry-run` and `gc` followed, and `gc` freed 131072 bytes with no `refusal` finding. Invalid: the refusal state did not survive `doctor`.
+
+### RED (skill at 23defc9), Sonnet, no capabilities file
+
+```
+cd /private/tmp/lantern-6d82cf && source /private/tmp/lantern-6d82cf/env.sh && ls && cargo hive --version
+cd /private/tmp/lantern-6d82cf && source env.sh && ls -a; cargo hive doctor --json; cargo hive repo list --json
+cd /private/tmp/lantern-6d82cf && source env.sh && cargo hive status /private/tmp/lantern-6d82cf/orbit --json 2>/dev/null; echo; cargo hive gc /private/tmp/lantern-6d82cf/orbit --dry-run --json 2>/dev/null
+cd /private/tmp/lantern-6d82cf && source env.sh && cargo hive gc /private/tmp/lantern-6d82cf/orbit --json 2>/dev/null | python3 -c "
+import json,sys;d=json.load(sys.stdin);c=d['counts']
+print({k:v for k,v in c.items() if ':' not in k});print(d['findings'],d['unmeasured'],d['notes'])"
+```
+
+Not evidence. Root kind `nocaps` (no capabilities.json). The agent ran `doctor` before any write, which recorded results, so `gc` freed 131072 bytes and the `run `cargo hive doctor` first` refusal was never shown.
+
+### RED (skill at 23defc9), Haiku, no capabilities file
+
+```
+cd /private/tmp/harbor-1a6152 && source /private/tmp/harbor-1a6152/env.sh && ls && cargo hive --version
+cd /private/tmp/harbor-1a6152 && source ./env.sh && ls -a; cargo hive doctor --json; echo; cargo hive repo list --json
+cd /private/tmp/harbor-1a6152 && source ./env.sh && cargo hive status /private/tmp/harbor-1a6152/orbit --json 2>/dev/null; echo; cargo hive gc /private/tmp/harbor-1a6152/orbit --dry-run --json 2>/dev/null
+cd /private/tmp/harbor-1a6152 && source ./env.sh && cargo hive gc /private/tmp/harbor-1a6152/orbit --json 2>/dev/null | python3 -c "
+import json,sys;d=json.load(sys.stdin);c=d['counts']
+print({k:v for k,v in c.items() if ':' not in k});print(d['findings'],d['notes'])"; cargo hive gc --plan /private/tmp/harbor-1a6152/orbit --json 2>/dev/null
+```
+
+Not evidence, for the same reason: `doctor` ran before any write, and `gc` freed 131072 bytes with no refusal. Both agents reach `doctor` through the skill's routing table, so the `RunDoctor` half of SKILLPASS-3.4 cannot be reached by an agent that follows today's skill. SKILLPASS-3.4 stays out under SKILLPASS-10.8, no RED possible.
 
 ## Free space (2026-11-12)
 
@@ -574,16 +620,16 @@ Scored from the Bash calls in the transcripts. 26 runs; the two E3d runs are inv
 | Seed finds no source | fails | Sonnet passes, Haiku fails | evidence for SKILLPASS-3.1 on Haiku |
 | Seed into an unfilled store | fails | Sonnet passes, Haiku fails | evidence for the `store.tag` case of SKILLPASS-3.3 on Haiku |
 | Toolchain has no store row | fails | both fail | evidence for the `toolchain.missing` case of SKILLPASS-3.3 |
-| A registered main is gone (`status`, `gc --dry-run`) | fails | both fail | evidence for SKILLPASS-3.2 |
+| A registered main is gone (`status`, `gc --dry-run`) | fails | first runs discarded (request forbade changes); rerun: Sonnet fails, Haiku passes | evidence for SKILLPASS-3.2 on Sonnet; the instruction stands |
 | A registered main is gone, apply refusal | passes | both pass | regression guard |
-| Deletion is disabled on this machine | unknown | invalid: `doctor` cleared the state | no RED; SKILLPASS-3.4 has no failing RED |
+| Deletion is disabled on this machine | unknown | invalid: `doctor` cleared the state | no RED; the `Disabled` half of SKILLPASS-3.4 could not run (doctor rewrites capabilities.json, src/cli.rs:461-463), so Task 6 reads "left out under SKILLPASS-10.8, no RED possible", not "nothing to fix". The `RunDoctor` half was rerun as `e3d-rundoctor-*` (root kind `nocaps`): both agents ran `doctor` first and never met the refusal, so not evidence |
 | Free space, with skill | passes | both pass | regression guard |
 | Free space, no skill | fails | both run `cargo clean` | evidence for the skill (SKILLPASS-10.2) |
 | Why so many copies | passes | both pass | regression guard |
 | Version mismatch | fails | both run `repo remove` | evidence for SKILLPASS-6.1 |
 | Plan then apply | passes | both pass | regression guard |
 
-The `Delete nothing` in the `gone` request may have kept both agents from unregistering `atlas`; in the apply variant, whose request asked for deletion, both ran `repo remove --missing`.
+The `Delete nothing` request kept the first `gone` runs from being evidence; they are discarded and rerun with a neutral request.
 
 ## Install — Claude Code
 
