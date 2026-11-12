@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="600" viewBox="0 0 1100 600" role="img" aria-labelledby="title desc">
+  <title id="title">What cargo-hive manages</title>
+  <desc id="desc">Two panels compare the same Cargo target dirs without hive and with hive. Without hive, the main checkout's target keeps dead units, superseded incremental sessions and rustc temp dirs, every agent worktree compiles every registry dependency cold, and an orphan target dir is forgotten. With hive, live units are kept, dead state is deleted by gc or by an applied plan, registry dependencies are filled into the ~/.hive store once and cloned into new secondary worktrees, so only workspace crates compile, and the orphan target is removed by an orphan plan.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0969da"/>
+    </marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
+      .h1 { font-size: 20px; font-weight: 700; }
+      .h2 { font-size: 15px; font-weight: 700; }
+      .box-title { font-size: 13px; font-weight: 600; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; fill: #59636e; }
+      .muted { font-size: 12px; fill: #59636e; }
+      .chip { font-size: 11.5px; }
+      .panel { fill: #ffffff; stroke: #d0d7de; }
+      .box { fill: #f6f8fa; stroke: #d0d7de; }
+      .live { fill: #dafbe1; stroke: #1a7f37; }
+      .live-t { fill: #116329; }
+      .waste { fill: #ffebe9; stroke: #cf222e; }
+      .waste-t { fill: #a40e26; }
+      .freed { fill: #ffffff; stroke: #cf222e; stroke-dasharray: 4 3; }
+      .cold { fill: #fff8c5; stroke: #9a6700; }
+      .cold-t { fill: #7d4e00; }
+      .clone { fill: #ddf4ff; stroke: #0969da; }
+      .clone-t { fill: #0550ae; }
+      .store { fill: #ddf4ff; stroke: #0969da; stroke-width: 1.5; }
+      .flow { stroke: #0969da; stroke-width: 1.6; fill: none; }
+      .flow-t { font-size: 11.5px; font-weight: 600; fill: #0550ae; }
+    </style>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1099" height="599" rx="12" fill="#ffffff" stroke="#d0d7de"/>
+  <text class="h1" x="30" y="40">What cargo-hive manages</text>
+  <text class="muted" x="30" y="60">The same Cargo target dirs on one Mac. Each worktree keeps its own target/; hive never merges them into one.</text>
+
+  <!-- ===== Without hive ===== -->
+  <rect class="panel" x="20" y="75" width="520" height="430" rx="10"/>
+  <text class="h2" x="35" y="100">Without hive</text>
+
+  <rect class="box" x="35" y="112" width="490" height="132" rx="8"/>
+  <text class="box-title" x="50" y="133">~/code/repo · main checkout</text>
+  <text class="mono" x="50" y="151">target/ only grows</text>
+  <rect class="live" x="50" y="162" width="225" height="24" rx="5"/>
+  <text class="chip live-t" x="62" y="178">deps/: live units</text>
+  <rect class="waste" x="285" y="162" width="225" height="24" rx="5"/>
+  <text class="chip waste-t" x="297" y="178">deps/: units no command uses</text>
+  <rect class="waste" x="50" y="194" width="225" height="24" rx="5"/>
+  <text class="chip waste-t" x="62" y="210">incremental/: superseded sessions</text>
+  <rect class="waste" x="285" y="194" width="225" height="24" rx="5"/>
+  <text class="chip waste-t" x="297" y="210">deps/rustc*, rmeta* temp dirs</text>
+  <text class="muted" x="50" y="236">Nothing prunes these. cargo clean deletes the live units too.</text>
+
+  <rect class="box" x="35" y="256" width="490" height="62" rx="8"/>
+  <text class="box-title" x="50" y="277">.worktrees/wt-a · agent worktree</text>
+  <rect class="cold" x="50" y="285" width="460" height="24" rx="5"/>
+  <text class="chip cold-t" x="62" y="301">target/: every registry dependency compiled cold</text>
+
+  <rect class="box" x="35" y="328" width="490" height="62" rx="8"/>
+  <text class="box-title" x="50" y="349">.worktrees/wt-b · agent worktree</text>
+  <rect class="cold" x="50" y="357" width="460" height="24" rx="5"/>
+  <text class="chip cold-t" x="62" y="373">target/: the same dependencies compiled cold again</text>
+
+  <rect class="box" x="35" y="400" width="490" height="62" rx="8"/>
+  <text class="box-title" x="50" y="421">~/.cache/cargo-target/old · no checkout owns it</text>
+  <rect class="waste" x="50" y="429" width="460" height="24" rx="5"/>
+  <text class="chip waste-t" x="62" y="445">a whole target dir, forgotten</text>
+
+  <text class="muted" x="35" y="488">Every new worktree repeats the same dependency builds, and disk use only grows.</text>
+
+  <!-- ===== With hive ===== -->
+  <rect class="panel" x="560" y="75" width="520" height="430" rx="10"/>
+  <text class="h2" x="575" y="100">With cargo-hive</text>
+
+  <rect class="box" x="575" y="112" width="320" height="132" rx="8"/>
+  <text class="box-title" x="588" y="133">~/code/repo · protected</text>
+  <text class="mono" x="588" y="151">target/</text>
+  <rect class="live" x="588" y="162" width="145" height="24" rx="5"/>
+  <text class="chip live-t" x="598" y="178">live units: kept</text>
+  <rect class="freed" x="741" y="162" width="145" height="24" rx="5"/>
+  <text class="chip waste-t" x="751" y="178">dead units → apply</text>
+  <rect class="freed" x="588" y="194" width="145" height="24" rx="5"/>
+  <text class="chip waste-t" x="598" y="210">old sessions → gc</text>
+  <rect class="freed" x="741" y="194" width="145" height="24" rx="5"/>
+  <text class="chip waste-t" x="751" y="210">temp dirs → gc</text>
+  <text class="muted" x="588" y="236">Deleted under Cargo's and rustc's locks.</text>
+
+  <rect class="box" x="575" y="256" width="320" height="62" rx="8"/>
+  <text class="box-title" x="588" y="277">.worktrees/wt-a · secondary</text>
+  <rect class="clone" x="588" y="285" width="145" height="24" rx="5"/>
+  <text class="chip clone-t" x="598" y="301">registry deps: cloned</text>
+  <rect class="cold" x="741" y="285" width="145" height="24" rx="5"/>
+  <text class="chip cold-t" x="751" y="301">workspace: compiled</text>
+
+  <rect class="box" x="575" y="328" width="320" height="62" rx="8"/>
+  <text class="box-title" x="588" y="349">.worktrees/wt-b · secondary</text>
+  <rect class="clone" x="588" y="357" width="145" height="24" rx="5"/>
+  <text class="chip clone-t" x="598" y="373">registry deps: cloned</text>
+  <rect class="cold" x="741" y="357" width="145" height="24" rx="5"/>
+  <text class="chip cold-t" x="751" y="373">workspace: compiled</text>
+
+  <rect class="box" x="575" y="400" width="320" height="62" rx="8"/>
+  <text class="box-title" x="588" y="421">~/.cache/cargo-target/old · orphan</text>
+  <rect class="freed" x="588" y="429" width="298" height="24" rx="5"/>
+  <text class="chip waste-t" x="598" y="445">whole dir removed by an orphan plan</text>
+
+  <!-- store -->
+  <rect class="store" x="945" y="112" width="120" height="350" rx="8"/>
+  <text class="box-title" x="957" y="133">~/.hive/</text>
+  <text class="mono" x="957" y="153">store/</text>
+  <text class="chip clone-t" x="957" y="173">one copy of each</text>
+  <text class="chip clone-t" x="957" y="189">live registry unit</text>
+  <text class="chip" x="957" y="225">bare gc keeps it</text>
+  <text class="chip" x="957" y="241">≤ 40 GB and</text>
+  <text class="chip" x="957" y="257">≤ 30 days old</text>
+  <text class="mono" x="957" y="405">receipts/</text>
+  <text class="mono" x="957" y="421">plans.json</text>
+  <text class="muted" x="957" y="443">measured only</text>
+
+  <!-- flows -->
+  <path class="flow" d="M895,175 H943" marker-end="url(#arrow)"/>
+  <text class="flow-t" x="905" y="168">fill</text>
+  <path class="flow" d="M945,297 H897" marker-end="url(#arrow)"/>
+  <text class="flow-t" x="902" y="290">clone</text>
+  <path class="flow" d="M945,369 H897" marker-end="url(#arrow)"/>
+  <text class="flow-t" x="902" y="362">clone</text>
+
+  <text class="muted" x="575" y="488">New worktrees start with dependencies built; dead bytes go back to the volume.</text>
+
+  <!-- legend -->
+  <rect class="live" x="30" y="525" width="16" height="16" rx="3"/>
+  <text class="muted" x="52" y="538">live, kept</text>
+  <rect class="waste" x="140" y="525" width="16" height="16" rx="3"/>
+  <text class="muted" x="162" y="538">dead bytes</text>
+  <rect class="freed" x="255" y="525" width="16" height="16" rx="3"/>
+  <text class="muted" x="277" y="538">reclaimed by hive</text>
+  <rect class="clone" x="400" y="525" width="16" height="16" rx="3"/>
+  <text class="muted" x="422" y="538">cloned from the store (APFS copy-on-write, shared blocks)</text>
+  <rect class="cold" x="760" y="525" width="16" height="16" rx="3"/>
+  <text class="muted" x="782" y="538">compiled by Cargo</text>
+  <text class="muted" x="30" y="572">Hive never writes a repo file or ~/.cargo, and never deletes a unit that is live. It installs no wrapper, shim, hook or Cargo config.</text>
+</svg>

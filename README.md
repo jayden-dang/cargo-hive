@@ -49,15 +49,7 @@ Cargo has no default GC policy for target dirs yet
 ([cargo#13136](https://github.com/rust-lang/cargo/issues/13136)). cargo-hive fills that
 gap for the multi-worktree case. Its receipts record the data such a policy would need.
 
-```
-Without hive                              With hive
-
-main/  target/  grows, never pruned       main/  target/  dead sessions and units reclaimed
-wt-a/  target/  every dep built cold      wt-a/  target/  registry deps cloned in first;
-wt-b/  target/  every dep built cold      wt-b/  target/  only workspace crates compile
-...    stale incremental sessions         ~/.hive/store/  one copy of each registry unit,
-       pile up                                            shared by APFS clones
-```
+![The same Cargo target dirs without hive and with hive. Without hive, the main target keeps dead units, superseded sessions and temp dirs, every worktree compiles every registry dependency cold, and an orphan target is forgotten. With hive, live units are kept, dead state is reclaimed by gc or an applied plan, registry dependencies are filled into the ~/.hive store once and cloned into new worktrees, and the orphan target is removed by an orphan plan.](docs/assets/hive-targets.svg)
 
 Each worktree still has its own `target/`. Hive doesn't turn them into one shared build
 directory.
