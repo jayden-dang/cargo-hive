@@ -1,7 +1,7 @@
 # Roadmap: cargo-hive
 
 Status: Approved
-Date: 2026-11-09
+Date: 2026-11-12
 
 <!--
 The program layer: milestone INTENT, above any single feature and below the product
@@ -81,7 +81,7 @@ ID rules:
 
 | ID | Milestone | Outcome | Depends-on | Commitment |
 |---|---|---|---|---|
-| MILE-1 | Safe automatic reclaim | On any Mac, a user installs cargo-hive from scratch, registers a repo, and reclaims superseded incremental sessions and leftover rustc temp entries across all its checkouts, from the CLI or from an agent driving that same CLI through the hive skill, with a receipt showing per-file bytes freed and zero units rebuilt because of a deletion. | none | Committed |
+| MILE-1 | Safe automatic reclaim | On any Mac, a user installs cargo-hive from scratch, registers a repo, and reclaims superseded incremental sessions and leftover rustc temp entries across all its checkouts, from the CLI or from an agent driving that same CLI through the hive skill, with a receipt showing per-file bytes freed and zero units rebuilt because of a deletion. | none | Closed |
 | MILE-2 | Planned reclaim | A user or agent previews closure-based garbage and orphan target dirs as a plan, and an agent applies that plan itself on any checkout and on orphan target dirs, with no owner step, hive rechecking it under locks before it deletes. | MILE-1 | Planned |
 | MILE-3 | Warm worktrees from a shared store | A new secondary checkout (a build-in-waves lane, a native Claude worktree) is seeded from a compressed, hive-owned store, so its first build recompiles zero seeded registry units while the seeded copies add about zero private bytes, and `cargo hive bench` gives the measured cold-versus-seeded time. | MILE-2 | Planned |
 
@@ -95,8 +95,8 @@ ID rules:
 - **ROAD-3** explain-findings — After: ROAD-1 — Surfaces: None — the module layout is set in design-solution. Expected components: read-only findings on why a crate has N copies in a target dir (variant groups by feature set, mode and profile hash; feature divergence within one mode and target kind; failed units from the rustc summary line). Orphan candidates are left to `status`, which already reports them, and "emptied protected targets" is dropped, never having been defined (2026-10-29, ROAD-3 frame-change).
 - **ROAD-12** agent-skill — After: ROAD-2, ROAD-3 — Surfaces: `skills/hive/`, `.claude-plugin/`, `.codex-plugin/`, `tests/skill.rs`. Expected components: a hive agent skill (`skills/hive/SKILL.md`) shipped as a plugin from this repo's own marketplace, installed through each harness's plugin manager (Claude Code, Codex), with manifest versions and `metadata.hive-version` equal to the crate version and a test that fails when they differ or the skill names a command or flag the CLI lacks; hive itself writes no skills dir. Its frame is the model from vision (protected versus secondary checkouts, auto versus plan tier, scope from arguments) and its commands are MILE-1's only, each later item adding its own. Agents drive every MILE-1 operation through the CLI with `--json`.
 **Depends-on:** none
-**Commitment:** Committed 2026-10-25
-**Closed:** None
+**Commitment:** Closed 2026-11-12
+**Closed:** 0043374faf1952b06f12c88f632427ebbb46c040 (assessment 1, Accepted / Close 2026-10-30; released in v0.1.0 on 2026-11-12)
 **Deferred:**
 - ~~**ROAD-4**~~ mcp-server — dropped 2026-10-29: hive is a local CLI with no server state, so an MCP server would only wrap the receipts `--json` already prints, and its tool schemas would cost tokens in every agent session. Replaced by ROAD-12, the CLI plus a skill, as `gh` does.
 **Blockers:** None
@@ -112,7 +112,7 @@ ID rules:
 **Commitment:** Planned
 **Closed:** None
 **Deferred:**
-- ~~**ROAD-7**~~ owner-approval — dropped 2026-11-02: a deletion from a target dir costs at most a rebuild and holds no sensitive data, an agent can already delete a target by hand, and the locks and the apply-time recheck are what keep a build sound, so a human step added work without adding protection. Agents apply plans of every class (ADR-0002).
+- ~~**ROAD-7**~~ owner-approval — dropped 2026-11-02: a target-dir deletion costs at most a rebuild, so a human step added work without adding protection; agents apply plans of every class (ADR-0002). — Notes: [MILE-2](milestones/MILE-2.notes.md)
 **Blockers:** None
 
 ## MILE-3 — Warm worktrees from a shared store
