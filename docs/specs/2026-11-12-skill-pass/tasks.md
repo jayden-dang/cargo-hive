@@ -586,7 +586,7 @@ _Requirements: SKILLPASS-10.1, SKILLPASS-10.4, SKILLPASS-10.6, SKILLPASS-10.7, S
 
 **Depends-on:** Task 11
 
-- [ ] **Step 1: Run each rename.** In a scratch copy of the worktree under `/private/tmp`, apply one rename per class, run the gate, record the failure line verbatim, and discard the copy. Each rename changes only the printed name, never a Rust identifier, so `tests/skill.rs`'s exhaustive `parse` match (line 446) still compiles: a flag through `#[arg(long = …)]`, a subcommand through `#[command(name = …)]`, an outcome through `#[serde(rename = …)]`, and literals by editing the string. The classes:
+- [x] **Step 1: Run each rename.** In a scratch copy of the worktree under `/private/tmp`, apply one rename per class, run the gate, record the failure line verbatim, and discard the copy. Each rename changes only the printed name, never a Rust identifier, so `tests/skill.rs`'s exhaustive `parse` match (line 446) still compiles: a flag through `#[arg(long = …)]`, a subcommand through `#[command(name = …)]`, an outcome through `#[serde(rename = …)]`, and literals by editing the string. The classes:
   - a long flag (`--dry-run` in src/cli.rs);
   - a subcommand;
   - a bench shape (`check-all`);
@@ -597,8 +597,8 @@ _Requirements: SKILLPASS-10.1, SKILLPASS-10.4, SKILLPASS-10.6, SKILLPASS-10.7, S
   - a count literal with one non-test literal in src (`fill_targets_skipped`, src/seed/mod.rs line 513). `fill_entries_held` would not fail, because src/cli.rs line 1764 holds a second copy: that is design Decision 4's residual;
   - a finding kind (`source.none`);
   - a short flag written into README (`-n`).
-- [ ] **Step 2: Confirm the worktree is unchanged.** Run: `git status --porcelain` in the worktree — expect: only `skills/hive/TESTS.md` changed.
-- [ ] **Step 3: Commit.** `git commit -m "test(skill): record that a rename of each cited kind fails the tests"`
+- [x] **Step 2: Confirm the worktree is unchanged.** Run: `git status --porcelain` in the worktree — expect: only `skills/hive/TESTS.md` changed.
+- [x] **Step 3: Commit.** `git commit -m "test(skill): record that a rename of each cited kind fails the tests"`
 
 _Requirements: SKILLPASS-7.1, SKILLPASS-7.2, SKILLPASS-8.3_
 
