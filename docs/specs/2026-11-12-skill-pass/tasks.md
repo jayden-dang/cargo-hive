@@ -555,18 +555,18 @@ _Requirements: SKILLPASS-8.1, SKILLPASS-8.2, SKILLPASS-8.3, SKILLPASS-8.5_
 
 **Depends-on:** Task 10
 
-- [ ] **Step 1: Run every GREEN.** Rerun each Task 1 scenario on both models, with the worktree skill text pasted (never the installed plugin), on the restored fixture. Score each from its transcript against SKILLPASS-10.4: `--json`, scope as arguments, counts quoted from the receipt, no `cargo clean`, no hand deletion, and each scenario's locked behaviour (E1-E3c, the `repo remove` hold, plan then apply).
-- [ ] **Step 2: REFACTOR loop.**
+- [x] **Step 1: Run every GREEN.** Rerun each Task 1 scenario on both models, with the worktree skill text pasted (never the installed plugin), on the restored fixture. Score each from its transcript against SKILLPASS-10.4: `--json`, scope as arguments, counts quoted from the receipt, no `cargo clean`, no hand deletion, and each scenario's locked behaviour (E1-E3c, the `repo remove` hold, plan then apply).
+- [x] **Step 2: REFACTOR loop.**
   - A GREEN that fails on Haiku gets its rationalisation quoted verbatim, a counter added in the skill (within 150 lines), and a rerun. Stop when a run shows no new rationalisation.
   - Every text change reruns `cargo test --test skill`.
   - A fix that needs a dropped instruction or more than 150 lines stops here for the operator.
-- [ ] **Step 3: Run the trigger test.** Write 8-10 should-fire and 8-10 should-not-fire queries (SKILLPASS-10.6). The near-misses are: a `cargo clean` or disk ask in an unregistered repo, sccache or linker speed-up, and `git worktree` housekeeping. Run each fresh on both models with the hive description among neighbours, and record which skill each picks.
-- [ ] **Step 4: Read the README against the skill.** For each command, check that the README and the final body give the same flags and recoveries (SKILLPASS-8.1, 8.5, the design's manual seam). Record each difference found and fixed under `## Instruction map`.
-- [ ] **Step 5: Write the instruction map.** Map each of today's 51 instructions to its line in the final body, marking 10, 19, 28 and 32 as changed (SKILLPASS-5.3).
-- [ ] **Step 6: Add the eval entries.** Add `behavior` entries per new scenario. Re-point 8 (plan before closure deletion) and 9 (apply one plan) to `## Plan then apply (2026-11-12)`, and 10 (seed a new lane) to `## Three lanes`. Entry 11 (bench) keeps pointing at the existing `## Bench cold against seeded` heading, since the bench scenario was cut (final review, item 10). Keep the SKILL-5.3 shape.
+- [x] **Step 3: Run the trigger test.** Write 8-10 should-fire and 8-10 should-not-fire queries (SKILLPASS-10.6). The near-misses are: a `cargo clean` or disk ask in an unregistered repo, sccache or linker speed-up, and `git worktree` housekeeping. Run each fresh on both models with the hive description among neighbours, and record which skill each picks.
+- [x] **Step 4: Read the README against the skill.** For each command, check that the README and the final body give the same flags and recoveries (SKILLPASS-8.1, 8.5, the design's manual seam). Record each difference found and fixed under `## Instruction map`.
+- [x] **Step 5: Write the instruction map.** Map each of today's 51 instructions to its line in the final body, marking 10, 19, 28 and 32 as changed (SKILLPASS-5.3).
+- [x] **Step 6: Add the eval entries.** Add `behavior` entries per new scenario. Re-point 8 (plan before closure deletion) and 9 (apply one plan) to `## Plan then apply (2026-11-12)`, and 10 (seed a new lane) to `## Three lanes`. Entry 11 (bench) keeps pointing at the existing `## Bench cold against seeded` heading, since the bench scenario was cut (final review, item 10). Keep the SKILL-5.3 shape.
 
   Run: `cargo test --test skill eval_entries_carry_their_evidence` — expect: pass.
-- [ ] **Step 7: Commit.** `git commit -m "test(skill): record GREEN runs of the rewritten hive skill on Sonnet and Haiku"`
+- [x] **Step 7: Commit.** `git commit -m "test(skill): record GREEN runs of the rewritten hive skill on Sonnet and Haiku"`
 
 _Requirements: SKILLPASS-10.1, SKILLPASS-10.4, SKILLPASS-10.6, SKILLPASS-10.7, SKILLPASS-10.8, SKILLPASS-9.7, SKILLPASS-5.3, SKILLPASS-5.4_
 
