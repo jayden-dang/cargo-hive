@@ -1,4 +1,11 @@
+//! Document tests for the hive skill, plugin manifests and README: they read
+//! repo files from `CARGO_MANIFEST_DIR`, parse command lines with the public
+//! `Cli` parser in-process, and touch nothing on the machine.
+
 use std::fs;
+
+#[path = "skill/names.rs"]
+mod names;
 
 const SKILL: &str = "plugin/skills/hive/SKILL.md";
 const CLAUDE_PLUGIN: &str = "plugin/.claude-plugin/plugin.json";
@@ -455,6 +462,34 @@ fn parse(words: &[String]) -> Result<Parsed, String> {
     }
 }
 
+const VERSION_FIRST: &str = "## Version first";
+const FREE_DISK: &str = "## Free disk";
+const START_LANES: &str = "## Start new lanes";
+const PLAN_APPLY: &str = "## Delete what gc keeps";
+const LOOK: &str = "## Look before acting";
+const BENCH: &str = "## Time cold against seeded builds";
+const REFUSES: &str = "## When a command refuses";
+const RECEIPT: &str = "## Reading a receipt";
+const GOAL_HEADINGS: [&str; 8] = [
+    VERSION_FIRST,
+    FREE_DISK,
+    START_LANES,
+    PLAN_APPLY,
+    LOOK,
+    BENCH,
+    REFUSES,
+    RECEIPT,
+];
+
+/// The text under `heading`, up to the next `## ` heading.
+fn section<'a>(body: &'a str, heading: &str) -> &'a str {
+    let after = body
+        .split(&format!("{heading}\n"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("the skill body has no {heading} section"));
+    after.split("\n## ").next().unwrap_or(after)
+}
+
 fn skill_body() -> String {
     split_skill(&repo_file(SKILL)).unwrap().1
 }
@@ -534,13 +569,7 @@ fn skill_command_lines_parse_with_the_cli() {
 #[test]
 fn the_skill_teaches_seeding_a_new_lane() {
     let body = skill_body();
-    let version = body
-        .split("## Version first")
-        .nth(1)
-        .expect("Version first heading")
-        .split("## ")
-        .next()
-        .expect("Version first section");
+    let version = section(&body, VERSION_FIRST);
     assert!(
         version.contains("Do not run") && version.contains("`seed`"),
         "Version first does not hold seed back on a version mismatch"
@@ -684,13 +713,14 @@ fn skill_documents_every_shipped_command() {
 #[test]
 fn the_skill_teaches_the_plan_flow_for_every_class() {
     let body = skill_body();
+    let plan = section(&body, PLAN_APPLY);
     for needle in [
         "every class",
         "no owner step",
         "plan again",
-        "already consumed",
+        "`already_consumed`",
     ] {
-        assert!(body.contains(needle), "SKILL.md lacks {needle}");
+        assert!(plan.contains(needle), "{PLAN_APPLY} lacks {needle}");
     }
     for gone in ["needs-human", "exit 3", "approve"] {
         assert!(!body.contains(gone), "SKILL.md still says {gone}");
@@ -720,6 +750,127 @@ fn has_local_link(line: &str) -> bool {
         let target = rest.split(')').next().unwrap_or(rest);
         !(target.starts_with("http://") || target.starts_with("https://"))
     })
+}
+
+#[test]
+fn the_skill_frees_disk_on_the_checkouts_the_user_named() {
+    let body = skill_body();
+    let free = section(&body, FREE_DISK);
+    for phrase in [
+        "--dry-run",
+        "`freed_bytes`",
+        "`deleted_bytes_still_shared`",
+        "`store_freed_bytes`",
+        "`unmeasured`",
+        "whole repo",
+        "`store.skipped_scoped`",
+    ] {
+        assert!(free.contains(phrase), "{FREE_DISK} lacks {phrase}");
+    }
+}
+
+#[test]
+fn the_skill_seeds_one_lane_builds_it_then_seeds_the_rest() {
+    let body = skill_body();
+    let lanes = section(&body, START_LANES);
+    let seed_one = lanes.find("seed one lane").expect("seed one lane");
+    let build = lanes[seed_one..].find("build it").expect("build it");
+    assert!(
+        lanes[seed_one + build..].contains("seed the other"),
+        "order: seed one, build, seed the rest"
+    );
+    for phrase in ["bare `gc`", "`store_bytes`", "gets nothing", "one build"] {
+        assert!(lanes.contains(phrase), "{START_LANES} lacks {phrase}");
+    }
+}
+
+#[test]
+fn the_skill_gives_the_recovery_each_refusal_names() {
+    let body = skill_body();
+    let refuses = section(&body, REFUSES);
+    let none = refuses.find("`source.none`").expect("source.none");
+    let build = refuses[none..]
+        .find("build the main checkout")
+        .expect("build the main checkout after source.none");
+    assert!(
+        refuses[none + build..].contains("`seed` again"),
+        "after source.none: build the main checkout, then seed again"
+    );
+    for phrase in [
+        "`store.tag`",
+        "`toolchain.missing`",
+        "could not be read",
+        "`walk.unreadable`",
+        "`explain`",
+        "`cargo hive repo remove --missing --json`",
+    ] {
+        assert!(refuses.contains(phrase), "{REFUSES} lacks {phrase}");
+    }
+}
+
+#[test]
+fn the_skill_routes_a_deleted_repo_to_repo_remove_missing() {
+    let body = skill_body();
+    let row = section(&body, LOOK)
+        .lines()
+        .find(|l| l.starts_with('|') && l.contains("was deleted"))
+        .expect("a routing row for a deleted repo");
+    assert!(
+        row.contains("`repo remove --missing`"),
+        "the deleted-repo row does not route to repo remove --missing: {row}"
+    );
+}
+
+#[test]
+fn the_skill_names_receipt_counts_as_the_binary_keys_them() {
+    let body = skill_body();
+    let receipt = section(&body, RECEIPT);
+    for phrase in [
+        "`counts`",
+        "`reused_fresh:/path/to/target`",
+        "`reused_fresh`",
+        "not Cargo's printed fresh count",
+        "`seeded_fresh`",
+        "`seeded_unneeded`",
+        "`seeded_recompiled`",
+        "`seeded_missing`",
+    ] {
+        assert!(receipt.contains(phrase), "{RECEIPT} lacks {phrase}");
+    }
+}
+
+#[test]
+fn the_skill_writes_every_bench_series_name_in_full() {
+    let body = skill_body();
+    let receipt = section(&body, RECEIPT);
+    for phrase in [
+        "`seeded_build_ms_median`",
+        "`seeded_total_ms_spread`",
+        "are different names",
+    ] {
+        assert!(receipt.contains(phrase), "{RECEIPT} lacks {phrase}");
+    }
+    assert!(
+        !receipt.contains("the same five suffixes"),
+        "{RECEIPT} still abbreviates several names"
+    );
+}
+
+#[test]
+fn a_version_mismatch_holds_every_write() {
+    let body = skill_body();
+    let version = section(&body, VERSION_FIRST);
+    let held = &version[version.find("Do not run").expect("Do not run")..];
+    for cmd in [
+        "`gc`",
+        "`apply`",
+        "`repo add`",
+        "`repo remove`",
+        "`seed`",
+        "`bench`",
+    ] {
+        assert!(held.contains(cmd), "the held list lacks {cmd}");
+    }
 }
 
 #[test]
@@ -755,18 +906,21 @@ fn skill_body_fits_the_budget() {
     }
     let headings: Vec<&str> = body.lines().filter(|l| l.starts_with("## ")).collect();
     assert_eq!(
-        headings,
-        [
-            "## Command form",
-            "## Version first",
-            "## The model",
-            "## Which command",
-            "## Command lines",
-            "## Reading a receipt",
-            "## Do not",
-        ],
-        "the skill body headings must be the seven the skill is built around, in order"
+        headings.first(),
+        Some(&"## Command form"),
+        "the first heading must be the command form"
     );
+    assert_eq!(
+        headings.get(1),
+        Some(&VERSION_FIRST),
+        "the version check must be the first section after the command form"
+    );
+    for goal in GOAL_HEADINGS {
+        assert!(
+            headings.contains(&goal),
+            "the skill body has no {goal} section"
+        );
+    }
 }
 
 #[test]
@@ -850,4 +1004,155 @@ fn eval_entries_carry_their_evidence() {
     for needed in ["behavior", "trigger"] {
         assert!(kinds.contains(&needed), "eval.json has no {needed} entry");
     }
+}
+
+#[test]
+fn the_literal_lexer_reads_the_string_forms_src_uses() {
+    let src = r##"
+fn f<'a>(x: &'a str) { let q = '"'; let b = b"bytes"; // "comment"
+    let r = r#"raw "quoted""#; let s = "esc \" aped"; }
+#[cfg(all(test, target_os = "macos"))]
+mod exit_code_tests {
+    fn f() { let s = "}"; let c = '}'; }
+    const T: &str = "only_in_tests";
+}
+const MIDDLE: &str = "middle";
+#[cfg(test)]
+#[allow(dead_code)]
+mod x { fn g() { let u = "{"; } const U: &str = "stacked"; }
+const AFTER: &str = "after_tests";
+"##;
+    assert_eq!(
+        names::string_literals(src),
+        vec![
+            "bytes",
+            "raw \"quoted\"",
+            "esc \\\" aped",
+            "middle",
+            "after_tests"
+        ]
+    );
+}
+
+#[test]
+fn the_name_check_places_every_kind_of_span() {
+    let cases: &[(&str, bool)] = &[
+        ("check-lib=<package>", true),
+        ("check-al", false),
+        ("--dry-run", true),
+        ("--dry-rn", false),
+        ("--help", true),
+        ("--missing", true),
+        ("--top", true),
+        ("--misssing", false),
+        ("-n", false),
+        ("seed", true),
+        ("sed", false),
+        ("refused", true),
+        ("refusd", false),
+        ("orphan", true),
+        ("orphn", false),
+        ("hive_version", true),
+        ("undecided", true),
+        ("hive_versio", false),
+        ("metadata.hive-version", true),
+        ("metadata.hive-versio", false),
+        ("gc_window_days", true),
+        ("cold_build_ms_median", true),
+        ("build_ms_median", false),
+        ("cold_build_ms_medain", false),
+        ("~/.hive/store/", true),
+        ("0.1.0", true),
+        ("<id>", true),
+        ("sessions_deleted", true),
+        ("reused_fresh", true),
+        ("source.none", true),
+        ("source.nne", false),
+        ("Cargo.lock", true),
+        ("RESEARCH.md", true),
+        ("cargo", true),
+        ("hive", true),
+        ("frobnicate", false),
+    ];
+    for (span, ok) in cases {
+        let failures = names::cited_name_failures(&format!("x `{span}` y\n"), "case");
+        assert_eq!(failures.is_empty(), *ok, "`{span}`: {failures:?}");
+    }
+    let lits = |v: &[&str]| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+    let defined = lits(&["cold_build_ms", "{series}_median"]);
+    assert!(names::bench_series(&defined, "cold_build_ms_median")
+        .unwrap()
+        .is_ok());
+    assert!(
+        names::bench_series(&lits(&["cold_build_ms"]), "cold_build_ms_median")
+            .unwrap()
+            .is_err()
+    );
+    assert!(names::bench_series(&defined, "cold_build_ms_medain").is_none());
+    let err = names::inline_spans("a `b`\nc ` d\n").unwrap_err();
+    assert!(err.contains("line 2"), "{err}");
+    let spans = names::inline_spans("```\n`hidden`\n```\nx `shown`\n").unwrap();
+    assert_eq!(spans, vec![(4, "shown".to_string())]);
+}
+
+#[test]
+fn the_skill_cites_only_names_the_binary_defines() {
+    let failures = names::cited_name_failures(&skill_body(), "SKILL.md body");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn readme_command_lines_and_names_match_the_binary() {
+    let readme = repo_file("README.md");
+    let mut failures = names::cited_name_failures(&readme, "README.md");
+    failures.extend(names::synopsis_flag_failures(&readme, "README.md"));
+    let mut seen = Vec::new();
+    for (line, words) in names::readme_command_lines(&readme) {
+        if words
+            .iter()
+            .any(|w| w.starts_with('-') && !w.starts_with("--") && w.len() == 2)
+        {
+            failures.push(format!(
+                "README.md:{line}: short flag in `{}`",
+                words.join(" ")
+            ));
+        }
+        match parse(&words) {
+            Ok(p) => seen.push(p),
+            Err(e) => failures.push(format!("README.md:{line}: {e}")),
+        }
+    }
+    for want in [
+        Parsed::Doctor,
+        Parsed::RepoAdd,
+        Parsed::RepoList,
+        Parsed::RepoRemove,
+        Parsed::Status,
+        Parsed::Gc {
+            dry_run: false,
+            plan: false,
+        },
+        Parsed::Gc {
+            dry_run: false,
+            plan: true,
+        },
+        Parsed::Apply,
+        Parsed::Explain,
+        Parsed::Seed,
+        Parsed::Bench,
+    ] {
+        if !seen.contains(&want) {
+            failures.push(format!("README.md has no command line for {want:?}"));
+        }
+    }
+    for recovery in [
+        "`source.none`",
+        "`walk.unreadable`",
+        "repo remove --missing",
+    ] {
+        if !readme.contains(recovery) {
+            failures.push(format!("README.md lacks {recovery}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

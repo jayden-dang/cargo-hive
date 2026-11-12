@@ -162,7 +162,7 @@ Terms (defined in `CONTEXT.md`, whose Store and Fill entries this feature correc
 
 **Story:** As an agent, I want the hive skill to tell me when and how to run `cargo hive seed`, so that I seed a new lane without being told by a person.
 
-- **SEED-8.1** THE SYSTEM SHALL document `seed` in `plugin/skills/hive/SKILL.md`, inside its existing headings: what it does, that it is for a new secondary checkout before its first build, that an existing target gets nothing, and the `status` counts to read afterward.
+- **SEED-8.1** THE SYSTEM SHALL document `seed` in `plugin/skills/hive/SKILL.md`, ~~inside its existing headings~~ (superseded by SKILLPASS-5.1): what it does, that it is for a new secondary checkout before its first build, that an existing target gets nothing, and the `status` counts to read afterward.
 - **SEED-8.2** THE SYSTEM SHALL add `seed` to the commands the skill's `Version first` section says not to run when the hive version does not match.
 - **SEED-8.3** THE SYSTEM SHALL update `tests/skill.rs`, including its exhaustive match over the CLI's commands and its shipped-command list, so that the test covers `seed`, and keep the skill text `skills/hive/eval.json` quotes in step with the skill.
 

@@ -76,7 +76,7 @@ that.
 
 ## Measured results
 
-The table comes from one `cargo hive bench` receipt from 2026-11-11, with two fresh
+The table comes from one `bench` receipt from 2026-11-11, with two fresh
 checkouts per arm. The repo is the author's workspace, which had 597 packages, 42 of them
 workspace crates, when [`SPIKES.md`](SPIKES.md) was written. The machine was an M5 Pro
 with 18 cores, running macOS 27.0.1 and Rust 1.97.1.
@@ -95,7 +95,7 @@ builds had failed and been interrupted. It deleted 31 superseded sessions (1,223
 The next build compiled the same 28 crates as a control run that skipped the `gc`.
 
 This is one repo on one machine, with only two samples per arm. It promises nothing about
-yours. Run `cargo hive bench` to measure your own.
+yours. Run `cargo hive bench --cold /path/to/cold1 /path/to/cold2 --seeded /path/to/seeded1 /path/to/seeded2` to measure your own.
 
 ## Install
 
@@ -122,24 +122,22 @@ cargo hive doctor    # checks what works on this machine; run it again after a t
 # 1. Register a repo by any path inside its main checkout
 cargo hive repo add ~/code/my-repo
 
-# 2. See every checkout and target dir, with sizes and owners
-cargo hive status
+# 2. Free disk on the checkouts you name: preview first, then run
+cargo hive gc ~/code/my-repo --dry-run
+cargo hive gc ~/code/my-repo
 
-# 3. Find out why some crates are built in many copies
-cargo hive explain
-
-# 4. Reclaim superseded incremental sessions and rustc temp dirs (preview first)
-cargo hive gc --dry-run
-cargo hive gc
-
-# 5. Plan deeper cleanup (dead units, orphan targets), review it, then apply it
-cargo hive gc --plan
-cargo hive apply <id>
-
-# 6. Seed a new worktree before its first build
+# 3. Seed a new worktree before its first build
 git -C ~/code/my-repo worktree add .worktrees/wt-a
 cargo hive seed ~/code/my-repo/.worktrees/wt-a
 cargo build --manifest-path ~/code/my-repo/.worktrees/wt-a/Cargo.toml
+
+# 4. Plan deeper cleanup (dead units, orphan targets), review it, then apply it
+cargo hive gc ~/code/my-repo --plan
+cargo hive apply plan-id
+
+# 5. Look before acting: every checkout and target dir, then why a crate is built in many copies
+cargo hive status ~/code/my-repo
+cargo hive explain ~/code/my-repo
 ```
 
 `seed` only fills a *secondary* checkout: a linked worktree that sits inside its main
@@ -148,23 +146,44 @@ such as `~/code/my-repo-wt-a` counts as protected, and `seed` refuses it. To cha
 list its parent in `secondary_roots`, together with any default roots you want to keep
 (see [Configuration](#configuration)).
 
+When a command refuses:
+
+- `seed` reports `source.none` when the repo has no source target record for the current
+  toolchain: no checkout of it has built yet, or none has with this toolchain. Build the main checkout, then run `cargo hive seed ~/code/my-repo/.worktrees/wt-a`
+  again. Do not retry `seed` first.
+- A registered repo whose main checkout is gone makes `status`, `gc`, `gc --plan`,
+  `explain` and `apply` report `walk.unreadable` for its path. Run
+  `cargo hive repo remove --missing`, which unregisters every such repo, then rerun the
+  command.
+- `seed` reports `store.tag` when the store has not been filled yet (no tag), or
+  `toolchain.missing` when the store has no row for the current toolchain. Build the main
+  checkout with the current toolchain, then run `seed` again. When `store.tag` says the tag
+  could not be read, a build does not fix it: read the finding's detail.
+- `store.busy` means run `cargo hive gc` again when no seed runs. `store.held_over_cap` names
+  the targets to retire.
+
 Every command accepts `--json`. With it, a command prints exactly one receipt on stdout.
 
 ## Commands
 
+Each row shows one command form. Optional arguments are described in the row's text.
+
 | Command | What it does |
 |---|---|
 | `cargo hive doctor` | Runs checks (a)–(d), (f), and (g) in a temporary directory and records which capabilities are enabled for the active toolchain. There is no check (e). A failure of check (g) disables failed-unit reporting only |
-| `cargo hive repo add <path>` | Registers the main checkout containing `<path>` |
+| `cargo hive repo add /path/to/repo` | Registers the main checkout containing the path |
 | `cargo hive repo list` | Lists registered repositories and their root commits |
-| `cargo hive repo remove [<path>…] [--missing]` | Unregisters repositories. `--missing` also removes every repository whose main checkout no longer exists |
-| `cargo hive status [<repo>…] [--no-sizes]` | Lists checkouts (protected, secondary, missing) and Cargo target dirs (owner or orphan candidate, size, units and edges) |
-| `cargo hive gc [<repo>…] [--dry-run]` | Deletes superseded incremental sessions and `deps/rustc*`/`rmeta*` temp dirs. Freed bytes are counted per inode and reported as totals. `--dry-run` deletes nothing. With no repo argument it also evicts from the store |
-| `cargo hive gc --plan [<repo>…]` | Writes a plan and deletes nothing |
-| `cargo hive apply <id>` | Deletes the plan's paths for every class |
-| `cargo hive explain [<repo>…] [-n N]` | Reports copies of one crate, feature splits, and units whose last compile failed. `-n` defaults to 10; `-n 0` shows every group |
-| `cargo hive seed <checkout>` | Copies registry output into a new secondary checkout before its first build. A checkout that already has a target gets nothing. Bare `cargo hive gc` keeps the store under 40 GB |
-| `cargo hive bench --cold <checkout>… --seeded <checkout>… [--build-cmd <cmd>]` | Times cold and seeded first builds of fresh secondary checkouts and reports integer milliseconds in a receipt. `--build-cmd` sets the compile-only cargo command (default `build`) |
+| `cargo hive repo remove /path/to/repo` | Unregisters the repository whose main checkout contains the path. Give several paths to unregister several repositories |
+| `cargo hive repo remove --missing` | Unregisters every repository whose main checkout no longer exists |
+| `cargo hive status /path/to/repo` | Lists checkouts (protected, secondary, missing) and Cargo target dirs (owner or orphan candidate, size, units and edges). Leave out the path for every registered repo; add `--no-sizes` to skip sizes |
+| `cargo hive gc /path/to/repo --dry-run` | Previews what `gc` would delete and deletes nothing |
+| `cargo hive gc /path/to/repo` | Deletes superseded incremental sessions and `deps/rustc*`/`rmeta*` temp dirs. Freed bytes are counted per inode and reported as totals. With a repo argument it leaves the store alone |
+| `cargo hive gc` | With no repo argument, covers every target hive knows, including orphan candidates and targets under a cache root, and also evicts from the store. Bare `cargo hive gc` keeps the store under 40 GB. `--dry-run` previews it |
+| `cargo hive gc /path/to/repo --plan` | Writes a plan and deletes nothing. Leave out the path for every target hive knows, including orphan candidates and targets under a cache root |
+| `cargo hive apply plan-id` | Deletes the plan's paths for every class |
+| `cargo hive explain /path/to/repo --top 0` | Reports copies of one crate, feature splits, and units whose last compile failed. `--top` defaults to 10 groups; `--top 0` shows every group. Leave out the path for every registered repo |
+| `cargo hive seed /path/to/checkout` | Clones registry units from the store into a new secondary checkout before its first build. A checkout that already has a target gets nothing |
+| `cargo hive bench --cold /path/to/cold1 /path/to/cold2 --seeded /path/to/seeded1 /path/to/seeded2` | Times cold and seeded first builds of fresh secondary checkouts and reports integer milliseconds in a receipt. `--build-cmd` sets the compile-only cargo command (default `build`) |
 
 Run `cargo hive <command> --help` for every flag.
 
@@ -172,15 +191,15 @@ Run `cargo hive <command> --help` for every flag.
 
 Every receipt is also appended to `~/.hive/receipts/<date>.jsonl`. Receipts carry counts
 and measured values only, never an estimate of time saved. Durations appear only in
-`cargo hive bench`, as integer milliseconds. You can feed them to dashboards or agent
+`bench`, as integer milliseconds. You can feed them to dashboards or agent
 automation.
 
 ### explain
 
 `cargo hive explain` reports copies of one crate, feature splits, and units whose last
 compile failed. It never claims bytes, durations, or a tool name. It never says that a
-unit always fails, or that a copy is an older build. `-n` (`--top`) defaults to 10 groups;
-`-n 0` shows every group. Naming a failed unit needs doctor check (g). Without it, the
+unit always fails, or that a copy is an older build. `--top` defaults to 10 groups;
+`--top 0` shows every group. Naming a failed unit needs doctor check (g). Without it, the
 count stays unmeasured and no unit is named.
 
 ### gc
