@@ -563,7 +563,7 @@ cd /private/tmp/willow-1d9f23 && source env.sh && cargo hive status /private/tmp
 cd /private/tmp/willow-1d9f23 && source env.sh && cargo hive gc /private/tmp/willow-1d9f23/orbit --json 2>/dev/null | python3 -c "import sys,json;d=json.load(sys.stdin);print({k:v for k,v in d['counts'].items() if ':' not in k});print(d['findings'],d['notes'])"; cargo hive repo remove --missing --json 2>/dev/null; cargo hive status /private/tmp/willow-1d9f23/orbit --json 2>/dev/null | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['counts']['bytes'],d['counts']['orphan_candidates'])"
 ```
 
-Passes on the second Sonnet runner (regression guard on this runner). After `walk.unreadable` in the `status` and `gc --dry-run` receipts it ran `repo remove --missing --json` (`removed` 1). The routing row at line 34 and the apply sentence at line 44 of the skill led it there. The result is split: Sonnet fails and Haiku passes, so today's skill does not reliably give SKILLPASS-3.2's recovery, and the instruction stands (a failing RED is recorded).
+Passes on the second Sonnet runner (regression guard on this runner). After `walk.unreadable` in the `status` and `gc --dry-run` receipts it ran `repo remove --missing --json` (`removed` 1). The routing row at line 34 and the apply sentence at line 44 of the skill led it there. The result is split: Sonnet fails and the second Sonnet runner passes, so today's skill does not reliably give SKILLPASS-3.2's recovery, and the instruction stands (a failing RED is recorded).
 
 ### GREEN (rewrite), Sonnet
 
