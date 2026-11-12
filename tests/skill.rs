@@ -835,6 +835,23 @@ fn the_skill_names_receipt_counts_as_the_binary_keys_them() {
 }
 
 #[test]
+fn the_skill_writes_every_bench_series_name_in_full() {
+    let body = skill_body();
+    let receipt = section(&body, RECEIPT);
+    for phrase in [
+        "`seeded_build_ms_median`",
+        "`seeded_total_ms_spread`",
+        "are different names",
+    ] {
+        assert!(receipt.contains(phrase), "{RECEIPT} lacks {phrase}");
+    }
+    assert!(
+        !receipt.contains("the same five suffixes"),
+        "{RECEIPT} still abbreviates several names"
+    );
+}
+
+#[test]
 fn skill_body_fits_the_budget() {
     for local in [
         "see [notes](#anchor)",
