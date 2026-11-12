@@ -13,7 +13,7 @@ The hive skill (`plugin/skills/hive/SKILL.md`) is 78 body lines under seven fixe
 
 The binding constraint is that `src/` stays unchanged (Lock L9; requirements Out of Scope). Together with the absent dev-dependencies (Cargo.toml has no `[dev-dependencies]`, design-scan §2), this rules out the obvious alternative: a `pub mod names` of constants, or a `syn` parse of `src/`, as the bridge between the skill's words and the binary's. The bridge must instead be built from what `src/` already exposes publicly (`Cli`, `BuildCmd`, `Outcome`, `class_label`, `ReceiptBuilder`) plus a small hand lexer over `src/**/*.rs` string literals. Adopting `syn` as a dev-dependency would be a new dependency, which is the operator's call. Nothing here needs it.
 
-A second constraint comes from `docs/standards/testing.md` (Strategy table): document tests in `tests/skill.rs` "touch nothing on the machine, and need neither `HIVE_HOME` nor `tests/common`". That rules out SKILLPASS-8.4's original mechanism (open a temp state root with `State::open_at` from `tests/skill.rs`). The config-key check therefore moves to an integration test that runs the binary with a scratch `HIVE_HOME`, the class the standard gives that job. Requirement 8.4 and 12.2 are corrected to match; see Decisions 6 and Upstream sync-back.
+A second constraint comes from `docs/standards/testing.md` (Strategy table): document tests in `tests/skill.rs` "touch nothing on the machine, and need neither `HIVE_HOME` nor `tests/common`". That ruled out SKILLPASS-8.4's original mechanism, a temp state root opened from `tests/skill.rs`. The config-key check was then moved to an integration test, and later cut by the conductor's final review (item 5): no Lock required it, and the README's Configuration section is outside this rewrite. The README's config keys are now skipped by the name check (Decision 3).
 
 Architecture invariants this feature relies on: ARCH-8 (scope from arguments: the guide keeps that rule and every command line carries path arguments); ARCH-10 (counters measured, durations only from bench: the guide's receipt section keeps that rule); ARCH-2 (no new write path: the binary is unchanged and the new integration test writes only its scratch `HIVE_HOME`).
 
@@ -30,7 +30,7 @@ Architecture invariants this feature relies on: ARCH-8 (scope from arguments: th
    6. plan class: the three `class_label` values, reached by an exhaustive match over `cargo_hive::plan_tier::record::PlanClass` (src/plan_tier/record.rs:21; `class_label` at src/plan_tier/build.rs:76-82);
    7. receipt envelope key: the top-level keys of `serde_json::to_value` of `let mut b = Receipt::with_os("x", Scope::default(), None); b.plan_tier(PlanTierBody { … empty }); b.finish()` (`plan_tier` takes `&mut self`, `finish` takes `self`) (src/receipt.rs:89-108, 120, 196, 206). `with_os` avoids the `sw_vers` call. The plan-tier body brings in `plans`, `undecided` and `nothing_to_do`, which an empty receipt omits (`skip_serializing_if`, src/receipt.rs:102-107);
    8. frontmatter key path (`metadata.` prefix): a key of `split_skill`'s metadata;
-   9. config key: a span equal to a first-column key of the README's `## Configuration` table (checked by Decision 6);
+   9. config key: a span equal to a first-column key of the README's `## Configuration` table is skipped, not checked, since SKILLPASS-8.4 was cut (final review item 5);
    10. bench series name: one of the four series literals (`cold_build_ms`, `seeded_build_ms`, `seeded_seed_ms`, `seeded_total_ms`) followed by one of the five suffixes (`_median`, `_p90`, `_min`, `_max`, `_spread`). The test checks that each series is a literal in src/bench/mod.rs and each suffix is a `"{series}<suffix>"` template there (src/bench/mod.rs:572-590), so a rename in src fails the test, not the skill;
    11. shape skip: a path, glob or placeholder (contains `/`, `~`, `$` or `*`, or starts with `<`), or a version or number (digits and dots only). This runs before class 12, so `0.1.0`, `~/.hive/config.json` and `docs/architecture/INDEX.md` are skipped;
    12. name with `_` or `.`: the literal match in Decision 4;
@@ -49,12 +49,7 @@ Architecture invariants this feature relies on: ARCH-8 (scope from arguments: th
 
    It drops the braced block of any `mod` item preceded by an attribute run that mentions `test`, found by brace counting in the lexer: `#[cfg(test)]`, `#[cfg(all(test, …))]`, stacked attributes, and any module name (`exit_code_tests`). It keeps scanning after that block, so test fixtures in `src/` do not vouch for a name and non-test items after a test module are still read (src/plan_tier/guard.rs:92, src/gc/account.rs:156, src/platform/mod.rs:331-456, src/liveness.rs:655, src/plan_tier/apply.rs:1133). A span matches a literal it equals. It also matches a literal ending in `{…}` or `:{…}` once that trailing placeholder is dropped: `"sessions_deleted{suffix}"` (src/cli.rs:893-906) and `"reused_fresh:{path}"` (src/cli.rs:862-865). No other placeholder position matches; bench series names take Decision 3's typed rule 10 instead. Residual, as W1 accepted: a rename passes when another non-test copy of the old literal remains in src. For example, `fill_entries_held` also sits in a `.get("fill_entries_held")` at src/cli.rs:1764, so renaming its emitter alone still passes. The integration tests that read real receipts are what catch it, and the rename demonstration uses a count with a single literal. The walk is bounded: `read_dir` recursion over `src/` only, with no symlink following, and one lex per test process held in a `OnceLock`, which both tests share. [W1; agent-decided; design-review F4, F5, F11]
 5. **Spans are found by one new helper.** `inline_spans(text) -> Vec<(usize, String)>` walks lines with the same fence toggle as `scan` (tests/skill.rs:371-401) and returns each backtick span outside fences with its 1-based line number. It is used for the skill body and for README.md. An odd backtick count on a line fails the test with that line rather than silently flipping the parity (design-scan §8). [agent-decided]
-6. **Config keys are checked by the binary in an integration test** (SKILLPASS-8.4, corrected). A new `tests/config_keys.rs` uses `tests/common`'s `Hive::ready()` (tests/common/mod.rs:73-77). `ready()` writes ready capabilities, which `status` needs (src/cli.rs:655-659). The test then calls `Hive::config(json)` (:61-70), which always adds the helper's scratch `cache_roots` unless the JSON sets it. It reads the first-column code spans of README's `## Configuration` table. For each key it writes that key, the only one besides the helper's `cache_roots`, with a value and an effect taken from a table in the test:
-   - `secondary_roots`: a dir under the test's own `HIVE_HOME`. Effect: `status --json` exits 0 with no `refusal` finding and the note `secondary_roots: <that dir>` (src/cli.rs:649-650).
-   - `cache_roots`: a dir under the test's own `HIVE_HOME`. Effect: the `status` note `cache_roots: <that dir>`.
-   - `gc_window_days`: `0`, then `7`. Effect: bare `gc --json` reports the finding `store.window_invalid` for `0` and not for `7`. Bare `gc` reads the window there (src/cli.rs:1044); `status` never reads it. Not driven yet: the build's first RED drives bare `gc` with no registered repo, and confirms it reaches :1044 rather than returning earlier. If it returns earlier, the test registers one empty repo first.
-
-   A renamed key is refused by `deny_unknown_fields` (src/state.rs:243-249). A key the README names with no row in the test's table fails with "no test value for <key>", so the two cannot drift silently. The test also runs one unknown key, with ready capabilities so that only the config can refuse, and expects exit 1 with the key named on stderr, which proves the refusal path is live. Root values stay under the test's own `HIVE_HOME`, so no command walks the shared temp dir. [Weigh, the standard's document-test boundary; agent-decided mechanism; design-gate-review finding 3]
+6. ~~**Config keys are checked by the binary in an integration test**~~ Cut by the conductor's final review, item 5 (2026-11-12), with SKILLPASS-8.4. The plan held `tests/config_keys.rs`, built on `Hive::ready()`, `Hive::config` and the `status` notes and bare `gc`'s `store.window_invalid` effects. No Lock required it, and it guarded a README section this road does not rewrite. U5 (whether bare `gc` with no repo reaches src/cli.rs:1044) no longer needs driving. [agent-decided]
 7. **README pass reuses the skill helpers** with these differences (SKILLPASS-8.2, 8.3; W3):
    - no `--json` rule;
    - `.md` links allowed;
@@ -74,7 +69,7 @@ deep modules — an interface much simpler than what it hides.
 
 ### The skill body
 
-Satisfies: SKILLPASS-1.1, SKILLPASS-1.2, SKILLPASS-2.1, SKILLPASS-2.2, SKILLPASS-2.3, SKILLPASS-3.1, SKILLPASS-3.2, SKILLPASS-3.3, SKILLPASS-4.1, SKILLPASS-4.2, SKILLPASS-4.3, SKILLPASS-5.1, SKILLPASS-5.2, SKILLPASS-5.3, SKILLPASS-5.4, SKILLPASS-6.1, SKILLPASS-11.1
+Satisfies: SKILLPASS-1.1, SKILLPASS-1.2, SKILLPASS-2.1, SKILLPASS-2.2, SKILLPASS-2.3, SKILLPASS-3.1, SKILLPASS-3.2, SKILLPASS-3.3, SKILLPASS-3.4, SKILLPASS-4.1, SKILLPASS-4.2, SKILLPASS-4.3, SKILLPASS-5.1, SKILLPASS-5.2, SKILLPASS-5.3, SKILLPASS-5.4, SKILLPASS-6.1, SKILLPASS-11.1
 Reuse: rung 2 — the existing `plugin/skills/hive/SKILL.md`, its frontmatter and its 51 instructions (scan.md §5), rewritten in place under Decision 2's headings
 Respects: ARCH-8, ARCH-10
 Surface:
@@ -106,9 +101,10 @@ Section plan, each instruction in one place:
   - `source.none` (32, changed), `store.tag` and `toolchain.missing` (new): build the main checkout, then seed again; an unreadable tag is reported to the user;
   - `walk.unreadable` (28, widened) and `store.busy` (44): rerun the command after the fix;
   - `store.held_over_cap` (45): retire the targets it names;
+  - `refusal` (new): "run `cargo hive doctor` first" → run `doctor`, then the command; a capability disabled by a failed doctor check → report the check to the user and stop;
   - exit codes (40).
 
-  (SKILLPASS-3.1 to 3.3.)
+  (SKILLPASS-3.1 to 3.4.)
 - **Reading a receipt**: 39 and 41-43, with every name written in full (SKILLPASS-4.1 to 4.3), and 46.
 - The command-line block is split so that each goal section carries its own `--json` lines. Together they cover every shipped subcommand (SKILLPASS-5.2). Instruction 38's block is thereby moved, not dropped.
 - The description: instruction 51, plus seeding and benching (SKILLPASS-5.4).
@@ -142,15 +138,6 @@ Surface:
 Interface: Quick start in the skill's goal order, and a Commands table with one row per command form whose code span is a real command line (`cargo hive explain /path/to/repo --top 0`), with optional parts in prose. The two recoveries appear as in the skill.
 Depth: n/a — extends README.md.
 Locality: README.md Quick start and Commands only. Other sections are leave, apart from a line that contradicts the skill (requirements Out of Scope).
-
-### Config-key check (tests/config_keys.rs)
-
-Satisfies: SKILLPASS-8.4
-Reuse: rung 2 — `tests/common`'s `Hive::ready`, `Hive::config` and `Hive::json` (tests/common/mod.rs:73, 61, 167); rung 4 — the binary's own `deny_unknown_fields` config read (src/state.rs:243-249, 286), reached through `status --json`
-Respects: ARCH-2
-Interface: `#[test] fn every_config_key_the_readme_names_is_accepted()`, plus `#[test] fn an_unknown_config_key_is_refused()`, both on `Hive::ready()`.
-Depth: if it vanished, callers would need to know only that each README config key, set alone, must be accepted by the binary.
-Locality: new file `tests/config_keys.rs` (rung 7 by file, rung 2 by content); `tests/common` leave.
 
 ### Guards kept in tests/skill.rs
 
@@ -193,30 +180,28 @@ Locality: four requirement files under `docs/specs/` (extend); no code.
 | Seam | Kind | Covers |
 |---|---|---|
 | `tests/skill.rs` reading the skill and README from `CARGO_MANIFEST_DIR`, with the public lib items named above | integration (document class) | SKILLPASS-4.2, 5.1, 5.2, 6.1 (held-list pin), 7.1, 7.2, 7.3, 8.2, 8.3, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 12.1, 12.2 |
-| `tests/config_keys.rs` running the `cargo-hive` binary with a scratch `HIVE_HOME` via `tests/common` | integration | SKILLPASS-8.4 |
-| Agent runs recorded in `skills/hive/TESTS.md` (skill-tester Sonnet and Haiku), with `eval.json` entries | e2e (manual) | SKILLPASS-1.1, 1.2, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 4.1, 4.3, 5.3, 5.4, 6.1, 9.7, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8, 11.1 |
+| Agent runs recorded in `skills/hive/TESTS.md` (skill-tester Sonnet and Haiku), with `eval.json` entries | e2e (manual) | SKILLPASS-1.1, 1.2, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 3.4, 4.1, 4.3, 5.3, 5.4, 6.1, 9.7, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6, 10.7, 10.8, 11.1 |
 | Reading the README against the skill, recorded in TESTS.md's instruction map | manual | SKILLPASS-8.1, 8.5 |
 
-A temporary rename per class (Decision 3's classes 1-10 and 12), made in a scratch copy of the worktree and reverted, shows the document-class seam failing on each. This is the close package's done signal, recorded in TESTS.md, not a committed test.
+A temporary rename per class (Decision 3's classes 1-8, 10 and 12), made in a scratch copy of the worktree and reverted, shows the document-class seam failing on each. This is the close package's done signal, recorded in TESTS.md, not a committed test.
 
 ## Coverage check
 
 Walked top to bottom; every requirement ID appears in exactly one `Satisfies:` line:
 
-- Skill body: 1.1-1.2, 2.1-2.3, 3.1-3.3, 4.1-4.3, 5.1-5.4, 6.1, 11.1.
+- Skill body: 1.1-1.2, 2.1-2.3, 3.1-3.4, 4.1-4.3, 5.1-5.4, 6.1, 11.1.
 - Name check: 7.1-7.3.
 - README pass: 8.2-8.3.
 - README text: 8.1, 8.5.
-- Config keys: 8.4.
 - Guards: 9.1-9.6, 12.1-12.2.
 - Evals: 9.7, 10.1-10.8.
 
-No ID is unmapped. The Supersedes table has no ID of its own and maps to the infrastructure section.
+SKILLPASS-8.4 is struck (final review item 5) and maps to no section. No live ID is unmapped. The Supersedes table has no ID of its own and maps to the infrastructure section.
 
 ## Upstream sync-back
 
 Designing showed that two approved requirement texts named a mechanism that breaks `docs/standards/testing.md`, and that one rule missed a name form found in the code. Corrected in requirements.md, to be re-approved:
 
-- **SKILLPASS-8.4** named `State::open_at` and `config()` from the skill test. The standard forbids a document test touching the machine, so 8.4 now says the binary refuses the key when it is set in a scratch `HIVE_HOME`, checked by an integration test.
+- **SKILLPASS-8.4** (later cut by the final review, item 5) named `State::open_at` and `config()` from the skill test. The standard forbids a document test touching the machine, so 8.4 now says the binary refuses the key when it is set in a scratch `HIVE_HOME`, checked by an integration test.
 - **SKILLPASS-12.2** said the skill test's temporary state root lives under a temp directory. It now says the config-key integration test's `HIVE_HOME` is a scratch directory under `/private/tmp/hive-it-*`, and that `tests/skill.rs` touches nothing.
 - **SKILLPASS-7.2** listed only trailing placeholders. It now also has a typed bench-series kind, the four series literals times the five suffix templates in src/bench/mod.rs:572-590, after design review showed a general leading-placeholder rule passes `build_ms_median`. It adds the receipt-envelope-key kind (`hive_version`), checked through `ReceiptBuilder`, and the frontmatter-key kind (`metadata.hive-version`), checked against the skill's own frontmatter.
