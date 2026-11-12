@@ -11,7 +11,7 @@ Status: Approved
 Approved: 2026-11-12 12:44 +07 by the operator on the spec sheet at commit 9441660, in their words: "approve" (relayed by the conductor, `.skills/_pending-hive-skill-pass/auto/operator-reply.md`).
 Date: 2026-11-12
 Execution-mode: continuous
-Delivered-by: PR #11
+Delivered-by: PR #11 (follow-up d33e5f6)
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
@@ -374,7 +374,7 @@ Run: `cargo test --test skill the_skill_gives_the_recovery` — expect: FAIL, no
   Run: `cargo test --test skill` — expect: pass, with the name check green on `store.tag` and `toolchain.missing` (src/seed/mod.rs literals).
 - [x] **Step 3: Commit.** `git commit -m "docs(skill): give the recovery for each refusal a receipt names"`
 
-_Requirements: SKILLPASS-3.1, SKILLPASS-3.2, SKILLPASS-3.3, SKILLPASS-3.4_
+_Requirements: SKILLPASS-3.1, SKILLPASS-3.2, SKILLPASS-3.3_
 
 ---
 
