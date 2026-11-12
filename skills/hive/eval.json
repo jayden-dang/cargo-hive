@@ -221,5 +221,17 @@
       "Runs status for the size but not repo remove, gc, apply, repo add, seed or bench",
       "Tells the user both versions and how to update"
     ]
+  },
+  {
+    "eval_id": 20,
+    "eval_name": "bare-gc-after-a-batch-of-lanes",
+    "kind": "behavior",
+    "derived_from": "## Bare gc after a batch (2026-11-12)",
+    "prompt": "I'm about to start work in three new lanes of orbit. Get them ready so their first builds are quick, build each one, and tidy up afterwards.",
+    "assertions": [
+      "Seeds one lane, builds it, then seeds the other lanes",
+      "Runs bare cargo hive gc --json after the batch of lanes, without the user asking for everything",
+      "Reports store_freed_bytes from the bare gc receipt"
+    ]
   }
 ]

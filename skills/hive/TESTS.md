@@ -1205,3 +1205,21 @@ $ ls -a <plugin root>; ls <plugin root>/skills
 skills
 hive
 ```
+
+## Bare gc after a batch (2026-11-12)
+
+Found in an author-skills review of the merged skill (main e3d2bcd). `## Free disk` labelled the bare `gc` line "Only when the user asked for everything:" and said "Pass explicit paths unless the user asked for everything", while `## Start new lanes` says "Run bare `gc` after the batch of lanes finishes". Runner: the in-session `skill-tester` agent; every transcript records `claude-sonnet-5-5`. Request (the Three lanes request): "I'm about to start work in three new lanes of orbit … Get them ready so their first builds are quick, build each one, and tidy up afterwards." Scored from the Bash commands in each transcript; fresh fixture root and fresh context per run.
+
+### RED (skill at e3d2bcd), Sonnet, 5 runs
+
+Bare `gc` after the batch: 3 of 5. Runs 1 and 2 ran only `gc <lane-1> <lane-2> <lane-3>` and stopped. Run 2's words: "I didn't run a bare `gc`, because that would also evict from the store and the user didn't ask for everything." Run 1's: "Bare `gc`: I didn't run it, because it acts on every target hive knows, including orphan candidates, and you didn't ask for everything."
+
+### GREEN (both sentences name the two cases that call for bare `gc`), Sonnet, 5 runs
+
+Bare `gc` after the batch: 5 of 5, each after seeding one lane, building it, then seeding the rest; no `cargo clean`, no hand deletion. Runs 1 and 4 ran bare `gc` without a bare `gc --dry-run` first (run 4: "I skipped the dry run because the skill gives a bare `gc` for this case"); the skill asks for the preview only on named checkouts, so this is not counted against the run.
+
+### Regression, Sonnet, 5 runs on the GREEN text
+
+Named paths still stay named: Free disk across named lanes (3 runs) and Free space (2 runs) each ran `gc --dry-run` then `gc` with the named paths, and none ran bare `gc`.
+
+Haiku arm: not run (see Runner labels).
