@@ -458,6 +458,34 @@ fn parse(words: &[String]) -> Result<Parsed, String> {
     }
 }
 
+const VERSION_FIRST: &str = "## Version first";
+const FREE_DISK: &str = "## Free disk";
+const START_LANES: &str = "## Start new lanes";
+const PLAN_APPLY: &str = "## Delete what gc keeps";
+const LOOK: &str = "## Look before acting";
+const BENCH: &str = "## Time cold against seeded builds";
+const REFUSES: &str = "## When a command refuses";
+const RECEIPT: &str = "## Reading a receipt";
+const GOAL_HEADINGS: [&str; 8] = [
+    VERSION_FIRST,
+    FREE_DISK,
+    START_LANES,
+    PLAN_APPLY,
+    LOOK,
+    BENCH,
+    REFUSES,
+    RECEIPT,
+];
+
+/// The text under `heading`, up to the next `## ` heading.
+fn section<'a>(body: &'a str, heading: &str) -> &'a str {
+    let after = body
+        .split(&format!("{heading}\n"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("the skill body has no {heading} section"));
+    after.split("\n## ").next().unwrap_or(after)
+}
+
 fn skill_body() -> String {
     split_skill(&repo_file(SKILL)).unwrap().1
 }
@@ -537,13 +565,7 @@ fn skill_command_lines_parse_with_the_cli() {
 #[test]
 fn the_skill_teaches_seeding_a_new_lane() {
     let body = skill_body();
-    let version = body
-        .split("## Version first")
-        .nth(1)
-        .expect("Version first heading")
-        .split("## ")
-        .next()
-        .expect("Version first section");
+    let version = section(&body, VERSION_FIRST);
     assert!(
         version.contains("Do not run") && version.contains("`seed`"),
         "Version first does not hold seed back on a version mismatch"
@@ -758,18 +780,21 @@ fn skill_body_fits_the_budget() {
     }
     let headings: Vec<&str> = body.lines().filter(|l| l.starts_with("## ")).collect();
     assert_eq!(
-        headings,
-        [
-            "## Command form",
-            "## Version first",
-            "## The model",
-            "## Which command",
-            "## Command lines",
-            "## Reading a receipt",
-            "## Do not",
-        ],
-        "the skill body headings must be the seven the skill is built around, in order"
+        headings.first(),
+        Some(&"## Command form"),
+        "the first heading must be the command form"
     );
+    assert_eq!(
+        headings.get(1),
+        Some(&VERSION_FIRST),
+        "the version check must be the first section after the command form"
+    );
+    for goal in GOAL_HEADINGS {
+        assert!(
+            headings.contains(&goal),
+            "the skill body has no {goal} section"
+        );
+    }
 }
 
 #[test]
