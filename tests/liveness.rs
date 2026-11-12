@@ -256,6 +256,7 @@ fn status_writes_a_snapshot_with_only_its_two_fields() {
 }
 
 /// The entries of the `include = [...]` array under `[package]`, by plain text scanning.
+/// A leading `/` only anchors a pattern at the package root, so it is dropped.
 fn manifest_includes(manifest: &str) -> Vec<String> {
     let Some(start) = manifest.find("include = [") else {
         return Vec::new();
@@ -263,7 +264,13 @@ fn manifest_includes(manifest: &str) -> Vec<String> {
     let rest = &manifest[start + "include = [".len()..];
     let body = &rest[..rest.find(']').unwrap_or(rest.len())];
     body.split(',')
-        .map(|entry| entry.trim().trim_matches('"').to_string())
+        .map(|entry| {
+            entry
+                .trim()
+                .trim_matches('"')
+                .trim_start_matches('/')
+                .to_string()
+        })
         .filter(|entry| !entry.is_empty())
         .collect()
 }
@@ -280,7 +287,7 @@ fn the_package_ships_no_test_file() {
 
 #[test]
 fn the_include_scan_sees_a_tests_entry() {
-    let manifest = "[package]\ninclude = [\"src/**/*\", \"tests/**/*\", \"Cargo.toml\"]\n";
+    let manifest = "[package]\ninclude = [\"/src/**/*\", \"/tests/**/*\", \"Cargo.toml\"]\n";
     assert_eq!(
         manifest_includes(manifest),
         ["src/**/*", "tests/**/*", "Cargo.toml"]
