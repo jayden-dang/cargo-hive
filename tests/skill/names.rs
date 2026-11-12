@@ -109,6 +109,7 @@ fn attribute(c: &[char], at: usize) -> Option<(String, usize)> {
     while j < c.len() {
         match c[j] {
             '"' => j = quoted(c, j).1,
+            '\'' => j = char_end(c, j),
             '[' | ']' => {
                 depth = if c[j] == '[' { depth + 1 } else { depth - 1 };
                 j += 1;
@@ -225,10 +226,8 @@ fn collect_commands(cmd: &clap::Command, ctx: &mut Context) {
     for arg in cmd.get_arguments() {
         ctx.flags.extend(arg.get_long().map(str::to_string));
     }
-    for sub in cmd.get_subcommands() {
-        if !sub.is_hide_set() {
-            ctx.subcommands.insert(sub.get_name().to_string());
-        }
+    for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
+        ctx.subcommands.insert(sub.get_name().to_string());
         collect_commands(sub, ctx);
     }
 }
@@ -312,12 +311,13 @@ fn strip_placeholder(lit: &str) -> &str {
     }
 }
 
-fn bench_series(ctx: &Context, span: &str) -> Option<Result<(), String>> {
+/// `None` when `span` is not a bench series name; otherwise whether `bench_literals` still define it.
+pub fn bench_series(bench_literals: &[String], span: &str) -> Option<Result<(), String>> {
     let series = BENCH_SERIES.iter().find(|s| span.starts_with(**s))?;
     let suffix = BENCH_SUFFIXES
         .iter()
         .find(|x| span[series.len()..] == ***x)?;
-    let has = |lit: &str| ctx.bench_literals.iter().any(|l| l == lit);
+    let has = |lit: &str| bench_literals.iter().any(|l| l == lit);
     let template = format!("{{series}}{suffix}");
     Some(if has(series) && has(&template) {
         Ok(())
@@ -364,7 +364,7 @@ fn classify(ctx: &Context, span: &str) -> Result<(), String> {
     if ctx.config_keys.contains(span) {
         return Ok(());
     }
-    if let Some(verdict) = bench_series(ctx, span) {
+    if let Some(verdict) = bench_series(&ctx.bench_literals, span) {
         return verdict;
     }
     if is_shape(span) {

@@ -861,12 +861,25 @@ fn the_literal_lexer_reads_the_string_forms_src_uses() {
 fn f<'a>(x: &'a str) { let q = '"'; let b = b"bytes"; // "comment"
     let r = r#"raw "quoted""#; let s = "esc \" aped"; }
 #[cfg(all(test, target_os = "macos"))]
-mod exit_code_tests { const T: &str = "only_in_tests"; }
+mod exit_code_tests {
+    fn f() { let s = "}"; let c = '}'; }
+    const T: &str = "only_in_tests";
+}
+const MIDDLE: &str = "middle";
+#[cfg(test)]
+#[allow(dead_code)]
+mod x { fn g() { let u = "{"; } const U: &str = "stacked"; }
 const AFTER: &str = "after_tests";
 "##;
     assert_eq!(
         names::string_literals(src),
-        vec!["bytes", "raw \"quoted\"", "esc \\\" aped", "after_tests"]
+        vec![
+            "bytes",
+            "raw \"quoted\"",
+            "esc \\\" aped",
+            "middle",
+            "after_tests"
+        ]
     );
 }
 
@@ -896,6 +909,7 @@ fn the_name_check_places_every_kind_of_span() {
         ("gc_window_days", true),
         ("cold_build_ms_median", true),
         ("build_ms_median", false),
+        ("cold_build_ms_medain", false),
         ("~/.hive/store/", true),
         ("0.1.0", true),
         ("<id>", true),
@@ -913,7 +927,21 @@ fn the_name_check_places_every_kind_of_span() {
         let failures = names::cited_name_failures(&format!("x `{span}` y\n"), "case");
         assert_eq!(failures.is_empty(), *ok, "`{span}`: {failures:?}");
     }
-    assert!(names::inline_spans("one ` two\n").is_err());
+    let lits = |v: &[&str]| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+    let defined = lits(&["cold_build_ms", "{series}_median"]);
+    assert!(names::bench_series(&defined, "cold_build_ms_median")
+        .unwrap()
+        .is_ok());
+    assert!(
+        names::bench_series(&lits(&["cold_build_ms"]), "cold_build_ms_median")
+            .unwrap()
+            .is_err()
+    );
+    assert!(names::bench_series(&defined, "cold_build_ms_medain").is_none());
+    let err = names::inline_spans("a `b`\nc ` d\n").unwrap_err();
+    assert!(err.contains("line 2"), "{err}");
+    let spans = names::inline_spans("```\n`hidden`\n```\nx `shown`\n").unwrap();
+    assert_eq!(spans, vec![(4, "shown".to_string())]);
 }
 
 #[test]
