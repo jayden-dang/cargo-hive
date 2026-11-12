@@ -34,6 +34,7 @@ Terms:
 Files this feature touches:
 - `plugin/skills/hive/SKILL.md` — rewritten. Behaviour to guard: SKILLPASS-9.1 to 9.4.
 - `tests/skill.rs` — gains the name check and the README pass; its heading and phrase pins change. Behaviour to guard: SKILLPASS-9.1 to 9.5.
+- `tests/skill/names.rs` — new private module of the skill test (SKILLPASS-7.x); no behaviour to guard.
 - `tests/config_keys.rs` — new integration test (SKILLPASS-8.4); no behaviour to guard.
 - `README.md` — Quick start and Commands rewritten. Behaviour to guard: SKILLPASS-9.6.
 - `skills/hive/TESTS.md` and `skills/hive/eval.json` — new runs and headings added. Behaviour to guard: SKILLPASS-9.7.
@@ -113,7 +114,7 @@ Files this feature touches:
   [Lock L7; W1; config-key and placeholder forms from `req-review.md` item 2, src/state.rs:243-249, src/cli.rs:893-906; envelope, frontmatter, bench-series and test-module rules added at design, design.md Decisions 3-4, agent-decided]
 A rename that leaves an exact copy of the old literal elsewhere in `src/` passes these checks; the integration tests that assert real receipt names are what catch it (W1 residual).
 
-- **SKILLPASS-7.3** IF a single-word inline code span in the body is none of the kinds in SKILLPASS-7.1 and 7.2, and not a path, a glob, a placeholder or a command of another tool by the skill test's fixed skip rules, THEN THE SYSTEM SHALL fail the skill test, naming the span, rather than passing it unchecked. [W1]
+- **SKILLPASS-7.3** IF a single-word inline code span in the body is none of the kinds in SKILLPASS-7.1 and 7.2, and not skipped by the skill test's fixed rules THEN THE SYSTEM SHALL fail the skill test, naming the span, rather than passing it unchecked. The fixed skip rules cover only these: a path, a glob or a placeholder; a version or number; a file name with one of the extensions design Decision 3 lists, and only after the literal match fails; a command of another tool by name; and the product words `hive` and `cargo-hive`. [W1; the version, file-name and product-word skips are agent-decided, design Decision 3, synced back after the stage review]
 
 ## 8. The README describes each command as the skill does
 

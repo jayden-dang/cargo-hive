@@ -61,11 +61,15 @@ Canonical sources, referenced by every task and not copied:
 
 Outside the repo, under the run directory and not committed: `.skills/_pending-hive-skill-pass/auto/fixture.sh`, which builds the scratch fixture (design Decision 9).
 
-Retrieval (fsubr-1.2, run once before the task bodies):
-- `blast_radius` over the mapped paths gives `plugin/skills/hive/SKILL.md` → CORE, SKILL, GCPLAN, SEED, STOREGC; `tests/skill.rs` → the same five; `README.md` → CORE, AUTOGC, EXPLAIN, SKILL, SEED, STOREGC; `skills/hive/TESTS.md` and `eval.json` → SKILL, GCPLAN, SEED.
-- The new files have no owner.
-- `cluster(SKILLPASS)` holds only its focus, because SKILLPASS has no OWNS until this file lands.
-- owns_coverage is 9/10.
+Retrieval (fsubr-1.2; rerun after the stage review over all 11 mapped paths, against the tree with this file present; output in `.skills/_pending-hive-skill-pass/auto/plan-retrieval.txt`):
+- owns_coverage is 10/10; observations [] (no active overlay).
+- `blast_radius`:
+  - `plugin/skills/hive/SKILL.md` and `tests/skill.rs` → CORE, GCPLAN, SEED, SKILL, STOREGC;
+  - `README.md` → AUTOGC, CORE, EXPLAIN, SEED, SKILL, STOREGC;
+  - `skills/hive/TESTS.md` and `eval.json` → GCPLAN, SEED, SKILL;
+  - `docs/specs/2026-11-02-store-seed/requirements.md` → STOREGC, whose tasks edited it;
+  - the other three requirement files and both new test files → no owner but SKILLPASS.
+- `cluster(SKILLPASS)`: SKILLPASS, then SEED (5 shared paths), SKILL (5), GCPLAN (4), STOREGC (4), CORE (3), AUTOGC (1), EXPLAIN (1). `members_truncated` false.
 
 Every neighbour is Shipped on `main` (54a9e1e; main has since moved to e2c2130, a roadmap-only commit), so no other plan collides on these files.
 
@@ -90,9 +94,10 @@ Every neighbour is Shipped on `main` (54a9e1e; main has since moved to e2c2130, 
 **Depends-on:** none
 
 - [ ] **Step 1: Build the fixture.**
-  - Write `fixture.sh` under the run directory. It makes a fresh random root under `/private/tmp` with project-shaped names only (for example `orbit/`, `ledger/`, no test vocabulary). It installs the worktree's binary with `cargo install --locked --path . --root <root>/bin`, and writes `env.sh` setting `PATH` and `HIVE_HOME=<root>/hive`.
+  - Write `fixture.sh` under the run directory. It makes a fresh random root under `/private/tmp` with project-shaped names only (for example `orbit/`, `ledger/`, no test vocabulary). It installs the worktree's binary with `cargo install --locked --path . --root <root>/bin`, and writes `env.sh` setting `PATH`, `HIVE_HOME=<root>/hive` and `CARGO_HOME=<root>/cargo-home`.
+  - Registry units come from a local registry, because only registry units go in the store (CONTEXT.md, Registry unit) and a path dependency fills nothing. The script mirrors `tests/common/registry_fixture.rs` (lines 86-135): it packs `leafcrate` and `depcrate` (with a build script, plus a feature `extra` for this fixture) into `<root>/registry`, writes their index, and writes `<root>/cargo-home/config.toml` with `[source.crates-io] replace-with = "fixture"` and `[source.fixture] local-registry = "<root>/registry"`. Every repo depends on `depcrate = "1"` and runs `cargo generate-lockfile --offline` and commits `Cargo.lock`, so builds, agents' recovery builds and bench run `--offline --locked` without the network or the real `~/.cargo`.
   - The fixture holds every state in SKILLPASS-10.5:
-    - repo `orbit` with crate `depcrate`, feature `extra`, built so `explain` reports two groups;
+    - repo `orbit` depending on the registry `depcrate`, built both without and with `--features depcrate/extra`, so `explain` reports two groups (L17) and the first `seed` fills the store with registry units;
     - three linked worktree lanes under `orbit/.worktrees/`;
     - repo `ledger`, registered after `orbit` has filled the store and never built;
     - a second `HIVE_HOME` that has never been filled;
@@ -102,7 +107,7 @@ Every neighbour is Shipped on `main` (54a9e1e; main has since moved to e2c2130, 
   - In a third scratch `HIVE_HOME`, run `cargo-hive doctor --json` first, so that capabilities are recorded (without them `gc` refuses at src/cli.rs lines 974-979, before the window code). Then drive `cargo-hive gc --json` with no repo registered and `gc_window_days: 0`, and record whether the receipt carries `store.window_invalid` (U5, needed by Task 11; a static trace with ready capabilities says it reaches src/cli.rs line 1046).
   - Record the fixture as `## Fixture (2026-11-12)`. Copy the pristine state aside, and restore it before each run that can write.
 
-  Run: `source <root>/env.sh && cargo-hive doctor --json` — expect exit 0, every check passing.
+  Run: `source <root>/env.sh && cargo-hive doctor --json` — expect exit 0, every check passing. Then `cargo-hive seed <orbit lane> --json` — expect `fill_entries_added` above 0. If it is 0, the fixture holds no registry unit: fix the fixture before any run.
 - [ ] **Step 2: Write predictions before any run.** Under `## Predictions`, predict each scenario's RED with today's skill:
   - E3b `walk.unreadable` fails: its request is a `status` and `gc --dry-run` of the registered repos while `atlas`'s main is gone, so the finding comes from `status`/`gc` (src/cli.rs lines 610 and 995), and SKILL.md line 44 at 23defc9 tells the agent to run `repo remove --missing` only for `apply` of an orphan plan. An `apply`-refusal variant of E3b is also run, and is marked a regression guard if its RED passes;
   - E2 fails, because there is no "build it, then seed the rest";
@@ -514,7 +519,7 @@ fn readme_describes_the_commands_as_the_skill_does() {
 }
 ```
 
-  `names::readme_command_lines(&str) -> Vec<(usize, Vec<String>)>` is added to `tests/skill/names.rs` per Decision 7. It reads mentions only in spans and fenced lines, takes a command line only where the prefix opens its span or line, replaces `<word>` placeholders with `x`, and returns a synopsis line (placeholder subcommand) with its words flagged so that it is not parsed.
+  `names::readme_command_lines(&str) -> Vec<(usize, Vec<String>)>` is added to `tests/skill/names.rs` per Decision 7. It reads mentions only in spans and fenced lines, takes a command line only where the prefix opens its span or line, and replaces `<word>` placeholders with `x`. It does not return a synopsis line, one whose subcommand word is a placeholder (README.md lines 117 and 169). It checks such a line's flags itself, as long hive flags, and adds any failure to `cited_name_failures`'s output for the README.
 
   Run: `cargo test --test skill readme_describes` — expect: a compile error until `names::readme_command_lines` exists. Once it does, expect FAIL naming `-n` (single-word spans at README.md lines 165 and 182) and the bracketed synopsis rows (lines 160-167). `-n 0` at line 183 sits in a multi-word span, so it is caught only as a short flag on a parsed command line.
 - [ ] **Step 2: Rewrite the README.**
