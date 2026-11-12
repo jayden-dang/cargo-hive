@@ -804,6 +804,19 @@ fn the_skill_gives_the_recovery_each_refusal_names() {
 }
 
 #[test]
+fn the_skill_routes_a_deleted_repo_to_repo_remove_missing() {
+    let body = skill_body();
+    let row = section(&body, LOOK)
+        .lines()
+        .find(|l| l.starts_with('|') && l.contains("was deleted"))
+        .expect("a routing row for a deleted repo");
+    assert!(
+        row.contains("`repo remove --missing`"),
+        "the deleted-repo row does not route to repo remove --missing: {row}"
+    );
+}
+
+#[test]
 fn skill_body_fits_the_budget() {
     for local in [
         "see [notes](#anchor)",
