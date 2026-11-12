@@ -780,6 +780,30 @@ fn the_skill_seeds_one_lane_builds_it_then_seeds_the_rest() {
 }
 
 #[test]
+fn the_skill_gives_the_recovery_each_refusal_names() {
+    let body = skill_body();
+    let refuses = section(&body, REFUSES);
+    let none = refuses.find("`source.none`").expect("source.none");
+    let build = refuses[none..]
+        .find("build the main checkout")
+        .expect("build the main checkout after source.none");
+    assert!(
+        refuses[none + build..].contains("`seed` again"),
+        "after source.none: build the main checkout, then seed again"
+    );
+    for phrase in [
+        "`store.tag`",
+        "`toolchain.missing`",
+        "could not be read",
+        "`walk.unreadable`",
+        "`explain`",
+        "`cargo hive repo remove --missing --json`",
+    ] {
+        assert!(refuses.contains(phrase), "{REFUSES} lacks {phrase}");
+    }
+}
+
+#[test]
 fn skill_body_fits_the_budget() {
     for local in [
         "see [notes](#anchor)",

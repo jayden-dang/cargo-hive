@@ -66,7 +66,7 @@ A checkout is protected (a registered main checkout, or anything hive cannot cla
 |---|---|
 | Is hive usable here? | `doctor` |
 | What is registered? | `repo list` |
-| A registered repo was deleted or should go | `repo remove <path>`, or `repo remove --missing` |
+| A registered repo should go | `repo remove <path>` |
 | How big is it, what is orphaned? | `status` |
 | How do I free space? | `gc` |
 | What can be deleted later? | `gc --plan`, then `apply` one plan |
@@ -94,8 +94,9 @@ cargo hive bench --cold /path/to/cold1 /path/to/cold2 --seeded /path/to/seeded1 
 
 ## When a command refuses
 
-- `source.none` means no checkout of the repo has built yet.
-- A registered repo whose main checkout is gone makes `apply` of an orphan plan refuse with `walk.unreadable`; `repo remove --missing` unregisters every such repo.
+- `source.none` means no source target of the repo has a record for the current toolchain: no checkout of it has built yet, or none has with this toolchain. Build the main checkout, then run `seed` again; do not retry `seed` first.
+- `store.tag` with a missing tag (the store has not been filled yet) and `toolchain.missing` (the store has no row for this toolchain) take the same recovery: build the main checkout with the current toolchain, then run `seed` again. When `store.tag` says the tag could not be read, report the finding's detail to the user, since a build does not fix it.
+- A registered repo whose main checkout is gone makes `status`, `gc`, `gc --plan`, `explain` or `apply` report `walk.unreadable` for its path. Run `cargo hive repo remove --missing --json`, which unregisters every such repo, then rerun the command.
 - Finding `store.busy` means run `gc` again when no seed runs.
 - `store.held_over_cap` names the targets to retire.
 
