@@ -401,14 +401,23 @@ impl Drop for KillOnDrop {
 /// descriptor of this process, `O_CLOEXEC` ones too, until it execs, so a lock this
 /// process has just released can still read as held for a moment. A lock hive really
 /// keeps stays held for the whole wait.
+///
+/// Each try runs in a child (`cargo-hive __try-lock flock`) that has exited before the
+/// answer is read. A probe in this process would take the lock itself for a moment, and a
+/// child spawning meanwhile would copy that descriptor and keep the lock held after the
+/// wait returned.
 #[allow(dead_code)]
 pub fn wait_until_lock_free(path: &Path, limit: Duration) -> bool {
-    use std::os::fd::AsRawFd;
     let started = Instant::now();
     loop {
-        let file = fs::OpenOptions::new().read(true).open(path).unwrap();
-        // SAFETY: `file` owns a valid descriptor for this call; closing it releases the lock.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        let out = Command::new(env!("CARGO_BIN_EXE_cargo-hive"))
+            .args(["__try-lock", "flock"])
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        if String::from_utf8_lossy(&out.stdout).trim() == "acquired" {
             return true;
         }
         if started.elapsed() > limit {
