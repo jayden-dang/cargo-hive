@@ -267,7 +267,7 @@ _Requirements: SKILLPASS-5.1, SKILLPASS-5.2, SKILLPASS-5.3, SKILLPASS-5.4, SKILL
 
 **Depends-on:** Task 3
 
-- [ ] **Step 1: Write the failing test.**
+- [x] **Step 1: Write the failing test.**
 
 ```rust
 fn section(body: &str, heading: &str) -> String {
@@ -287,10 +287,10 @@ fn the_skill_frees_disk_on_the_checkouts_the_user_named() {
 ```
 
 Run: `cargo test --test skill the_skill_frees_disk` — expect: FAIL, missing `freed_bytes`.
-- [ ] **Step 2: Write the section.** Write SKILLPASS-1.1 and 1.2 into `## Free disk`, with a command-line pair `cargo hive gc /path/to/lane-a /path/to/lane-b --dry-run --json` and the same line without `--dry-run`.
+- [x] **Step 2: Write the section.** Write SKILLPASS-1.1 and 1.2 into `## Free disk`, with a command-line pair `cargo hive gc /path/to/lane-a /path/to/lane-b --dry-run --json` and the same line without `--dry-run`.
 
   Run: `cargo test --test skill` — expect: pass.
-- [ ] **Step 3: Commit.** `git commit -m "docs(skill): free disk on the named lanes and report freed bytes from the receipt"`
+- [x] **Step 3: Commit.** `git commit -m "docs(skill): free disk on the named lanes and report freed bytes from the receipt"`
 
 _Requirements: SKILLPASS-1.1, SKILLPASS-1.2_
 
