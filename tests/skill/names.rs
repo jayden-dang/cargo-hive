@@ -401,3 +401,86 @@ pub fn cited_name_failures(text: &str, origin: &str) -> Vec<String> {
         })
         .collect()
 }
+
+const COMMAND_PREFIXES: [&str; 2] = ["cargo hive ", "cargo-hive "];
+
+fn is_placeholder(word: &str) -> bool {
+    word.len() > 2 && word.starts_with('<') && word.ends_with('>')
+}
+
+/// Words of a README command line, or `None` when the text does not open with
+/// the command prefix. Cut at a pipe, `&&`, `#` or a redirect.
+fn readme_words(text: &str) -> Option<Vec<String>> {
+    if text.trim_end().ends_with('\\') {
+        return None;
+    }
+    let rest = COMMAND_PREFIXES.iter().find_map(|p| text.strip_prefix(p))?;
+    Some(
+        rest.split_whitespace()
+            .take_while(|w| !(w.starts_with('|') || w.starts_with("&&") || w.starts_with('#')))
+            .take_while(|w| !w.contains('>') || is_placeholder(w))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Every README command line as 1-based line and words, from fenced lines and
+/// backtick spans only. A line that opens with the prefix is the command; prose
+/// mentions elsewhere are ignored. A `<word>` placeholder becomes `x`. A synopsis
+/// line (its subcommand word is a placeholder) is left out.
+pub fn readme_command_lines(text: &str) -> Vec<(usize, Vec<String>)> {
+    command_texts(text)
+        .into_iter()
+        .filter_map(|(line, text)| readme_words(&text).map(|words| (line, words)))
+        .filter(|(_, words)| !words.first().is_some_and(|w| is_placeholder(w)))
+        .map(|(line, words)| {
+            let words = words
+                .into_iter()
+                .map(|w| if is_placeholder(&w) { "x".into() } else { w })
+                .collect();
+            (line, words)
+        })
+        .collect()
+}
+
+fn command_texts(text: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let mut fenced = false;
+    for (i, line) in text.lines().enumerate() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        } else if fenced {
+            out.push((i + 1, line.to_string()));
+        } else {
+            let spans = line.split('`').skip(1).step_by(2);
+            out.extend(spans.map(|s| (i + 1, s.to_string())));
+        }
+    }
+    out
+}
+
+/// One failure per flag on a synopsis line (`cargo hive <command> --help`) that
+/// is not a long flag of some hive command.
+pub fn synopsis_flag_failures(text: &str, origin: &str) -> Vec<String> {
+    let ctx = context();
+    let mut out = Vec::new();
+    for (line, text) in command_texts(text) {
+        let Some(words) = readme_words(&text) else {
+            continue;
+        };
+        if !words.first().is_some_and(|w| is_placeholder(w)) {
+            continue;
+        }
+        for flag in words.iter().filter(|w| w.starts_with('-')) {
+            let known = flag
+                .strip_prefix("--")
+                .is_some_and(|f| ctx.flags.contains(f));
+            if !known {
+                out.push(format!(
+                    "{origin}:{line}: `{flag}` in a synopsis is not a long flag of any hive command"
+                ));
+            }
+        }
+    }
+    out
+}

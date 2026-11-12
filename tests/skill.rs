@@ -1096,3 +1096,59 @@ fn the_skill_cites_only_names_the_binary_defines() {
     let failures = names::cited_name_failures(&skill_body(), "SKILL.md body");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn readme_describes_the_commands_as_the_skill_does() {
+    let readme = repo_file("README.md");
+    let mut failures = names::cited_name_failures(&readme, "README.md");
+    failures.extend(names::synopsis_flag_failures(&readme, "README.md"));
+    let mut seen = Vec::new();
+    for (line, words) in names::readme_command_lines(&readme) {
+        if words
+            .iter()
+            .any(|w| w.starts_with('-') && !w.starts_with("--") && w.len() == 2)
+        {
+            failures.push(format!(
+                "README.md:{line}: short flag in `{}`",
+                words.join(" ")
+            ));
+        }
+        match parse(&words) {
+            Ok(p) => seen.push(p),
+            Err(e) => failures.push(format!("README.md:{line}: {e}")),
+        }
+    }
+    for want in [
+        Parsed::Doctor,
+        Parsed::RepoAdd,
+        Parsed::RepoList,
+        Parsed::RepoRemove,
+        Parsed::Status,
+        Parsed::Gc {
+            dry_run: false,
+            plan: false,
+        },
+        Parsed::Gc {
+            dry_run: false,
+            plan: true,
+        },
+        Parsed::Apply,
+        Parsed::Explain,
+        Parsed::Seed,
+        Parsed::Bench,
+    ] {
+        if !seen.contains(&want) {
+            failures.push(format!("README.md has no command line for {want:?}"));
+        }
+    }
+    for recovery in [
+        "`source.none`",
+        "`walk.unreadable`",
+        "repo remove --missing",
+    ] {
+        if !readme.contains(recovery) {
+            failures.push(format!("README.md lacks {recovery}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
