@@ -1,5 +1,8 @@
 use std::fs;
 
+#[path = "skill/names.rs"]
+mod names;
+
 const SKILL: &str = "plugin/skills/hive/SKILL.md";
 const CLAUDE_PLUGIN: &str = "plugin/.claude-plugin/plugin.json";
 const CODEX_PLUGIN: &str = "plugin/.codex-plugin/plugin.json";
@@ -850,4 +853,71 @@ fn eval_entries_carry_their_evidence() {
     for needed in ["behavior", "trigger"] {
         assert!(kinds.contains(&needed), "eval.json has no {needed} entry");
     }
+}
+
+#[test]
+fn the_literal_lexer_reads_the_string_forms_src_uses() {
+    let src = r##"
+fn f<'a>(x: &'a str) { let q = '"'; let b = b"bytes"; // "comment"
+    let r = r#"raw "quoted""#; let s = "esc \" aped"; }
+#[cfg(all(test, target_os = "macos"))]
+mod exit_code_tests { const T: &str = "only_in_tests"; }
+const AFTER: &str = "after_tests";
+"##;
+    assert_eq!(
+        names::string_literals(src),
+        vec!["bytes", "raw \"quoted\"", "esc \\\" aped", "after_tests"]
+    );
+}
+
+#[test]
+fn the_name_check_places_every_kind_of_span() {
+    let cases: &[(&str, bool)] = &[
+        ("check-lib=<package>", true),
+        ("check-al", false),
+        ("--dry-run", true),
+        ("--dry-rn", false),
+        ("--help", true),
+        ("--missing", true),
+        ("--top", true),
+        ("--misssing", false),
+        ("-n", false),
+        ("seed", true),
+        ("sed", false),
+        ("refused", true),
+        ("refusd", false),
+        ("orphan", true),
+        ("orphn", false),
+        ("hive_version", true),
+        ("undecided", true),
+        ("hive_versio", false),
+        ("metadata.hive-version", true),
+        ("metadata.hive-versio", false),
+        ("gc_window_days", true),
+        ("cold_build_ms_median", true),
+        ("build_ms_median", false),
+        ("~/.hive/store/", true),
+        ("0.1.0", true),
+        ("<id>", true),
+        ("sessions_deleted", true),
+        ("reused_fresh", true),
+        ("source.none", true),
+        ("source.nne", false),
+        ("Cargo.lock", true),
+        ("RESEARCH.md", true),
+        ("cargo", true),
+        ("hive", true),
+        ("frobnicate", false),
+    ];
+    for (span, ok) in cases {
+        let failures = names::cited_name_failures(&format!("x `{span}` y\n"), "case");
+        assert_eq!(failures.is_empty(), *ok, "`{span}`: {failures:?}");
+    }
+    assert!(names::inline_spans("one ` two\n").is_err());
+}
+
+#[test]
+fn the_skill_cites_only_names_the_binary_defines() {
+    let failures = names::cited_name_failures(&skill_body(), "SKILL.md body");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
