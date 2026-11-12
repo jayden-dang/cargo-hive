@@ -765,6 +765,21 @@ fn the_skill_frees_disk_on_the_checkouts_the_user_named() {
 }
 
 #[test]
+fn the_skill_seeds_one_lane_builds_it_then_seeds_the_rest() {
+    let body = skill_body();
+    let lanes = section(&body, START_LANES);
+    let seed_one = lanes.find("seed one lane").expect("seed one lane");
+    let build = lanes[seed_one..].find("build it").expect("build it");
+    assert!(
+        lanes[seed_one + build..].contains("seed the other"),
+        "order: seed one, build, seed the rest"
+    );
+    for phrase in ["bare `gc`", "`store_bytes`", "gets nothing", "one build"] {
+        assert!(lanes.contains(phrase), "{START_LANES} lacks {phrase}");
+    }
+}
+
+#[test]
 fn skill_body_fits_the_budget() {
     for local in [
         "see [notes](#anchor)",

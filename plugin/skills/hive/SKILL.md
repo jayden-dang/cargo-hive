@@ -24,7 +24,7 @@ The repos a command acts on come from its arguments. Never infer them from the c
 
 To free disk on the checkouts the user named, run `gc --dry-run` with those checkouts as arguments, then `gc` with the same arguments. The auto tier is safe to run unasked on every checkout, protected or secondary (both defined under Look before acting). `gc` without `--plan` deletes superseded incremental sessions (with their lock files) and leftover rustc temp entries, taking each owner's lock without waiting where one exists and skipping anything held.
 
-`gc` with repo arguments leaves the store alone and notes `store.skipped_scoped`. Bare `gc` (no repo) also evicts from the store by age, toolchain and the 40 GB cap; `gc --dry-run` previews that.
+`gc` with repo arguments leaves the store alone and notes `store.skipped_scoped`. Bare `gc` (no repo) also bounds the store, evicting by age, toolchain and the 40 GB cap; `gc --dry-run` previews that.
 
 Report freed bytes from the receipt's `freed_bytes` count, with `deleted_bytes_still_shared` reported apart. When the receipt lists `freed_bytes` under `unmeasured`, say the size was not measured. Report the store's freed bytes from a bare `gc` as `store_freed_bytes`.
 
@@ -39,7 +39,9 @@ cargo hive gc --json
 
 ## Start new lanes
 
-Use `seed` to fill a new secondary checkout before its first build. It takes one registered checkout and does not mean every repo. It copies registry output from one checkout that has already built into that new checkout: the one whose `Cargo.lock` matches, else the most recently built, so every copied unit comes from one build. A checkout that already has a target gets nothing, so do not seed it. Seed one lane first when starting several. Run bare `gc` after a batch of lanes finishes, and whenever `seed`'s `store_bytes` passes 40 GB.
+Use `seed` to fill a new secondary checkout before its first build. It takes one registered checkout and does not mean every repo. It copies registry output from one checkout that has already built into that new checkout: the one whose `Cargo.lock` matches, else the most recently built, so every copied unit comes from one build. A checkout that already has a target gets nothing, so do not seed it.
+
+When starting several lanes, seed one lane first, build it, then seed the other lanes. Run bare `gc` after the batch of lanes finishes, and whenever `seed`'s `store_bytes` passes 40 GB.
 
 ```
 cargo hive seed /path/to/checkout --json
@@ -69,8 +71,8 @@ A checkout is protected (a registered main checkout, or anything hive cannot cla
 | How do I free space? | `gc` |
 | What can be deleted later? | `gc --plan`, then `apply` one plan |
 | Why are there so many copies of a crate? | `explain` |
-| How do I seed a new secondary checkout before its first build? | `seed` |
-| How do I time cold checkouts against seeded ones? | `bench` |
+| A new secondary checkout, before its first build | `seed` |
+| Cold against seeded build times | `bench` |
 
 `explain` shows 10 groups by default; `--top 0` shows all of them, as in `cargo hive explain /path/to/repo --top 0 --json`.
 
