@@ -310,7 +310,7 @@ _Requirements: SKILLPASS-1.1, SKILLPASS-1.2_
 
 **Depends-on:** Task 4
 
-- [ ] **Step 1: Write the failing test.**
+- [x] **Step 1: Write the failing test.**
 
 ```rust
 #[test]
@@ -326,10 +326,10 @@ fn the_skill_seeds_one_lane_builds_it_then_seeds_the_rest() {
 ```
 
 Run: `cargo test --test skill the_skill_seeds_one_lane` — expect: FAIL, no "build it".
-- [ ] **Step 2: Write the section.** Write SKILLPASS-2.1 to 2.3 into `## Start new lanes`. The `status` counts read after a seed (instruction 42) stay in `## Reading a receipt`, their one home (Task 7). The seed pins in `the_skill_teaches_seeding_a_new_lane` keep reading the whole body.
+- [x] **Step 2: Write the section.** Write SKILLPASS-2.1 to 2.3 into `## Start new lanes`. The `status` counts read after a seed (instruction 42) stay in `## Reading a receipt`, their one home (Task 7). The seed pins in `the_skill_teaches_seeding_a_new_lane` keep reading the whole body.
 
   Run: `cargo test --test skill` — expect: pass.
-- [ ] **Step 3: Commit.** `git commit -m "docs(skill): seed one lane, build it, then seed the rest and bound the store"`
+- [x] **Step 3: Commit.** `git commit -m "docs(skill): seed one lane, build it, then seed the rest and bound the store"`
 
 _Requirements: SKILLPASS-2.1, SKILLPASS-2.2, SKILLPASS-2.3_
 
