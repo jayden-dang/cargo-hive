@@ -2,6 +2,8 @@
 
 Runs were made by hand on 2026-10-30 with the `skill-tester` agent (Sonnet) and the `skill-tester-haiku` agent (configured as Haiku; see Runner labels (2026-11-12) for what it resolved to). CI does not run agents. Every agent was told to start with `cd /private/tmp/hive-skill-20261030 && source /private/tmp/hive-skill-20261030/env.sh`. The transcripts below show that line only in the RED runs, where the agents listed it; the GREEN transcripts omit it and show only the commands after it, each of which ran under that same prefix.
 
+Note (added 2026-11-12): in every 2026-10-30 section below, the runs headed "Haiku" were made by the `skill-tester-haiku` agent, configured as Haiku. Their resolved model was not recorded and their transcripts are not kept; the 2026-11-12 runs of the same agent resolved to claude-sonnet-5-5, so these may not be Haiku runs either. They are history, left as written, and are not relied on for any Haiku claim.
+
 ## Fixture
 
 Scratch root `/private/tmp/hive-skill-20261030/`; the developer's `~/.hive` is never written.
@@ -203,7 +205,7 @@ The root of each run, and its prompt, are listed in `.skills/SKILLPASS/evals/run
 
 Written before any run, for the skill at 23defc9. A RED that passes is marked regression guard, not evidence for the rewrite.
 
-- Free disk across named lanes: unknown. The skill has `gc --dry-run` then `gc` with explicit paths, but no section about naming the lanes and reporting `freed_bytes` with `deleted_bytes_still_shared` apart. Sonnet likely passes; Haiku may pass a path inside a registered repo and not notice that it means the whole repo.
+- Free disk across named lanes: unknown. The skill has `gc --dry-run` then `gc` with explicit paths, but no section about naming the lanes and reporting `freed_bytes` with `deleted_bytes_still_shared` apart. Sonnet likely passes; Haiku may pass a path inside a registered repo and not notice that it means the whole repo. The run that tested the Haiku half of this prediction was the second Sonnet runner (see Runner labels (2026-11-12)).
 - Three lanes: fails. The skill says "seed one lane first" and nothing about building it and then seeding the rest, so an agent seeds all three, or builds before seeding.
 - Seed finds no source: fails. `source.none` is named only as "no checkout of the repo has built yet", with no action, so an agent retries `seed` or stops.
 - Seed into an unfilled store: fails. The skill does not name `store.tag`.
@@ -352,7 +354,7 @@ cd /private/tmp/ember-d6511f && source env.sh && cargo hive repo list --json 2>&
 cd /private/tmp/ember-d6511f && source env.sh && cargo hive seed /private/tmp/ember-d6511f/ledger/.worktrees/ledger-lane-1 --json 2>/dev/null; echo "exit $?"
 ```
 
-One `seed`, which returned `source.none`, and then it stopped: no build of the main checkout and no second `seed`. Fails SKILLPASS-3.1 on Haiku.
+One `seed`, which returned `source.none`, and then it stopped: no build of the main checkout and no second `seed`. Fails SKILLPASS-3.1 on the second Sonnet runner.
 
 ### GREEN (rewrite), Sonnet
 
@@ -403,7 +405,7 @@ cd /private/tmp/ember-586e5d && source env.sh && cargo hive seed /private/tmp/em
 cd /private/tmp/ember-586e5d && source env.sh && cargo hive status /private/tmp/ember-586e5d/ledger --json 2>/dev/null; echo "exit $?"
 ```
 
-`seed` returned `store.tag`; it ran `status` on `ledger` and stopped. It did not build the main checkout or seed again. Fails SKILLPASS-3.3 (`store.tag`) on Haiku.
+`seed` returned `store.tag`; it ran `status` on `ledger` and stopped. It did not build the main checkout or seed again. Fails SKILLPASS-3.3 (`store.tag`) on the second Sonnet runner.
 
 ### GREEN (rewrite), Sonnet
 
@@ -561,7 +563,7 @@ cd /private/tmp/willow-1d9f23 && source env.sh && cargo hive status /private/tmp
 cd /private/tmp/willow-1d9f23 && source env.sh && cargo hive gc /private/tmp/willow-1d9f23/orbit --json 2>/dev/null | python3 -c "import sys,json;d=json.load(sys.stdin);print({k:v for k,v in d['counts'].items() if ':' not in k});print(d['findings'],d['notes'])"; cargo hive repo remove --missing --json 2>/dev/null; cargo hive status /private/tmp/willow-1d9f23/orbit --json 2>/dev/null | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['counts']['bytes'],d['counts']['orphan_candidates'])"
 ```
 
-Passes on Haiku (regression guard on this model). After `walk.unreadable` in the `status` and `gc --dry-run` receipts it ran `repo remove --missing --json` (`removed` 1). The routing row at line 34 and the apply sentence at line 44 of the skill led it there. The result is split: Sonnet fails and Haiku passes, so today's skill does not reliably give SKILLPASS-3.2's recovery, and the instruction stands (a failing RED is recorded).
+Passes on the second Sonnet runner (regression guard on this runner). After `walk.unreadable` in the `status` and `gc --dry-run` receipts it ran `repo remove --missing --json` (`removed` 1). The routing row at line 34 and the apply sentence at line 44 of the skill led it there. The result is split: Sonnet fails and Haiku passes, so today's skill does not reliably give SKILLPASS-3.2's recovery, and the instruction stands (a failing RED is recorded).
 
 ### GREEN (rewrite), Sonnet
 
