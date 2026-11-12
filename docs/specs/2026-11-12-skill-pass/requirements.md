@@ -46,7 +46,6 @@ Files this feature touches:
 
 - **SKILLPASS-1.1** THE SYSTEM SHALL tell the agent in the skill, in one section about freeing disk, to run `gc --dry-run` with the checkouts the user named as arguments, then `gc` with the same arguments, and to report freed bytes from the receipt's `freed_bytes` count, with `deleted_bytes_still_shared` reported apart. When the receipt lists `freed_bytes` under `unmeasured`, the agent shall say the size was not measured, and the store's freed bytes from a bare `gc` are reported from `store_freed_bytes`. [Lock L4; count names Weigh, src/cli.rs:893-910,1102-1105, src/seed/evict.rs]
 - **SKILLPASS-1.2** THE SYSTEM SHALL state in that section that a path inside a registered repo, or a linked worktree of one, makes `gc` act on that whole repo with a note. It shall also state that `gc` with repo arguments leaves the store alone and notes `store.skipped_scoped`, while bare `gc` also evicts from the store by age, toolchain and the 40 GB cap. Each fact is stated once in the body. [today's instructions 14, 25, 26; Weigh from L3, close-package row 7]
-- **SKILLPASS-1.3** THE SYSTEM SHALL state in that section that closure deletion and whole orphan targets go through `gc --plan` and then `apply` of one plan id. It shall state that the agent applies plans of every class (`secondary`, `protected`, `orphan`) itself with no owner step, that it names the targets an `orphan` plan removes when it reports, and that after a `refused` outcome it plans again and never reuses an id the binary reported as `already_consumed`. [today's instructions 15, 17-20; `already_consumed` spelling Weigh from code, src/plan_tier/apply.rs:105,125, close-package row 8]
 
 ## 2. Start several lanes from one seeded build
 
@@ -63,13 +62,13 @@ Files this feature touches:
 
   [today's instructions 27, 30, 31, 41, 42; SEED-8.1's content]
 
-## 3. Recover from the two refusals the card names
+## 3. Recover from a finding that names a recovery
 
-**Story:** As an agent whose `seed` returns `source.none` or whose `apply` refuses with `walk.unreadable`, I want the skill to give me the recovery, so that I take it instead of retrying the same command.
+**Story:** As an agent whose receipt carries a finding that names a recovery (`source.none`, `store.tag`, `toolchain.missing`, `walk.unreadable`), I want the skill to give me that recovery, so that I take it instead of retrying the same command.
 
 - **SKILLPASS-3.1** WHEN `seed`'s receipt carries the finding `source.none` THE SYSTEM SHALL tell the agent in the skill that no source target of the repo has a record for the current toolchain (no checkout of it has built yet, or none has with this toolchain), and to build the main checkout and then run `seed` again, not to retry `seed` first. [Lock L6; meaning Weigh from code, src/seed/mod.rs:284-288, close-package row 9]
 - **SKILLPASS-3.2** WHEN a receipt from `status`, `gc`, `gc --plan`, `explain` or `apply` carries `walk.unreadable` for a path that is a registered repo's main checkout that no longer exists THE SYSTEM SHALL tell the agent in the skill to run `repo remove --missing`, which unregisters every such repo, and then to rerun the command. [Lock L6; wider sources Weigh from code, src/cli.rs:610,995, src/plan_tier/apply.rs:223, close-package row 10; `explain` added from the req-review drive, `req-review.md` item 4]
-- **SKILLPASS-3.3** WHEN `seed`'s receipt carries `store.tag` (the store has not been filled yet) or `toolchain.missing` (the store has no row for this toolchain) THE SYSTEM SHALL tell the agent in the skill to take the same recovery as SKILLPASS-3.1: build the main checkout with the current toolchain, then run `seed` again. [agent-decided: an added instruction, since a first seed on a new machine meets `store.tag` before it can meet `source.none`; recovery Weigh from code, src/seed/mod.rs:258-265,290-300, and `source.none`'s recovery driven in `req-review.md` item 1]
+- **SKILLPASS-3.3** WHEN `seed`'s receipt carries `store.tag` because the store's tag is missing (the store has not been filled yet), or `toolchain.missing` (the store has no row for this toolchain), THE SYSTEM SHALL tell the agent in the skill to take the same recovery as SKILLPASS-3.1: build the main checkout with the current toolchain, then run `seed` again. When `store.tag` says the tag could not be read, the skill SHALL tell the agent to report the finding's detail to the user instead, since a build does not fix it. [agent-decided: an added instruction, since a first seed on a new machine meets `store.tag` before it can meet `source.none`; the causes are Weigh from code: missing tag src/seed/mod.rs:262-268, unreadable tag 269-273, `toolchain.missing` 290-302; requirements-review.md finding 3]
 
 ## 4. Read every receipt by its real names
 
@@ -85,7 +84,7 @@ Files this feature touches:
 
 - **SKILLPASS-5.1** THE SYSTEM SHALL organise the body under headings named for what the user wants done, with the version check as the first section after the command form. The heading names and order are agent-decided. [Lock L3, L8; headings Weigh from L3/L16, close-package row 6; names and order agent-decided, card Delegated]
 - **SKILLPASS-5.2** THE SYSTEM SHALL give in the skill a command line with `--json` for every subcommand the CLI ships, apart from hidden ones: `doctor`, `repo add`, `repo list`, `repo remove`, `status`, `gc` (with and without `--dry-run`, and with `--plan`), `apply`, `explain`, `seed` and `bench`. [Lock L1, L3; supersedes SKILL-2.4's "exactly the MILE-1 commands", Weigh from L3]
-- **SKILLPASS-5.3** THE SYSTEM SHALL keep each of today's instructions in the body, stated in ordinary prose at exactly one place. `skills/hive/TESTS.md` records the map from each numbered instruction to its line in the new body. Instructions 28 and 32 change as SKILLPASS-3.1 and 3.2 say, instruction 19 changes as SKILLPASS-1.3 says, and instruction 10 changes as SKILLPASS-6.1 says. [Lock L3 "no … duplicated instruction"; Ask me: none dropped]
+- **SKILLPASS-5.3** THE SYSTEM SHALL keep each of today's instructions in the body, stated in ordinary prose at exactly one place. `skills/hive/TESTS.md` records the map from each numbered instruction to its line in the new body. Instructions 28 and 32 change as SKILLPASS-3.1 and 3.2 say, instruction 19 changes as SKILLPASS-11.1 says, and instruction 10 changes as SKILLPASS-6.1 says. [Lock L3 "no … duplicated instruction"; Ask me: none dropped]
 - **SKILLPASS-5.4** THE SYSTEM SHALL keep the frontmatter `description` within SKILL-2.1's rules (it names a large `target/` dir, a disk filling up, reclaiming Rust build space and a crate built in many copies, and says to use it instead of `cargo clean` or deleting `target/`). The description shall add seeding new worktrees or lanes before their first build and timing cold against seeded builds. [agent-decided wording, close-package row 14]
 
 ## 6. Hold every write when the versions differ
@@ -105,9 +104,11 @@ Files this feature touches:
   - a plan outcome against the serialised variants of `cargo_hive::receipt::Outcome`;
   - a plan class through `cargo_hive::plan_tier::build::class_label`;
   - a config key (`secondary_roots`, `cache_roots`, `gc_window_days`) by the check in SKILLPASS-8.4;
-  - any other span containing `_` or `.` against a string literal in `src/` that equals the span, or equals the span followed by a `{…}` format placeholder (`"sessions_deleted{suffix}"`, `"reused_fresh:{path}"`).
+  - any other span containing `_` or `.` against a string literal in `src/` that equals the span, or equals the span followed by an optional `:` and one `{…}` format placeholder (`"sessions_deleted{suffix}"`, `"reused_fresh:{path}"`).
 
   [Lock L7; W1; config-key and placeholder forms from `req-review.md` item 2, src/state.rs:243-249, src/cli.rs:893-906]
+A rename that leaves an exact copy of the old literal elsewhere in `src/` passes these checks; the integration tests that assert real receipt names are what catch it (W1 residual).
+
 - **SKILLPASS-7.3** IF a single-word inline code span in the body is none of the kinds in SKILLPASS-7.1 and 7.2, and not a path, a glob, a placeholder or a command of another tool by the skill test's fixed skip rules, THEN THE SYSTEM SHALL fail the skill test, naming the span, rather than passing it unchecked. [W1]
 
 ## 8. The README describes each command as the skill does
@@ -116,7 +117,7 @@ Files this feature touches:
 
 - **SKILLPASS-8.1** THE SYSTEM SHALL order the README's Quick start by the same user goals as the skill, and keep its Commands section as a per-command reference with one row per command form (`repo add`, `repo list`, `repo remove`, `status`, `gc`, `gc --plan`, `apply`, `explain`, `seed`, `bench`, `doctor`), in an agent-decided order. Each row's code span shall be a real command line, with optional arguments described in the row's text. [W3; order agent-decided, card Delegated; Lock L12]
 - **SKILLPASS-8.2** IF a `cargo hive` command line in the README does not parse with `Cli`, or a cited name in the README fails the checks of SKILLPASS-7.1 to 7.3, THEN THE SYSTEM SHALL fail the skill test, naming the README line; it SHALL also fail when a shipped subcommand has no command line in the README. The README pass does not require `--json` and does not forbid `.md` links. [W3; the per-subcommand check holds BENCH-8.3, which no test held, `req-review.md` item 9]
-- **SKILLPASS-8.3** IF a README command line or code span uses a short flag THEN THE SYSTEM SHALL fail the skill test, naming the README line, so the README writes only long flags (`--top`, not `-n`). [W3, src/cli.rs:91]
+- **SKILLPASS-8.3** IF a README `cargo hive` / `cargo-hive` command line, or a README code span naming a flag of `Cli::command()`, uses a short flag THEN THE SYSTEM SHALL fail the skill test, naming the README line, so the README writes only long hive flags (`--top`, not `-n`). Spans of other tools (rustc's `-C save-temps`, README.md:194) stay under SKILLPASS-7.3's skip rules. [W3, src/cli.rs:91; scope narrowed in requirements-review.md finding 1]
 - **SKILLPASS-8.4** IF a config key the README cites (`secondary_roots`, `cache_roots`, `gc_window_days`) is refused when written alone into a `config.json` in a temporary state root opened with `cargo_hive::state::State::open_at` and read with `config()` THEN THE SYSTEM SHALL fail the skill test, naming the key. [W3, src/state.rs:116,243-249,286]
 - **SKILLPASS-8.5** THE SYSTEM SHALL give the same recovery for `source.none` and `walk.unreadable` in the README as SKILLPASS-3.1 and 3.2 give in the skill. [Lock L3, L12]
 
@@ -139,7 +140,7 @@ Files this feature touches:
 - **SKILLPASS-10.1** THE SYSTEM SHALL keep in `skills/hive/TESTS.md` one run per model (Sonnet via `skill-tester`, Haiku via `skill-tester-haiku`) and per arm (RED with the skill at commit 23defc9, GREEN with the rewrite) for each scenario: E1 free disk across named lanes, E2 three lanes, E3a `source.none`, E3b `walk.unreadable` for a gone main, E3c `store.tag` on a first seed into an unfilled store, free space, why so many copies, version mismatch with an added ask to unregister a gone repo, `gc --plan` then `apply`, and `bench`. Each run has its own heading and quotes the agent's commands verbatim. [Lock L11; W2]
 - **SKILLPASS-10.2** THE SYSTEM SHALL also keep, for the free-space scenario, a no-skill RED run on each model, rerun on the new fixture. [SKILL-5.1; W2a]
 - **SKILLPASS-10.3** THE SYSTEM SHALL write each scenario's predicted RED outcome into `skills/hive/TESTS.md` before its runs, and mark a scenario whose current-skill RED passes as a regression guard, not as evidence for the rewrite. [W2]
-- **SKILLPASS-10.4** WHEN a GREEN run is recorded THE SYSTEM SHALL show in it that the agent ran hive with `--json` and its scope as arguments, quoted counts from the receipt, and ran no `cargo clean` and no deletion inside a target dir or `~/.hive/store/`. For E1-E3c it shall also show the behaviour SKILLPASS-1.1, 2.1, 2.2, 3.1, 3.2 and 3.3 describe. [SKILL-5.2; Lock L4-L6]
+- **SKILLPASS-10.4** WHEN a GREEN run is recorded THE SYSTEM SHALL show in it that the agent ran hive with `--json` and its scope as arguments, quoted counts from the receipt, and ran no `cargo clean` and no deletion inside a target dir or `~/.hive/store/`. For E1-E3c it shall also show the behaviour SKILLPASS-1.1, 2.1, 2.2, 3.1, 3.2 and 3.3 describe, and the `gc --plan` then `apply` run the behaviour of SKILLPASS-11.1. [SKILL-5.2; Lock L4-L6]
 - **SKILLPASS-10.5** THE SYSTEM SHALL run the evals only on a scratch fixture under a temporary directory with `HIVE_HOME` set there. The fixture shall hold:
   - linked worktree lanes;
   - a registered repo whose main checkout is deleted;
@@ -151,16 +152,22 @@ Files this feature touches:
   [charter Out of scope; Lock L17; W2]
 - **SKILLPASS-10.6** THE SYSTEM SHALL record in `skills/hive/TESTS.md` a trigger test of the new description on each model, with 8-10 should-fire and 8-10 should-not-fire queries. The should-not-fire queries shall include a `cargo clean` or disk ask in an unregistered repo, a sccache or linker speed-up question, and `git worktree` housekeeping. [W2; author-skills pressure-testing]
 - **SKILLPASS-10.7** THE SYSTEM SHALL add to `skills/hive/eval.json` one `behavior` entry per new scenario, each `derived_from` the scenario's heading, and SHALL update contract entries 6 and 7 so that their quotes match the rewritten body. [SKILL-5.3; W2]
-- **SKILLPASS-10.8** IF an instruction is added or changed in meaning (SKILLPASS-3.1, 3.2, 3.3, 6.1) THEN THE SYSTEM SHALL have a recorded RED run with the current skill that fails on it before the rewrite is written. A move or a merge that keeps the meaning is held by its scenario's RED and GREEN pair. GREEN shall hold on Haiku. [Lock L10; close-package §2]
+- **SKILLPASS-10.8** IF an instruction is added or changed in meaning (SKILLPASS-3.1, 3.2, 3.3, 6.1) THEN THE SYSTEM SHALL have a recorded RED run with the current skill that fails on it before the rewrite is written. The exception is the `toolchain.missing` half of SKILLPASS-3.3: it has no RED, because producing it needs a second installed toolchain outside the fixture's temp directory, and it is held by the code reading only (src/seed/mod.rs:290-302). A move or a merge that keeps the meaning is held by its scenario's RED and GREEN pair. GREEN shall hold on Haiku. [Lock L10; close-package §2]
 
-## 11. Quality attributes
+## 11. Delete what gc keeps: plan, then apply
+
+**Story:** As an agent asked to remove dead units or an orphan target, I want the skill to tell me to plan and then apply one plan myself, whatever its class, so that I delete through hive's recheck instead of by hand.
+
+- **SKILLPASS-11.1** THE SYSTEM SHALL state in the skill, in one section about deleting what `gc` keeps, that closure deletion and whole orphan targets go through `gc --plan` and then `apply` of one plan id. It shall state that the agent applies plans of every class (`secondary`, `protected`, `orphan`) itself with no owner step, that it names the targets an `orphan` plan removes when it reports, and that after a `refused` outcome it plans again and never reuses an id the binary reported as `already_consumed`. [today's instructions 15, 17-20; `already_consumed` spelling Weigh from code, src/plan_tier/apply.rs:105,125, close-package row 8]
+
+## 12. Quality attributes
 
 **Section-kind:** nfr
 
 **Story:** As a stakeholder, I want measurable quality targets for this feature, so that how-well is not left implicit.
 
-- **Performance:** **SKILLPASS-11.1** THE SYSTEM SHALL keep the skill body at 150 lines or fewer (SKILLPASS-9.1), and SHALL keep `cargo test --test skill` free of agent runs, binary builds beyond the crate's own, and Cargo builds of fixtures, so the whole suite stays about a minute. Verified by the test's runtime in the close gate. (Lock L8 for the budget; the suite time from docs/agents/project.md verify commands; no `docs/product/metrics.md` exists, so no metric ID is cited.)
-- **Security:** **SKILLPASS-11.2** THE SYSTEM SHALL ship the skill without an `allowed-tools` key (SKILLPASS-9.4), so the rewrite grants no tool permission. The skill test's temporary state root lives under a temp directory, never `~/.hive`. Verified by tests/skill.rs. (No `docs/security/threat-model.md` exists; no TB/THR ID is cited.)
+- **Performance:** **SKILLPASS-12.1** THE SYSTEM SHALL keep the skill body at 150 lines or fewer (SKILLPASS-9.1), and SHALL keep `cargo test --test skill` free of agent runs, binary builds beyond the crate's own, and Cargo builds of fixtures, so the whole suite stays about a minute. Verified by the test's runtime in the close gate. (Lock L8 for the budget; the suite time from docs/agents/project.md verify commands; no `docs/product/metrics.md` exists, so no metric ID is cited.)
+- **Security:** **SKILLPASS-12.2** THE SYSTEM SHALL ship the skill without an `allowed-tools` key (SKILLPASS-9.4), so the rewrite grants no tool permission. The skill test's temporary state root lives under a temp directory, never `~/.hive`. Verified by tests/skill.rs. (No `docs/security/threat-model.md` exists; no TB/THR ID is cited.)
 - **Reliability:** None — no runtime component; the skill is text and the checks are tests.
 - **Accessibility:** None — the skill is text an agent reads, and the README is plain markdown; no UI.
 
@@ -190,4 +197,5 @@ When this file is Approved, each superseded clause below is struck through in it
 
 ## Open Questions
 
-None. The close package had no Owned unknowns (Coverage OFF). U1 (whether every cited `_`/`.` name has a whole literal in `src/`) is answered by the skill test's first run under SKILLPASS-7.2, and a red there gets a typed rule.
+- U1: whether every cited `_` or `.` name has a whole literal in `src/` (about 25 checked by hand) — hive-skill-pass-work — answered at the first run of the SKILLPASS-7.2 check over the rewritten body, in the build of this feature — forbid-guess: a name that fails red there gets a typed rule, as config keys did, and is never put on a skip list. The design names where typed rules live.
+- Version bump for existing installs: v0.1.0 is published (main bc842b1), and the rewritten skill reaches existing installs only through a version bump, which this road does not make (Out of Scope; Lock L8 keeps the match). Bump at the next release? — operator — at the next release (cut-release) — forbid-guess: Still-open, not agent-decided; no session picks it.
