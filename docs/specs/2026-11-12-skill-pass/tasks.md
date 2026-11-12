@@ -466,13 +466,13 @@ _Requirements: SKILLPASS-6.1_
 
 **Depends-on:** Task 8 (same files)
 
-- [ ] **Step 1: Write the failing test.** Change `the_skill_teaches_the_plan_flow_for_every_class` (tests/skill.rs lines 685-704) to require `already_consumed` in place of `already consumed`, keep its banned words, and read the phrases from `section(&skill_body(), PLAN_APPLY)`.
+- [x] **Step 1: Write the failing test.** Change `the_skill_teaches_the_plan_flow_for_every_class` (tests/skill.rs lines 685-704) to require `already_consumed` in place of `already consumed`, keep its banned words, and read the phrases from `section(&skill_body(), PLAN_APPLY)`.
 
   Run: `cargo test --test skill the_skill_teaches_the_plan_flow` — expect: FAIL, `already_consumed` absent.
-- [ ] **Step 2: Write SKILLPASS-11.1 into the section** with `already_consumed` (src/plan_tier/apply.rs lines 105 and 125).
+- [x] **Step 2: Write SKILLPASS-11.1 into the section** with `already_consumed` (src/plan_tier/apply.rs lines 105 and 125).
 
   Run: `cargo test --test skill` — expect: pass.
-- [ ] **Step 3: Commit.** `git commit -m "docs(skill): plan and apply every class, and name already_consumed as the binary does"`
+- [x] **Step 3: Commit.** `git commit -m "docs(skill): plan and apply every class, and name already_consumed as the binary does"`
 
 _Requirements: SKILLPASS-11.1_
 
