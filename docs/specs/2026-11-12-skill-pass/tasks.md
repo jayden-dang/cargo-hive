@@ -149,7 +149,7 @@ _Requirements: SKILLPASS-10.1, SKILLPASS-10.2, SKILLPASS-10.3, SKILLPASS-10.5, S
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing tests** in `tests/skill.rs`:
+- [x] **Step 1: Write the failing tests** in `tests/skill.rs`:
 
 ```rust
 #[path = "skill/names.rs"]
@@ -205,18 +205,18 @@ fn the_skill_cites_only_names_the_binary_defines() {
 ```
 
 Run: `cargo test --test skill` — expect: a compile error, because `tests/skill/names.rs` does not exist.
-- [ ] **Step 2: Implement `tests/skill/names.rs`.** Open it with a `//!` comment giving its contract. Implement:
+- [x] **Step 2: Implement `tests/skill/names.rs`.** Open it with a `//!` comment giving its contract. Implement:
   - the span finder per Decision 5;
   - the lexer per Decision 4: strings, raw strings, byte strings, `//` comments and char literals; literal text kept raw, with escapes not decoded; literals inside an attribute `#[…]` dropped; brace counting to drop the block of a `mod` that follows an attribute run mentioning `test`; a `read_dir` walk of `src/` only, without following symlinks;
   - the classifier per Decision 3's fifteen-step order, each class checked against the public item it names;
   - the trailing-placeholder match `{…}` / `:{…}` and the bench series rule.
 
   Run: `cargo test --test skill the_literal_lexer the_name_check_places` — expect: pass. Run: `cargo test --test skill the_skill_cites_only` — expect: FAIL naming `_live`, `_undecided`, `_name_meta`, `_busy`, `_whole_store` and `_ms` (design-scan §5).
-- [ ] **Step 3: Write those names in full** on the two body lines (`store_entries_held_live`, `store_entries_held_undecided`, `store_entries_held_name_meta`, `store_entries_held_busy`, `store_entries_held_whole_store`; the bench series as `cold_build_ms_median` … written out). If the line budget forces a cut, stop and report: that is the operator's call.
+- [x] **Step 3: Write those names in full** on the two body lines (`store_entries_held_live`, `store_entries_held_undecided`, `store_entries_held_name_meta`, `store_entries_held_busy`, `store_entries_held_whole_store`; the bench series as `cold_build_ms_median` … written out). If the line budget forces a cut, stop and report: that is the operator's call.
 
   Run: `cargo test --test skill` — expect: pass, with the body still at most 150 lines.
-- [ ] **Step 4: Time it.** Run: `cargo test --test skill`, and record its test time in the commit body. Expect: no agent run, no fixture build, and nothing written outside `target/` (SKILLPASS-12.1, 12.2). The whole `cargo test` stays about a minute at close (docs/agents/project.md verify commands).
-- [ ] **Step 5: Commit.** `git commit -m "test(skill): fail when the skill cites a name the binary does not define"`
+- [x] **Step 4: Time it.** Run: `cargo test --test skill`, and record its test time in the commit body. Expect: no agent run, no fixture build, and nothing written outside `target/` (SKILLPASS-12.1, 12.2). The whole `cargo test` stays about a minute at close (docs/agents/project.md verify commands).
+- [x] **Step 5: Commit.** `git commit -m "test(skill): fail when the skill cites a name the binary does not define"`
 
 _Requirements: SKILLPASS-7.1, SKILLPASS-7.2, SKILLPASS-7.3, SKILLPASS-4.2, SKILLPASS-12.1, SKILLPASS-12.2_
 
