@@ -20,16 +20,20 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 
 ## Free disk
 
-The repos a command acts on come from its arguments. Never infer them from the current directory. `status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root. Pass explicit paths unless the user asked for everything. A path inside a registered repo, or a linked worktree of one, means that whole repo, with a note.
+The repos a command acts on come from its arguments. Never infer them from the current directory. `status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root. Pass explicit paths unless the user asked for everything. A path inside a registered repo, or a linked worktree of one, makes `gc` act on that whole repo, with a note.
 
-The auto tier is safe to run unasked on protected and secondary checkouts alike. `gc` without `--plan` does that tier: it deletes superseded incremental sessions (with their lock files) and leftover rustc temp entries, taking each owner's lock without waiting where one exists and skipping anything held. Bare `gc` (no repo) also evicts from the store by age, toolchain and the 40 GB cap, and bounds the store; `gc --dry-run` previews that. `gc <repo>` leaves the store alone and notes `store.skipped_scoped`.
+To free disk on the checkouts the user named, run `gc --dry-run` with those checkouts as arguments, then `gc` with the same arguments. The auto tier is safe to run unasked on every checkout, protected or secondary (both defined under Look before acting). `gc` without `--plan` deletes superseded incremental sessions (with their lock files) and leftover rustc temp entries, taking each owner's lock without waiting where one exists and skipping anything held.
 
-When hive covers the request, reclaim only through hive: do not run `cargo clean`, and do not delete a target dir, an `incremental/` dir, or `rustc*` or `rmeta*` entries yourself, and do not delete `~/.hive/store/` by hand. Use `gc` after `--dry-run` for the auto tier.
+`gc` with repo arguments leaves the store alone and notes `store.skipped_scoped`. Bare `gc` (no repo) also evicts from the store by age, toolchain and the 40 GB cap; `gc --dry-run` previews that.
+
+Report freed bytes from the receipt's `freed_bytes` count, with `deleted_bytes_still_shared` reported apart. When the receipt lists `freed_bytes` under `unmeasured`, say the size was not measured. Report the store's freed bytes from a bare `gc` as `store_freed_bytes`.
+
+When hive covers the request, reclaim only through hive: do not run `cargo clean`, and do not delete a target dir, an `incremental/` dir, or `rustc*` or `rmeta*` entries yourself, and do not delete `~/.hive/store/` by hand.
 
 ```
 cargo hive repo add /path/to/repo --json
-cargo hive gc /path/to/repo --dry-run --json
-cargo hive gc /path/to/repo --json
+cargo hive gc /path/to/lane-a /path/to/lane-b --dry-run --json
+cargo hive gc /path/to/lane-a /path/to/lane-b --json
 cargo hive gc --json
 ```
 
@@ -62,7 +66,7 @@ A checkout is protected (a registered main checkout, or anything hive cannot cla
 | What is registered? | `repo list` |
 | A registered repo was deleted or should go | `repo remove <path>`, or `repo remove --missing` |
 | How big is it, what is orphaned? | `status` |
-| How do I free space? | `gc` with `--dry-run` first, then `gc` |
+| How do I free space? | `gc` |
 | What can be deleted later? | `gc --plan`, then `apply` one plan |
 | Why are there so many copies of a crate? | `explain` |
 | How do I seed a new secondary checkout before its first build? | `seed` |

@@ -748,6 +748,23 @@ fn has_local_link(line: &str) -> bool {
 }
 
 #[test]
+fn the_skill_frees_disk_on_the_checkouts_the_user_named() {
+    let body = skill_body();
+    let free = section(&body, FREE_DISK);
+    for phrase in [
+        "--dry-run",
+        "`freed_bytes`",
+        "`deleted_bytes_still_shared`",
+        "`store_freed_bytes`",
+        "`unmeasured`",
+        "whole repo",
+        "`store.skipped_scoped`",
+    ] {
+        assert!(free.contains(phrase), "{FREE_DISK} lacks {phrase}");
+    }
+}
+
+#[test]
 fn skill_body_fits_the_budget() {
     for local in [
         "see [notes](#anchor)",
