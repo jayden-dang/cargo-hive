@@ -20,7 +20,7 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 
 ## Free disk
 
-The repos a command acts on come from its arguments. Never infer them from the current directory. `status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root. Pass explicit paths unless the user asked for everything. A path inside a registered repo, or a linked worktree of one, makes `gc` act on that whole repo, with a note.
+The repos a command acts on come from its arguments. Never infer them from the current directory. `status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root. Pass explicit paths, except in the two cases that call for bare `gc`: the user asked for everything, or a batch of lanes has finished (Start new lanes). A path inside a registered repo, or a linked worktree of one, makes `gc` act on that whole repo, with a note.
 
 To free disk on the checkouts the user named, run `gc --dry-run` with those checkouts as arguments, then `gc` with the same arguments. The auto tier is safe to run unasked on every checkout, protected or secondary (both defined under Look before acting). `gc` without `--plan` deletes superseded incremental sessions (with their lock files) and leftover rustc temp entries, taking each owner's lock without waiting where one exists and skipping anything held.
 
@@ -36,7 +36,7 @@ cargo hive gc /path/to/lane-a /path/to/lane-b --dry-run --json
 cargo hive gc /path/to/lane-a /path/to/lane-b --json
 ```
 
-Only when the user asked for everything:
+Bare `gc`, when the user asked for everything or a batch of lanes has finished:
 
 ```
 cargo hive gc --json
