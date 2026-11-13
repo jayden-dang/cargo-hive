@@ -95,11 +95,12 @@ Labels used below:
   version, set once in `[workspace.package]`.
 - **SPLIT-3.4** THE SYSTEM SHALL declare every dependency between members with both `path` and an exact
   `version = "=X.Y.Z"` equal to the shared version, checked by a test, so that `cargo install` without
-  `--locked` cannot resolve a member at another version.
+  `--locked` cannot resolve a member at another version (agent-decided).
 - **SPLIT-3.5** WHEN hive writes a receipt, THE SYSTEM SHALL record as `hive_version` the same version that
   `cargo-hive --version` prints.
 - **SPLIT-3.6** THE SYSTEM SHALL give no member except `cargo-hive` a binary target, checked by a test, so that
-  no `cargo hive-<role>` subcommand is installed.
+  no `cargo hive-<role>` subcommand is installed (derived from ROAD-15.md:19, "new commands" off limits; the
+  test is agent-decided).
 - **SPLIT-3.7** (guard) WHEN `cargo hive` runs on a system other than macOS, THE SYSTEM SHALL CONTINUE TO print
   the macOS-only message and exit 2 (src/cli.rs:147-149), and `cargo check --target x86_64-unknown-linux-gnu`
   SHALL CONTINUE TO pass for the whole workspace.
@@ -156,7 +157,10 @@ Labels used below:
   each member comes after every member it depends on, with each verify build and publish run under
   `CARGO_TARGET_DIR=target/package-verify` (extends FIX-1.1).
 - **SPLIT-6.2** WHEN `cargo package --list` runs for a member, THE SYSTEM SHALL list only that member's `src/`
-  files, its `Cargo.toml`, a README and the two license files, and no file under `tests/`.
+  files, its `Cargo.toml`, a README and the two license files, plus `Cargo.lock` for `cargo-hive` (as 0.1.0's
+  package has it, Cargo.toml:8, so `cargo install --locked cargo-hive` keeps a pinned dependency set), and no file
+  under `tests/`; a library member's package carries `Cargo.lock` only if `cargo package` adds it by default
+  (agent-decided; design confirms what Cargo 1.97 does).
 - **SPLIT-6.3** (guard) WHEN a release step has packaged a member, THE SYSTEM SHALL CONTINUE TO recompile
   that member when a file under its `src/` changes, as `scripts/fresh-probe.sh` checks for every member by
   printing `GREEN` (extends FIX-1.2).
@@ -188,8 +192,11 @@ Labels used below:
 - **Performance:** **SPLIT-8.1** WHEN a one-line edit is made to a gc-crate source file, THE SYSTEM SHALL finish
   the following `cargo build` (dev profile, warm) with a median time no greater than the median for the same edit to the same
   code in the 0.1.0 single crate, 5 runs each on the proof machine, recorded with dated evidence (docs/standards/code.md
-  "Measured claims"). No standing product metric or SLO exists (docs/product/metrics.md and docs/ops/ absent),
-  so the target is the 0.1.0 baseline itself.
+  "Measured claims") (agent-decided target: ROAD-15 promises building only what an edit touches, not a faster
+  build, and no standing product metric or SLO exists — docs/product/metrics.md and docs/ops/ are absent). The
+  0.1.0 baseline is captured in the same pre-step-1 session as the SPLIT-4.1 klynt baseline. IF the median is
+  greater, THEN the result goes to the operator as an open question with both medians; the target is not
+  relaxed silently.
   **SPLIT-8.2** (guard) WHEN `cargo hive status <repo> --no-sizes` runs on the proof machine against klynt, THE
   SYSTEM SHALL CONTINUE TO meet CORE-6.1 as written (median of 5 warm runs and one cold-cache run, each within
   2 s), and `explain` SHALL CONTINUE TO stay within two seconds of `status` (tests/guards.rs:375); both checked by
