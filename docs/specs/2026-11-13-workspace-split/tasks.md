@@ -760,12 +760,12 @@ _Requirements: SPLIT-1.1, SPLIT-1.2, SPLIT-4.3_
 
 **Depends-on:** Task 16
 
-- [ ] **Step 1: Failing test.** Add the `LAYERS` row and run `cargo test --test workspace`. Expect: the package is
+- [x] **Step 1: Failing test.** Add the `LAYERS` row and run `cargo test --test workspace`. Expect: the package is
   missing.
-- [ ] **Step 2: Implement.** Create the crate and move the file.
-- [ ] **Step 3: Run.** The full gate, `cargo test -p cargo-hive-state` and the capture comparison (including
+- [x] **Step 2: Implement.** Create the crate and move the file.
+- [x] **Step 3: Run.** The full gate, `cargo test -p cargo-hive-state` and the capture comparison (including
   `state_written_by_0_1_0_reads_unchanged`) pass.
-- [ ] **Step 4: Commit.** `git commit -m "build: extract the state crate"`
+- [x] **Step 4: Commit.** `git commit -m "build: extract the state crate"`
 
 _Requirements: SPLIT-1.2, SPLIT-4.2_
 
