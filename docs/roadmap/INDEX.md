@@ -1,7 +1,7 @@
 # Roadmap: cargo-hive
 
 Status: Approved
-Date: 2026-11-12
+Date: 2026-11-13
 
 <!--
 The program layer: milestone INTENT, above any single feature and below the product
@@ -76,7 +76,7 @@ ID rules:
 
 ## Focus
 
-**Now:** ROAD-13
+**Now:** ROAD-14
 **Next:** None
 
 | ID | Milestone | Outcome | Depends-on | Commitment |
@@ -84,6 +84,7 @@ ID rules:
 | MILE-1 | Safe automatic reclaim | On any Mac, a user installs cargo-hive from scratch, registers a repo, and reclaims superseded incremental sessions and leftover rustc temp entries across all its checkouts, from the CLI or from an agent driving that same CLI through the hive skill, with a receipt showing per-file bytes freed and zero units rebuilt because of a deletion. | none | Closed |
 | MILE-2 | Planned reclaim | A user or agent previews closure-based garbage and orphan target dirs as a plan, and an agent applies that plan itself on any checkout and on orphan target dirs, with no owner step, hive rechecking it under locks before it deletes. | MILE-1 | Closed |
 | MILE-3 | Warm worktrees from a shared store | A new secondary checkout (a build-in-waves lane, a native Claude worktree) is seeded from a compressed, hive-owned store, so its first build recompiles zero seeded registry units while the seeded copies add about zero private bytes, and `cargo hive bench` gives the measured cold-versus-seeded time. | MILE-2 | Planned |
+| MILE-4 | Upgrades keep hive's state | A user or agent who upgrades hive keeps every registered repo, plan, receipt and store entry an earlier release wrote, or is stopped with the file named and the command that fixes it, and hive never starts empty because it could not read what is there. | none | Committed |
 
 ## MILE-1 — Safe automatic reclaim
 
@@ -131,12 +132,24 @@ ID rules:
 - ~~**ROAD-9**~~ seed-secondary-checkouts — merged into ROAD-8 2026-11-02: a filled store gives nothing until something clones from it, so one slice delivers both and is proven against GOAL-2 and GOAL-3. ROAD-8 takes the `seed` command and the `status` counts.
 **Blockers:** None
 
+## MILE-4 — Upgrades keep hive's state
+
+**Outcome:** A user or agent who upgrades hive keeps every registered repo, plan, receipt and store entry an earlier release wrote, or is stopped with the file named and the command that fixes it, and hive never starts empty because it could not read what is there.
+**Goals:** GOAL-8
+**Members:**
+- **ROAD-14** state-upgrade-safety — After: none — Surfaces: the `state` module (ARCH-16) and every file it writes (registry, capabilities, snapshot, plans, receipts, `store.db`); test fixtures taken from v0.1.0. — Card: [ROAD-14](roads/ROAD-14.md)
+**Depends-on:** none
+**Commitment:** Committed 2026-11-13
+**Closed:** None
+**Deferred:** None
+**Blockers:** None
+
 ## Goal dispositions
 
 Every live `GOAL-N` in `docs/product/vision.md` that no milestone cites belongs here, so
 that a goal is never silently dropped (S6).
 
-None. Every live goal, GOAL-2, GOAL-3, GOAL-4, GOAL-6 and GOAL-7, is cited by at least one milestone.
+None. Every live goal, GOAL-2, GOAL-3, GOAL-4, GOAL-6, GOAL-7 and GOAL-8, is cited by at least one milestone.
 
 | Goal | Disposition | Date | Reason |
 |---|---|---|---|
