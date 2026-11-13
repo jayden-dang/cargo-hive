@@ -192,7 +192,7 @@ _Requirements: SPLIT-3.1_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing test.** `#[test] #[ignore] fn same_inputs_give_the_same_output_and_state()`.
+- [x] **Step 1: Write the failing test.** `#[test] #[ignore] fn same_inputs_give_the_same_output_and_state()`.
   1. Build `golden` once with `RegistryRepo::new` (a git main with a registry dependency), a linked worktree
      `wt` (`RegistryRepo::worktree("wt")`), and one `cargo_fixture::cargo` build in each.
   2. Run `run_sequence` with the current binary, then move `home` to `home-new`.
@@ -208,10 +208,10 @@ _Requirements: SPLIT-3.1_
   4. Assert both exit 0 and the two homes are equal under the same normalization.
 
   Run: `cargo test --test capture -- --ignored`. Expect: a panic naming `HIVE_V010_BIN`.
-- [ ] **Step 2: Build the v0.1.0 binary.** Run `cargo build --offline` in `/private/tmp/hive-0.1.0`.
-- [ ] **Step 3: Run and pass.** `HIVE_V010_BIN=/private/tmp/hive-0.1.0/target/debug/cargo-hive cargo test --test
+- [x] **Step 2: Build the v0.1.0 binary.** Run `cargo build --offline` in `/private/tmp/hive-0.1.0`.
+- [x] **Step 3: Run and pass.** `HIVE_V010_BIN=/private/tmp/hive-0.1.0/target/debug/cargo-hive cargo test --test
   capture -- --ignored` passes on this branch.
-- [ ] **Step 4: Commit.** `git commit -m "test: compare output and state with the 0.1.0 binary"`
+- [x] **Step 4: Commit.** `git commit -m "test: compare output and state with the 0.1.0 binary"`
 
 _Requirements: SPLIT-3.2, SPLIT-4.2, SPLIT-4.3_
 
