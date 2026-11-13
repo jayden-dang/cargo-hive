@@ -10,7 +10,7 @@ Feature code: SPLIT
 Status: Approved
 Approved: 2026-11-13, by the operator (Jayden), reply relayed by the conductor: "approve"
 Date: 2026-11-13
-Execution-mode: unset
+Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
