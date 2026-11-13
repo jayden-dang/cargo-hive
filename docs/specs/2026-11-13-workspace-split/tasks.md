@@ -732,13 +732,13 @@ _Requirements: SPLIT-1.2, SPLIT-2.1, SPLIT-2.2, SPLIT-2.3, SPLIT-2.4, SPLIT-3.7,
 
 **Depends-on:** Task 15
 
-- [ ] **Step 1: Failing test.** Add `("cargo-hive-core", 1)` to `LAYERS` and run `cargo test --test workspace`.
+- [x] **Step 1: Failing test.** Add `("cargo-hive-core", 1)` to `LAYERS` and run `cargo test --test workspace`.
   Expect: it fails, because the package `cargo-hive-core` does not exist.
-- [ ] **Step 2: Implement.** Create the crate (forbid attribute, `[lints] workspace = true`, deps:
+- [x] **Step 2: Implement.** Create the crate (forbid attribute, `[lints] workspace = true`, deps:
   `cargo-hive-platform`, serde, serde_json) and move the files with `git mv`. Rewrite imports.
-- [ ] **Step 3: Run.** The full gate, `cargo test -p cargo-hive-core`, `cargo test --test os_boundary`, the
+- [x] **Step 3: Run.** The full gate, `cargo test -p cargo-hive-core`, `cargo test --test os_boundary`, the
   capture comparison and `cli_tree` pass.
-- [ ] **Step 4: Commit.** `git commit -m "build: extract the core crate"`
+- [x] **Step 4: Commit.** `git commit -m "build: extract the core crate"`
 
 _Requirements: SPLIT-1.1, SPLIT-1.2, SPLIT-4.3_
 
