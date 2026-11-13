@@ -3,14 +3,14 @@
 //! receipt. Directory listings stop at a fixed bound.
 
 use super::cargo_fixture::{backdate_all, set_mtime};
-use super::{git, init_repo, register, Hive, Scratch};
+use super::{Hive, Scratch, git, init_repo, register};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use cargo_hive::ctx::Ctx;
 use cargo_hive::platform::Fs;
-use cargo_hive::registry::{Registry, FILE as REGISTRY_FILE};
+use cargo_hive::registry::{FILE as REGISTRY_FILE, Registry};
 use cargo_hive::state::{Config, State};
 
 /// A registered main checkout and linked worktrees under `/private/tmp` (a default

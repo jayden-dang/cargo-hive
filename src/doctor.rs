@@ -346,11 +346,7 @@ fn failed(id: CheckId, e: impl fmt::Display) -> Check {
 }
 
 fn verdict(ok: bool) -> Verdict {
-    if ok {
-        Verdict::Pass
-    } else {
-        Verdict::Fail
-    }
+    if ok { Verdict::Pass } else { Verdict::Fail }
 }
 
 /// (a) A clone shares all its blocks: zero private bytes for source and clone.
@@ -497,7 +493,7 @@ fn check_lock_probe(fs: &dyn Fs, dir: &Path) -> Check {
             other => {
                 return Err(io::Error::other(format!(
                     "could not take the lock to test the reverse direction: {other:?}"
-                )))
+                )));
             }
         };
         for (kind, name) in [
@@ -523,11 +519,23 @@ fn check_lock_probe(fs: &dyn Fs, dir: &Path) -> Check {
 
 /// A crate with a lib, a bin, a build script and an integration test, and no dependencies.
 pub const PROBE_CRATE: [(&str, &str); 5] = [
-    ("Cargo.toml", "[package]\nname = \"hive-doctor-probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n"),
-    ("build.rs", "fn main() {\n    println!(\"cargo:rerun-if-changed=build.rs\");\n}\n"),
+    (
+        "Cargo.toml",
+        "[package]\nname = \"hive-doctor-probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+    ),
+    (
+        "build.rs",
+        "fn main() {\n    println!(\"cargo:rerun-if-changed=build.rs\");\n}\n",
+    ),
     ("src/lib.rs", "pub fn answer() -> u32 {\n    42\n}\n"),
-    ("src/main.rs", "fn main() {\n    println!(\"{}\", hive_doctor_probe::answer());\n}\n"),
-    ("tests/it.rs", "#[test]\nfn answers() {\n    assert_eq!(hive_doctor_probe::answer(), 42);\n}\n"),
+    (
+        "src/main.rs",
+        "fn main() {\n    println!(\"{}\", hive_doctor_probe::answer());\n}\n",
+    ),
+    (
+        "tests/it.rs",
+        "#[test]\nfn answers() {\n    assert_eq!(hive_doctor_probe::answer(), 42);\n}\n",
+    ),
 ];
 
 /// The allowlisted environment for the probe build (Decision 7); nothing else is inherited.
@@ -578,7 +586,7 @@ fn check_format(
                 id: CheckId::F,
                 verdict: Verdict::Unavailable,
                 measured: Measures::from([("reason".to_string(), Measured::Text(reason.clone()))]),
-            })
+            });
         }
     };
     let attempt = || -> io::Result<Result<Check, DoctorError>> {
@@ -828,8 +836,8 @@ pub fn run(fs: &dyn Fs, env: &DoctorEnv) -> Result<DoctorReport, DoctorError> {
 mod tests {
     use super::*;
     use crate::platform::{
-        entry_kind, Availability, EntryKind, EntryStat, HeldLock, Sharing, TempDir, TryLock,
-        VolumeInfo,
+        Availability, EntryKind, EntryStat, HeldLock, Sharing, TempDir, TryLock, VolumeInfo,
+        entry_kind,
     };
     use std::collections::HashMap;
     use std::os::unix::fs::MetadataExt;

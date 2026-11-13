@@ -1,5 +1,5 @@
 mod common;
-use common::{git, init_repo, register, Hive, Scratch};
+use common::{Hive, Scratch, git, init_repo, register};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -94,8 +94,8 @@ fn a_built_checkout_reports_its_target_as_owned_with_units_and_resolved_edges() 
 }
 
 #[test]
-fn a_cache_root_target_no_checkout_resolves_to_is_an_orphan_candidate_only_when_every_repo_is_in_scope(
-) {
+fn a_cache_root_target_no_checkout_resolves_to_is_an_orphan_candidate_only_when_every_repo_is_in_scope()
+ {
     let hive = Hive::ready();
     let s = Scratch::new("orphan");
     let cache = s.path.join("cache");
@@ -205,9 +205,11 @@ fn a_profile_in_the_newer_layout_is_unsupported_has_no_edges_and_is_recorded() {
     register(&hive, &repo);
     let r = status(&hive, &[repo.to_str().unwrap()]);
     let profile = t.join("debug");
-    assert!(finding(&r, "profile.unsupported", &profile)
-        .unwrap()
-        .contains(".fingerprint"));
+    assert!(
+        finding(&r, "profile.unsupported", &profile)
+            .unwrap()
+            .contains(".fingerprint")
+    );
     assert_eq!(
         count(&r, &format!("edges_resolved:{}", profile.display())),
         None
@@ -550,10 +552,10 @@ fn an_interrupted_status_exits_130_and_kills_cargo_metadata() {
             started.elapsed() < Duration::from_secs(30),
             "cargo metadata never wrote its pid"
         );
-        if let Ok(text) = fs::read_to_string(&sentinel) {
-            if let Ok(pid) = text.trim().parse::<u32>() {
-                break pid;
-            }
+        if let Ok(text) = fs::read_to_string(&sentinel)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            break pid;
         }
         std::thread::sleep(Duration::from_millis(10));
     };
@@ -561,11 +563,13 @@ fn an_interrupted_status_exits_130_and_kills_cargo_metadata() {
         pid_alive(cargo_pid),
         "sleeper should be running before SIGINT"
     );
-    assert!(std::process::Command::new("kill")
-        .args(["-INT", &hive_pid.to_string()])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-INT", &hive_pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
     let out = wait_within(child, Duration::from_secs(30));
     assert_eq!(out.status.code(), Some(130), "{out:?}");
     assert!(
@@ -635,11 +639,13 @@ fn an_interrupted_status_waiting_on_the_state_lock_exits_130_without_writing_the
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(std::process::Command::new("kill")
-        .args(["-INT", &hive_pid.to_string()])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-INT", &hive_pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
     let out = wait_within(child, Duration::from_secs(30));
     holder.kill().unwrap();
     let _ = holder.wait();
@@ -754,11 +760,13 @@ fn an_interrupted_status_waiting_for_the_state_lock_exits_130_without_waiting_fo
         .unwrap();
     // The first state lock status takes is the snapshot write, after discovery.
     wait_until_open(child.id(), &hive.home.path.join(".lock"));
-    assert!(std::process::Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
     let out = wait_within(child, Duration::from_secs(10));
     assert_eq!(out.status.code(), Some(130), "{out:?}");
     let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();

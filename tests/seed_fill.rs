@@ -17,15 +17,15 @@ use cargo_hive::platform::{
     CompressOutcome, EntryKind, EntryStat, Fs, LockHolder, LockKind, LockState, Sharing, TempDir,
     TryLock, VolumeInfo,
 };
+use cargo_hive::seed::Error;
 use cargo_hive::seed::fill::FillReport;
 use cargo_hive::seed::place::{self, PlaceReport};
-use cargo_hive::seed::source::{live_registry_units, unit_files, SourceUnit};
+use cargo_hive::seed::source::{SourceUnit, live_registry_units, unit_files};
 use cargo_hive::seed::store::{self, tag_path};
-use cargo_hive::seed::Error;
+use common::Hive;
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
-use common::registry_fixture::{cargo_json, RegistryRepo};
-use common::Hive;
+use common::registry_fixture::{RegistryRepo, cargo_json};
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1737,10 +1737,12 @@ fn a_clone_finding_an_existing_file_leaves_it_and_counts_it() {
     assert_eq!(report.failed, 0, "{report:?}");
     assert_eq!(report.cloned, filled.rows.len() as u64 - 1, "{report:?}");
     assert_eq!(report.placed.len() as u64, report.cloned);
-    assert!(report
-        .placed
-        .iter()
-        .all(|unit| unit.dir_name != row.name_meta || unit.rel_profile != row.rel_profile));
+    assert!(
+        report
+            .placed
+            .iter()
+            .all(|unit| unit.dir_name != row.name_meta || unit.rel_profile != row.rel_profile)
+    );
 }
 
 #[test]
@@ -1772,10 +1774,12 @@ fn a_clone_failure_counts_the_unit_and_continues() {
             && (detail.contains("Input/output error") || detail.contains("os error 5")),
         "{detail}"
     );
-    assert!(report
-        .placed
-        .iter()
-        .all(|unit| unit.dir_name != row.name_meta || unit.rel_profile != row.rel_profile));
+    assert!(
+        report
+            .placed
+            .iter()
+            .all(|unit| unit.dir_name != row.name_meta || unit.rel_profile != row.rel_profile)
+    );
     assert!(report.placed.len() as u64 >= 1);
 }
 

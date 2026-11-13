@@ -2,7 +2,7 @@
 //! with a scratch `CARGO_HOME`, backdating of what a build wrote, and reading a target dir to
 //! decide liveness. Shared by the liveness tests; `cargo_in` kills a cargo that outlives its deadline.
 
-use super::{prove, wait_within, Scratch};
+use super::{Scratch, prove, wait_within};
 use cargo_hive::cargo_target::TargetDir;
 use cargo_hive::gc::liveness::liveness;
 use cargo_hive::liveness::{DeadUnit, Liveness, UnitRef};

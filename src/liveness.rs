@@ -67,9 +67,7 @@ impl Uncertain {
                 "only one unit dir per profile carries that unit hash"
             }
             Uncertain::TargetUnreadable { .. } => "the target dir is readable",
-            Uncertain::TimestampUnreadable { .. } => {
-                "the file is readable, or the unit is removed"
-            }
+            Uncertain::TimestampUnreadable { .. } => "the file is readable, or the unit is removed",
         }
     }
 }

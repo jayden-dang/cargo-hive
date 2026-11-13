@@ -10,8 +10,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use common::registry_fixture::{cargo_json, RegistryRepo};
 use common::Hive;
+use common::registry_fixture::{RegistryRepo, cargo_json};
 
 #[test]
 fn after_the_first_build_status_reports_reused_units_and_no_recompiled_ones() {

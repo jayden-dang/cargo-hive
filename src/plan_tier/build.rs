@@ -17,7 +17,7 @@ use crate::discover::{self, Checkout, Scope, Snapshot};
 use crate::ledger;
 use crate::liveness::{Liveness, Uncertain, UnitRef};
 use crate::plan_tier::record::{
-    kind_name, BytesRec, OrphanScope, Plan, PlanClass, PlanState, PlannedEntry, PlannedTarget,
+    BytesRec, OrphanScope, Plan, PlanClass, PlanState, PlannedEntry, PlannedTarget, kind_name,
 };
 use crate::receipt::{ReasonRecord, UndecidedRecord, Unmeasured};
 use crate::state::window_days;

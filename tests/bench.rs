@@ -9,9 +9,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
-use cargo_hive::bench::check::{check, CheckStop, Checked};
-use cargo_hive::bench::command::{env_map, BuildCmd};
-use cargo_hive::bench::{run, End, Limits, Plan, Report, BUILD_DEADLINE};
+use cargo_hive::bench::check::{CheckStop, Checked, check};
+use cargo_hive::bench::command::{BuildCmd, env_map};
+use cargo_hive::bench::{BUILD_DEADLINE, End, Limits, Plan, Report, run};
 use cargo_hive::ctx::Ctx;
 use cargo_hive::receipt::Measured;
 use cargo_hive::registry::Registry;
@@ -19,8 +19,8 @@ use cargo_hive::seed::{self, Fill};
 use cargo_hive::state::{Config, State};
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
-use common::registry_fixture::{cargo_json, RegistryRepo};
-use common::{env_lock, git, init_repo, register, wait_within, CargoHomeGuard, Hive, Scratch};
+use common::registry_fixture::{RegistryRepo, cargo_json};
+use common::{CargoHomeGuard, Hive, Scratch, env_lock, git, init_repo, register, wait_within};
 
 fn bench_plan(hive: &Hive, repo: &RegistryRepo, n: usize) -> Plan {
     let cold_paths: Vec<_> = (0..n).map(|i| repo.worktree(&format!("cold{i}"))).collect();
@@ -95,7 +95,8 @@ fn prime_store(hive: &Hive, plan: &Plan) {
         mains: &lib.mains,
         liveness: cargo_hive::gc::liveness::liveness,
     };
-    match seed::run_fill(&ctx, &repos[0], &|| false).expect("prime fill") {
+    let fill = seed::run_fill(&ctx, &repos[0], &|| false).expect("prime fill");
+    match fill {
         Fill::Continue(_) => {}
         Fill::Stopped(_) => panic!("prime fill stopped"),
     }
@@ -137,37 +138,47 @@ fn an_unfair_set_of_checkouts_is_refused_with_a_reason_for_each() {
     let hive = Hive::ready();
     let repo = RegistryRepo::new(&hive);
     let [a, b, c, d] = ["a", "b", "c", "d"].map(|n| repo.worktree(n));
-    assert!(reason(checked(
-        &hive,
-        std::slice::from_ref(&a),
-        std::slice::from_ref(&b)
-    ))
-    .contains("at least 2"));
-    assert!(reason(checked(
-        &hive,
-        &[a.clone(), b.clone()],
-        std::slice::from_ref(&c)
-    ))
-    .contains("equal"));
-    assert!(reason(checked(
-        &hive,
-        &[a.clone(), a.clone()],
-        &[c.clone(), d.clone()]
-    ))
-    .contains("more than once"));
-    assert!(reason(checked(
-        &hive,
-        &[repo.main.clone(), b.clone()],
-        &[c.clone(), d.clone()]
-    ))
-    .contains("protected"));
+    assert!(
+        reason(checked(
+            &hive,
+            std::slice::from_ref(&a),
+            std::slice::from_ref(&b)
+        ))
+        .contains("at least 2")
+    );
+    assert!(
+        reason(checked(
+            &hive,
+            &[a.clone(), b.clone()],
+            std::slice::from_ref(&c)
+        ))
+        .contains("equal")
+    );
+    assert!(
+        reason(checked(
+            &hive,
+            &[a.clone(), a.clone()],
+            &[c.clone(), d.clone()]
+        ))
+        .contains("more than once")
+    );
+    assert!(
+        reason(checked(
+            &hive,
+            &[repo.main.clone(), b.clone()],
+            &[c.clone(), d.clone()]
+        ))
+        .contains("protected")
+    );
     fs::write(c.join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
-    assert!(reason(checked(
-        &hive,
-        &[a.clone(), b.clone()],
-        &[c.clone(), d.clone()]
-    ))
-    .contains("uncommitted"));
+    assert!(
+        reason(checked(
+            &hive,
+            &[a.clone(), b.clone()],
+            &[c.clone(), d.clone()]
+        ))
+        .contains("uncommitted")
+    );
     git(&c, &["checkout", "--", "."]);
     git(
         &d,
@@ -183,21 +194,25 @@ fn an_unfair_set_of_checkouts_is_refused_with_a_reason_for_each() {
             "x",
         ],
     );
-    assert!(reason(checked(
-        &hive,
-        &[a.clone(), b.clone()],
-        &[c.clone(), d.clone()]
-    ))
-    .contains("at HEAD"));
+    assert!(
+        reason(checked(
+            &hive,
+            &[a.clone(), b.clone()],
+            &[c.clone(), d.clone()]
+        ))
+        .contains("at HEAD")
+    );
     let e = repo.worktree("e");
     let f = repo.worktree("f");
     fs::create_dir(e.join("target")).unwrap();
-    assert!(reason(checked(
-        &hive,
-        &[a.clone(), b.clone()],
-        &[e.clone(), f.clone()]
-    ))
-    .contains("already exists"));
+    assert!(
+        reason(checked(
+            &hive,
+            &[a.clone(), b.clone()],
+            &[e.clone(), f.clone()]
+        ))
+        .contains("already exists")
+    );
     let g = repo.worktree("g");
     assert!(checked(&hive, &[a, b], &[f, g]).is_ok());
 }
@@ -526,14 +541,18 @@ fn a_seed_that_clones_nothing_still_builds_and_leaves_its_counts_unmeasured() {
         &|| false,
     );
     assert!(matches!(report.end, End::Finished));
-    assert!(report
-        .findings
-        .iter()
-        .any(|f| f.kind == "toolchain.missing"));
-    assert!(report
-        .unmeasured
-        .iter()
-        .any(|(field, _)| field.ends_with(".seed_counts")));
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.kind == "toolchain.missing")
+    );
+    assert!(
+        report
+            .unmeasured
+            .iter()
+            .any(|(field, _)| field.ends_with(".seed_counts"))
+    );
 }
 
 #[test]
@@ -648,10 +667,12 @@ fn an_empty_store_for_the_repo_after_the_prime_stops_before_any_sample() {
     assert!(matches!(report.end, End::Failed));
     assert_eq!(report.exit_code(), 1);
     assert!(report.counts.contains_key("prime_ms"));
-    assert!(report
-        .findings
-        .iter()
-        .any(|f| f.kind == "bench.nothing_to_seed"));
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.kind == "bench.nothing_to_seed")
+    );
     assert_eq!(
         report
             .findings
@@ -735,10 +756,12 @@ fn a_cancel_after_the_first_sample_keeps_it_and_lists_the_rest() {
     assert_eq!(samples.len(), 1);
     assert_eq!(samples[0].measured["arm"], Measured::Text("cold".into()));
     assert!(!report.counts.keys().any(|k| k.ends_with("_median")));
-    assert!(report
-        .unmeasured
-        .iter()
-        .any(|(f, r)| f.starts_with("sample.") && r == "cancelled"));
+    assert!(
+        report
+            .unmeasured
+            .iter()
+            .any(|(f, r)| f.starts_with("sample.") && r == "cancelled")
+    );
     for c in plan.cold.iter().chain(&plan.seeded) {
         assert!(c.path.exists());
     }
@@ -789,11 +812,13 @@ fn bench_writes_one_schema_two_receipt_and_exits_zero() {
     .map(String::from)
     .into();
     assert!(keys.is_subset(&allowed), "{keys:?}");
-    assert!(receipt["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f["kind"] == "bench.command"));
+    assert!(
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "bench.command")
+    );
     assert_eq!(git(&repo.main, &["ls-files", "-s"]), tracked);
     for (lane, before) in lanes.iter().zip(&indexes) {
         assert!(
@@ -855,11 +880,13 @@ fn bench_refuses_with_exit_one_and_rejects_an_unknown_shape_with_exit_two() {
     let s = |p: &PathBuf| p.to_str().unwrap().to_string();
     let (out, receipt) = hive.json(&["bench", "--cold", &s(&a), "--seeded", &s(&b)]);
     assert_eq!(out.status.code(), Some(1), "{receipt}");
-    assert!(receipt["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f["kind"] == "refusal"));
+    assert!(
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "refusal")
+    );
     let out = hive.run(&[
         "bench",
         "--cold",
@@ -904,11 +931,13 @@ fn ctrl_c_stops_bench_with_exit_130() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(Command::new("kill")
-        .args(["-INT", &pid.to_string()])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
     let out = wait_within(child, Duration::from_secs(30));
     assert_eq!(out.status.code(), Some(130), "{out:?}");
     for lane in &lanes {

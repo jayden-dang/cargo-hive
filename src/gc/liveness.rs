@@ -4,8 +4,8 @@
 
 use crate::caps::DEPS_CAP;
 use crate::cargo_target::TargetDir;
-use crate::fingerprint::{self, le_hex, DepEdge, Format, Unit};
-use crate::liveness::{embedded_hashes, unit_timestamp, DeadUnit, Liveness, Uncertain, UnitRef};
+use crate::fingerprint::{self, DepEdge, Format, Unit, le_hex};
+use crate::liveness::{DeadUnit, Liveness, Uncertain, UnitRef, embedded_hashes, unit_timestamp};
 use crate::platform::Fs;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
@@ -95,7 +95,7 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
     let live_units: BTreeSet<UnitRef> = units
         .iter()
         .zip(&live)
-        .filter(|(_, &is_live)| is_live)
+        .filter(|&(_, &is_live)| is_live)
         .map(|(entry, _)| unit_ref(entry))
         .chain(marked.live_nodes)
         .collect();
@@ -357,7 +357,7 @@ fn mark_live(
     let live_nodes = nodes
         .iter()
         .zip(&node_live)
-        .filter(|(_, &is_live)| is_live)
+        .filter(|&(_, &is_live)| is_live)
         .map(|(node, _)| node.unit_ref())
         .collect();
     Marked {
@@ -421,10 +421,10 @@ fn assemble(
     let dead_set: HashSet<usize> = dead_idx.iter().copied().collect();
     let mut kept_hashes: HashMap<&Path, HashSet<&str>> = HashMap::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
-        if !dead_set.contains(&i) {
-            if let Some(hash) = fingerprint::unit_hash(&unit.dir_name) {
-                kept_hashes.entry(profile).or_default().insert(hash);
-            }
+        if !dead_set.contains(&i)
+            && let Some(hash) = fingerprint::unit_hash(&unit.dir_name)
+        {
+            kept_hashes.entry(profile).or_default().insert(hash);
         }
     }
     for (profile, hash) in not_current_hashes {
@@ -938,8 +938,8 @@ mod tests {
     }
 
     #[test]
-    fn a_not_current_unit_with_an_old_stamp_and_a_fresh_hash_file_is_a_root_that_keeps_its_dependency(
-    ) {
+    fn a_not_current_unit_with_an_old_stamp_and_a_fresh_hash_file_is_a_root_that_keeps_its_dependency()
+     {
         let s = Scratch::new("nc-root-hash");
         let p = s.0.join("debug");
         write_unit(&p, C, "lib-c", 103, &[], Some(30 * DAY));
@@ -1097,9 +1097,10 @@ mod tests {
         unmatched_edge_of_a_learned_package(&cross);
         emptied_hash(&host, LIBA_2, "lib-liba", Some(30 * DAY), 30 * DAY);
         let (live, _) = decided(decide(&target_of(&s.0, &[&host, &cross]), 6 * HOUR));
-        assert!(live
-            .iter()
-            .any(|u| u.dir_name == LIBA_2 && u.profile == host));
+        assert!(
+            live.iter()
+                .any(|u| u.dir_name == LIBA_2 && u.profile == host)
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ mod account;
 
 #[doc(hidden)]
 pub use account::Removed;
-pub(crate) use account::{remove_counted, RemoveFailed};
+pub(crate) use account::{RemoveFailed, remove_counted};
 
 use crate::caps::CRATE_DIR_CAP;
 use crate::platform::{EntryKind, EntryStat, Fs, Sharing};
@@ -211,7 +211,7 @@ pub(crate) fn scan(
                     return Err(format!(
                         "{} is deeper than {MAX_DEPTH} levels",
                         path.display()
-                    ))
+                    ));
                 }
                 EntryKind::Dir => stack.push((path, depth + 1)),
                 EntryKind::File => {

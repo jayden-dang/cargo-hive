@@ -1,5 +1,5 @@
 mod common;
-use common::{git, init_repo, register, Hive, Scratch};
+use common::{Hive, Scratch, git, init_repo, register};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -127,11 +127,13 @@ fn without_configuration_private_tmp_is_a_secondary_root() {
     let (_, receipt) = hive.json(&["status", main.to_str().unwrap()]);
     // s.path is level 1 below /private/tmp, so its `clone` is level 2: inside the walk.
     assert_eq!(class_of(&receipt, &s.path.join("clone")), "secondary");
-    assert!(receipt["notes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|n| n.as_str().unwrap().contains("/private/tmp")));
+    assert!(
+        receipt["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap().contains("/private/tmp"))
+    );
 }
 
 #[test]
@@ -315,9 +317,11 @@ fn an_unregistered_repo_argument_is_refused() {
     let s = Scratch::new("unknown");
     let (out, receipt) = hive.json(&["status", s.path.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(receipt["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f["kind"] == "refusal"));
+    assert!(
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "refusal")
+    );
 }

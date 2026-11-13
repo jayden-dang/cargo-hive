@@ -610,9 +610,10 @@ mod tests {
     fn ids_are_sixteen_lowercase_hex_characters_and_entry_kinds_round_trip() {
         let id = new_id(1_700_000_000_123_456_789, 4242, 7);
         assert_eq!(id.len(), 16);
-        assert!(id
-            .chars()
-            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        );
         assert_ne!(id, new_id(1_700_000_000_123_456_789, 4242, 8));
         for k in ["file", "dir", "symlink", "other"] {
             assert_eq!(kind_name(kind_of(k).unwrap()), k);

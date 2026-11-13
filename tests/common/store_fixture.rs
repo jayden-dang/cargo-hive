@@ -1,9 +1,9 @@
 //! Scratch-store helpers for store GC tests. Every `store.db` write goes through
 //! `State::open_at` and `State::locked` with `Tx::write_bounded`.
 
-use super::registry_fixture::{cargo_json, RegistryRepo};
 use super::Hive;
-use cargo_hive::seed::store::{store_dir, Row, StoreFile, MAX_STORE_BYTES, STORE_FILE};
+use super::registry_fixture::{RegistryRepo, cargo_json};
+use cargo_hive::seed::store::{MAX_STORE_BYTES, Row, STORE_FILE, StoreFile, store_dir};
 use cargo_hive::state::State;
 use std::fs;
 use std::path::{Path, PathBuf};

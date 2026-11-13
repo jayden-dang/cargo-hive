@@ -266,10 +266,11 @@ mod tests {
     #[test]
     fn without_rustup_the_pin_is_the_resolved_rustc_alone() {
         let env = env_map([], &tc(None));
-        assert!(env
-            .vars()
-            .get(&OsString::from("RUSTUP_TOOLCHAIN"))
-            .is_none());
+        assert!(
+            env.vars()
+                .get(&OsString::from("RUSTUP_TOOLCHAIN"))
+                .is_none()
+        );
         assert_eq!(
             env.vars()[&OsString::from("RUSTC")],
             OsString::from("/tc/bin/rustc")

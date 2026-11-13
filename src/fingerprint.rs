@@ -914,11 +914,13 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("lib-fifo"), le_hex(1)).unwrap();
         let fifo = dir.join("lib-fifo.json");
-        assert!(std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
         // A FIFO reports length 0, so only the capped read stands between hive and
         // an unbounded body. The writer stops on its own after 12 MiB.
         let writer = std::thread::spawn({

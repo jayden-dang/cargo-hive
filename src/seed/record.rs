@@ -492,9 +492,11 @@ mod tests {
                 .is_none()
         );
         fs::remove_dir_all(&gone).unwrap();
-        assert!(super::write(&state, &kept, record((2, 8), 1, 4), &|| false)
-            .unwrap()
-            .is_none());
+        assert!(
+            super::write(&state, &kept, record((2, 8), 1, 4), &|| false)
+                .unwrap()
+                .is_none()
+        );
         let file = read(&state).unwrap();
         assert!(!file.targets.contains_key(&gone), "{file:?}");
         let kept_record = file.targets.get(&kept).expect("the live target stays");
@@ -525,18 +527,24 @@ mod tests {
             }
             pad += 32;
         };
-        assert!(write_capped(&state, &older, first, &|| false, cap)
-            .unwrap()
-            .is_none());
-        assert!(write_capped(&state, &middle, second, &|| false, cap)
-            .unwrap()
-            .is_none());
+        assert!(
+            write_capped(&state, &older, first, &|| false, cap)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            write_capped(&state, &middle, second, &|| false, cap)
+                .unwrap()
+                .is_none()
+        );
         let before = read(&state).unwrap();
         assert!(before.targets.contains_key(&older), "{before:?}");
         assert!(before.targets.contains_key(&middle), "{before:?}");
-        assert!(write_capped(&state, &newest, third.clone(), &|| false, cap)
-            .unwrap()
-            .is_none());
+        assert!(
+            write_capped(&state, &newest, third.clone(), &|| false, cap)
+                .unwrap()
+                .is_none()
+        );
         let file = read(&state).unwrap();
         assert!(!file.targets.contains_key(&older), "{file:?}");
         assert!(!file.targets.contains_key(&middle), "{file:?}");

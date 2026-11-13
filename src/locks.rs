@@ -58,7 +58,9 @@ pub fn acquire_capped(fs: &dyn Fs, target: &Path, lists_examples: bool, cap: usi
             return Acquired::Skipped(Reason::Missing);
         }
         for path in locks {
-            match fs.try_lock_exclusive(&path) {
+            // Bind the attempt so the HeldLock temporary keeps the 2021 drop point.
+            let attempt = fs.try_lock_exclusive(&path);
+            match attempt {
                 TryLock::Held => return Acquired::Skipped(Reason::Held),
                 TryLock::Unopenable(_) => return Acquired::Skipped(Reason::Unopenable),
                 TryLock::Unlockable(_) => return Acquired::Skipped(Reason::Unlockable),

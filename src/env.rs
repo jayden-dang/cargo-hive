@@ -181,7 +181,7 @@ fn child_env(
 
 #[cfg(test)]
 mod tests {
-    use super::{child_env, git, metadata, probe_build, rustup_which, timed_build, ResolveEnv};
+    use super::{ResolveEnv, child_env, git, metadata, probe_build, rustup_which, timed_build};
     use crate::platform::proc::Spec;
     use std::collections::BTreeMap;
     use std::ffi::{OsStr, OsString};

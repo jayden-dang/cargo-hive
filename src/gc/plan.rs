@@ -123,13 +123,12 @@ pub(crate) fn crate_dir(entries: &[(String, EntryKind)], now: SystemTime) -> Vec
     for (name, kind) in entries {
         match kind {
             EntryKind::Dir => {
-                if let Some((key, ts, finalized)) = parse_session(name) {
-                    if sessions
+                if let Some((key, ts, finalized)) = parse_session(name)
+                    && sessions
                         .insert(key.clone(), (name.clone(), ts, finalized))
                         .is_some()
-                    {
-                        ambiguous.insert(key);
-                    }
+                {
+                    ambiguous.insert(key);
                 }
             }
             EntryKind::File => {

@@ -1,6 +1,6 @@
 #![cfg(target_os = "macos")]
 mod common;
-use common::prove::{check_command, prove, ProveInput, WindowOutcome};
+use common::prove::{ProveInput, WindowOutcome, check_command, prove};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 

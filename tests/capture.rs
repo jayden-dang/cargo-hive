@@ -2,7 +2,7 @@
 mod common;
 
 use common::registry_fixture::RegistryRepo;
-use common::{wait_within, Hive};
+use common::{Hive, wait_within};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -17,7 +17,7 @@ use crate::ctx::Ctx;
 use crate::liveness;
 use crate::platform::{EntryKind, Fs};
 use crate::seed::store::{self, Row};
-use crate::size::{allocated_bytes, MAX_DEPTH};
+use crate::size::{MAX_DEPTH, allocated_bytes};
 
 use super::Error;
 
@@ -389,13 +389,13 @@ fn place_unit(
     let mut has_build = false;
     for rel in &files {
         let dst = target.join(rel);
-        if let Some(parent) = dst.parent() {
-            if let Err(stop) = ensure_dirs(ctx.fs, parent, target, made) {
-                return match stop {
-                    Stop::Full(why) => Err(why),
-                    Stop::Failed(detail) => Ok(UnitOutcome::Failed(dst, detail)),
-                };
-            }
+        if let Some(parent) = dst.parent()
+            && let Err(stop) = ensure_dirs(ctx.fs, parent, target, made)
+        {
+            return match stop {
+                Stop::Full(why) => Err(why),
+                Stop::Failed(detail) => Ok(UnitOutcome::Failed(dst, detail)),
+            };
         }
         let src = entry.join(rel);
         match ctx.fs.clone_file(&src, &dst) {

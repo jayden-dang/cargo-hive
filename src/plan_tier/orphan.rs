@@ -10,8 +10,8 @@ use crate::ctx::Ctx;
 use crate::discover::{self, Snapshot, WalkFault};
 use crate::ledger::{self, Ledger, RemoveFailed};
 use crate::locks::{self, Acquired};
-use crate::plan_tier::guard::{check_entry, Deleted, Expect};
-use crate::plan_tier::record::{kind_of, BytesRec, PlannedTarget};
+use crate::plan_tier::guard::{Deleted, Expect, check_entry};
+use crate::plan_tier::record::{BytesRec, PlannedTarget, kind_of};
 use crate::platform::{EntryKind, Fs};
 
 pub struct Counted {

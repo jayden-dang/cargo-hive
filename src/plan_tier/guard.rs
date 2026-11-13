@@ -40,10 +40,10 @@ pub fn check_entry(
         Err(e) if e.kind() == ErrorKind::NotFound => return Err(Deleted::Missing),
         Err(_) => return Err(Deleted::Changed),
     };
-    if let Expect::Entry { kind, dev, ino } = expect {
-        if stat.kind != kind || stat.dev != dev || stat.ino != ino {
-            return Err(Deleted::Changed);
-        }
+    if let Expect::Entry { kind, dev, ino } = expect
+        && (stat.kind != kind || stat.dev != dev || stat.ino != ino)
+    {
+        return Err(Deleted::Changed);
     }
     if stat.kind == EntryKind::Other {
         return Err(Deleted::Changed);

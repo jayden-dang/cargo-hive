@@ -6,11 +6,7 @@ pub const MACOS_ONLY_MESSAGE: &str = "cargo-hive supports macOS only";
 pub struct NotMacOs;
 
 pub fn check_os(os: &str) -> Result<(), NotMacOs> {
-    if os == "macos" {
-        Ok(())
-    } else {
-        Err(NotMacOs)
-    }
+    if os == "macos" { Ok(()) } else { Err(NotMacOs) }
 }
 
 pub fn ensure_supported() -> Result<(), NotMacOs> {

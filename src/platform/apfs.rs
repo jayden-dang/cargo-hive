@@ -1,12 +1,12 @@
 //! macOS `Fs`: APFS clones and sharing attributes through `libc`.
 
 use super::{
-    container_key, entry_kind, CompressOutcome, EntryKind, EntryStat, Fs, HeldLock, LockHolder,
-    LockKind, LockState, Sharing, TempDir, TryLock, VolumeInfo, CHILD_DEADLINE,
+    CHILD_DEADLINE, CompressOutcome, EntryKind, EntryStat, Fs, HeldLock, LockHolder, LockKind,
+    LockState, Sharing, TempDir, TryLock, VolumeInfo, container_key, entry_kind,
 };
+use applesauce::FileCompressor;
 use applesauce::compressor::Kind;
 use applesauce::progress::{Progress, SkipReason, Task};
-use applesauce::FileCompressor;
 use std::ffi::{CStr, CString, OsString};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
@@ -216,7 +216,9 @@ impl Fs for Apfs {
         let m = match file.metadata() {
             Ok(m) if m.file_type().is_file() => m,
             Ok(_) => {
-                return TryLock::Unopenable(io::Error::other("the lock path is not a regular file"))
+                return TryLock::Unopenable(io::Error::other(
+                    "the lock path is not a regular file",
+                ));
             }
             Err(e) => return TryLock::Unopenable(e),
         };
@@ -513,12 +515,13 @@ mod tests {
         let t = tmp("drop");
         let path = t.path().to_path_buf();
         assert!(path.is_dir());
-        assert!(path
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .starts_with("hive-apfs-drop-"));
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("hive-apfs-drop-")
+        );
         apfs().write_file(&path.join("f"), b"x").unwrap();
         drop(t);
         assert!(!path.exists());

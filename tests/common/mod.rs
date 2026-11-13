@@ -434,11 +434,13 @@ pub fn wait_until_lock_free(path: &Path, limit: Duration) -> bool {
 /// Sends SIGINT to `pid`.
 #[allow(dead_code)]
 pub fn interrupt(pid: u32) {
-    assert!(Command::new("kill")
-        .args(["-INT", &pid.to_string()])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 pub fn wait_within(mut child: Child, limit: Duration) -> Output {

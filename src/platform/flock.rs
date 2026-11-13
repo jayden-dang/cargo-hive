@@ -88,7 +88,7 @@ pub fn try_exclusive(file: &File) -> io::Result<Option<FlockGuard>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{exclusive_or_cancelled, try_exclusive, FlockError};
+    use super::{FlockError, exclusive_or_cancelled, try_exclusive};
     use std::fs::{File, OpenOptions};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};

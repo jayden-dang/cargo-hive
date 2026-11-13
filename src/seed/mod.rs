@@ -546,7 +546,7 @@ fn read_lock_file(checkout: &std::path::Path) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{empty_fill, from_fill, record_seed_result, Error, Outcome};
+    use super::{Error, Outcome, empty_fill, from_fill, record_seed_result};
     use crate::ctx::Ctx;
     use crate::state::{Config, State};
     use std::collections::BTreeMap;
@@ -656,15 +656,19 @@ mod tests {
         let receipt = receipt.finish();
         assert_eq!(receipt.counts.get("clone_units_cloned").copied(), Some(2));
         assert_eq!(receipt.counts.get("fill_entries_added").copied(), Some(3));
-        assert!(receipt
-            .unmeasured
-            .iter()
-            .any(|row| row.field == "clone_bytes_not_shared"));
+        assert!(
+            receipt
+                .unmeasured
+                .iter()
+                .any(|row| row.field == "clone_bytes_not_shared")
+        );
         assert_eq!(receipt.notes, vec!["kept".to_string()]);
-        assert!(receipt
-            .findings
-            .iter()
-            .any(|finding| finding.kind == "unit.refused"));
+        assert!(
+            receipt
+                .findings
+                .iter()
+                .any(|finding| finding.kind == "unit.refused")
+        );
         let error = receipt
             .findings
             .iter()

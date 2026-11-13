@@ -4,7 +4,7 @@
 
 use crate::platform::clock::utc_date;
 use crate::platform::flock::{self, FlockError, FlockGuard};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
@@ -189,7 +189,9 @@ impl State {
     pub fn try_store_exclusive(&self) -> Result<Option<StoreLock>, StateError> {
         let path = self.root.join("store.lock");
         let file = self.open_store_lock_file(&path)?;
-        match flock::try_exclusive(&file).map_err(|e| io_err(&path, e))? {
+        // Bind so the flock temporary keeps the 2021 drop point under edition 2024.
+        let acquired = flock::try_exclusive(&file).map_err(|e| io_err(&path, e))?;
+        match acquired {
             Some(guard) => Ok(Some(StoreLock {
                 _guard: guard,
                 _file: file,
@@ -416,7 +418,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&tmp, path)?;
-        fs::File::open(dir)?.sync_all()
+        // Bind the dir fd so its drop stays after locals under edition 2024.
+        let dir_file = fs::File::open(dir)?;
+        dir_file.sync_all()
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -605,8 +609,8 @@ mod tests {
 
     #[test]
     fn read_bounded_refuses_a_file_over_its_bound_and_takes_no_lock() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Instant;
 
         let root = scratch("read-bounded");
@@ -699,8 +703,8 @@ mod tests {
 
     #[test]
     fn a_shared_lock_waits_for_an_exclusive_one_and_honors_cancel() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let root = scratch("store-sh-cancel");
         let holder = State::open_at(root.clone()).unwrap();

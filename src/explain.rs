@@ -7,10 +7,10 @@
 use crate::caps::DEPS_CAP;
 use crate::cargo_target::TargetDir;
 use crate::fingerprint::{
-    error_code, is_summary_line, kind_of, read_capped, Format, NotCurrentUnit, Unit,
+    Format, NotCurrentUnit, Unit, error_code, is_summary_line, kind_of, read_capped,
 };
-use crate::platform::clock::utc_timestamp;
 use crate::platform::Fs;
+use crate::platform::clock::utc_timestamp;
 use crate::receipt::{Finding, Measured};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -414,10 +414,10 @@ fn push_feature_findings(
 ) {
     let (crate_name, kind) = crate_and_kind(&group.stem);
     for row in feature_rows(group) {
-        if let Some(mode) = only_mode {
-            if row.mode != Some(mode) {
-                continue;
-            }
+        if let Some(mode) = only_mode
+            && row.mode != Some(mode)
+        {
+            continue;
         }
         let mut measured = BTreeMap::new();
         insert_text(&mut measured, "crate", &crate_name);
@@ -570,10 +570,10 @@ fn read_output_texts(texts: &[String]) -> OutputTexts {
                 }
                 Some(is_summary) => failed |= is_summary,
             }
-            if let Some(code) = error_code(line) {
-                if !codes.contains(&code) {
-                    codes.push(code);
-                }
+            if let Some(code) = error_code(line)
+                && !codes.contains(&code)
+            {
+                codes.push(code);
             }
         }
     }
@@ -813,8 +813,8 @@ fn measured_count(finding: &Finding, key: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{analyse, FailedUnits, Limits, NotCurrentInput, ProfileInput, DIVERGENCE_DETAIL};
-    use crate::fingerprint::{kind_of, Coverage, NotCurrentUnit};
+    use super::{DIVERGENCE_DETAIL, FailedUnits, Limits, NotCurrentInput, ProfileInput, analyse};
+    use crate::fingerprint::{Coverage, NotCurrentUnit, kind_of};
     use crate::receipt::{Finding, Measured};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -1243,9 +1243,11 @@ mod tests {
                 && measured_text(finding, "target_kind") == "lib"
         }));
         assert_eq!(exp.findings[0].kind, "copies.group");
-        assert!(exp.findings[1..=5]
-            .iter()
-            .all(|finding| finding.kind == "copies.features"));
+        assert!(
+            exp.findings[1..=5]
+                .iter()
+                .all(|finding| finding.kind == "copies.features")
+        );
         assert_eq!(
             exp.unmeasured,
             vec![(
@@ -1334,14 +1336,16 @@ mod tests {
         let got_all: Vec<_> = groups_of(&all.findings).into_iter().map(identity).collect();
         assert_eq!(got_all, expected);
         let none = analyse(&inputs, Limits { top: Some(0) }, &failed);
-        assert!(none
-            .findings
-            .iter()
-            .all(|finding| finding.kind != "copies.group" && finding.kind != "copies.features"));
-        assert!(none
-            .findings
-            .iter()
-            .any(|finding| finding.kind == "copies.totals"));
+        assert!(
+            none.findings
+                .iter()
+                .all(|finding| finding.kind != "copies.group" && finding.kind != "copies.features")
+        );
+        assert!(
+            none.findings
+                .iter()
+                .any(|finding| finding.kind == "copies.totals")
+        );
     }
 
     fn target_sample() -> Vec<ProfileInput> {
@@ -1458,12 +1462,16 @@ mod tests {
             .iter()
             .position(|finding| finding.kind == "copies.totals")
             .unwrap();
-        assert!(exp.findings[..first_totals]
-            .iter()
-            .any(|finding| finding.kind == "copies.group"));
-        assert!(exp.findings[first_totals..]
-            .iter()
-            .all(|finding| finding.kind == "copies.totals"));
+        assert!(
+            exp.findings[..first_totals]
+                .iter()
+                .any(|finding| finding.kind == "copies.group")
+        );
+        assert!(
+            exp.findings[first_totals..]
+                .iter()
+                .all(|finding| finding.kind == "copies.totals")
+        );
         assert_eq!(
             exp.counts,
             vec![
@@ -1488,9 +1496,11 @@ mod tests {
             .iter()
             .filter(|finding| finding.kind == "copies.totals")
             .collect();
-        assert!(totals
-            .iter()
-            .all(|finding| !finding.measured.contains_key("failed_units")));
+        assert!(
+            totals
+                .iter()
+                .all(|finding| !finding.measured.contains_key("failed_units"))
+        );
         assert_eq!(totals[1].measured, totals_map(1, 4, 1, None));
         assert!(exp.counts.iter().all(|(name, _)| *name != "failed_units"));
     }
@@ -1555,9 +1565,11 @@ mod tests {
                 "divergences_shown",
             ]
         );
-        assert!(count_names
-            .iter()
-            .all(|name| !name.contains("persistence") && !name.contains("testkit")));
+        assert!(
+            count_names
+                .iter()
+                .all(|name| !name.contains("persistence") && !name.contains("testkit"))
+        );
     }
 
     #[test]
@@ -1657,9 +1669,11 @@ mod tests {
                     && measured_text(finding, "crate") == "persistence"
             })
             .collect();
-        assert!(listed_features
-            .iter()
-            .all(|finding| !finding.measured.contains_key("mode")));
+        assert!(
+            listed_features
+                .iter()
+                .all(|finding| !finding.measured.contains_key("mode"))
+        );
         assert_eq!(
             listed_features
                 .iter()
@@ -1684,10 +1698,11 @@ mod tests {
                 "deps listing failed or was over its cap".to_string()
             )]
         );
-        assert!(exp
-            .findings
-            .iter()
-            .all(|finding| finding.kind != "copies.divergence"));
+        assert!(
+            exp.findings
+                .iter()
+                .all(|finding| finding.kind != "copies.divergence")
+        );
     }
 
     fn mode_artifact(hash: &str, mode: &str) -> String {
@@ -1819,9 +1834,10 @@ mod tests {
                     && finding.path.as_deref() == Some(Path::new("/profiles/nolist"))
             })
             .collect();
-        assert!(bare
-            .iter()
-            .all(|finding| !finding.measured.contains_key("mode")));
+        assert!(
+            bare.iter()
+                .all(|finding| !finding.measured.contains_key("mode"))
+        );
         assert_eq!(
             bare.iter()
                 .map(|finding| (
@@ -2019,12 +2035,16 @@ mod tests {
             .iter()
             .position(|finding| finding.kind == "copies.totals")
             .unwrap();
-        assert!(listed.findings[..first_divergence]
-            .iter()
-            .any(|finding| finding.kind == "copies.group"));
-        assert!(listed.findings[first_divergence..first_totals]
-            .iter()
-            .all(|finding| finding.kind == "copies.divergence"));
+        assert!(
+            listed.findings[..first_divergence]
+                .iter()
+                .any(|finding| finding.kind == "copies.group")
+        );
+        assert!(
+            listed.findings[first_divergence..first_totals]
+                .iter()
+                .all(|finding| finding.kind == "copies.divergence")
+        );
 
         let all = analyse(&inputs, Limits { top: None }, &failed);
         let got_all: Vec<_> = all
@@ -2400,9 +2420,11 @@ mod tests {
             .filter(|finding| finding.kind == "copies.divergence")
             .collect();
         assert!(divergences.len() >= 2);
-        assert!(divergences
-            .iter()
-            .all(|finding| finding.detail == DIVERGENCE_DETAIL));
+        assert!(
+            divergences
+                .iter()
+                .all(|finding| finding.detail == DIVERGENCE_DETAIL)
+        );
     }
 
     fn attempted_stamp() -> SystemTime {
@@ -2568,10 +2590,11 @@ mod tests {
             Limits { top: Some(0) },
             &failed,
         );
-        assert!(cut
-            .findings
-            .iter()
-            .all(|finding| finding.kind != "copies.group" && finding.kind != "copies.features"));
+        assert!(
+            cut.findings
+                .iter()
+                .all(|finding| finding.kind != "copies.group" && finding.kind != "copies.features")
+        );
         assert_eq!(failed_of(&cut.findings).len(), 1);
         assert_eq!(
             cut.findings
@@ -2896,10 +2919,11 @@ mod tests {
             exp.unmeasured,
             vec![("failed_units".to_string(), reason.to_string())]
         );
-        assert!(exp
-            .counts
-            .iter()
-            .all(|(name, _)| *name != "failed_units" && *name != "compiling_or_unknown_units"));
+        assert!(
+            exp.counts
+                .iter()
+                .all(|(name, _)| *name != "failed_units" && *name != "compiling_or_unknown_units")
+        );
     }
 
     #[test]
@@ -2937,9 +2961,11 @@ mod tests {
         );
         let found = failed_of(&exp.findings);
         assert_eq!(found.len(), 2);
-        assert!(found
-            .iter()
-            .all(|finding| finding.detail == "Its last compile failed."));
+        assert!(
+            found
+                .iter()
+                .all(|finding| finding.detail == "Its last compile failed.")
+        );
         assert_eq!(
             found
                 .iter()

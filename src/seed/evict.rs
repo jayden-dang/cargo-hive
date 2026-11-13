@@ -17,8 +17,8 @@ use crate::platform::Fs;
 use crate::receipt::{Finding, Measured};
 use crate::seed::source::{self, Holds};
 use crate::seed::store::{
-    self, commit_eviction, entry_dir, evict_dir, inventory, key_dir, rename_out, row_key,
-    row_matches, store_dir, CommitPlan, Inventory, Row, StoreKey,
+    self, CommitPlan, Inventory, Row, StoreKey, commit_eviction, entry_dir, evict_dir, inventory,
+    key_dir, rename_out, row_key, row_matches, store_dir,
 };
 use crate::state::{State, StateError};
 use crate::toolchain::{self, Toolchain};

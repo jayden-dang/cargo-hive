@@ -17,8 +17,8 @@ use cargo_hive::seed::Error;
 use common::cargo_fixture::backdate_all;
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
-use common::registry_fixture::{cargo_json, RegistryRepo};
-use common::{env_lock, init_repo, register, wait_within, CargoHomeGuard, Hive};
+use common::registry_fixture::{RegistryRepo, cargo_json};
+use common::{CargoHomeGuard, Hive, env_lock, init_repo, register, wait_within};
 
 #[test]
 fn the_fixture_builds_a_registry_crate_with_a_build_script_offline() {
@@ -808,11 +808,13 @@ fn a_signal_exits_130() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
     let out = wait_within(child, Duration::from_secs(60));
     assert_eq!(out.status.code(), Some(130), "{out:?}");
     let receipt: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|err| {
@@ -889,10 +891,12 @@ fn a_full_disk_reaches_the_caller() {
         Some(0)
     );
     assert!(outcome.counts.get("store_bytes").copied().is_some());
-    assert!(outcome
-        .unmeasured
-        .iter()
-        .all(|(field, _)| field != "clone_bytes_not_shared" && field != "store_bytes"));
+    assert!(
+        outcome
+            .unmeasured
+            .iter()
+            .all(|(field, _)| field != "clone_bytes_not_shared" && field != "store_bytes")
+    );
 }
 
 #[test]
@@ -2215,7 +2219,8 @@ fn seeding_through_the_fill_and_clone_halves_reports_what_one_run_reports() {
         let toolchain = cargo_hive::toolchain::resolve_toolchain(&lane).unwrap();
         let repos = [repo_row];
         let ctx = lib_ctx(&lib, &repos);
-        match cargo_hive::seed::run_fill(&ctx, &repos[0], &|| false).unwrap() {
+        let fill = cargo_hive::seed::run_fill(&ctx, &repos[0], &|| false).unwrap();
+        match fill {
             cargo_hive::seed::Fill::Continue(filled) => {
                 cargo_hive::seed::run_clone(&ctx, &repos[0], &checkout, &toolchain, filled, &|| {
                     false

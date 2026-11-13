@@ -294,10 +294,11 @@ mod tests {
     fn an_unavailable_os_version_is_reported_as_unmeasured_with_a_reason() {
         let r = Receipt::with_os("x", Scope::default(), None).finish();
         assert_eq!(r.macos_version, None);
-        assert!(r
-            .unmeasured
-            .iter()
-            .any(|u| u.field == "macos_version" && !u.reason.is_empty()));
+        assert!(
+            r.unmeasured
+                .iter()
+                .any(|u| u.field == "macos_version" && !u.reason.is_empty())
+        );
     }
 
     #[test]

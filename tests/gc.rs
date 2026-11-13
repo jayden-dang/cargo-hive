@@ -1,7 +1,7 @@
 #![cfg(target_os = "macos")]
 mod common;
 use common::{
-    crate_dirs, git, init_repo, plant_session, register, sessions_in, wait_within, Hive, Scratch,
+    Hive, Scratch, crate_dirs, git, init_repo, plant_session, register, sessions_in, wait_within,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -519,19 +519,21 @@ fn an_interrupted_gc_exits_130() {
             started.elapsed() < Duration::from_secs(30),
             "cargo metadata never wrote its pid"
         );
-        if let Ok(text) = fs::read_to_string(&sentinel) {
-            if text.trim().parse::<u32>().is_ok() {
-                break;
-            }
+        if let Ok(text) = fs::read_to_string(&sentinel)
+            && text.trim().parse::<u32>().is_ok()
+        {
+            break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(pid_alive(hive_pid), "gc should be running before SIGINT");
-    assert!(Command::new("kill")
-        .args(["-INT", &hive_pid.to_string()])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &hive_pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
     let out = wait_within(child, Duration::from_secs(30));
     assert_eq!(out.status.code(), Some(130), "{out:?}");
     let logged = fs::read_dir(hive.home.path.join("receipts"))

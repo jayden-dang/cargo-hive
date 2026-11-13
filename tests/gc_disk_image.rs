@@ -1,8 +1,8 @@
 #![cfg(target_os = "macos")]
 mod common;
-use cargo_hive::platform::apfs::Apfs;
 use cargo_hive::platform::Fs;
-use common::{crate_dirs, init_repo, plant_session, sessions_in, Hive, Scratch};
+use cargo_hive::platform::apfs::Apfs;
+use common::{Hive, Scratch, crate_dirs, init_repo, plant_session, sessions_in};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -181,7 +181,7 @@ fn plant_aged_entry(
     bytes: Vec<u8>,
     secs_ago: u64,
 ) -> PathBuf {
-    use cargo_hive::seed::store::{Row, StoreFile, MAX_STORE_BYTES, STORE_FILE};
+    use cargo_hive::seed::store::{MAX_STORE_BYTES, Row, STORE_FILE, StoreFile};
     use cargo_hive::state::State;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -263,10 +263,11 @@ fn freed_bytes_never_exceed_the_space_the_volume_gains() {
         )
         .unwrap();
     }
-    assert!(hive
-        .run(&["repo", "add", repo.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        hive.run(&["repo", "add", repo.to_str().unwrap()])
+            .status
+            .success()
+    );
     sh(&["sync"]);
     let apfs = Apfs::new(env!("CARGO_BIN_EXE_cargo-hive").into());
     let before = apfs.volume(&image.mount).unwrap();

@@ -1,7 +1,7 @@
 // The snapshot helpers serve only the macOS guard below.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
 mod common;
-use common::{git, init_repo, Hive, Scratch};
+use common::{Hive, Scratch, git, init_repo};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -172,10 +172,11 @@ fn explain_installs_nothing_in_the_build_path() {
     let s = Scratch::new("explain-path");
     let repo = init_repo(&s.path.join("app"), "");
     hive.build_crate(&repo, None);
-    assert!(hive
-        .run(&["repo", "add", repo.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        hive.run(&["repo", "add", repo.to_str().unwrap()])
+            .status
+            .success()
+    );
     let dot_cargo = repo.join(".cargo");
     assert!(
         !dot_cargo.exists(),
@@ -207,10 +208,11 @@ fn cargo_builds_a_registered_checkout_exactly_as_without_hive() {
     let s = Scratch::new("as-before");
     let repo = init_repo(&s.path.join("app"), "");
     hive.build_crate(&repo, None);
-    assert!(hive
-        .run(&["repo", "add", repo.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        hive.run(&["repo", "add", repo.to_str().unwrap()])
+            .status
+            .success()
+    );
     assert!(hive.run(&["status"]).status.success());
     let out = Command::new("cargo")
         .args(["build", "--offline"])
@@ -337,12 +339,13 @@ fn status_on_klynt_finishes_within_two_seconds_cold_and_warm() {
     let hive = Hive::ready();
     fs::remove_file(hive.home.path.join("config.json")).unwrap(); // the real defaults, as a user has them
     let real = cargo_home();
-    assert!(hive
-        .command(&["repo", "add", klynt])
-        .env("CARGO_HOME", &real)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        hive.command(&["repo", "add", klynt])
+            .env("CARGO_HOME", &real)
+            .status()
+            .unwrap()
+            .success()
+    );
     let run = || {
         let started = Instant::now();
         let out = hive
@@ -384,12 +387,13 @@ fn explain_on_klynt_stays_within_two_seconds_of_status() {
     let hive = Hive::ready();
     fs::remove_file(hive.home.path.join("config.json")).unwrap(); // the real defaults, as a user has them
     let real = cargo_home();
-    assert!(hive
-        .command(&["repo", "add", klynt])
-        .env("CARGO_HOME", &real)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        hive.command(&["repo", "add", klynt])
+            .env("CARGO_HOME", &real)
+            .status()
+            .unwrap()
+            .success()
+    );
     let run = |args: &[&str]| {
         let started = Instant::now();
         let out = hive

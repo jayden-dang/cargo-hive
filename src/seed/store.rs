@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::caps::CRATE_DIR_CAP;
 use crate::fingerprint;
 use crate::platform::{EntryKind, Fs};
-use crate::size::{allocated_bytes, SizeError, MAX_DEPTH};
+use crate::size::{MAX_DEPTH, SizeError, allocated_bytes};
 use crate::state::{State, StateError};
 
 pub const STORE_FILE: &str = "store.db";
@@ -333,14 +333,13 @@ fn same_file(fs: &dyn Fs, a: &Path, b: &Path) -> io::Result<bool> {
     if fs.entry_stat(b)?.compressed {
         return Ok(false);
     }
-    if let (Ok(left), Ok(right)) = (fs.sharing(a), fs.sharing(b)) {
-        if left.shares_all
-            && right.shares_all
-            && left.clone_id != 0
-            && left.clone_id == right.clone_id
-        {
-            return Ok(true);
-        }
+    if let (Ok(left), Ok(right)) = (fs.sharing(a), fs.sharing(b))
+        && left.shares_all
+        && right.shares_all
+        && left.clone_id != 0
+        && left.clone_id == right.clone_id
+    {
+        return Ok(true);
     }
     let (mut left, mut right) = (fs::File::open(a)?, fs::File::open(b)?);
     if left.metadata()?.len() != right.metadata()?.len() {
@@ -552,10 +551,10 @@ pub fn commit_eviction(
         file.units
             .retain(|row| !renamed_keys.contains_key(&row_key(row)));
         for key in &plan.refreshed {
-            if let Some(row) = file.units.iter_mut().find(|row| row_matches(row, key)) {
-                if plan.now > row.last_live_at {
-                    row.last_live_at = plan.now;
-                }
+            if let Some(row) = file.units.iter_mut().find(|row| row_matches(row, key))
+                && plan.now > row.last_live_at
+            {
+                row.last_live_at = plan.now;
             }
         }
 

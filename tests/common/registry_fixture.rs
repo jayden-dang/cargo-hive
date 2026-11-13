@@ -1,7 +1,7 @@
 //! A local-registry crate with a build script under the scratch `CARGO_HOME`.
 //! `cargo_json` sends cargo's stdout to a file: `wait_within` does not drain a pipe.
 
-use super::{git, register, wait_within, Hive, Scratch};
+use super::{Hive, Scratch, git, register, wait_within};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

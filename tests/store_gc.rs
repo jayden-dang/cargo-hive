@@ -8,23 +8,23 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cargo_hive::cargo_target::{Owner, TargetDir, TAG_LINE};
+use cargo_hive::cargo_target::{Owner, TAG_LINE, TargetDir};
 use cargo_hive::classify::{CheckoutKind, Class};
 use cargo_hive::discover::Checkout;
 use cargo_hive::fingerprint;
 use cargo_hive::ledger;
-use cargo_hive::platform::apfs::Apfs;
 use cargo_hive::platform::Fs;
+use cargo_hive::platform::apfs::Apfs;
 use cargo_hive::receipt::Measured;
 use cargo_hive::seed::choose::{self, Choice};
 use cargo_hive::seed::evict::{self, EvictCtx, Limits};
-use cargo_hive::seed::store::{self, store_dir, Row, StoreFile, MAX_STORE_BYTES, STORE_FILE};
+use cargo_hive::seed::store::{self, MAX_STORE_BYTES, Row, STORE_FILE, StoreFile, store_dir};
 use cargo_hive::state::State;
 use common::store_fixture::{
     count, drop_row, entry_dirs, has_finding, plant_rowless, rows, seeded_store, set_last_live_at,
     synth_entry, synth_entry_at, tree_files,
 };
-use common::{crate_dirs, plant_session, wait_within, Hive};
+use common::{Hive, crate_dirs, plant_session, wait_within};
 
 const DAY: u64 = 86_400;
 const CAP_BYTES: u64 = 40_000_000_000;
@@ -410,8 +410,8 @@ fn a_live_unit_in_a_target_gc_skips_for_an_unsupported_profile_still_holds_its_k
 }
 
 #[test]
-fn an_unreadable_target_holds_the_whole_store_and_gc_still_deletes_sessions_with_its_usual_exit_code(
-) {
+fn an_unreadable_target_holds_the_whole_store_and_gc_still_deletes_sessions_with_its_usual_exit_code()
+ {
     use std::os::unix::fs::PermissionsExt;
 
     let hive = Hive::ready();
@@ -2235,11 +2235,13 @@ fn gc_exits_130_when_store_eviction_is_cancelled() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(Command::new("kill")
-        .args(["-INT", &hive_pid.to_string()])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &hive_pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
     let _ = holder.kill();
     let _ = holder.wait();
     let out = wait_within(child, Duration::from_secs(60));

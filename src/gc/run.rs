@@ -8,7 +8,7 @@ use crate::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use crate::cargo_target::TargetDir;
 use crate::discover::Scope;
 use crate::fingerprint::Format;
-use crate::ledger::{remove_counted, Bytes, Ledger, RemoveFailed};
+use crate::ledger::{Bytes, Ledger, RemoveFailed, remove_counted};
 use crate::platform::{EntryKind, Fs, HeldLock, TryLock};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -316,11 +316,11 @@ impl Runner<'_> {
                 return self.skip(
                     profile,
                     "it has no .cargo-build-lock, so its temp entries are left alone".into(),
-                )
+                );
             }
             TryLock::Unopenable(e) => return self.skip(&lock, format!("could not open it: {e}")),
             TryLock::Unlockable(e) => {
-                return self.skip(&lock, format!("the lock could not be taken: {e}"))
+                return self.skip(&lock, format!("the lock could not be taken: {e}"));
             }
         };
         let deps = profile.join("deps");
@@ -373,7 +373,7 @@ mod tests {
     use super::*;
     use crate::cargo_target::Owner;
     use crate::fingerprint::ProfileReport;
-    use crate::ledger::{measure, Footprint};
+    use crate::ledger::{Footprint, measure};
     use crate::platform::{
         CompressOutcome, EntryStat, HeldLock, LockHolder, LockKind, LockState, Sharing, TempDir,
         VolumeInfo,
@@ -1079,23 +1079,28 @@ mod tests {
                 f.root.join("n")
             ]
         );
-        assert!(scoped
-            .skipped
-            .iter()
-            .any(|s| s.path == f.root.join("u") && s.reason.contains("unreadable")));
-        assert!(scoped
-            .skipped
-            .iter()
-            .any(|s| s.path == f.profile && s.reason.contains("unsupported")));
+        assert!(
+            scoped
+                .skipped
+                .iter()
+                .any(|s| s.path == f.root.join("u") && s.reason.contains("unreadable"))
+        );
+        assert!(
+            scoped
+                .skipped
+                .iter()
+                .any(|s| s.path == f.profile && s.reason.contains("unsupported"))
+        );
         let all = run(&Rec::new(), &targets, &Scope::All, &opts(true), &never());
         assert!(paths(&all).contains(&PathBuf::from("/private/tmp/cache-root/t")));
         let mut hfs = Rec::new();
         hfs.fs_type = "hfs".into();
         let skipped = run(&hfs, &[orphan(&f)], &Scope::All, &opts(true), &never());
         assert!(skipped.per_target.is_empty());
-        assert!(skipped.skipped.iter().any(|s| s
-            .reason
-            .contains("not on an APFS volume (filesystem type hfs)")));
+        assert!(skipped.skipped.iter().any(|s| {
+            s.reason
+                .contains("not on an APFS volume (filesystem type hfs)")
+        }));
     }
 
     #[test]

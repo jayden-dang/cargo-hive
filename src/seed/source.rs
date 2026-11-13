@@ -6,9 +6,9 @@
 
 use crate::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use crate::cargo_target::{Owner, TargetDir};
-use crate::ctx::{checkout_walk, Ctx};
+use crate::ctx::{Ctx, checkout_walk};
 use crate::discover::{self, Snapshot};
-use crate::fingerprint::{self, le_hex, Format, Unit};
+use crate::fingerprint::{self, Format, Unit, le_hex};
 use crate::liveness::{self, Liveness, LivenessFn, Uncertain};
 use crate::platform::{EntryKind, Fs};
 use crate::receipt::Finding;
@@ -548,7 +548,7 @@ fn build_dep_info(
                 &dir,
                 &err,
                 "build the target again",
-            )))
+            )));
         }
     };
     let mut names: Vec<String> = entries
@@ -572,7 +572,7 @@ fn read_dep_info(path: &Path) -> Result<Option<String>, Skip> {
             return Err(Skip::Bound(format!(
                 "{}: {err}; make the dep-info readable and build the target again",
                 path.display()
-            )))
+            )));
         }
     };
     let mut buf = Vec::new();
@@ -936,12 +936,24 @@ mod tests {
     fn the_first_input_decides_whether_a_unit_is_a_registry_unit() {
         let home = Path::new("/Users/x/.cargo");
         let cases = [
-            ("/t/deps/a-1.d: /Users/x/.cargo/registry/src/index.crates.io-1/a-1.0.0/src/lib.rs", true),
+            (
+                "/t/deps/a-1.d: /Users/x/.cargo/registry/src/index.crates.io-1/a-1.0.0/src/lib.rs",
+                true,
+            ),
             ("/t/deps/b-2.d: src/lib.rs src/x.rs", false),
-            ("/t/deps/c-3.d: src/lib.rs /Users/x/.cargo/registry/src/index.crates.io-1/a-1.0.0/data.txt", false),
-            ("/t/deps/d-4.d: /Users/x/.cargo/git/checkouts/d/src/lib.rs", false),
+            (
+                "/t/deps/c-3.d: src/lib.rs /Users/x/.cargo/registry/src/index.crates.io-1/a-1.0.0/data.txt",
+                false,
+            ),
+            (
+                "/t/deps/d-4.d: /Users/x/.cargo/git/checkouts/d/src/lib.rs",
+                false,
+            ),
             ("/t/deps/e-5.d:", false),
-            ("/t/deps/f-6.d: /Users/x\\ y/.cargo/registry/src/i/f/src/lib.rs", false),
+            (
+                "/t/deps/f-6.d: /Users/x\\ y/.cargo/registry/src/i/f/src/lib.rs",
+                false,
+            ),
         ];
         for (line, want) in cases {
             assert_eq!(is_registry_dep_info(line, home), want, "{line}");

@@ -1,5 +1,5 @@
 mod common;
-use common::{init_repo, register, wait_within, Hive, Scratch};
+use common::{Hive, Scratch, init_repo, register, wait_within};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -166,9 +166,11 @@ fn explain_without_check_g_counts_but_does_not_name() {
         .map(|finding| measured_u64(finding, "compiling_or_unknown_units"))
         .sum();
     assert!(unknown >= 1, "{receipt}");
-    assert!(findings(&receipt, "copies.totals")
-        .iter()
-        .all(|finding| finding["measured"].get("failed_units").is_none()));
+    assert!(
+        findings(&receipt, "copies.totals")
+            .iter()
+            .all(|finding| finding["measured"].get("failed_units").is_none())
+    );
 }
 
 #[test]
@@ -409,10 +411,10 @@ fn explain_cancelled_on_sigint_exits_130_and_leaves_the_snapshot() {
             started.elapsed() < Duration::from_secs(30),
             "cargo metadata never wrote its pid"
         );
-        if let Ok(text) = fs::read_to_string(&sentinel) {
-            if let Ok(pid) = text.trim().parse::<u32>() {
-                break pid;
-            }
+        if let Ok(text) = fs::read_to_string(&sentinel)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            break pid;
         }
         std::thread::sleep(Duration::from_millis(10));
     };
@@ -420,11 +422,13 @@ fn explain_cancelled_on_sigint_exits_130_and_leaves_the_snapshot() {
         pid_alive(cargo_pid),
         "sleeper should be running before SIGINT"
     );
-    assert!(Command::new("kill")
-        .args(["-INT", &hive_pid.to_string()])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &hive_pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
     let out = wait_within(child, Duration::from_secs(30));
     assert_eq!(out.status.code(), Some(130), "{out:?}");
     assert!(!pid_alive(cargo_pid), "cargo metadata sleeper must be dead");

@@ -182,14 +182,15 @@ pub fn string_literals(src: &str) -> Vec<String> {
                     i += 1;
                 }
                 let word: String = c[start..i].iter().collect();
-                if matches!(word.as_str(), "r" | "br") && matches!(c.get(i), Some('"' | '#')) {
-                    if let Some((text, end)) = raw(&c, i) {
-                        if !skipping {
-                            out.push(text);
-                        }
-                        i = end;
-                        continue;
+                if matches!(word.as_str(), "r" | "br")
+                    && matches!(c.get(i), Some('"' | '#'))
+                    && let Some((text, end)) = raw(&c, i)
+                {
+                    if !skipping {
+                        out.push(text);
                     }
+                    i = end;
+                    continue;
                 }
                 want_body |= test_attr && word == "mod";
                 test_attr &= word == "pub";

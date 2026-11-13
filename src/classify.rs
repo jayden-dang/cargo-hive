@@ -45,13 +45,13 @@ pub fn classify(
     if registered_mains.iter().any(|m| m == path) {
         return (Class::Protected, "registered main checkout".into());
     }
-    if let CheckoutKind::Linked { main } = &facts.kind {
-        if strictly_below(path, main) {
-            return (
-                Class::Secondary,
-                format!("linked worktree inside its main {}", main.display()),
-            );
-        }
+    if let CheckoutKind::Linked { main } = &facts.kind
+        && strictly_below(path, main)
+    {
+        return (
+            Class::Secondary,
+            format!("linked worktree inside its main {}", main.display()),
+        );
     }
     if let Some(root) = secondary_roots.iter().find(|r| strictly_below(path, r)) {
         return (

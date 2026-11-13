@@ -6,7 +6,7 @@ use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -413,7 +413,7 @@ fn finish_readers(
 
 #[cfg(test)]
 mod tests {
-    use super::{output, output_with_deadline, run_bounded, Capture, ChildOutputError, Spec};
+    use super::{Capture, ChildOutputError, Spec, output, output_with_deadline, run_bounded};
     use std::ffi::OsString;
     use std::time::{Duration, Instant};
 

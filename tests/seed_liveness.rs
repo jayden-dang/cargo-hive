@@ -10,8 +10,8 @@
 use cargo_hive::caps::DEPS_CAP;
 use cargo_hive::cargo_target::{Owner, TargetDir};
 use cargo_hive::ctx::Ctx;
-use cargo_hive::fingerprint::{self, le_hex, read_profile, Format};
-use cargo_hive::seed::source::{holds, live_registry_units, unit_key, Skip, SourceUnit};
+use cargo_hive::fingerprint::{self, Format, le_hex, read_profile};
+use cargo_hive::seed::source::{Skip, SourceUnit, holds, live_registry_units, unit_key};
 use cargo_hive::state::{Config, State};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -723,12 +723,16 @@ fn a_lock_that_cannot_be_read_is_skipped_and_fills_nothing() {
     assert_eq!(report.targets_skipped.get("lock.failed").copied(), Some(1));
     assert_eq!(report.entries_added, 0);
     assert_eq!(report.entries_held, 0);
-    assert!(report
-        .findings
-        .iter()
-        .any(|(kind, _, _)| kind == "lock.failed"));
-    assert!(cargo_hive::seed::store::read(&state)
-        .unwrap()
-        .units
-        .is_empty());
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|(kind, _, _)| kind == "lock.failed")
+    );
+    assert!(
+        cargo_hive::seed::store::read(&state)
+            .unwrap()
+            .units
+            .is_empty()
+    );
 }

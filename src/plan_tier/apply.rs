@@ -11,15 +11,15 @@ use crate::caps::CRATE_DIR_CAP;
 use crate::cargo_target::{self, Owner, TargetDir};
 use crate::ctx::Ctx;
 use crate::discover::{self, Snapshot};
-use crate::fingerprint::{read_profile, Format, ProfileReport};
+use crate::fingerprint::{Format, ProfileReport, read_profile};
 use crate::ledger::{self, Bytes, Ledger};
 use crate::liveness::Liveness;
 use crate::locks::{self, Acquired, Locked, Reason};
-use crate::plan_tier::build::{class_label, class_of_target, TargetClass};
-use crate::plan_tier::guard::{check_entry, Deleted as EntryMismatch, Expect};
+use crate::plan_tier::build::{TargetClass, class_label, class_of_target};
+use crate::plan_tier::guard::{Deleted as EntryMismatch, Expect, check_entry};
 use crate::plan_tier::orphan::{self, Counted, Removal};
 use crate::plan_tier::record::{
-    self, kind_of, BytesRec, Lookup, Plan, PlanClass, PlannedEntry, PlannedTarget, Taken,
+    self, BytesRec, Lookup, Plan, PlanClass, PlannedEntry, PlannedTarget, Taken, kind_of,
 };
 use crate::platform::Fs;
 use crate::receipt::{Outcome, Unmeasured};
@@ -94,10 +94,10 @@ pub struct Applied {
 fn plan_scope(plan: &Plan) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut checkouts = Vec::new();
     for target in &plan.targets {
-        if let Some(owner) = &target.owner {
-            if !checkouts.contains(owner) {
-                checkouts.push(owner.clone());
-            }
+        if let Some(owner) = &target.owner
+            && !checkouts.contains(owner)
+        {
+            checkouts.push(owner.clone());
         }
     }
     (plan.scope_repos.clone(), checkouts)
@@ -115,7 +115,7 @@ pub fn apply(
                 PlanClass::Secondary,
                 "unknown_plan",
                 Vec::new(),
-            ))
+            ));
         }
         Lookup::Consumed => {
             return Ok(refused(
@@ -123,7 +123,7 @@ pub fn apply(
                 PlanClass::Secondary,
                 "already_consumed",
                 Vec::new(),
-            ))
+            ));
         }
         Lookup::Live(plan) => plan,
     };
@@ -143,7 +143,7 @@ pub fn apply(
                     PlanClass::Secondary,
                     "already_consumed",
                     Vec::new(),
-                ))
+                ));
             }
             Taken::Unknown => {
                 return Ok(refused(
@@ -151,7 +151,7 @@ pub fn apply(
                     PlanClass::Secondary,
                     "unknown_plan",
                     Vec::new(),
-                ))
+                ));
             }
         };
     if cancel() {
@@ -471,10 +471,10 @@ pub fn execute(
         if !target_failed && !cancelled {
             applied_targets += 1;
         }
-        if deleted_here > 0 {
-            if let Ok(volume) = ctx.fs.volume(&target.path) {
-                touched.insert(volume.container);
-            }
+        if deleted_here > 0
+            && let Ok(volume) = ctx.fs.volume(&target.path)
+        {
+            touched.insert(volume.container);
         }
         if cancelled {
             break;

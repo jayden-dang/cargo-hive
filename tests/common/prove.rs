@@ -15,12 +15,12 @@ use cargo_hive::cargo_target::{self, Owner, TargetDir};
 use cargo_hive::ctx::Ctx;
 use cargo_hive::fingerprint;
 use cargo_hive::gc::liveness::liveness;
-use cargo_hive::ledger::{measure, Footprint};
-use cargo_hive::liveness::{unit_timestamp, Liveness};
+use cargo_hive::ledger::{Footprint, measure};
+use cargo_hive::liveness::{Liveness, unit_timestamp};
 use cargo_hive::plan_tier::apply::{self, ResolvedTarget};
 use cargo_hive::plan_tier::build::{self, TargetPlan};
-use cargo_hive::plan_tier::guard::{delete_checked, Deleted, Expect};
-use cargo_hive::plan_tier::record::{kind_name, Plan, PlanClass, PlannedEntry, PlannedTarget};
+use cargo_hive::plan_tier::guard::{Deleted, Expect, delete_checked};
+use cargo_hive::plan_tier::record::{Plan, PlanClass, PlannedEntry, PlannedTarget, kind_name};
 use cargo_hive::platform::{self, EntryKind, Fs, TryLock};
 use cargo_hive::receipt::Outcome;
 use cargo_hive::state::State;
@@ -408,7 +408,7 @@ pub fn vacuous_reason(
 ) -> Option<String> {
     match result {
         Liveness::Undecided { reasons } => {
-            return Some(format!("liveness is undecided ({} reasons)", reasons.len()))
+            return Some(format!("liveness is undecided ({} reasons)", reasons.len()));
         }
         Liveness::Decided { dead, .. } => {
             if dead.iter().all(|d| d.files.is_empty()) {
@@ -466,7 +466,7 @@ fn for_each_artifact(
                 return Err(format!(
                     "{} line {number}: cannot check the compiler-artifact message ({e}): {text}",
                     stdout.display()
-                ))
+                ));
             }
             Err(_) => continue,
         };
@@ -685,13 +685,13 @@ pub fn check_config_in(
                 let l = l.trim();
                 l == "[alias]" || l.starts_with("alias.")
             });
-            if has_alias {
-                if let Some(name) = keys.iter().find(|k| ALIAS_GUARDED.contains(&k.as_str())) {
-                    return Err(format!(
-                        "{} defines the alias `{name}`, which can turn an allowed subcommand into another command",
-                        path.display()
-                    ));
-                }
+            if has_alias
+                && let Some(name) = keys.iter().find(|k| ALIAS_GUARDED.contains(&k.as_str()))
+            {
+                return Err(format!(
+                    "{} defines the alias `{name}`, which can turn an allowed subcommand into another command",
+                    path.display()
+                ));
             }
         }
     }
@@ -1284,17 +1284,17 @@ pub fn prove_with_cloner(
                 return Err(format!(
                     "{}: no build lock file; cannot prove the target idle",
                     profile.display()
-                ))
+                ));
             }
             TryLock::Gone => {}
             TryLock::Held => {
                 return Err(format!(
                     "{}: the build lock is held by another process; stop other builds first",
                     profile.display()
-                ))
+                ));
             }
             TryLock::Unopenable(e) | TryLock::Unlockable(e) => {
-                return Err(format!("{}: cannot lock: {e}", profile.display()))
+                return Err(format!("{}: cannot lock: {e}", profile.display()));
             }
         }
     }

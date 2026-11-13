@@ -1,5 +1,5 @@
 mod common;
-use common::{init_repo, Hive, Scratch};
+use common::{Hive, Scratch, init_repo};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
@@ -165,10 +165,11 @@ fn status_still_prints_a_receipt_when_the_snapshot_cannot_be_written() {
     let hive = Hive::ready();
     let s = Scratch::new("snap-ro");
     let repo = init_repo(&s.path.join("app"), "");
-    assert!(hive
-        .run(&["repo", "add", repo.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        hive.run(&["repo", "add", repo.to_str().unwrap()])
+            .status
+            .success()
+    );
     let home = hive.home.path.clone();
     fs::set_permissions(&home, fs::Permissions::from_mode(0o555)).unwrap();
     let out = hive.run(&["status", "--json"]);

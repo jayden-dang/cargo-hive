@@ -2,7 +2,7 @@
 //! depth-bounded and never enters `node_modules`, `target` or `.git`.
 
 use crate::cargo_target::{self, Layout, Owner, TargetDir};
-use crate::classify::{classify, CheckoutFacts, CheckoutKind, Class};
+use crate::classify::{CheckoutFacts, CheckoutKind, Class, classify};
 use crate::fingerprint::{self, Format};
 use crate::git::Git;
 use crate::metadata::{self, Resolved};
@@ -659,16 +659,16 @@ pub fn targets(
 /// When several workspaces resolve to the same target, a protected checkout wins.
 /// A single match still uses the deepest containing checkout, even if that path is not registered.
 fn protected_owner(matches: &[&Resolved], live: &[PathBuf], checkouts: &[Checkout]) -> PathBuf {
-    if matches.len() > 1 {
-        if let Some(path) = matches.iter().find_map(|resolved| {
+    if matches.len() > 1
+        && let Some(path) = matches.iter().find_map(|resolved| {
             let path = owner_checkout(&resolved.workspace_root, live);
             checkouts
                 .iter()
                 .find(|c| !c.missing && c.class == Class::Protected && c.path == path)
                 .map(|c| c.path.clone())
-        }) {
-            return path;
-        }
+        })
+    {
+        return path;
     }
     owner_checkout(&matches[0].workspace_root, live)
 }
@@ -818,9 +818,11 @@ mod tests {
                 .map(String::as_str),
             Some("disk")
         );
-        assert!(!merged
-            .unsupported_profiles
-            .contains_key(Path::new("/p/cleared")));
+        assert!(
+            !merged
+                .unsupported_profiles
+                .contains_key(Path::new("/p/cleared"))
+        );
     }
 
     #[test]

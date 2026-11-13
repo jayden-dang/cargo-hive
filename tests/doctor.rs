@@ -233,11 +233,13 @@ fn an_interrupted_doctor_exits_130_and_removes_its_temp_dir() {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(std::process::Command::new("kill")
-            .args([signal, &pid])
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            std::process::Command::new("kill")
+                .args([signal, &pid])
+                .status()
+                .unwrap()
+                .success()
+        );
         let out = wait_within(child, Duration::from_secs(60));
         assert_eq!(out.status.code(), Some(130), "{signal}");
         assert_eq!(

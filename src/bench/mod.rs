@@ -15,7 +15,7 @@ use crate::discover::{self, Checkout, Snapshot};
 use crate::platform::proc::{self, Capture, ChildOutputError};
 use crate::receipt::{Finding, Measured, ReceiptBuilder};
 use crate::registry::Repo;
-use crate::seed::{self, record, Fill};
+use crate::seed::{self, Fill, record};
 use crate::toolchain::Toolchain;
 
 use self::command::{BuildCmd, EnvMap};
@@ -375,20 +375,15 @@ pub fn run(
                             }
                         }
                         Err(err) => {
-                            if let seed::Error::DiskFull(full) = &err {
-                                if let Some(kept) = &full.kept {
-                                    for (kind, path, detail) in &kept.findings {
-                                        if is_sample_row(plan, kind, path.as_deref()) {
-                                            note_sample_rows_skipped(&mut report, &mut rows_noted);
-                                            continue;
-                                        }
-                                        push_seed_finding(
-                                            &mut report,
-                                            checkout,
-                                            kind,
-                                            detail.clone(),
-                                        );
+                            if let seed::Error::DiskFull(full) = &err
+                                && let Some(kept) = &full.kept
+                            {
+                                for (kind, path, detail) in &kept.findings {
+                                    if is_sample_row(plan, kind, path.as_deref()) {
+                                        note_sample_rows_skipped(&mut report, &mut rows_noted);
+                                        continue;
                                     }
+                                    push_seed_finding(&mut report, checkout, kind, detail.clone());
                                 }
                             }
                             fail_run(

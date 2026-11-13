@@ -287,11 +287,7 @@ pub fn emit(state: &State, out: OutputArgs, receipt: Receipt, human: &str, code:
     } else if logged {
         print!("{human}");
     }
-    if logged {
-        code
-    } else {
-        1
-    }
+    if logged { code } else { 1 }
 }
 
 fn emit_failure(state: &State, out: OutputArgs, command: &str, error: &str, code: i32) -> i32 {
@@ -317,7 +313,7 @@ fn begin_plan_tier(b: &mut ReceiptBuilder) {
 }
 
 fn repo_add(state: &State, path: &std::path::Path, out: OutputArgs) -> i32 {
-    use crate::registry::{register, RegisterOutcome};
+    use crate::registry::{RegisterOutcome, register};
     let result = state.locked(|tx| register(path, tx));
     let mut b = Receipt::new("repo add", Scope::default());
     match result {
@@ -625,7 +621,7 @@ fn live_checkouts(
 
 fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: OutputArgs) -> i32 {
     use crate::classify::Class;
-    use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
+    use crate::discover::{self, SNAPSHOT_FILE, Snapshot};
     use crate::doctor::{self, Capabilities, Capability};
     let loaded = (|| -> Result<_, crate::state::StateError> {
         Ok((
@@ -854,20 +850,20 @@ fn report_targets(
                 (Format::Supported, None) => {}
             }
         }
-        if let Some(seeds) = seeds {
-            if let Some(record) = seeds.targets.get(&t.path) {
-                match crate::seed::record::counts(t, record, crate::caps::DEPS_CAP) {
-                    Ok(Some(counts)) => {
-                        let path = t.path.display();
-                        b.count(&format!("reused_fresh:{path}"), counts.fresh)
-                            .count(&format!("seeded_unneeded:{path}"), counts.unneeded)
-                            .count(&format!("seeded_recompiled:{path}"), counts.recompiled)
-                            .count(&format!("seeded_missing:{path}"), counts.missing);
-                    }
-                    Ok(None) => {}
-                    Err(why) => {
-                        b.note(why);
-                    }
+        if let Some(seeds) = seeds
+            && let Some(record) = seeds.targets.get(&t.path)
+        {
+            match crate::seed::record::counts(t, record, crate::caps::DEPS_CAP) {
+                Ok(Some(counts)) => {
+                    let path = t.path.display();
+                    b.count(&format!("reused_fresh:{path}"), counts.fresh)
+                        .count(&format!("seeded_unneeded:{path}"), counts.unneeded)
+                        .count(&format!("seeded_recompiled:{path}"), counts.recompiled)
+                        .count(&format!("seeded_missing:{path}"), counts.missing);
+                }
+                Ok(None) => {}
+                Err(why) => {
+                    b.note(why);
                 }
             }
         }
@@ -913,7 +909,7 @@ fn put_counts(b: &mut ReceiptBuilder, suffix: &str, c: &crate::gc::Counts) {
 }
 
 fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: OutputArgs) -> i32 {
-    use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
+    use crate::discover::{self, SNAPSHOT_FILE, Snapshot};
     use crate::doctor::{self, Capabilities, Capability};
     use crate::gc;
     use crate::seed::evict::{self, EvictCtx, Limits};
@@ -1290,10 +1286,10 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
     } else {
         for arg in args {
             let real = arg.canonicalize().unwrap_or_else(|_| arg.clone());
-            if let Some(repo) = reg.repos.iter().find(|r| r.main == real) {
-                if !named.iter().any(|got| got.main == repo.main) {
-                    named.push(repo.clone());
-                }
+            if let Some(repo) = reg.repos.iter().find(|r| r.main == real)
+                && !named.iter().any(|got| got.main == repo.main)
+            {
+                named.push(repo.clone());
             }
         }
     }
@@ -1418,7 +1414,7 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
 }
 
 fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: OutputArgs) -> i32 {
-    use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
+    use crate::discover::{self, SNAPSHOT_FILE, Snapshot};
     use crate::doctor::{self, Capabilities, Capability};
     use crate::explain::{self, FailedUnits, Limits};
     use crate::fingerprint::Format;
@@ -1769,7 +1765,7 @@ fn bench_cmd(
     out: OutputArgs,
 ) -> i32 {
     use crate::bench::command::env_map;
-    use crate::bench::{self, Limits, Plan, BUILD_DEADLINE};
+    use crate::bench::{self, BUILD_DEADLINE, Limits, Plan};
     use crate::ctx::Ctx;
     use crate::doctor::{self, Capabilities, Capability};
     use crate::receipt::Measured;

@@ -3,7 +3,7 @@
 mod common;
 use std::os::unix::fs::PermissionsExt;
 
-use cargo_hive::locks::{acquire, Acquired, Reason};
+use cargo_hive::locks::{Acquired, Reason, acquire};
 use cargo_hive::plan_tier::apply::apply;
 use cargo_hive::receipt::Outcome;
 use common::plan_fixture::Planned;
@@ -197,8 +197,8 @@ fn a_profile_dir_that_appears_after_the_locks_are_taken_skips_the_target() {
 }
 
 #[test]
-fn locks_are_all_held_before_the_first_removal_and_each_unit_is_removed_dot_d_first_fingerprint_last(
-) {
+fn locks_are_all_held_before_the_first_removal_and_each_unit_is_removed_dot_d_first_fingerprint_last()
+ {
     let p = Planned::new("apply-order");
     let id = Planned::id_of(&p.plan(), "secondary");
     let rec = Recording::over_real();
@@ -497,9 +497,9 @@ fn a_cancel_between_two_apply_deletions_is_partial_consumed_and_replanned() {
 }
 
 #[test]
-fn a_cancel_between_units_keeps_the_first_unit_gone_and_the_second_intact_and_the_rest_can_be_planned_again(
-) {
-    use cargo_hive::plan_tier::apply::{execute, ResolvedTarget};
+fn a_cancel_between_units_keeps_the_first_unit_gone_and_the_second_intact_and_the_rest_can_be_planned_again()
+ {
+    use cargo_hive::plan_tier::apply::{ResolvedTarget, execute};
     use cargo_hive::plan_tier::record::PlanClass;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let p = Planned::with_dead_units("cancel-between", 2);

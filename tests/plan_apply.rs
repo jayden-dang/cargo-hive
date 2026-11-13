@@ -7,8 +7,8 @@ mod common;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 
-use common::plan_fixture::{tree, Planned};
-use common::{init_repo, interrupt, register, wait_until_open, wait_within, Hive, Scratch};
+use common::plan_fixture::{Planned, tree};
+use common::{Hive, Scratch, init_repo, interrupt, register, wait_until_open, wait_within};
 
 fn write_caps(p: &Planned, disabled: serde_json::Value) {
     let release = cargo_hive::toolchain::resolve_toolchain(&p.hive.home.path)

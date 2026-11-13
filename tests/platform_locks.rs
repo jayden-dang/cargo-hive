@@ -76,11 +76,13 @@ fn the_exclusive_try_never_creates_follows_or_blocks() {
         "a symlink was followed"
     );
     let fifo = s.path.join("fifo.lock");
-    assert!(std::process::Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
     let started = Instant::now();
     assert!(matches!(
         apfs().try_lock_exclusive(&fifo),
@@ -152,7 +154,8 @@ fn an_acquired_lock_reports_the_identity_of_the_file_it_opened() {
     std::fs::write(&path, b"").unwrap();
     let fs = apfs();
     let stat = fs.entry_stat(&path).unwrap();
-    match fs.try_lock_exclusive(&path) {
+    let attempt = fs.try_lock_exclusive(&path);
+    match attempt {
         TryLock::Acquired(held) => assert_eq!(held.identity(), Some((stat.dev, stat.ino))),
         other => panic!("expected Acquired, got {other:?}"),
     }

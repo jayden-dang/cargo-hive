@@ -7,7 +7,7 @@ use cargo_hive::platform;
 use clap::CommandFactory;
 use common::cargo_fixture::*;
 use common::prove::{self, WindowOutcome};
-use common::{init_repo, register, Hive, Scratch};
+use common::{Hive, Scratch, init_repo, register};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -130,10 +130,12 @@ fn a_dead_example_lists_its_examples_entries() {
         .collect();
     owned.sort();
     assert!(!owned.is_empty());
-    let mut expected = vec![old_example
-        .profile
-        .join(".fingerprint")
-        .join(&old_example.dir_name)];
+    let mut expected = vec![
+        old_example
+            .profile
+            .join(".fingerprint")
+            .join(&old_example.dir_name),
+    ];
     expected.extend(owned);
     let files = &dead
         .iter()
@@ -158,12 +160,13 @@ fn a_build_script_unit_is_never_dead_and_its_run_timestamp_in_build_is_a_root() 
     assert!(dead.iter().all(|d| d.unit != script && d.unit != run));
 
     set_mtime(&timestamp_of(&run, "run-build-script"), SystemTime::now());
-    assert!(run
-        .profile
-        .join("build")
-        .join(&run.dir_name)
-        .join("invoked.timestamp")
-        .exists());
+    assert!(
+        run.profile
+            .join("build")
+            .join(&run.dir_name)
+            .join("invoked.timestamp")
+            .exists()
+    );
 
     let (live, dead) = decide(&fx.target);
     assert_eq!(live, BTreeSet::from([run.clone(), script.clone()]));
@@ -524,9 +527,11 @@ fn a_config_that_redirects_artifacts_is_refused() {
         "[build]\nartifact-dir=\"/x\"\n",
     )
     .unwrap();
-    assert!(prove::check_config(&work)
-        .unwrap_err()
-        .contains("artifact-dir"));
+    assert!(
+        prove::check_config(&work)
+            .unwrap_err()
+            .contains("artifact-dir")
+    );
     fs::write(s.path.join("a/.cargo/config.toml"), "[build]\njobs = 2\n").unwrap();
     assert!(prove::check_config(&work).is_ok());
     fs::write(s.path.join("a/.cargo/config.toml"), vec![b'#'; 1 << 20]).unwrap();
@@ -668,24 +673,30 @@ fn config_scan_covers_home_relative_checkout_and_relative_cargo_home() {
     let home = root.join("home");
     fs::create_dir_all(home.join(".cargo")).unwrap();
     fs::write(home.join(".cargo/config.toml"), bad).unwrap();
-    assert!(scan(&work, &root, None, Some(&home))
-        .unwrap_err()
-        .contains("home/.cargo/config.toml"));
+    assert!(
+        scan(&work, &root, None, Some(&home))
+            .unwrap_err()
+            .contains("home/.cargo/config.toml")
+    );
     assert!(scan(&work, &root, Some("ch"), Some(&home)).is_ok());
     assert!(scan(&work, &root, None, None).is_ok());
     // A relative checkout is resolved against the cwd, so its real ancestors are scanned.
     fs::create_dir_all(root.join("w/.cargo")).unwrap();
     fs::write(root.join("w/.cargo/config.toml"), bad).unwrap();
-    assert!(scan(Path::new("checkout"), &root.join("w"), None, None)
-        .unwrap_err()
-        .contains("w/.cargo/config.toml"));
+    assert!(
+        scan(Path::new("checkout"), &root.join("w"), None, None)
+            .unwrap_err()
+            .contains("w/.cargo/config.toml")
+    );
     fs::remove_file(root.join("w/.cargo/config.toml")).unwrap();
     // A relative CARGO_HOME is resolved against the checkout.
     fs::create_dir_all(work.join("ch")).unwrap();
     fs::write(work.join("ch/config.toml"), bad).unwrap();
-    assert!(scan(&work, &root, Some("ch"), None)
-        .unwrap_err()
-        .contains("checkout/ch/config.toml"));
+    assert!(
+        scan(&work, &root, Some("ch"), None)
+            .unwrap_err()
+            .contains("checkout/ch/config.toml")
+    );
 }
 
 #[test]
@@ -857,21 +868,31 @@ fn a_window_is_vacuous_when_undecided_empty_failed_or_silent() {
         live: vec![],
         dead: vec![dead(vec![])],
     };
-    assert!(prove::vacuous_reason(&undecided, &[0], &[1])
-        .unwrap()
-        .contains("undecided"));
-    assert!(prove::vacuous_reason(&empty, &[0], &[1])
-        .unwrap()
-        .contains("no dead unit"));
-    assert!(prove::vacuous_reason(&unlisted, &[0], &[1])
-        .unwrap()
-        .contains("no dead unit"));
-    assert!(prove::vacuous_reason(&listed, &[0, 101], &[1, 1])
-        .unwrap()
-        .contains("101"));
-    assert!(prove::vacuous_reason(&listed, &[0, 0], &[1, 0])
-        .unwrap()
-        .contains("compiler-artifact"));
+    assert!(
+        prove::vacuous_reason(&undecided, &[0], &[1])
+            .unwrap()
+            .contains("undecided")
+    );
+    assert!(
+        prove::vacuous_reason(&empty, &[0], &[1])
+            .unwrap()
+            .contains("no dead unit")
+    );
+    assert!(
+        prove::vacuous_reason(&unlisted, &[0], &[1])
+            .unwrap()
+            .contains("no dead unit")
+    );
+    assert!(
+        prove::vacuous_reason(&listed, &[0, 101], &[1, 1])
+            .unwrap()
+            .contains("101")
+    );
+    assert!(
+        prove::vacuous_reason(&listed, &[0, 0], &[1, 0])
+            .unwrap()
+            .contains("compiler-artifact")
+    );
     assert_eq!(prove::vacuous_reason(&listed, &[0, 0], &[3, 1]), None);
     assert_eq!(prove::vacuous_reason(&listed, &[], &[]), None);
 }
@@ -1098,8 +1119,8 @@ fn no_clone_left(scratch: &Path) {
 }
 
 #[test]
-fn the_proof_passes_a_window_whose_dead_units_cargo_does_not_need_and_calls_an_empty_window_vacuous(
-) {
+fn the_proof_passes_a_window_whose_dead_units_cargo_does_not_need_and_calls_an_empty_window_vacuous()
+ {
     let fx = proof_fixture("prove-pass");
     let scratch = Scratch::new("prove-scratch");
     let before = prove::walk(&fx.target, 5_000_000).unwrap();
@@ -1226,7 +1247,9 @@ fn a_volume_that_cannot_clone_fails_before_copying() {
 
 type Sources = std::rc::Rc<std::cell::RefCell<Vec<(String, PathBuf)>>>;
 
-fn recording_cloner(sources: &Sources) -> impl Fn(&Path, &str, &Path, &Path) -> Result<(), String> {
+fn recording_cloner(
+    sources: &Sources,
+) -> impl Fn(&Path, &str, &Path, &Path) -> Result<(), String> + use<> {
     let sources = sources.clone();
     move |_scratch, label, source, dest| {
         sources
@@ -1530,13 +1553,13 @@ fn the_profile_locks_are_free_while_the_warm_up_runs_and_the_hold_time_is_report
         if label == "warm-up" {
             let platform = platform::current().unwrap();
             for profile in &profiles {
-                match platform
+                let attempt = platform
                     .fs
-                    .try_lock_exclusive(&profile.join(".cargo-build-lock"))
-                {
+                    .try_lock_exclusive(&profile.join(".cargo-build-lock"));
+                match attempt {
                     platform::TryLock::Acquired(_) => {}
                     other => {
-                        return Err(format!("{} is still locked: {other:?}", profile.display()))
+                        return Err(format!("{} is still locked: {other:?}", profile.display()));
                     }
                 }
             }

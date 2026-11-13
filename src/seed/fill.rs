@@ -20,7 +20,7 @@ use crate::registry::Repo;
 use crate::seed::source::{self, Skip, SourceUnit};
 use crate::seed::store::{self, PublishFailed, Published, Row};
 use crate::size::MAX_DEPTH;
-use crate::state::{window_days, StateError};
+use crate::state::{StateError, window_days};
 
 use super::Error;
 
@@ -441,26 +441,26 @@ fn clone_unit(
     for rel in files {
         let src = target.path.join(rel);
         let dst = tmp.join(rel);
-        if let Some(parent) = dst.parent() {
-            if let Err(err) = std::fs::create_dir_all(parent) {
-                abandon(&tmp);
-                let detail = format!(
-                    "{}: {}: {err}; remove the temp directory and run the command again",
-                    target.path.display(),
-                    parent.display()
-                );
-                return match stop_io(&err, &detail) {
-                    Stop::Full(why) => Err(why),
-                    Stop::Failed(detail) => {
-                        report.findings.push((
-                            "store.tmp".to_string(),
-                            Some(target.path.clone()),
-                            detail,
-                        ));
-                        Ok(ClonedUnit::Skip)
-                    }
-                };
-            }
+        if let Some(parent) = dst.parent()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            abandon(&tmp);
+            let detail = format!(
+                "{}: {}: {err}; remove the temp directory and run the command again",
+                target.path.display(),
+                parent.display()
+            );
+            return match stop_io(&err, &detail) {
+                Stop::Full(why) => Err(why),
+                Stop::Failed(detail) => {
+                    report.findings.push((
+                        "store.tmp".to_string(),
+                        Some(target.path.clone()),
+                        detail,
+                    ));
+                    Ok(ClonedUnit::Skip)
+                }
+            };
         }
         let stat = match ctx.fs.entry_stat(&src) {
             Ok(stat) => stat,
@@ -721,16 +721,16 @@ fn clone_tag(ctx: &Ctx<'_>, target: &TargetDir) -> Result<(), Stop> {
         return Ok(());
     }
     let src = target.path.join("CACHEDIR.TAG");
-    if let Some(parent) = dst.parent() {
-        if let Err(err) = std::fs::create_dir_all(parent) {
-            return Err(stop_io(
-                &err,
-                &format!(
-                    "{}: {err}; remove the store directory and run the command again",
-                    parent.display()
-                ),
-            ));
-        }
+    if let Some(parent) = dst.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        return Err(stop_io(
+            &err,
+            &format!(
+                "{}: {err}; remove the store directory and run the command again",
+                parent.display()
+            ),
+        ));
     }
     match ctx.fs.clone_file(&src, &dst) {
         Ok(()) => Ok(()),

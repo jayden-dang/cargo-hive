@@ -1,5 +1,5 @@
 mod common;
-use common::{init_repo, Hive, Scratch};
+use common::{Hive, Scratch, init_repo};
 use std::fs;
 
 fn refusal(receipt: &serde_json::Value) -> String {
@@ -14,10 +14,11 @@ fn refusal(receipt: &serde_json::Value) -> String {
 
 fn registered(hive: &Hive, s: &Scratch) -> String {
     let repo = init_repo(&s.path.join("app"), "");
-    assert!(hive
-        .run(&["repo", "add", repo.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        hive.run(&["repo", "add", repo.to_str().unwrap()])
+            .status
+            .success()
+    );
     repo.display().to_string()
 }
 

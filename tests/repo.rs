@@ -1,5 +1,5 @@
 mod common;
-use common::{git, init_repo, Hive, Scratch};
+use common::{Hive, Scratch, git, init_repo};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
@@ -44,10 +44,11 @@ fn a_cargo_manifest_two_levels_down_is_accepted_and_three_levels_down_is_refused
     let hive = Hive::new();
     let s = Scratch::new("depth");
     let ok = init_repo(&s.path.join("ok"), "backend/api");
-    assert!(hive
-        .run(&["repo", "add", ok.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        hive.run(&["repo", "add", ok.to_str().unwrap()])
+            .status
+            .success()
+    );
     let deep = init_repo(&s.path.join("deep"), "a/b/c");
     let (out, receipt) = hive.json(&["repo", "add", deep.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(1));
@@ -204,19 +205,22 @@ fn registering_twice_leaves_the_registry_unchanged() {
     let hive = Hive::new();
     let s = Scratch::new("twice");
     let repo = init_repo(&s.path.join("app"), "");
-    assert!(hive
-        .run(&["repo", "add", repo.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        hive.run(&["repo", "add", repo.to_str().unwrap()])
+            .status
+            .success()
+    );
     let before = fs::read(hive.home.path.join("registry.json")).unwrap();
     let (out, receipt) = hive.json(&["repo", "add", repo.to_str().unwrap()]);
     assert!(out.status.success());
     assert_eq!(receipt["counts"]["registered"], 0);
-    assert!(receipt["notes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|n| n.as_str().unwrap().contains("already registered")));
+    assert!(
+        receipt["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap().contains("already registered"))
+    );
     assert_eq!(
         fs::read(hive.home.path.join("registry.json")).unwrap(),
         before
@@ -240,10 +244,11 @@ fn remove_unregisters_a_repo_named_by_a_path_inside_it() {
     let a = init_repo(&s.path.join("a"), "");
     let b = init_repo(&s.path.join("b"), "");
     for repo in [&a, &b] {
-        assert!(hive
-            .run(&["repo", "add", repo.to_str().unwrap()])
-            .status
-            .success());
+        assert!(
+            hive.run(&["repo", "add", repo.to_str().unwrap()])
+                .status
+                .success()
+        );
     }
     let (out, receipt) = hive.json(&["repo", "remove", a.join("src").to_str().unwrap()]);
     assert!(out.status.success(), "{receipt}");
@@ -261,10 +266,11 @@ fn remove_takes_a_repo_whose_main_checkout_is_gone() {
     let hive = Hive::new();
     let s = Scratch::new("remove-gone");
     let gone = init_repo(&s.path.join("gone"), "");
-    assert!(hive
-        .run(&["repo", "add", gone.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        hive.run(&["repo", "add", gone.to_str().unwrap()])
+            .status
+            .success()
+    );
     fs::remove_dir_all(&gone).unwrap();
     let (out, receipt) = hive.json(&["repo", "remove", gone.to_str().unwrap()]);
     assert!(out.status.success(), "{receipt}");
@@ -279,10 +285,11 @@ fn remove_missing_drops_every_repo_whose_main_checkout_is_gone() {
     let kept = init_repo(&s.path.join("kept"), "");
     let gone = init_repo(&s.path.join("gone"), "");
     for repo in [&kept, &gone] {
-        assert!(hive
-            .run(&["repo", "add", repo.to_str().unwrap()])
-            .status
-            .success());
+        assert!(
+            hive.run(&["repo", "add", repo.to_str().unwrap()])
+                .status
+                .success()
+        );
     }
     fs::remove_dir_all(&gone).unwrap();
     let (out, receipt) = hive.json(&["repo", "remove", "--missing"]);
@@ -297,10 +304,11 @@ fn remove_of_an_unregistered_path_is_refused_and_removes_nothing() {
     let s = Scratch::new("remove-unknown");
     let a = init_repo(&s.path.join("a"), "");
     let other = init_repo(&s.path.join("other"), "");
-    assert!(hive
-        .run(&["repo", "add", a.to_str().unwrap()])
-        .status
-        .success());
+    assert!(
+        hive.run(&["repo", "add", a.to_str().unwrap()])
+            .status
+            .success()
+    );
     let (out, receipt) = hive.json(&[
         "repo",
         "remove",

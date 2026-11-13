@@ -133,10 +133,10 @@ fn check_against_spec(dir: &str, text: &str) -> Result<(), String> {
             return Err(format!("description must contain {needle:?}"));
         }
     }
-    if let Some(c) = get(&fm.keys, "compatibility") {
-        if c.chars().count() > 500 {
-            return Err("compatibility is longer than 500 characters".to_string());
-        }
+    if let Some(c) = get(&fm.keys, "compatibility")
+        && c.chars().count() > 500
+    {
+        return Err("compatibility is longer than 500 characters".to_string());
     }
     Ok(())
 }
@@ -185,7 +185,9 @@ fn skill_frontmatter_follows_the_spec() {
         ),
         (
             "hive",
-            format!("---\nmetadata:\n  a: \"1\"\nname: hive\nmetadata:\n  b: \"2\"\n{ok_desc}\n---\nbody"),
+            format!(
+                "---\nmetadata:\n  a: \"1\"\nname: hive\nmetadata:\n  b: \"2\"\n{ok_desc}\n---\nbody"
+            ),
             "second metadata",
         ),
         (
@@ -432,14 +434,14 @@ enum Parsed {
 
 fn parse(words: &[String]) -> Result<Parsed, String> {
     use cargo_hive::cli::{Cli, Command, RepoCommand};
-    use clap::error::ErrorKind;
     use clap::Parser;
+    use clap::error::ErrorKind;
 
     let argv = std::iter::once("cargo-hive".to_string()).chain(words.iter().cloned());
     let cli = match Cli::try_parse_from(argv) {
         Ok(cli) => cli,
         Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
-            return Ok(Parsed::Info)
+            return Ok(Parsed::Info);
         }
         Err(e) => return Err(e.to_string()),
     };
@@ -930,9 +932,11 @@ fn eval_entries_carry_their_evidence() {
         ["a b."]
     );
     assert!(skill_quotes("no quote here").unwrap().is_empty());
-    assert!(skill_quotes("The skill says: \"never closed")
-        .unwrap_err()
-        .contains("never closed"));
+    assert!(
+        skill_quotes("The skill says: \"never closed")
+            .unwrap_err()
+            .contains("never closed")
+    );
     let evals = manifest("skills/hive/eval.json");
     let entries = evals.as_array().expect("eval.json is an array");
     assert!(!entries.is_empty(), "eval.json has no entries");
@@ -1080,9 +1084,11 @@ fn the_name_check_places_every_kind_of_span() {
     }
     let lits = |v: &[&str]| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
     let defined = lits(&["cold_build_ms", "{series}_median"]);
-    assert!(names::bench_series(&defined, "cold_build_ms_median")
-        .unwrap()
-        .is_ok());
+    assert!(
+        names::bench_series(&defined, "cold_build_ms_median")
+            .unwrap()
+            .is_ok()
+    );
     assert!(
         names::bench_series(&lits(&["cold_build_ms"]), "cold_build_ms_median")
             .unwrap()

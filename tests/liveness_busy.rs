@@ -6,9 +6,9 @@
 mod common;
 use cargo_hive::liveness::{Liveness, Uncertain, UnitRef};
 use cargo_hive::platform;
+use common::Scratch;
 use common::cargo_fixture::*;
 use common::prove::{self, WindowOutcome};
-use common::Scratch;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};

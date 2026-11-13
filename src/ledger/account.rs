@@ -2,7 +2,7 @@
 //! following links; a file or a symlink is one entry, from a single stat. A dry run measures
 //! and leaves the path in place. A path that is already gone counts nothing.
 
-use super::{record, scan, Ledger};
+use super::{Ledger, record, scan};
 use crate::platform::{EntryKind, EntryStat, Fs};
 use std::fmt;
 use std::io;

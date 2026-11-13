@@ -1,10 +1,10 @@
 //! Read-only liveness report for comparing releases against a fixed target.
 
-use cargo_hive::cargo_target::{identify, Owner, TargetDir};
+use cargo_hive::cargo_target::{Owner, TargetDir, identify};
 use cargo_hive::fingerprint::read_profile;
 use cargo_hive::gc::liveness::liveness;
 use cargo_hive::liveness::Liveness;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
