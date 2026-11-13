@@ -97,7 +97,9 @@ the unchanged suite plus the SPLIT-4.1 liveness comparison prove the results equ
    - `UnitId(u32)` for unit indexes;
    - `UnitHash(u64)` for unit hashes, parsed from and printed as 16 lowercase hex;
    - `UnitKind`, an enum of the nine `KINDS` names (fingerprint.rs:31), including `Other` = `"other"`;
-   - a CSR graph (`offsets: Vec<u32>`, `targets: Vec<UnitId>`) with a bitset closure, in place of
+   - a CSR graph per profile (`offsets: Vec<u32>`, `targets: Vec<UnitId>`) plus a `BitSet` for the live marks
+     of the closure walk, which keeps its lazy target-wide edge resolution so `Uncertain` reasons stay as in 0.1.0
+     (plan review, tasks.md Task 25), in place of
      `Vec<(usize, usize)>` and `HashMap<&str, Vec<usize>>`.
 
    `UnitGraph` is never serialized to output (`ProfileReport.graph` is `#[serde(skip)]`, fingerprint.rs:130-131).
@@ -153,7 +155,7 @@ Satisfies: SPLIT-2.1 (owner of the barred constructs), SPLIT-3.8, SPLIT-2.7
 Reuse: rung 2 — src/platform/{mod,apfs}.rs stay as they are (`Fs` trait mod.rs:295, `Apfs` apfs.rs:47, lock
 self-exec apfs.rs:172-245, `current()` mod.rs:444-455). These items move in unchanged:
 - the spawn runner `output_with_deadline`, `run_bounded`, `Capture`, `Ran`, `ChildOutputError`, `kill_pgid`
-  (cargo_target.rs:236-389);
+  (cargo_target.rs:217-550, through `finish_readers`);
 - signals `CANCEL`, `on_signal`, `install_signal_handlers` and `kill(pid, 0)` (doctor.rs:179-233);
 - the three `flock` loops (state.rs:164-215);
 - `utc_date`/`utc_timestamp` (state.rs);
@@ -228,11 +230,11 @@ Interface:
 - `ledger::{Ledger, Tally, measure, Footprint, remove_counted, RemoveFailed}`, `caps::{CRATE_DIR_CAP, DEPS_CAP}`;
 - `receipt::{Receipt, Scope, Measured, CheckRecord, Finding, Unmeasured, Outcome, PlanRecord, ReasonRecord,
   UndecidedRecord, SCHEMA}`; `classify::{classify, Class, CheckoutKind}`; `size::{tree_size, MAX_DEPTH}`;
-  `locks::{try_lock_target, Acquired, Locked}`.
+  `locks::{acquire, acquire_capped, Acquired, Locked, Reason}`.
 Depth: the moved modules extend existing code. These new parts are rung 7:
 - `UnitId`, `UnitHash`, `UnitKind`: small value types. Callers keep knowing "an id, a hash that prints as 16 hex,
   a kind that prints as one of nine names".
-- the CSR graph: callers keep `successors(id)` and `closure(roots) -> BitSet`.
+- the CSR graph: callers keep `successors(id)` and `edge_count()`; `BitSet` keeps `insert`/`contains`.
 - `LivenessFn`: callers keep one function signature.
 
 Each interface is a line long and hides parsing, layout or the walk. Editing `embedded_hashes` or

@@ -88,7 +88,10 @@ Modified (then moved under `crates/<role>/src/` by Tasks 15–21 as pure moves):
 **Interfaces:**
 - Consumes: `cargo_hive::cli::Cli` (clap `CommandFactory`), present in 0.1.0 and after every task.
 - Produces: `fn dump(cmd: &clap::Command, depth: usize, out: &mut String)` — one line per command, argument,
-  flag, default and help string, sorted by name, hidden items included, with `--version` text excluded.
+  flag, default and help string, sorted by name, hidden items included, with `--version` text excluded, plus
+  each command's rendered long help (clap's `render_long_help`, which also covers value names, `num_args`,
+  conflicts, aliases and `after_help`). The version number appears only in the version flag, which the
+  dump filters out.
 
 **Depends-on:** none
 
@@ -113,6 +116,7 @@ fn dump(cmd: &clap::Command, depth: usize, out: &mut String) {
             a.get_default_values(), a.get_help().map(|h| h.to_string()),
             a.get_long_help().map(|h| h.to_string())));
     }
+    out.push_str(&format!("{pad}  long_help_render:\n{}\n", cmd.clone().render_long_help()));
     let mut subs: Vec<_> = cmd.get_subcommands().collect();
     subs.sort_by_key(|s| s.get_name().to_string());
     for s in subs { dump(s, depth + 1, out); }
@@ -147,40 +151,55 @@ _Requirements: SPLIT-3.1_
 
 **Files:**
 - Create: `tests/capture.rs`
+- Modify: `tests/common/mod.rs` (add `Hive::command_with`; `Hive::command` at line 97 calls it with `env!("CARGO_BIN_EXE_cargo-hive")`)
 - Test: `tests/capture.rs`
 
-**Reuse:** rung 2 — `tests/common/mod.rs` `Hive` (`Hive::new`, `json_env`, `run`), `tests/common/cargo_fixture.rs` `fixture`, `cargo`.
+**Reuse:** rung 2 — `tests/common/mod.rs` `Hive` (env setup at lines 97-106), `tests/common/registry_fixture.rs` `RegistryRepo::new` and `RegistryRepo::worktree` (line 152), `tests/common/cargo_fixture.rs` `cargo`.
 
 **Interfaces:**
-- Consumes: `HIVE_V010_BIN`, the path of a `cargo-hive` built from the v0.1.0 export
+- Consumes: the v0.1.0 export at `/private/tmp/hive-0.1.0` (Task 1) and `HIVE_V010_BIN`
   (`/private/tmp/hive-0.1.0/target/debug/cargo-hive`).
-- Produces: `fn normalized(v: &serde_json::Value) -> serde_json::Value`, which replaces the values of
-  `hive_version`, `ts`, `made_at`, `attempted_at` and every `*_ms` key with `"<n>"`; and
-  `fn run_sequence(bin: &Path, home: &Path, repo: &Path) -> Vec<(String, serde_json::Value, i32)>`, which runs, in
-  order:
-  - `doctor --json`
-  - `repo add <repo> --json`
-  - `status --json`
-  - `status <repo> --no-sizes --json`
-  - `explain <repo> --json`
-  - `gc --plan --json`
-  - `seed --json` on a secondary worktree
-  - `repo list --json`
+- Produces:
+  - `Hive::command_with(&self, bin: &Path, args: &[&str]) -> Command`, which applies the same `HIVE_HOME`,
+    `CARGO_HOME` and `env_remove` set as `Hive::command`;
+  - a fixed layout `/private/tmp/hive-capture/{golden,work,home}`;
+  - `fn normalized(v: &serde_json::Value) -> serde_json::Value`, which replaces the values of these keys,
+    wherever they appear, with `"<n>"`:
+    - `id`, `at`, `ts`, `made_at`, `attempted_at`, `written_at`;
+    - `filled_at`, `last_live_at`, `newest_at`, `stamp`, `identity`, `root_dev`, `root_ino`.
 
-**Depends-on:** none
+    `hive_version` is compared literally, since both binaries are 0.1.0 until a release bumps it.
+  - `fn run_sequence(bin: &Path) -> Vec<(String, serde_json::Value, i32)>`. It first resets `work` and `home`
+    (`rm -rf`, then `cp -cR golden work`) so both binaries see the same absolute paths. It writes
+    `{"cache_roots": ["/private/tmp/hive-capture/home/no-cache"]}` with `Hive::config`. Then it runs, in order:
+    - `doctor --json`
+    - `repo add /private/tmp/hive-capture/work/main --json`
+    - `status --json`
+    - `status /private/tmp/hive-capture/work/main --no-sizes --json`
+    - `explain /private/tmp/hive-capture/work/main --json`
+    - `gc --plan --json`
+    - `seed /private/tmp/hive-capture/work/wt --json`
+    - `repo list --json`
 
-- [ ] **Step 1: Write the failing test.** Add `#[test] #[ignore]` `same_inputs_give_the_same_output_and_state`.
-  It builds one `cargo_fixture::fixture("capture")` repo, makes two copies of it under `/private/tmp`, and runs
-  `run_sequence` with the current binary (`env!("CARGO_BIN_EXE_cargo-hive")`) on one copy and with
-  `HIVE_V010_BIN` on the other. It asserts the `normalized` JSON and exit codes are pairwise equal, and that every
-  file under each `HIVE_HOME` except `receipts/` is byte-equal after `hive_version`/clock normalization of JSON
-  files. A second test, `state_written_by_0_1_0_reads_unchanged`, lets the v0.1.0 binary write a state root, runs
-  `status --json` and `gc --plan --json` on it with the current binary, and asserts both exit 0, no file is
-  refused or reset, and the files equal what the v0.1.0 binary leaves after the same two commands.
-  Run: `cargo test --test capture -- --ignored`. Expect: it fails at `std::env::var("HIVE_V010_BIN")` with a
-  message naming the variable.
-- [ ] **Step 2: Build the v0.1.0 binary.** Run `cargo build --offline` in `/private/tmp/hive-0.1.0`
-  (export from Task 1).
+**Depends-on:** Task 1
+
+- [ ] **Step 1: Write the failing test.** `#[test] #[ignore] fn same_inputs_give_the_same_output_and_state()`.
+  1. Build `golden` once with `RegistryRepo::new` (a git main with a registry dependency), a linked worktree
+     `wt` (`RegistryRepo::worktree("wt")`), and one `cargo_fixture::cargo` build in each.
+  2. Run `run_sequence` with the current binary, then move `home` to `home-new`.
+  3. Run `run_sequence` with `HIVE_V010_BIN`, then move `home` to `home-old`.
+  4. Assert the `normalized` JSON and exit codes are pairwise equal, and every file under `home-new` equals its
+     twin under `home-old` (JSON files compared after `normalized`, others byte for byte).
+
+  A second test, `state_written_by_0_1_0_reads_unchanged`:
+  1. Run `run_sequence` with `HIVE_V010_BIN`.
+  2. Copy `home` twice.
+  3. Run `status --json` and `gc --plan --json` on one copy with the current binary and on the other with
+     `HIVE_V010_BIN`.
+  4. Assert both exit 0 and the two homes are equal under the same normalization.
+
+  Run: `cargo test --test capture -- --ignored`. Expect: a panic naming `HIVE_V010_BIN`.
+- [ ] **Step 2: Build the v0.1.0 binary.** Run `cargo build --offline` in `/private/tmp/hive-0.1.0`.
 - [ ] **Step 3: Run and pass.** `HIVE_V010_BIN=/private/tmp/hive-0.1.0/target/debug/cargo-hive cargo test --test
   capture -- --ignored` passes on this branch.
 - [ ] **Step 4: Commit.** `git commit -m "test: compare output and state with the 0.1.0 binary"`
@@ -200,9 +219,11 @@ _Requirements: SPLIT-3.2, SPLIT-4.2, SPLIT-4.3_
 - Consumes: env `HIVE_REPORT_TARGET`, `HIVE_REPORT_NOW` (unix seconds), `HIVE_REPORT_WINDOW_DAYS`,
   `HIVE_REPORT_OUT` (a path under `/private/tmp`).
 - Produces: a JSON file `{"live": [[profile, dir_name]…], "dead": [[profile, dir_name]…], "undecided": [String…]}`,
-  each list sorted.
+  each list sorted. Checkpoint rule (Tasks 12, 22, 25): klynt's target changes between checkpoints, so each
+  checkpoint re-runs the report from `/private/tmp/hive-0.1.0` and then from this branch, back to back, with the
+  same `HIVE_REPORT_NOW` and window, and compares those two files.
 
-**Depends-on:** none
+**Depends-on:** Task 1
 
 - [ ] **Step 1: Write the test.** `#[test] #[ignore] fn report()` builds `TargetDir { path, owner:
   Owner::Unresolved { reason: "report".into() }, profiles: <read_profile of each profile dir from identify>,
@@ -213,10 +234,11 @@ _Requirements: SPLIT-3.2, SPLIT-4.2, SPLIT-4.3_
 - [ ] **Step 2: Baseline on klynt (manual, proof machine).** Copy the file into `/private/tmp/hive-0.1.0/tests/`
   and run it there with `HIVE_REPORT_TARGET=~/Developer/klynt/klynt/target`, a fixed `HIVE_REPORT_NOW` and
   `HIVE_REPORT_WINDOW_DAYS=7`, writing `/private/tmp/hive-split/live-0.1.0.json`. Then run it on this branch
-  with the same values, writing `/private/tmp/hive-split/live-step0.json`. Expect `cmp` to print nothing.
+  with the same values, writing `/private/tmp/hive-split/live-step0.json`. Expect `cmp` of the two files to print
+  nothing.
   Record both commands and the `now` value in `.skills/_pending-workspace-split/auto/evidence.md`.
 - [ ] **Step 3: Build-time baseline (manual, same session).** In `/private/tmp/hive-0.1.0`, append one comment
-  line to `src/gc/run.rs`, run `cargo build --offline` and time it. Do this 5 times, restoring the line each time,
+  line to `src/gc/run.rs` (the file Task 28 edits is the same code at `crates/gc/src/gc/run.rs`), run `cargo build --offline` and time it. Do this 5 times, restoring the line each time,
   and record the median in the same evidence file.
 - [ ] **Step 4: Commit.** `git commit -m "test: read-only liveness report for comparing releases"`
 
@@ -228,7 +250,7 @@ _Requirements: SPLIT-4.1, SPLIT-8.1_
 
 **Files:**
 - Create: `src/platform/proc.rs`
-- Modify: `src/platform/mod.rs`, `src/cargo_target.rs` (runner at lines 217-389 moves out), `src/git.rs`, `src/doctor.rs`, `src/bench/command.rs`, `src/bench/mod.rs`, `src/cli.rs`
+- Modify: `src/platform/mod.rs`, `src/cargo_target.rs` (runner at lines 217-550, through `finish_readers`, plus its `CommandExt`/`mpsc`/`thread` imports, moves out), `src/git.rs`, `src/doctor.rs`, `src/bench/command.rs`, `src/bench/mod.rs`, `src/cli.rs`, and every `tests/*.rs` that imports `cargo_hive::cargo_target::{run_bounded, Capture, ChildOutputError, …}` (find them with `grep -rln 'cargo_target::' tests`)
 - Test: `src/platform/proc.rs`
 
 **Reuse:** rung 2 — src/platform/{mod,apfs}.rs stay as they are (`Fs` trait mod.rs:295, `Apfs` apfs.rs:47, lock self-exec apfs.rs:172-245, `current()` mod.rs:444-455); the spawn runner `output_with_deadline`, `run_bounded`, `Capture`, `Ran`, `ChildOutputError`, `kill_pgid` (cargo_target.rs:236-389) moves in unchanged.
@@ -253,8 +275,10 @@ _Requirements: SPLIT-4.1, SPLIT-8.1_
 
   Run `cargo test --lib platform::proc::`. Expect: a compile error, because `platform::proc` does not exist.
 - [ ] **Step 2: Implement.** Move the runner from `cargo_target.rs` into `proc.rs`, taking `&Spec` and building
-  `std::process::Command` inside. Rewrite the nine production spawn sites (design-scan.md §2.1) to build a `Spec`
-  with the same program, args, cwd and env calls as today. Re-export nothing from `cargo_target`.
+  `std::process::Command` inside. Rewrite the six production spawn sites outside platform to build a `Spec` with
+  the same program, args, cwd and env calls as today: cargo_target.rs:554, git.rs:64, doctor.rs:428, :514, :748
+  and bench/command.rs:142. The three sites already in platform (platform/mod.rs:24, apfs.rs:172, :238) move to
+  `Spec` too. Re-export nothing from `cargo_target`.
 - [ ] **Step 3: Run.** `cargo test` (whole suite) and `cargo test --test cli_tree` pass, and
   `HIVE_V010_BIN=… cargo test --test capture -- --ignored` passes.
 - [ ] **Step 4: Commit.** `git commit -m "refactor(platform): own child-process spawning"`
@@ -274,10 +298,19 @@ _Requirements: SPLIT-2.5_
 
 **Interfaces:**
 - Consumes: `platform::proc::Spec` (Task 4).
-- Produces: `env::metadata(&mut Spec)`, `env::git(&mut Spec)`, `env::rustup_which(&mut Spec, ResolveEnv)`,
-  `env::probe_build(&mut Spec, …same args doctor.rs:748 uses today…)`, `env::timed_build(&mut Spec, &Toolchain)`;
-  `fn child_env(spec: &Spec, parent: &[(OsString, OsString)]) -> BTreeMap<OsString, OsString>` (test helper,
-  `#[cfg(test)]`), which applies `env_clear`/`env_remove`/`env_set` to a given parent environment.
+- Produces: `env` owns `pub enum ResolveEnv` (moved from doctor.rs, same variants) and takes plain data, never
+  `Toolchain`, so `toolchain` may depend on `env` and not the reverse. Each builder takes the parent environment
+  as a parameter; production passes `&std::env::vars_os().collect::<Vec<_>>()`:
+  - `env::metadata(spec: &mut Spec, parent: &[(OsString, OsString)])`;
+  - `env::git(spec: &mut Spec, parent: &[(OsString, OsString)])`;
+  - `env::rustup_which(spec: &mut Spec, parent: &[(OsString, OsString)], how: ResolveEnv)`;
+  - `env::probe_build(spec: &mut Spec, parent: &[(OsString, OsString)], cargo_home: &Path, rustup_home: &Path,
+    toolchain_name: &OsStr)`, with the values doctor.rs:748-760 passes today;
+  - `env::timed_build(spec: &mut Spec, parent: &[(OsString, OsString)], cargo: &Path, rustc: &Path,
+    toolchain_name: &OsStr)`, with the values bench/command.rs:84-143 reads from `Toolchain` today.
+
+  `#[cfg(test)] fn child_env(spec: &Spec, parent: &[(OsString, OsString)]) -> BTreeMap<OsString, OsString>`
+  applies `env_clear`/`env_remove`/`env_set` to the given parent. It never reads the live process environment.
 
 **Depends-on:** Task 4
 
@@ -377,7 +410,7 @@ _Requirements: SPLIT-2.7, SPLIT-2.1_
 
 **Files:**
 - Create: `src/toolchain.rs`, `src/metadata.rs`
-- Modify: `src/doctor.rs` (toolchain family :355-397 and helpers), `src/cargo_target.rs` (`Resolved` :208, `resolve` :553, `caller_overrides` :613, `TARGET_VARS`, `METADATA_DEADLINE`), `src/seed/evict.rs` (lines 12, 572), `src/seed/fill.rs` (line 868), `src/seed/mod.rs` (line 17), `src/discover.rs`, `src/bench/command.rs`, `src/cli.rs`, `src/lib.rs`
+- Modify: `src/doctor.rs` (toolchain family :355-397 and helpers), `src/cargo_target.rs` (`Resolved` :208, `resolve` :553, `caller_overrides` :613, `TARGET_VARS`, `METADATA_DEADLINE`), `src/seed/evict.rs` (lines 12, 572), `src/seed/fill.rs` (line 868), `src/seed/mod.rs` (line 17), `src/discover.rs`, `src/bench/command.rs`, `src/cli.rs`, `src/lib.rs`, and every `tests/*.rs` or `tests/common/*.rs` naming a moved item (`grep -rln 'doctor::\(Toolchain\|resolve_toolchain\)\|cargo_target::\(resolve\|Resolved\|TARGET_VARS\)' tests`)
 - Test: existing doctor and cargo_target unit tests move with their items
 
 **Reuse:** rung 2 — `Resolved` (cargo_target.rs:208), `resolve`, `caller_overrides`, `TARGET_VARS`, `METADATA_DEADLINE` from cargo_target.rs (:208, :553-620); the toolchain family from doctor.rs (`Toolchain`, `resolve_toolchain*`, `drop_directory_toolchain`, `caller_toolchain_kept*`, :355-397 and helpers).
@@ -386,7 +419,7 @@ _Requirements: SPLIT-2.7, SPLIT-2.1_
 - Produces: `toolchain::{Toolchain, ResolveEnv, resolve_toolchain, resolve_toolchain_until,
   resolve_toolchain_own_dir_until, drop_directory_toolchain, caller_toolchain_kept}`;
   `metadata::{Resolved, resolve, caller_overrides, TARGET_VARS, METADATA_DEADLINE}`.
-- Consumes: `env::*` (Task 5).
+- Consumes: `env::*` and `env::ResolveEnv` (Task 5). `toolchain` depends on `env`; `env` never names `Toolchain`.
 
 **Depends-on:** Task 5
 
@@ -405,14 +438,14 @@ _Requirements: SPLIT-1.2, SPLIT-1.3_
 
 **Files:**
 - Create: `src/ctx.rs`, `src/locks.rs`
-- Modify: `src/plan_tier/mod.rs` (lines 18-68), `src/plan_tier/locks.rs` (removed), `src/plan_tier/apply.rs` (line 11), `src/cli.rs` (`cross_check_notes` :915), `src/seed/{mod,fill,place,source,evict}.rs`, `src/bench/mod.rs`, `src/lib.rs`
+- Modify: `src/plan_tier/mod.rs` (lines 18-68), `src/plan_tier/locks.rs` (removed), `src/plan_tier/apply.rs` (line 11), `src/cli.rs` (`cross_check_notes` :915), `src/seed/{mod,fill,place,source,evict}.rs`, `src/bench/mod.rs`, `src/lib.rs`, and every `tests/*.rs` or `tests/common/*.rs` naming `plan_tier::{Ctx, locks, checkout_walk, …}` (`grep -rln 'plan_tier::\(Ctx\|locks\|checkout_walk\|split_checkout_faults\|faults_that\)' tests`)
 - Test: existing plan_tier and seed unit tests
 
 **Reuse:** rung 2 — `Ctx`, `checkout_walk`, `split_checkout_faults`, `faults_that_can_hide_an_owner` from plan_tier/mod.rs:18-68; plan_tier/locks.rs; `cross_check_notes` (cli.rs:915). Moving it removes the plan_tier → cli edge.
 
 **Interfaces:**
 - Produces: `ctx::{Ctx, checkout_walk, split_checkout_faults, faults_that_can_hide_an_owner}`;
-  `locks::{lock_target, Acquired, Locked}` (the names plan_tier/locks.rs has today);
+  `locks::{acquire, acquire_capped, Acquired, Locked, Reason}` (the names plan_tier/locks.rs has today, lines 12-47);
   `plan_tier::apply::cross_check_notes`.
 - Consumes: none new.
 
@@ -433,7 +466,7 @@ _Requirements: SPLIT-1.2, SPLIT-1.3_
 
 **Files:**
 - Create: `src/ledger/mod.rs`, `src/ledger/account.rs`, `src/caps.rs`
-- Modify: `src/gc.rs`, `src/gc/run.rs` (lines 20-22, 59, 384-456), `src/gc/ledger.rs` and `src/gc/account.rs` (removed), `src/liveness.rs` (line 10), `src/explain.rs` (line 11), `src/seed/{evict,fill,place,source,store,mod}.rs`, `src/plan_tier/{apply,orphan,build}.rs`, `src/bench/mod.rs`, `src/lib.rs`
+- Modify: `src/gc.rs`, `src/gc/run.rs` (lines 20-22, 59, 384-456), `src/gc/ledger.rs` and `src/gc/account.rs` (removed), `src/liveness.rs` (line 10), `src/explain.rs` (line 11), `src/locks.rs` (line 44, `CRATE_DIR_CAP`), `src/cli.rs` (line 859), `src/seed/{evict,fill,place,source,store,mod}.rs`, `src/plan_tier/{apply,orphan,build}.rs`, `src/bench/mod.rs`, `src/lib.rs`, and every `tests/*.rs` or `tests/common/*.rs` naming `gc::{Ledger, account, DEPS_CAP, CRATE_DIR_CAP, measure, …}` (`grep -rln 'gc::\(Ledger\|account\|DEPS_CAP\|CRATE_DIR_CAP\|measure\|Footprint\|scan\|record\)' tests`)
 - Test: existing gc/ledger and gc/account unit tests move with the files
 
 **Reuse:** rung 2 — gc accounting: gc/ledger.rs, gc/account.rs, and `Scanned`, `Footprint`, `measure`, `record`, `scan`, `CRATE_DIR_CAP`, `DEPS_CAP` from gc/run.rs:20-456.
@@ -447,8 +480,8 @@ _Requirements: SPLIT-1.2, SPLIT-1.3_
 
 - [ ] **Step 1: Failing check.** Point seed, liveness and explain at `crate::caps` and `crate::ledger`, and run
   `cargo check`. Expect: unresolved imports.
-- [ ] **Step 2: Implement.** Move the items. `grep -n 'crate::gc' src/seed src/liveness.rs src/explain.rs` must
-  print nothing.
+- [ ] **Step 2: Implement.** Move the items. `grep -rn 'crate::gc' src --include='*.rs' | grep -v '^src/gc'`
+  must print only `src/plan_tier/*`, `src/cli.rs` and `src/bench/*` lines (callers above gc).
 - [ ] **Step 3: Run.** `cargo test` and the capture comparison pass.
 - [ ] **Step 4: Commit.** `git commit -m "refactor: move accounting and caps out of gc"`
 
@@ -460,10 +493,10 @@ _Requirements: SPLIT-1.3_
 
 **Files:**
 - Create: `src/gc/liveness.rs`, `tests/seed_liveness.rs`
-- Modify: `src/liveness.rs` (the algorithm `liveness()` :210 and its private walk move out; types :31-60, `embedded_hashes`, `unit_timestamp` stay), `src/ctx.rs`, `src/seed/source.rs` (lines 163, 183, 310, 327; test module), `src/seed/evict.rs` (line 24 `EvictCtx`, line 67), `src/seed/fill.rs` (test module :986-1232), `src/seed/mod.rs` (test module :539-580), `src/cli.rs` (line 1050), `src/bench/mod.rs`, `src/plan_tier/build.rs`, `src/gc.rs`, `tests/store_gc.rs`, `tests/seed.rs`, `tests/seed_fill.rs`, `tests/common/prove.rs`, `tests/liveness*.rs`
+- Modify: `src/liveness.rs` (the algorithm `liveness()` :210 and its private walk move out; types :31-60, `embedded_hashes`, `unit_timestamp` stay), `src/ctx.rs`, `src/seed/source.rs` (lines 163, 183, 310, 327; test module), `src/seed/evict.rs` (line 24 `EvictCtx`, line 67), `src/seed/fill.rs` (test module :986-1232), `src/seed/mod.rs` (test module :539-580), `src/cli.rs` (line 1050), `src/bench/mod.rs`, `src/plan_tier/build.rs`, `src/plan_tier/apply.rs` (line 807), `src/gc.rs`, `tests/store_gc.rs`, `tests/seed.rs`, `tests/seed_fill.rs`, `tests/bench.rs`, `tests/common/prove.rs`, `tests/common/cargo_fixture.rs`, `tests/common/plan_fixture.rs`, `tests/liveness*.rs`, `tests/guards.rs` (line 437: the no-process guard reads both `../src/liveness.rs` and `../src/gc/liveness.rs`)
 - Test: `tests/seed_liveness.rs`
 
-**Reuse:** rung 2 — src/seed/* moves whole; its edges are rewired downward: liveness result types, caps, ledger and locks from core; toolchain, `Ctx` and the walk fns from the adapter.
+**Reuse:** rung 2 — the liveness algorithm from liveness.rs (`liveness()` :210 and its private graph walk) moves out; the liveness *result types* (liveness.rs:31-60), `embedded_hashes`, `unit_timestamp` stay (design: `cargo-hive-gc` and `cargo-hive-core` sections; ADR-0003).
 
 **Interfaces:**
 - Produces: `liveness::LivenessFn = fn(&dyn Fs, &TargetDir, SystemTime, Duration) -> Liveness`;
@@ -504,8 +537,9 @@ _Requirements: SPLIT-1.3, SPLIT-1.4_
 
 **Depends-on:** Task 11
 
-- [ ] **Step 1: Run the report.** Run the liveness report on klynt with Task 3's `now` and window, writing
-  `/private/tmp/hive-split/live-step1.json`. Run `cmp` against `live-0.1.0.json`. Expect: no output.
+- [ ] **Step 1: Run the report.** Following Task 3's checkpoint rule, run the 0.1.0 report
+  (`live-0.1.0-step1.json`) and then this branch's (`live-step1.json`) back to back on klynt, with one fresh
+  `now` and the same window. Run `cmp` on the two files. Expect: no output.
 - [ ] **Step 2: Run the capture comparison and the full gate.** Expect: all pass.
 - [ ] **Step 3: Record.** Write both results in the evidence file. A mismatch stops the plan: report it and do not
   start Task 13.
@@ -527,18 +561,20 @@ _Requirements: SPLIT-4.1_
 
 **Depends-on:** Task 12
 
-- [ ] **Step 1: Run the migration lints.** Run `cargo fix --edition --all-targets --allow-dirty 2>&1 | tee
-  /private/tmp/hive-split/edition.log`. Expect: it completes. Run `grep -c 'if-let-rescope\|tail-expr-drop-order'
+- [ ] **Step 1: Run the migration lints.** With `edition = "2021"` still set, run `cargo fix --edition
+  --all-targets --allow-dirty 2>&1 | tee /private/tmp/hive-split/edition.log`. Expect: it completes. Run `grep -c 'if-let-rescope\|tail-expr-drop-order'
   /private/tmp/hive-split/edition.log` and record the count.
-- [ ] **Step 2: Resolve each drop-order warning.** For every `if-let-rescope` or `tail-expr-drop-order` hit, rewrite
-  the site to keep 0.1.0's drop point (a `match` or an explicit binding), as the lint suggests. Then set
-  `edition = "2024"`.
-- [ ] **Step 3: Re-run the lints.** Run `cargo clippy --all-targets -- -W rust-2024-compatibility -D warnings`.
-  Expect: no drop-order warning. Copy the log summary into the evidence file. Inspect the named sites as well:
-  doctor.rs:693, :695, :708, plan_tier/locks.rs:61 (now `src/locks.rs`), gc/run.rs:173, :318,
-  seed/mod.rs:218, seed/evict.rs:330.
-- [ ] **Step 4: Run.** The full gate, tests/platform_locks.rs, tests/liveness_busy.rs and the capture comparison
-  pass.
+- [ ] **Step 2: Resolve each drop-order warning while still on edition 2021.** For every `if-let-rescope` or
+  `tail-expr-drop-order` hit, rewrite the site to keep 0.1.0's drop point (a `match` or an explicit binding), as
+  the lint suggests. Then run `cargo clippy --all-targets -- -W rust-2024-compatibility -D warnings` with
+  `edition = "2021"`. Expect: exit 0. Record the output in the evidence file. On edition 2024 these lints no
+  longer fire, so the check must run before the flip.
+- [ ] **Step 3: Flip and format.** Set `edition = "2024"`, then run `cargo fmt`, because the 2024 style edition
+  reorders some imports. As a second check, inspect the guard sites found by
+  `grep -rn 'try_lock_exclusive\|store_shared_or_cancelled\|try_store_exclusive\|\.locked(\|locked_or_cancelled\|acquire(' src`;
+  the line numbers have moved since design-scan.md §6.
+- [ ] **Step 4: Run.** The full gate (including `cargo fmt --check`), tests/platform_locks.rs,
+  tests/liveness_busy.rs and the capture comparison pass.
 - [ ] **Step 5: Commit.** `git commit -m "build: move to edition 2024"`
 
 _Requirements: SPLIT-5.2_
@@ -549,7 +585,7 @@ _Requirements: SPLIT-5.2_
 
 **Files:**
 - Create: `crates/cargo-hive/Cargo.toml`, `crates/cargo-hive/tests/workspace.rs`, `crates/cargo-hive/tests/version.rs`
-- Modify: `Cargo.toml` (virtual root), `Cargo.lock`, `src/` → `crates/cargo-hive/src/` (move), `tests/` → `crates/cargo-hive/tests/` (move), `crates/cargo-hive/tests/skill.rs` (lines 10-25 repo root), `crates/cargo-hive/tests/skill/names.rs` (line 265 sweep), `crates/cargo-hive/tests/liveness.rs` (lines 270-293 manifest test), `crates/cargo-hive/tests/guards.rs` (line 437 `include_str!` path), `scripts/fresh-probe.sh` (lines 9-13 default)
+- Modify: `Cargo.toml` (virtual root), `Cargo.lock`, `src/` → `crates/cargo-hive/src/` (move), `tests/` → `crates/cargo-hive/tests/` (move), `crates/cargo-hive/tests/skill.rs` (lines 10-25 repo root), `crates/cargo-hive/tests/skill/names.rs` (line 265 sweep), `crates/cargo-hive/tests/liveness.rs` (lines 270-293 manifest test), `crates/cargo-hive/tests/seed.rs` (line 2533: `repo_root()/target/klynt-run`), `.gitignore` (add `/crates/*/target`), `scripts/fresh-probe.sh` (lines 9-13 default). The guards.rs `include_str!` paths stay relative to the test file and still resolve, because `src/` and `tests/` move together.
 - Test: `crates/cargo-hive/tests/workspace.rs`, `crates/cargo-hive/tests/version.rs`
 
 **Reuse:** rung 4 — Cargo workspaces (`[workspace]`, `[workspace.package]`, `[workspace.dependencies]`, `[workspace.lints]`, `resolver = "3"`); the guard test reuses `cargo metadata --format-version 1`, already parsed with `serde_json` in src/cargo_target.rs.
@@ -583,11 +619,13 @@ _Requirements: SPLIT-5.2_
 - [ ] **Step 2: Implement.**
   - Root `Cargo.toml`: `[workspace] members = ["crates/cargo-hive"] resolver = "3"`, with `[workspace.package]`
     holding version 0.1.0, edition 2024, license, repository, description and rust-version unset, and
-    `[workspace.dependencies]` holding clap, serde, serde_json, libc and applesauce at today's versions.
+    `[workspace.dependencies]` holding clap, serde, serde_json, libc and applesauce at today's versions, and an empty
+    `[workspace.lints.clippy]` table so later members can set `[lints] workspace = true`.
   - Move `src/` and `tests/` with `git mv`. `crates/cargo-hive/Cargo.toml` inherits the package fields, keeps
     `[lib]`/`[[bin]]`, and has `include = ["/src/**/*", "/Cargo.toml", "/README.md", "/LICENSE-MIT",
     "/LICENSE-APACHE"]`; copy README.md and both license files into `crates/cargo-hive/`.
-  - Rewrite the four repo-root tests to use `repo_root()` and to sweep `crates/*/src`.
+  - Rewrite the repo-root tests (tests/skill.rs:15, :25; tests/skill/names.rs:265; tests/liveness.rs:279-293;
+    tests/seed.rs:2533) to use `repo_root()`, and make names.rs sweep `crates/*/src`.
   - `fresh-probe.sh` defaults to `crates/cargo-hive/src/size.rs cargo-hive` and accepts several `<file>
     <package>` pairs.
 - [ ] **Step 3: Run.** At the root: `cargo test --workspace`, `cargo test --test workspace`, `cargo test --test
@@ -625,12 +663,14 @@ _Requirements: SPLIT-1.1, SPLIT-3.3, SPLIT-3.4, SPLIT-3.5, SPLIT-3.6, SPLIT-5.1,
   `cargo-hive-platform`. Each fails with `"{RULE}: {member} …"`:
   - `no_member_but_platform_depends_on_libc`: `libc` in normal deps (kind null);
   - `no_member_but_platform_has_non_test_cfg_target_os`: run over every `src/**/*.rs`;
-  - `every_member_but_platform_forbids_unsafe`: `src/lib.rs` (or `src/main.rs`) begins with
+  - `every_member_but_platform_forbids_unsafe`: for every target of kind `lib` or `bin` (`targets[].src_path`),
+    the file's leading block of `//!` comments and inner attributes contains
     `#![forbid(unsafe_code, reason = "only the platform crate may touch the OS (ARCH-15)")]`.
 
   Add a unit test for `non_test_cfg_target_os` covering:
   - `#[cfg(test)]\nmod t {\n #[cfg(target_os = "macos")]\n fn f(){}\n}` → `[]`;
   - `#[cfg(all(test, target_os = "macos"))]\nfn f(){}` → `[]`;
+  - `#[cfg(test)]\n#[cfg(target_os = "macos")]\nmod t {\n}` → `[]`;
   - `#[cfg(target_os = "macos")]\nfn f(){}` → `[1]`.
 
   Run `cargo test --test os_boundary`. Expect: the forbid test fails for `cargo-hive`.
@@ -665,7 +705,7 @@ _Requirements: SPLIT-1.2, SPLIT-2.1, SPLIT-2.2, SPLIT-2.3, SPLIT-2.4, SPLIT-3.7,
 
 **Files:**
 - Create: `crates/core/{Cargo.toml,src/lib.rs,README.md,LICENSE-MIT,LICENSE-APACHE}`
-- Modify: move `fingerprint.rs`, `classify.rs`, `size.rs`, `receipt.rs`, `liveness.rs` (types and helpers), `ledger/`, `caps.rs`, `locks.rs` and the target-dir part of `cargo_target.rs` (`TAG_LINE`, `Layout`, `identify`, `identify_bounded`, `realpath_lossy` made `pub`, `Owner`, `TargetDir`) from `crates/cargo-hive/src/` into `crates/core/src/` (target-dir part as `target.rs`); `Cargo.toml` (member + workspace dep); importers in `crates/cargo-hive/src` and `tests/`; `crates/cargo-hive/tests/workspace.rs` (`("cargo-hive-core", 1)`)
+- Modify: move `fingerprint.rs`, `classify.rs`, `size.rs`, `receipt.rs`, `liveness.rs` (types and helpers), `ledger/`, `caps.rs`, `locks.rs` and the target-dir part of `cargo_target.rs` (`TAG_LINE`, `Layout`, `identify`, `identify_bounded`, `realpath_lossy` made `pub`, `Owner`, `TargetDir`) from `crates/cargo-hive/src/` into `crates/core/src/` (target-dir part as `target.rs`); `crates/cargo-hive/tests/guards.rs` (line 437: read `../../core/src/liveness.rs` and `../src/gc/liveness.rs`); `Cargo.toml` (member + workspace dep); importers in `crates/cargo-hive/src` and `tests/`; `crates/cargo-hive/tests/workspace.rs` (`("cargo-hive-core", 1)`)
 - Test: moved unit tests; `crates/cargo-hive/tests/workspace.rs`
 
 **Reuse:** rung 2 — these move whole: fingerprint.rs, classify.rs, size.rs, receipt.rs; the target-dir types and identification from cargo_target.rs (`TAG_LINE` :17, `Layout` :26, `identify` :120, `identify_bounded` :129, `realpath_lossy` :189 (made `pub`), `Owner` :626, `TargetDir` :639); the liveness *result types* (liveness.rs:31-60), `embedded_hashes`, `unit_timestamp`; gc accounting: gc/ledger.rs, gc/account.rs, and `Scanned`, `Footprint`, `measure`, `record`, `scan`, `CRATE_DIR_CAP`, `DEPS_CAP` from gc/run.rs:20-456; plan_tier/locks.rs.
@@ -701,7 +741,8 @@ _Requirements: SPLIT-1.1, SPLIT-1.2, SPLIT-4.3_
 
 **Interfaces:**
 - Produces: crate `cargo_hive_state`: `State`, `Tx`, `StoreLock`, `Config`, `StateError`.
-- Consumes: `cargo_hive_platform::flock`, `cargo_hive_core::receipt`.
+- Consumes: `cargo_hive_platform::{flock, clock}` only. `state.rs` has no `crate::` import, so its
+  `Cargo.toml` depends on platform (plus serde, serde_json) and not on core. Its `LAYERS` row stays 2.
 
 **Depends-on:** Task 16
 
@@ -785,7 +826,9 @@ _Requirements: SPLIT-1.2, SPLIT-1.3_
 
 - [ ] **Step 1: Failing test.** Add the rows and run `cargo test --test workspace`. Expect: the package is missing.
 - [ ] **Step 2: Implement.** Create the crate with no dependency on gc or doctor in any table, and move the files.
-- [ ] **Step 3: Run.** `cargo test -p cargo-hive-seed -v 2>&1 | grep -c 'Compiling cargo-hive-gc'` prints `0`. The
+- [ ] **Step 3: Run.** `cargo tree -p cargo-hive-seed -e normal,dev --prefix none | grep -E '^cargo-hive-(gc|doctor) '`
+  prints nothing (the dependency graph, not build output, proves seed reaches neither gc nor doctor, dev-deps
+  included). The
   full gate, `tests/seed_liveness.rs` and the capture comparison pass.
 - [ ] **Step 4: Commit.** `git commit -m "build: extract the seed crate"`
 
@@ -797,13 +840,14 @@ _Requirements: SPLIT-1.3, SPLIT-1.5_
 
 **Files:**
 - Create: `crates/gc/{Cargo.toml,src/lib.rs,README.md,LICENSE-MIT,LICENSE-APACHE}`
-- Modify: move `crates/cargo-hive/src/gc.rs`, `gc/`, `plan_tier/`, `explain.rs` into `crates/gc/src/` (`gc/liveness.rs` becomes `liveness.rs`); move `crates/cargo-hive/tests/liveness_report.rs` → `crates/gc/tests/liveness_report.rs`; `crates/cargo-hive/tests/guards.rs` (line 437 path → `../../gc/src/liveness.rs`); `Cargo.toml`; importers (cli.rs, bench/mod.rs pass `cargo_hive_gc::liveness`); `workspace.rs` (`("cargo-hive-gc", 4)`, `FEATURES` gains it)
+- Modify: move `crates/cargo-hive/src/gc.rs`, `gc/`, `plan_tier/`, `explain.rs` into `crates/gc/src/` (`gc/liveness.rs` becomes `liveness.rs`); move `crates/cargo-hive/tests/liveness_report.rs` → `crates/gc/tests/liveness_report.rs`; `crates/cargo-hive/tests/guards.rs` (line 437: read `../../core/src/liveness.rs` and `../../gc/src/liveness.rs`); `Cargo.toml`; importers (cli.rs, bench/mod.rs pass `cargo_hive_gc::liveness`); `workspace.rs` (`("cargo-hive-gc", 4)`, `FEATURES` gains it)
 - Test: moved unit tests; `cargo test -p cargo-hive-gc`
 
 **Reuse:** rung 2 — these move whole: gc.rs, gc/{plan,run}.rs (minus the accounting moved to core); the liveness algorithm from liveness.rs (`liveness()` :210 and its private graph walk); plan_tier/{apply,build,guard,orphan,record}.rs; explain.rs; `cross_check_notes` (cli.rs:915).
 
 **Interfaces:**
-- Produces: crate `cargo_hive_gc`: `liveness`, `gc`, `plan_tier`, `explain`, `cross_check_notes`.
+- Produces: crate `cargo_hive_gc`: `liveness`, `gc`, `plan_tier` (with `plan_tier::apply::cross_check_notes`,
+  moved there by Task 9), `explain`.
 - Consumes: platform, core, state, adapter.
 
 **Depends-on:** Task 20
@@ -828,8 +872,11 @@ _Requirements: SPLIT-1.1, SPLIT-1.2, SPLIT-1.3, SPLIT-1.5_
 **Reuse:** rung 2 — `scripts/fresh-probe.sh` pattern (append a comment, `cargo build -v`, restore).
 
 **Interfaces:**
-- Produces: `#[test] #[ignore] fn a_gc_edit_leaves_seed_fresh()`. It copies the workspace with `cp -c` to
-  `/private/tmp/hive-split/rebuild` and runs `cargo build -v` with `CARGO_TARGET_DIR` under `/private/tmp`. It
+- Produces: `#[test] #[ignore] fn a_gc_edit_leaves_seed_fresh()`. It copies the tracked tree
+  (`git ls-files -z | xargs -0 -I{} cp -c --parents {} /private/tmp/hive-split/rebuild` from the repo root; `cp -c`
+  clones on APFS, and `--parents` needs BSD `cp` 13+ or a `rsync -a --files-from` equivalent, both acceptable) and
+  runs `cargo build -v --offline` with `CARGO_TARGET_DIR=/private/tmp/hive-split/rebuild-target` in that copy. The
+  shared `~/.cargo` registry is read, not written, as in any offline build. It
   appends a comment to `crates/gc/src/liveness.rs`, builds again, and asserts the output contains
   `Compiling cargo-hive-gc`, `Compiling cargo-hive v` and `Fresh cargo-hive-seed`. A second case runs
   `cargo test -p cargo-hive-gc --no-run -v` and asserts no `Compiling cargo-hive-seed` and no `Compiling
@@ -839,8 +886,8 @@ _Requirements: SPLIT-1.1, SPLIT-1.2, SPLIT-1.3, SPLIT-1.5_
 
 - [ ] **Step 1: Write the test.** Run `cargo test --test rebuild_scope -- --ignored`. Expect: it passes. Before
   Task 21 it would fail, because there is no `cargo-hive-gc` package.
-- [ ] **Step 2: Checkpoint.** Run the liveness report on klynt (`live-step4.json`, Task 3's `now` and window),
-  `cmp` it with `live-0.1.0.json`, run the capture comparison, and record both. A mismatch stops the plan.
+- [ ] **Step 2: Checkpoint.** Following Task 3's checkpoint rule, run the 0.1.0 report and this branch's
+  (`live-step4.json`) back to back on klynt, `cmp` them, run the capture comparison, and record both. A mismatch stops the plan.
 - [ ] **Step 3: Commit.** `git commit -m "test: a gc edit rebuilds only gc and the binary"`
 
 _Requirements: SPLIT-1.4, SPLIT-1.5, SPLIT-4.1_
@@ -879,7 +926,7 @@ _Requirements: SPLIT-4.4, SPLIT-4.6_
 ### Task 24: Unit kinds are an enum that keeps `other`
 
 **Files:**
-- Modify: `crates/core/src/fingerprint.rs` (`KINDS` :31, `kind_of` :146-152, `Unit.kind` :81), `crates/gc/src/liveness.rs` (`NEVER_COLLECTED` :21, :502), `crates/core/src/liveness.rs` (`unit_timestamp`), other `.kind` readers
+- Modify: `crates/core/src/fingerprint.rs` (`KINDS` :31, `kind_of` :146-152, `Unit.kind` :81), `crates/gc/src/liveness.rs` (`NEVER_COLLECTED` :21, :502), `crates/core/src/liveness.rs` (`unit_timestamp`), and every other reader found by `grep -rn 'kind_of\|\.kind\b' crates --include='*.rs'`
 - Test: `crates/core/src/fingerprint.rs`
 
 **Reuse:** rung 2 — `KINDS` and `kind_of` (fingerprint.rs:31, :146-152).
@@ -904,32 +951,43 @@ _Requirements: SPLIT-4.4, SPLIT-4.5_
 
 ---
 
-### Task 25: The unit graph is CSR with a bitset closure; checkpoint after the rework
+### Task 25: The fingerprint graph is CSR and liveness marks with a bitset; checkpoint after the rework
 
 **Files:**
-- Modify: `crates/core/src/fingerprint.rs` (`UnitGraph` :116-120, index :520-540), `crates/gc/src/liveness.rs` (the walk), readers of `UnitGraph.edges`
+- Modify: `crates/core/src/fingerprint.rs` (`UnitGraph` :116-120, edge build and index :520-540, `EdgeCounts` :109-114), `crates/gc/src/liveness.rs` (`mark_live` :396 and its `live`/`node_live` vectors; `index_units` :313 keyed by `UnitHash`)
 - Test: `crates/core/src/fingerprint.rs`, `crates/gc/src/liveness.rs`
 
-**Reuse:** rung 2 — the existing edge build (fingerprint.rs:520-540) and the liveness walk; rung 7 for the CSR type (design Decision 9).
+**Reuse:** rung 2 — the existing edge build (fingerprint.rs:520-540) and `mark_live`; rung 7 for the CSR and
+bitset types (design Decision 9).
 
 **Interfaces:**
-- Produces: `fingerprint::UnitId(u32)`; `UnitGraph { units: Vec<Unit>, offsets: Vec<u32>, targets: Vec<UnitId> }`
-  with `successors(id) -> &[UnitId]` and `edge_count()`; `fn closure(graph: &UnitGraph, roots: &[UnitId]) ->
-  BitSet` (a `Vec<u64>` wrapper with `contains`/`insert`). `ProfileReport`'s serialized `edges` count keeps its
-  value.
+- Produces:
+  - `fingerprint::UnitId(u32)`, an index into `UnitGraph.units` within one profile;
+  - `UnitGraph { units: Vec<Unit>, offsets: Vec<u32>, targets: Vec<UnitId> }`, built from exactly the resolved
+    edges the 0.1.0 loop pushes, in the same order, with `successors(id) -> &[UnitId]` and `edge_count()`;
+  - the per-profile index `HashMap<UnitHash, Vec<UnitId>>` in place of `HashMap<&str, Vec<usize>>`;
+  - `core::bitset::BitSet` (`with_len`, `insert -> bool`, `contains`) in place of `mark_live`'s `Vec<bool>`.
+
+  `EdgeCounts` and `ProfileReport`'s serialized counts keep their values. `mark_live` keeps its lazy,
+  target-wide resolution through `index_units`/`learn_packages`, so an `Uncertain` reason is still recorded only
+  for an edge the walk reaches. A precomputed target-wide CSR would resolve edges of unreached units and add
+  reasons, so it is not used.
 
 **Depends-on:** Task 24
 
-- [ ] **Step 1: Failing test.** On the liveness unit-test fixtures (liveness.rs:744), the set reached by
-  `closure` equals the set the 0.1.0 walk reaches. Capture the 0.1.0 set by running the old walk in the test
-  before replacing it, and keep both until Step 3. Run `cargo test -p cargo-hive-gc liveness::`. Expect: a
-  compile error.
-- [ ] **Step 2: Implement.** Build CSR from the same resolved edges in the same order, switch the walk to
-  `closure`, and then delete the old walk.
-- [ ] **Step 3: Checkpoint.** The full gate and the capture comparison pass. Run the liveness report on klynt
-  (`live-step5.json`, Task 3's values), `cmp` it with `live-0.1.0.json` and record the result. A mismatch stops the
-  plan and goes to the operator.
-- [ ] **Step 4: Commit.** `git commit -m "refactor: CSR unit graph with a bitset closure"`
+- [ ] **Step 1: Failing test.**
+  - fingerprint: for the profiles in the liveness unit-test fixtures (liveness.rs:744), `successors` of each unit
+    equals the 0.1.0 `edges` filtered by source, and `edge_count` equals `edges.len()`. Capture the 0.1.0 lists
+    by keeping the old builder in the test module until Step 3.
+  - BitSet: table cases at bit 0, 63, 64 and `len - 1`.
+
+  Run `cargo test -p cargo-hive-core fingerprint:: bitset::`. Expect: a compile error.
+- [ ] **Step 2: Implement.** Build the CSR, switch the index keys, and swap `mark_live`'s vectors for `BitSet`.
+  Delete the old builder.
+- [ ] **Step 3: Checkpoint.** The full gate (all liveness suites, tests/liveness_prove.rs) and the capture
+  comparison pass. Following Task 3's checkpoint rule, run the 0.1.0 report and this branch's (`live-step5.json`)
+  back to back on klynt, `cmp` them and record the result. A mismatch stops the plan and goes to the operator.
+- [ ] **Step 4: Commit.** `git commit -m "refactor: CSR fingerprint graph and bitset liveness marks"`
 
 _Requirements: SPLIT-4.4, SPLIT-4.1_
 
@@ -952,7 +1010,8 @@ _Requirements: SPLIT-4.4, SPLIT-4.1_
   - 5: the same publish without `--dry-run`, and on a partial failure stop and report which members uploaded;
   - 6: smoke as today.
 
-  The line `Crate names approved:` is written with no date.
+  The line `Crate names approved:` (no date) is added under `## release steps` in docs/agents/project.md, above
+  step 0.
 
 **Depends-on:** Task 25
 
@@ -963,7 +1022,8 @@ _Requirements: SPLIT-4.4, SPLIT-4.1_
 - [ ] **Step 2: Implement.** Write the steps, the README path `cargo install --path crates/cargo-hive`, and the
   includes.
 - [ ] **Step 3: Dry-run (manual).** Run `cargo package --workspace --list` and expect every member to list only
-  `src/`, `Cargo.toml`, `Cargo.lock`, `README.md` and the license files. Run `CARGO_TARGET_DIR=target/package-verify
+  `src/` files, `Cargo.toml`, `Cargo.toml.orig`, `.cargo_vcs_info.json`, `Cargo.lock`, `README.md` and the two
+  license files. Run `CARGO_TARGET_DIR=target/package-verify
   cargo publish --workspace --dry-run` and expect "aborting upload due to dry run" for each member, in dependency
   order. `scripts/fresh-probe.sh` with every member pair prints `GREEN` for each. Run `cargo install --path
   crates/cargo-hive --root /private/tmp/hive-split/inst`, then `/private/tmp/hive-split/inst/bin/cargo-hive
@@ -1018,7 +1078,7 @@ _Requirements: SPLIT-7.1, SPLIT-7.2_
 
 **Depends-on:** Task 27
 
-- [ ] **Step 1: Measure.** Append one comment line to `crates/gc/src/run.rs`, run `cargo build` and time it. Do
+- [ ] **Step 1: Measure.** Append one comment line to `crates/gc/src/gc/run.rs`, run `cargo build` and time it. Do
   this 5 times, restoring the line each time, and record the median beside Task 3's 0.1.0 median. If the new
   median is greater, write both medians as an open question for the operator. Do not change the target.
 - [ ] **Step 2: Status timing.** Run `cargo test -p cargo-hive --test guards -- --ignored` on the proof machine.
