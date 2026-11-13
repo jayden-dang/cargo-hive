@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use cargo_hive::platform::{self, Fs, HeldLock, TryLock};
+use cargo_hive_platform::{self as platform, Fs, HeldLock, TryLock};
 
 type OnCompress = Arc<dyn Fn(&Path) + Send + Sync>;
 

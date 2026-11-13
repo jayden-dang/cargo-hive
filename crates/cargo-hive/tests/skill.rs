@@ -2,6 +2,7 @@
 //! repo files from the workspace root, parse command lines with the public
 //! `Cli` parser in-process, and touch nothing on the machine.
 
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 use std::fs;
 use std::path::PathBuf;
 

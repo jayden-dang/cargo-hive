@@ -1,5 +1,6 @@
 // The snapshot helpers serve only the macOS guard below.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 use common::{Hive, Scratch, git, init_repo};
 use std::collections::hash_map::DefaultHasher;

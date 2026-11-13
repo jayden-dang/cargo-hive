@@ -1,4 +1,5 @@
 #![cfg(target_os = "macos")]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 use common::prove::{ProveInput, WindowOutcome, check_command, prove};
 use std::path::PathBuf;

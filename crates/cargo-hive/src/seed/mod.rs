@@ -36,7 +36,7 @@ pub mod store;
 
 #[cfg(test)]
 pub(crate) fn no_liveness(
-    _: &dyn crate::platform::Fs,
+    _: &dyn cargo_hive_platform::Fs,
     _: &crate::cargo_target::TargetDir,
     _: std::time::SystemTime,
     _: std::time::Duration,
@@ -566,9 +566,9 @@ mod tests {
         path
     }
 
-    fn ctx_at(root: &std::path::Path) -> (State, crate::platform::Platform, Config) {
+    fn ctx_at(root: &std::path::Path) -> (State, cargo_hive_platform::Platform, Config) {
         let state = State::open_at(root.join("home")).unwrap();
-        let platform = crate::platform::current().unwrap();
+        let platform = cargo_hive_platform::current().unwrap();
         let cfg = Config {
             secondary_roots: Vec::new(),
             cache_roots: Vec::new(),
@@ -579,7 +579,7 @@ mod tests {
 
     fn outcome_of(
         state: &State,
-        platform: &crate::platform::Platform,
+        platform: &cargo_hive_platform::Platform,
         cfg: &Config,
         account_bytes: bool,
     ) -> Outcome {

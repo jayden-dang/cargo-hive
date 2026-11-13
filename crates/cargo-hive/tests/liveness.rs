@@ -1,9 +1,10 @@
 #![cfg(target_os = "macos")]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 use cargo_hive::cargo_target::{self, TargetDir};
 use cargo_hive::fingerprint;
 use cargo_hive::liveness::{Liveness, UnitRef};
-use cargo_hive::platform;
+use cargo_hive_platform as platform;
 use clap::CommandFactory;
 use common::cargo_fixture::*;
 use common::prove::{self, WindowOutcome};

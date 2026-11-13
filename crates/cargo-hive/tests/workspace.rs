@@ -1,11 +1,12 @@
 //! Workspace structure guards: layer order, edition, pins, and the virtual root.
 
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-const LAYERS: &[(&str, u8)] = &[("cargo-hive", 5)];
+const LAYERS: &[(&str, u8)] = &[("cargo-hive-platform", 0), ("cargo-hive", 5)];
 const FEATURES: &[&str] = &[];
 
 fn metadata() -> serde_json::Value {

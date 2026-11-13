@@ -550,6 +550,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
     use std::io::Write;

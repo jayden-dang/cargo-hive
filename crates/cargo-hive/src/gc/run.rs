@@ -9,7 +9,7 @@ use crate::cargo_target::TargetDir;
 use crate::discover::Scope;
 use crate::fingerprint::Format;
 use crate::ledger::{Bytes, Ledger, RemoveFailed, remove_counted};
-use crate::platform::{EntryKind, Fs, HeldLock, TryLock};
+use cargo_hive_platform::{EntryKind, Fs, HeldLock, TryLock};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -374,11 +374,11 @@ mod tests {
     use crate::cargo_target::Owner;
     use crate::fingerprint::ProfileReport;
     use crate::ledger::{Footprint, measure};
-    use crate::platform::{
+    use crate::size::MAX_DEPTH;
+    use cargo_hive_platform::{
         CompressOutcome, EntryStat, HeldLock, LockHolder, LockKind, LockState, Sharing, TempDir,
         VolumeInfo,
     };
-    use crate::size::MAX_DEPTH;
     use std::collections::{BTreeSet, HashMap};
     use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -12,7 +12,7 @@ use crate::ledger::{self, Ledger, RemoveFailed};
 use crate::locks::{self, Acquired};
 use crate::plan_tier::guard::{Deleted, Expect, check_entry};
 use crate::plan_tier::record::{BytesRec, PlannedTarget, kind_of};
-use crate::platform::{EntryKind, Fs};
+use cargo_hive_platform::{EntryKind, Fs};
 
 pub struct Counted {
     pub bytes: BytesRec,

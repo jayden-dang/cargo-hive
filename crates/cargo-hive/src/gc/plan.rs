@@ -2,7 +2,7 @@
 //! directory's listing and the current time. They mirror rustc 1.97.1's own session GC
 //! (`rustc_incremental/src/persist/fs.rs`). This module decides; it never touches a file.
 
-use crate::platform::EntryKind;
+use cargo_hive_platform::EntryKind;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

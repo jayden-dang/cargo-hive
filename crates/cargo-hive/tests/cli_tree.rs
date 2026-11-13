@@ -1,4 +1,5 @@
 //! The installed command tree stays as 0.1.0 shipped it.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 use cargo_hive::cli::Cli;
 use clap::CommandFactory;
 

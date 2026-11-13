@@ -3,7 +3,7 @@
 //! and leaves the path in place. A path that is already gone counts nothing.
 
 use super::{Ledger, record, scan};
-use crate::platform::{EntryKind, EntryStat, Fs};
+use cargo_hive_platform::{EntryKind, EntryStat, Fs};
 use std::fmt;
 use std::io;
 use std::path::Path;
@@ -155,7 +155,7 @@ fn remove_dir(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
-    use crate::platform::{self, Fs};
+    use cargo_hive_platform::{self as platform, Fs};
     use std::path::PathBuf;
 
     fn scratch(label: &str) -> PathBuf {

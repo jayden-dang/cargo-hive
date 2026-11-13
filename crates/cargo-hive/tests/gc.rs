@@ -1,4 +1,5 @@
 #![cfg(target_os = "macos")]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 use common::{
     Hive, Scratch, crate_dirs, git, init_repo, plant_session, register, sessions_in, wait_within,

@@ -1,7 +1,8 @@
 #![cfg(target_os = "macos")]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
-use cargo_hive::platform::Fs;
-use cargo_hive::platform::apfs::Apfs;
+use cargo_hive_platform::Fs;
+use cargo_hive_platform::apfs::Apfs;
 use common::{Hive, Scratch, crate_dirs, init_repo, plant_session, sessions_in};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -320,7 +321,7 @@ fn store_freed_bytes_never_exceed_what_the_volume_regained() {
     );
     assert!(matches!(
         apfs.compress(&packed),
-        cargo_hive::platform::CompressOutcome::Compressed
+        cargo_hive_platform::CompressOutcome::Compressed
     ));
 
     let noise = plant_aged_entry(

@@ -1,11 +1,7 @@
 //! Seed unit tests that reach the liveness algorithm through `holds` or
 //! `live_registry_units`. They pass the real `gc::liveness::liveness`.
 
-#![allow(
-    clippy::disallowed_types,
-    clippy::disallowed_methods,
-    reason = "test fixtures"
-)]
+#![allow(clippy::disallowed_types, clippy::disallowed_methods, reason = "test fixtures")]
 
 use cargo_hive::caps::DEPS_CAP;
 use cargo_hive::cargo_target::{Owner, TargetDir};
@@ -48,7 +44,7 @@ const DAY: Duration = Duration::from_secs(86_400);
 struct Env {
     state: State,
     cfg: Config,
-    platform: cargo_hive::platform::Platform,
+    platform: cargo_hive_platform::Platform,
     now: SystemTime,
 }
 
@@ -61,7 +57,7 @@ impl Env {
                 cache_roots: Vec::new(),
                 gc_window_days: None,
             },
-            platform: cargo_hive::platform::current().unwrap(),
+            platform: cargo_hive_platform::current().unwrap(),
             now: SystemTime::now(),
         }
     }
@@ -688,7 +684,7 @@ fn a_lock_that_cannot_be_read_is_skipped_and_fills_nothing() {
     let _restore = Restore(target_path.clone());
     let home = scratch.0.join("home");
     let state = cargo_hive::state::State::open_at(home).unwrap();
-    let platform = cargo_hive::platform::current().unwrap();
+    let platform = cargo_hive_platform::current().unwrap();
     let cfg = cargo_hive::state::Config {
         secondary_roots: Vec::new(),
         cache_roots: Vec::new(),

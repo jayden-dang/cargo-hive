@@ -1,5 +1,6 @@
 //! Read-only liveness report for comparing releases against a fixed target.
 
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 use cargo_hive::cargo_target::{Owner, TargetDir, identify};
 use cargo_hive::fingerprint::read_profile;
 use cargo_hive::gc::liveness::liveness;
@@ -47,7 +48,7 @@ fn report() {
 
     let now = UNIX_EPOCH + Duration::from_secs(now_secs);
     let window = Duration::from_secs(window_days.saturating_mul(86_400));
-    let platform = cargo_hive::platform::current().unwrap();
+    let platform = cargo_hive_platform::current().unwrap();
     let verdict = liveness(&*platform.fs, &target, now, window);
 
     let (mut live, mut dead, mut undecided) = match verdict {

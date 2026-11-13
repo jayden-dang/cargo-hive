@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 use common::{Hive, Scratch, init_repo, register, wait_within};
 use std::fs;

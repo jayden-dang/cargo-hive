@@ -15,12 +15,12 @@ use crate::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use crate::cargo_target::{Owner, TargetDir};
 use crate::ctx::Ctx;
 use crate::locks::{self, Acquired, Locked};
-use crate::platform::{EntryKind, Fs};
 use crate::registry::Repo;
 use crate::seed::source::{self, Skip, SourceUnit};
 use crate::seed::store::{self, PublishFailed, Published, Row};
 use crate::size::MAX_DEPTH;
 use crate::state::{StateError, window_days};
+use cargo_hive_platform::{EntryKind, Fs};
 
 use super::Error;
 
@@ -1195,7 +1195,7 @@ mod tests {
         let scratch = Scratch::new("not-dir");
         let path = scratch.0.join("store");
         std::fs::write(&path, b"x").unwrap();
-        let fs = crate::platform::current().unwrap().fs;
+        let fs = cargo_hive_platform::current().unwrap().fs;
         let err = super::dir_size(fs.as_ref(), &path).unwrap_err();
         assert!(!err.contains("shrink"), "{err}");
         assert!(err.contains(&path.display().to_string()), "{err}");

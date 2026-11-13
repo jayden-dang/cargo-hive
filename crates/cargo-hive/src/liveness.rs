@@ -4,7 +4,7 @@
 
 use crate::cargo_target::TargetDir;
 use crate::fingerprint;
-use crate::platform::Fs;
+use cargo_hive_platform::Fs;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};

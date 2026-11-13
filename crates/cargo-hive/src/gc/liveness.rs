@@ -6,7 +6,7 @@ use crate::caps::DEPS_CAP;
 use crate::cargo_target::TargetDir;
 use crate::fingerprint::{self, DepEdge, Format, Unit, le_hex};
 use crate::liveness::{DeadUnit, Liveness, Uncertain, UnitRef, embedded_hashes, unit_timestamp};
-use crate::platform::Fs;
+use cargo_hive_platform::Fs;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -612,7 +612,7 @@ mod tests {
     }
 
     fn decide(target: &TargetDir, window: Duration) -> Liveness {
-        let platform = crate::platform::current().unwrap();
+        let platform = cargo_hive_platform::current().unwrap();
         liveness(&*platform.fs, target, now(), window)
     }
 
@@ -1360,7 +1360,7 @@ mod tests {
     impl FakeFs {
         fn new(listing: Listing) -> FakeFs {
             FakeFs {
-                real: crate::platform::current().unwrap().fs,
+                real: cargo_hive_platform::current().unwrap().fs,
                 listing,
                 listed: Default::default(),
             }
@@ -1368,7 +1368,11 @@ mod tests {
     }
 
     impl Fs for FakeFs {
-        fn temp_dir(&self, parent: &Path, prefix: &str) -> io::Result<crate::platform::TempDir> {
+        fn temp_dir(
+            &self,
+            parent: &Path,
+            prefix: &str,
+        ) -> io::Result<cargo_hive_platform::TempDir> {
             self.real.temp_dir(parent, prefix)
         }
         fn write_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -1403,37 +1407,37 @@ mod tests {
         fn create_dir(&self, path: &Path) -> io::Result<()> {
             self.real.create_dir(path)
         }
-        fn sharing(&self, path: &Path) -> io::Result<crate::platform::Sharing> {
+        fn sharing(&self, path: &Path) -> io::Result<cargo_hive_platform::Sharing> {
             self.real.sharing(path)
         }
-        fn compress(&self, path: &Path) -> crate::platform::CompressOutcome {
+        fn compress(&self, path: &Path) -> cargo_hive_platform::CompressOutcome {
             self.real.compress(path)
         }
         fn hold_lock(
             &self,
-            kind: crate::platform::LockKind,
+            kind: cargo_hive_platform::LockKind,
             path: &Path,
-        ) -> io::Result<crate::platform::LockHolder> {
+        ) -> io::Result<cargo_hive_platform::LockHolder> {
             self.real.hold_lock(kind, path)
         }
-        fn try_lock_exclusive(&self, path: &Path) -> crate::platform::TryLock {
+        fn try_lock_exclusive(&self, path: &Path) -> cargo_hive_platform::TryLock {
             self.real.try_lock_exclusive(path)
         }
         fn try_lock_elsewhere(
             &self,
-            kind: crate::platform::LockKind,
+            kind: cargo_hive_platform::LockKind,
             path: &Path,
-        ) -> io::Result<crate::platform::LockState> {
+        ) -> io::Result<cargo_hive_platform::LockState> {
             self.real.try_lock_elsewhere(kind, path)
         }
-        fn entry_stat(&self, path: &Path) -> io::Result<crate::platform::EntryStat> {
+        fn entry_stat(&self, path: &Path) -> io::Result<cargo_hive_platform::EntryStat> {
             self.real.entry_stat(path)
         }
         fn read_dir_bounded(
             &self,
             dir: &Path,
             cap: usize,
-        ) -> io::Result<Vec<(String, crate::platform::EntryKind)>> {
+        ) -> io::Result<Vec<(String, cargo_hive_platform::EntryKind)>> {
             self.listed.borrow_mut().push(dir.to_path_buf());
             match self.listing {
                 Listing::FailOn(leaf) if dir.ends_with(leaf) => {
@@ -1453,7 +1457,7 @@ mod tests {
         fn remove_file(&self, path: &Path) -> io::Result<()> {
             self.real.remove_file(path)
         }
-        fn volume(&self, path: &Path) -> io::Result<crate::platform::VolumeInfo> {
+        fn volume(&self, path: &Path) -> io::Result<cargo_hive_platform::VolumeInfo> {
             self.real.volume(path)
         }
     }

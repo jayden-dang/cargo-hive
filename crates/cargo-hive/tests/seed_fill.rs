@@ -1,4 +1,5 @@
 #![cfg(target_os = "macos")]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 
 use std::collections::{BTreeMap, HashSet};
@@ -12,16 +13,16 @@ use cargo_hive::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive::cargo_target::{Owner, TargetDir};
 use cargo_hive::fingerprint::read_profile;
 use cargo_hive::liveness::unit_timestamp;
-use cargo_hive::platform::apfs::Apfs;
-use cargo_hive::platform::{
-    CompressOutcome, EntryKind, EntryStat, Fs, LockHolder, LockKind, LockState, Sharing, TempDir,
-    TryLock, VolumeInfo,
-};
 use cargo_hive::seed::Error;
 use cargo_hive::seed::fill::FillReport;
 use cargo_hive::seed::place::{self, PlaceReport};
 use cargo_hive::seed::source::{SourceUnit, live_registry_units, unit_files};
 use cargo_hive::seed::store::{self, tag_path};
+use cargo_hive_platform::apfs::Apfs;
+use cargo_hive_platform::{
+    CompressOutcome, EntryKind, EntryStat, Fs, LockHolder, LockKind, LockState, Sharing, TempDir,
+    TryLock, VolumeInfo,
+};
 use common::Hive;
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
@@ -114,7 +115,7 @@ fn fill_in(
 }
 
 fn registry_units(hive: &Hive, target: &TargetDir) -> Vec<SourceUnit> {
-    let fs = cargo_hive::platform::current().expect("macOS").fs;
+    let fs = cargo_hive_platform::current().expect("macOS").fs;
     let lib = LibCtx::open(hive, fs);
     let window = Duration::from_secs(7 * 86_400);
     let (units, left_out) = live_registry_units(&lib.ctx(), target, &hive.cargo_home.path, window)
@@ -134,7 +135,7 @@ fn registry_units(hive: &Hive, target: &TargetDir) -> Vec<SourceUnit> {
 fn first_clone_dst(hive: &Hive, target: &TargetDir) -> (SourceUnit, PathBuf) {
     let units = registry_units(hive, target);
     let unit = units[0].clone();
-    let fs = cargo_hive::platform::current().expect("macOS").fs;
+    let fs = cargo_hive_platform::current().expect("macOS").fs;
     let profile = target.path.join(&unit.rel_profile);
     let listing = match fs.read_dir_bounded(&profile.join("deps"), DEPS_CAP) {
         Ok(listing) => listing,
@@ -268,7 +269,7 @@ fn a_new_unit_is_cloned_under_the_locks_and_never_compressed() {
     let states = std::sync::Arc::new(Mutex::new(Vec::new()));
     let recorded = std::sync::Arc::clone(&states);
     let recording = Recording::over_real().on_compress(move |_| {
-        let fs = cargo_hive::platform::apfs::Apfs::new(env!("CARGO_BIN_EXE_cargo-hive").into());
+        let fs = cargo_hive_platform::apfs::Apfs::new(env!("CARGO_BIN_EXE_cargo-hive").into());
         let state = fs
             .try_lock_elsewhere(LockKind::Flock, &lock)
             .expect("lock probe");

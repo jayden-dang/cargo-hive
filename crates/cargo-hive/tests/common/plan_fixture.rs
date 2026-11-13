@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use cargo_hive::ctx::Ctx;
-use cargo_hive::platform::Fs;
 use cargo_hive::registry::{FILE as REGISTRY_FILE, Registry};
 use cargo_hive::state::{Config, State};
+use cargo_hive_platform::Fs;
 
 /// A registered main checkout and linked worktrees under `/private/tmp` (a default
 /// secondary root, so hive classes the worktrees Secondary and the main Protected; never
@@ -166,7 +166,7 @@ impl Planned {
 
     /// The hive state, registry and filesystem an in-process apply reads.
     pub fn library_ctx(&self) -> LibCtx {
-        self.library_ctx_with(cargo_hive::platform::current().unwrap().fs)
+        self.library_ctx_with(cargo_hive_platform::current().unwrap().fs)
     }
 
     pub fn library_ctx_with(&self, fs: Box<dyn Fs>) -> LibCtx {

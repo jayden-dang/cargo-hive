@@ -1,4 +1,5 @@
 #![cfg(target_os = "macos")]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 
 use std::fs;
@@ -13,13 +14,13 @@ use cargo_hive::classify::{CheckoutKind, Class};
 use cargo_hive::discover::Checkout;
 use cargo_hive::fingerprint;
 use cargo_hive::ledger;
-use cargo_hive::platform::Fs;
-use cargo_hive::platform::apfs::Apfs;
 use cargo_hive::receipt::Measured;
 use cargo_hive::seed::choose::{self, Choice};
 use cargo_hive::seed::evict::{self, EvictCtx, Limits};
 use cargo_hive::seed::store::{self, MAX_STORE_BYTES, Row, STORE_FILE, StoreFile, store_dir};
 use cargo_hive::state::State;
+use cargo_hive_platform::Fs;
+use cargo_hive_platform::apfs::Apfs;
 use common::store_fixture::{
     count, drop_row, entry_dirs, has_finding, plant_rowless, rows, seeded_store, set_last_live_at,
     synth_entry, synth_entry_at, tree_files,
@@ -1868,7 +1869,7 @@ fn freed_and_still_shared_bytes_split_by_sharing() {
     let noise = dir.join("noise");
     assert!(matches!(
         fs.compress(&packed),
-        cargo_hive::platform::CompressOutcome::Compressed
+        cargo_hive_platform::CompressOutcome::Compressed
     ));
     let keep = hive.home.path.join("clone-keep");
     fs::create_dir_all(&keep).unwrap();

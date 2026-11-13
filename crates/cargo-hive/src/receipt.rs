@@ -2,7 +2,7 @@
 //! holds integer milliseconds; there is no float or duration slot.
 //! Plan and apply receipts are version 3. Every other command writes version 2.
 
-use crate::platform::clock::utc_timestamp;
+use cargo_hive_platform::clock::utc_timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -114,7 +114,7 @@ pub struct ReceiptBuilder {
 impl Receipt {
     #[allow(clippy::new_ret_no_self)]
     pub fn new(command: &str, scope: Scope) -> ReceiptBuilder {
-        Receipt::with_os(command, scope, crate::platform::os_version())
+        Receipt::with_os(command, scope, cargo_hive_platform::os_version())
     }
 
     pub fn with_os(command: &str, scope: Scope, os: Option<String>) -> ReceiptBuilder {

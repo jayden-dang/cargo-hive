@@ -1,6 +1,6 @@
 //! Child-process environment rules: one owner for every scrub and allowlist.
 
-use crate::platform::proc::Spec;
+use cargo_hive_platform::proc::Spec;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
@@ -182,7 +182,7 @@ fn child_env(
 #[cfg(test)]
 mod tests {
     use super::{ResolveEnv, child_env, git, metadata, probe_build, rustup_which, timed_build};
-    use crate::platform::proc::Spec;
+    use cargo_hive_platform::proc::Spec;
     use std::collections::BTreeMap;
     use std::ffi::{OsStr, OsString};
     use std::path::Path;

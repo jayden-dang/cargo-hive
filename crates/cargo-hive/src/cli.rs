@@ -1,10 +1,10 @@
 //! Thin adapter: arguments → library calls → one receipt.
 
 use crate::bench::command::BuildCmd;
-use crate::platform::{self, MACOS_ONLY_MESSAGE};
 use crate::receipt::{PlanRecord, PlanTierBody, Receipt, ReceiptBuilder, Scope};
 use crate::registry::{self, Registry};
 use crate::state::{State, StateError};
+use cargo_hive_platform::{self as platform, MACOS_ONLY_MESSAGE};
 use clap::{Args, Parser, Subcommand};
 use std::ffi::OsString;
 
@@ -1418,7 +1418,7 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
     use crate::doctor::{self, Capabilities, Capability};
     use crate::explain::{self, FailedUnits, Limits};
     use crate::fingerprint::Format;
-    use crate::platform::Availability;
+    use cargo_hive_platform::Availability;
     let loaded = (|| -> Result<_, StateError> {
         Ok((
             state.read::<Registry>(registry::FILE)?,
@@ -1887,6 +1887,7 @@ fn bench_cmd(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
     use crate::doctor::Capabilities;

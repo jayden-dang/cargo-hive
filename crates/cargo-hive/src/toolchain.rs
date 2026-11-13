@@ -1,7 +1,7 @@
 //! Toolchain resolution: rustup which, rustc -vV, and the caller's keep rules.
 
 use crate::env::ResolveEnv;
-use crate::platform::proc::{self, ChildOutputError, Spec};
+use cargo_hive_platform::proc::{self, ChildOutputError, Spec};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -75,7 +75,7 @@ pub fn resolve_toolchain(cwd: &Path) -> Result<Toolchain, String> {
         cwd,
         Path::new("rustup"),
         ResolveEnv::DropDirectoryToolchain,
-        crate::platform::signals::cancelled,
+        cargo_hive_platform::signals::cancelled,
     )
 }
 

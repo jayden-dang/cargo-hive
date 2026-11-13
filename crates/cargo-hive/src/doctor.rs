@@ -1,13 +1,13 @@
 //! `cargo hive doctor`: capability checks in a fresh temp dir, the check → capability map,
 //! and the `require` gate every capability-dependent command calls.
 
-use crate::platform::major_version;
-use crate::platform::proc::{self, ChildOutputError, Spec};
-use crate::platform::{
-    Availability, CompressOutcome, EntryKind, Fs, LockHolder, LockKind, LockState, TryLock,
-};
 use crate::receipt::Measured;
 use crate::toolchain::Toolchain;
+use cargo_hive_platform::major_version;
+use cargo_hive_platform::proc::{self, ChildOutputError, Spec};
+use cargo_hive_platform::{
+    Availability, CompressOutcome, EntryKind, Fs, LockHolder, LockKind, LockState, TryLock,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -195,7 +195,7 @@ pub fn sweep_stale(parent: &Path) -> u64 {
         {
             continue;
         }
-        if !crate::platform::alive(pid) && std::fs::remove_dir_all(entry.path()).is_ok() {
+        if !cargo_hive_platform::alive(pid) && std::fs::remove_dir_all(entry.path()).is_ok() {
             removed += 1;
         }
     }
@@ -328,7 +328,7 @@ pub(crate) fn toolchain_failure_exit(message: &str) -> i32 {
 
 /// The process cancel flag that `platform::signals::install` sets.
 pub fn process_cancel() -> bool {
-    crate::platform::signals::cancelled()
+    cargo_hive_platform::signals::cancelled()
 }
 
 fn pattern(len: usize, seed: u8) -> Vec<u8> {
@@ -833,9 +833,10 @@ pub fn run(fs: &dyn Fs, env: &DoctorEnv) -> Result<DoctorReport, DoctorError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
-    use crate::platform::{
+    use cargo_hive_platform::{
         Availability, EntryKind, EntryStat, HeldLock, Sharing, TempDir, TryLock, VolumeInfo,
         entry_kind,
     };
@@ -1511,7 +1512,7 @@ mod tests {
         let result = run(&FakeFs::new(Knobs::default()), &cancelled);
         assert!(matches!(result, Err(DoctorError::Cancelled)));
         assert!(
-            !crate::platform::signals::cancelled(),
+            !cargo_hive_platform::signals::cancelled(),
             "the test cancels through its own env, not the process flag"
         );
         assert_eq!(leftovers(&parent), Vec::<String>::new());

@@ -496,7 +496,7 @@ pub fn hold_lock_forever(kind: LockKind, path: &Path) -> io::Result<std::convert
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::CompressOutcome;
+    use crate::CompressOutcome;
     use std::fs;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -607,7 +607,7 @@ mod tests {
         );
     }
 
-    use crate::platform::EntryKind;
+    use crate::EntryKind;
 
     #[test]
     fn entry_stat_never_follows_a_link_and_sees_links_and_compression() {

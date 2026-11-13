@@ -2,8 +2,8 @@
 //! the only code that writes hive's files; every write is a whole-file atomic
 //! replace taken under one `flock`, so a kill never leaves a half-written file.
 
-use crate::platform::clock::utc_date;
-use crate::platform::flock::{self, FlockError, FlockGuard};
+use cargo_hive_platform::clock::utc_date;
+use cargo_hive_platform::flock::{self, FlockError, FlockGuard};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -431,7 +431,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::clock::{utc_date, utc_timestamp};
+    use cargo_hive_platform::clock::{utc_date, utc_timestamp};
     use serde::{Deserialize, Serialize};
     use std::time::{Duration, UNIX_EPOCH};
 

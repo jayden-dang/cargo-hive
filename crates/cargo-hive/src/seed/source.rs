@@ -10,10 +10,10 @@ use crate::ctx::{Ctx, checkout_walk};
 use crate::discover::{self, Snapshot};
 use crate::fingerprint::{self, Format, Unit, le_hex};
 use crate::liveness::{self, Liveness, LivenessFn, Uncertain};
-use crate::platform::{EntryKind, Fs};
 use crate::receipt::Finding;
 use crate::seed::store::StoreKey;
 use crate::size::MAX_DEPTH;
+use cargo_hive_platform::{EntryKind, Fs};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
@@ -782,15 +782,16 @@ fn unescape_spaces(input: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
     use crate::cargo_target::{Owner, TAG_LINE};
     use crate::ctx::Ctx;
     use crate::fingerprint::le_hex;
-    use crate::platform::EntryKind;
     use crate::registry::Repo;
     use crate::size::MAX_DEPTH;
     use crate::state::{Config, State};
+    use cargo_hive_platform::EntryKind;
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -829,7 +830,7 @@ mod tests {
             let prev = std::env::var_os("CARGO_HOME");
             // `cargo metadata` inherits this process's environment. The previous
             // value is restored when the guard drops, including when an assertion panics.
-            crate::platform::testing::set_env("CARGO_HOME", path);
+            cargo_hive_platform::testing::set_env("CARGO_HOME", path);
             CargoHomeGuard { prev }
         }
     }
@@ -838,8 +839,8 @@ mod tests {
         fn drop(&mut self) {
             // Paired with `CargoHomeGuard::set`. Restores the environment this test replaced.
             match self.prev.take() {
-                Some(value) => crate::platform::testing::set_env("CARGO_HOME", value),
-                None => crate::platform::testing::remove_env("CARGO_HOME"),
+                Some(value) => cargo_hive_platform::testing::set_env("CARGO_HOME", value),
+                None => cargo_hive_platform::testing::remove_env("CARGO_HOME"),
             }
         }
     }
@@ -847,7 +848,7 @@ mod tests {
     struct Env {
         state: State,
         cfg: Config,
-        platform: crate::platform::Platform,
+        platform: cargo_hive_platform::Platform,
         now: SystemTime,
     }
 
@@ -860,7 +861,7 @@ mod tests {
                     cache_roots: Vec::new(),
                     gc_window_days: None,
                 },
-                platform: crate::platform::current().unwrap(),
+                platform: cargo_hive_platform::current().unwrap(),
                 now: SystemTime::now(),
             }
         }
@@ -1202,7 +1203,7 @@ mod tests {
             root_commits: BTreeSet::from([root]),
         }];
         let mains = [repo.clone()];
-        let platform = crate::platform::current().unwrap();
+        let platform = cargo_hive_platform::current().unwrap();
         let ctx = Ctx {
             state: &state,
             fs: platform.fs.as_ref(),

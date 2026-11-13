@@ -115,7 +115,7 @@ pub fn identify(dir: &Path) -> Option<Result<Vec<(PathBuf, Layout)>, String>> {
 
 /// Same as [`identify`], but every directory listing stops at `cap` entries.
 pub fn identify_bounded(
-    fs: &dyn crate::platform::Fs,
+    fs: &dyn cargo_hive_platform::Fs,
     dir: &Path,
     cap: usize,
 ) -> Option<Result<Vec<(PathBuf, Layout)>, String>> {
@@ -148,7 +148,7 @@ fn finish_profiles(
 }
 
 fn bounded_dirs(
-    fs: &dyn crate::platform::Fs,
+    fs: &dyn cargo_hive_platform::Fs,
     dir: &Path,
     cap: usize,
 ) -> Result<Vec<PathBuf>, String> {
@@ -157,7 +157,7 @@ fn bounded_dirs(
         .map_err(|err| format!("{}: {err}", dir.display()))?;
     let mut dirs = Vec::new();
     for (name, kind) in entries {
-        if kind == crate::platform::EntryKind::Dir {
+        if kind == cargo_hive_platform::EntryKind::Dir {
             dirs.push(dir.join(name));
         }
     }
@@ -165,9 +165,9 @@ fn bounded_dirs(
     Ok(dirs)
 }
 
-fn is_dir_bounded(fs: &dyn crate::platform::Fs, path: &Path) -> Result<bool, String> {
+fn is_dir_bounded(fs: &dyn cargo_hive_platform::Fs, path: &Path) -> Result<bool, String> {
     match fs.entry_stat(path) {
-        Ok(stat) => Ok(stat.kind == crate::platform::EntryKind::Dir),
+        Ok(stat) => Ok(stat.kind == cargo_hive_platform::EntryKind::Dir),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(err) => Err(format!("{}: {err}", path.display())),
     }
@@ -241,7 +241,7 @@ mod tests {
         fs::write(root.join("extra"), b"x").unwrap();
         let n = fs::read_dir(&root).unwrap().count();
         let open = identify(&root).unwrap().unwrap();
-        let fs = crate::platform::current().unwrap().fs;
+        let fs = cargo_hive_platform::current().unwrap().fs;
         let capped = identify_bounded(fs.as_ref(), &root, n).unwrap().unwrap();
         assert_eq!(open, capped);
         let err = identify_bounded(fs.as_ref(), &root, n - 1)

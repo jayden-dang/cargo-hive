@@ -5,8 +5,8 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::platform::proc::Spec;
 use crate::toolchain::Toolchain;
+use cargo_hive_platform::proc::Spec;
 use std::ffi::OsStr;
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]

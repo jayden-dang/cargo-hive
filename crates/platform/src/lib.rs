@@ -78,7 +78,8 @@ pub enum EntryKind {
 }
 
 /// Kind of a `FileType` from `symlink_metadata` or `DirEntry::file_type` (neither follows a link).
-pub(crate) fn entry_kind(t: std::fs::FileType) -> EntryKind {
+#[doc(hidden)]
+pub fn entry_kind(t: std::fs::FileType) -> EntryKind {
     if t.is_symlink() {
         EntryKind::Symlink
     } else if t.is_dir() {

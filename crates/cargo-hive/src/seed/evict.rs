@@ -13,7 +13,6 @@ use crate::ctx::{faults_that_can_hide_an_owner, split_checkout_faults};
 use crate::discover::{Checkout, WalkFault};
 use crate::ledger::{self, Ledger};
 use crate::liveness::LivenessFn;
-use crate::platform::Fs;
 use crate::receipt::{Finding, Measured};
 use crate::seed::source::{self, Holds};
 use crate::seed::store::{
@@ -22,6 +21,7 @@ use crate::seed::store::{
 };
 use crate::state::{State, StateError};
 use crate::toolchain::{self, Toolchain};
+use cargo_hive_platform::Fs;
 
 pub struct EvictCtx<'a> {
     pub state: &'a State,

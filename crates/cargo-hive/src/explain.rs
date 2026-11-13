@@ -9,9 +9,9 @@ use crate::cargo_target::TargetDir;
 use crate::fingerprint::{
     Format, NotCurrentUnit, Unit, error_code, is_summary_line, kind_of, read_capped,
 };
-use crate::platform::Fs;
-use crate::platform::clock::utc_timestamp;
 use crate::receipt::{Finding, Measured};
+use cargo_hive_platform::Fs;
+use cargo_hive_platform::clock::utc_timestamp;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -663,7 +663,7 @@ pub fn run(
     failed: FailedUnits,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Explanation, Cancelled> {
-    let host = crate::platform::host_fs();
+    let host = cargo_hive_platform::host_fs();
     run_with(host.as_ref(), DEPS_CAP, targets, limits, failed, cancelled)
 }
 
@@ -3015,8 +3015,8 @@ mod tests {
         std::io::Error::new(std::io::ErrorKind::Unsupported, "not used by explain")
     }
 
-    impl crate::platform::Fs for FakeFs {
-        fn temp_dir(&self, _: &Path, _: &str) -> std::io::Result<crate::platform::TempDir> {
+    impl cargo_hive_platform::Fs for FakeFs {
+        fn temp_dir(&self, _: &Path, _: &str) -> std::io::Result<cargo_hive_platform::TempDir> {
             Err(unused_io())
         }
         fn write_file(&self, _: &Path, _: &[u8]) -> std::io::Result<()> {
@@ -3043,37 +3043,37 @@ mod tests {
         fn create_dir(&self, _: &Path) -> std::io::Result<()> {
             Err(unused_io())
         }
-        fn sharing(&self, _: &Path) -> std::io::Result<crate::platform::Sharing> {
+        fn sharing(&self, _: &Path) -> std::io::Result<cargo_hive_platform::Sharing> {
             Err(unused_io())
         }
-        fn compress(&self, _: &Path) -> crate::platform::CompressOutcome {
-            crate::platform::CompressOutcome::Failed("not used by explain".into())
+        fn compress(&self, _: &Path) -> cargo_hive_platform::CompressOutcome {
+            cargo_hive_platform::CompressOutcome::Failed("not used by explain".into())
         }
         fn hold_lock(
             &self,
-            _: crate::platform::LockKind,
+            _: cargo_hive_platform::LockKind,
             _: &Path,
-        ) -> std::io::Result<crate::platform::LockHolder> {
+        ) -> std::io::Result<cargo_hive_platform::LockHolder> {
             Err(unused_io())
         }
-        fn try_lock_exclusive(&self, _: &Path) -> crate::platform::TryLock {
-            crate::platform::TryLock::Unopenable(unused_io())
+        fn try_lock_exclusive(&self, _: &Path) -> cargo_hive_platform::TryLock {
+            cargo_hive_platform::TryLock::Unopenable(unused_io())
         }
         fn try_lock_elsewhere(
             &self,
-            _: crate::platform::LockKind,
+            _: cargo_hive_platform::LockKind,
             _: &Path,
-        ) -> std::io::Result<crate::platform::LockState> {
+        ) -> std::io::Result<cargo_hive_platform::LockState> {
             Err(unused_io())
         }
-        fn entry_stat(&self, _: &Path) -> std::io::Result<crate::platform::EntryStat> {
+        fn entry_stat(&self, _: &Path) -> std::io::Result<cargo_hive_platform::EntryStat> {
             Err(unused_io())
         }
         fn read_dir_bounded(
             &self,
             dir: &Path,
             cap: usize,
-        ) -> std::io::Result<Vec<(String, crate::platform::EntryKind)>> {
+        ) -> std::io::Result<Vec<(String, cargo_hive_platform::EntryKind)>> {
             let mut out = Vec::new();
             for (seen, entry) in std::fs::read_dir(dir)?.enumerate() {
                 if seen >= cap {
@@ -3084,9 +3084,9 @@ mod tests {
                 }
                 let entry = entry?;
                 let kind = if entry.file_type()?.is_dir() {
-                    crate::platform::EntryKind::Dir
+                    cargo_hive_platform::EntryKind::Dir
                 } else {
-                    crate::platform::EntryKind::File
+                    cargo_hive_platform::EntryKind::File
                 };
                 let name = entry.file_name().into_string().map_err(|_| {
                     std::io::Error::other(format!(
@@ -3104,7 +3104,7 @@ mod tests {
         fn remove_file(&self, _: &Path) -> std::io::Result<()> {
             Err(unused_io())
         }
-        fn volume(&self, _: &Path) -> std::io::Result<crate::platform::VolumeInfo> {
+        fn volume(&self, _: &Path) -> std::io::Result<cargo_hive_platform::VolumeInfo> {
             Err(unused_io())
         }
     }

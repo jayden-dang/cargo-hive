@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::platform::EntryKind;
 use crate::state::{State, StateError, Tx};
+use cargo_hive_platform::EntryKind;
 
 const PLANS_FILE: &str = "plans.json";
 pub const MAX_PLANS_BYTES: u64 = 4 * 1024 * 1024;

@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::cargo_target;
-use crate::platform::{Fs, HeldLock, TryLock};
+use cargo_hive_platform::{Fs, HeldLock, TryLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {

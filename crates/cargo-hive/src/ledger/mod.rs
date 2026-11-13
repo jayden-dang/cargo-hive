@@ -8,8 +8,8 @@ pub use account::Removed;
 pub(crate) use account::{RemoveFailed, remove_counted};
 
 use crate::caps::CRATE_DIR_CAP;
-use crate::platform::{EntryKind, EntryStat, Fs, Sharing};
 use crate::size::MAX_DEPTH;
+use cargo_hive_platform::{EntryKind, EntryStat, Fs, Sharing};
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -235,7 +235,7 @@ pub(crate) fn scan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::EntryKind;
+    use cargo_hive_platform::EntryKind;
 
     fn stat(ino: u64, nlink: u64, blocks: u64, compressed: bool) -> EntryStat {
         EntryStat {

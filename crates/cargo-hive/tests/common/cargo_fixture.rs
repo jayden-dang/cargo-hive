@@ -6,7 +6,7 @@ use super::{Scratch, prove, wait_within};
 use cargo_hive::cargo_target::TargetDir;
 use cargo_hive::gc::liveness::liveness;
 use cargo_hive::liveness::{DeadUnit, Liveness, UnitRef};
-use cargo_hive::platform;
+use cargo_hive_platform as platform;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};

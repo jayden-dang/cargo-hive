@@ -21,9 +21,9 @@ use crate::plan_tier::orphan::{self, Counted, Removal};
 use crate::plan_tier::record::{
     self, BytesRec, Lookup, Plan, PlanClass, PlannedEntry, PlannedTarget, Taken, kind_of,
 };
-use crate::platform::Fs;
 use crate::receipt::{Outcome, Unmeasured};
 use crate::state::StateError;
+use cargo_hive_platform::Fs;
 
 pub(crate) fn cross_check_notes(
     before: &std::collections::BTreeMap<String, (std::path::PathBuf, u64)>,

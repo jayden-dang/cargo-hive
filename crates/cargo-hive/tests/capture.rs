@@ -1,4 +1,5 @@
 //! Compare this binary's receipts, exit codes and state with the 0.1.0 binary.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 
 use common::registry_fixture::RegistryRepo;

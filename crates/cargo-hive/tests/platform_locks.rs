@@ -1,7 +1,8 @@
 #![cfg(target_os = "macos")]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
-use cargo_hive::platform::apfs::Apfs;
-use cargo_hive::platform::{Fs, LockKind, LockState, TryLock};
+use cargo_hive_platform::apfs::Apfs;
+use cargo_hive_platform::{Fs, LockKind, LockState, TryLock};
 use common::{Hive, Scratch};
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;

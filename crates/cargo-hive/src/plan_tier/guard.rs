@@ -6,7 +6,7 @@
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
-use crate::platform::{EntryKind, EntryStat, Fs};
+use cargo_hive_platform::{EntryKind, EntryStat, Fs};
 
 pub enum Expect {
     Entry { kind: EntryKind, dev: u64, ino: u64 },
@@ -92,7 +92,7 @@ fn canonical_parent(path: &Path) -> Result<PathBuf, Deleted> {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
-    use crate::platform::{self, Fs};
+    use cargo_hive_platform::{self as platform, Fs};
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 

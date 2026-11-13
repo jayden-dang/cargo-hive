@@ -3,6 +3,7 @@
 //! against a scratch home and read the receipt.
 
 #![cfg(target_os = "macos")]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;

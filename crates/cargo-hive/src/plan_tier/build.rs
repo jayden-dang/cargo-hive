@@ -628,17 +628,17 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     struct FailStat {
-        inner: Box<dyn crate::platform::Fs>,
+        inner: Box<dyn cargo_hive_platform::Fs>,
         deny: fn(&Path) -> bool,
     }
 
     #[cfg(target_os = "macos")]
-    impl crate::platform::Fs for FailStat {
+    impl cargo_hive_platform::Fs for FailStat {
         fn temp_dir(
             &self,
             parent: &Path,
             prefix: &str,
-        ) -> std::io::Result<crate::platform::TempDir> {
+        ) -> std::io::Result<cargo_hive_platform::TempDir> {
             self.inner.temp_dir(parent, prefix)
         }
         fn write_file(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -665,30 +665,30 @@ mod tests {
         fn create_dir(&self, path: &Path) -> std::io::Result<()> {
             self.inner.create_dir(path)
         }
-        fn sharing(&self, path: &Path) -> std::io::Result<crate::platform::Sharing> {
+        fn sharing(&self, path: &Path) -> std::io::Result<cargo_hive_platform::Sharing> {
             self.inner.sharing(path)
         }
-        fn compress(&self, path: &Path) -> crate::platform::CompressOutcome {
+        fn compress(&self, path: &Path) -> cargo_hive_platform::CompressOutcome {
             self.inner.compress(path)
         }
         fn hold_lock(
             &self,
-            kind: crate::platform::LockKind,
+            kind: cargo_hive_platform::LockKind,
             path: &Path,
-        ) -> std::io::Result<crate::platform::LockHolder> {
+        ) -> std::io::Result<cargo_hive_platform::LockHolder> {
             self.inner.hold_lock(kind, path)
         }
-        fn try_lock_exclusive(&self, path: &Path) -> crate::platform::TryLock {
+        fn try_lock_exclusive(&self, path: &Path) -> cargo_hive_platform::TryLock {
             self.inner.try_lock_exclusive(path)
         }
         fn try_lock_elsewhere(
             &self,
-            kind: crate::platform::LockKind,
+            kind: cargo_hive_platform::LockKind,
             path: &Path,
-        ) -> std::io::Result<crate::platform::LockState> {
+        ) -> std::io::Result<cargo_hive_platform::LockState> {
             self.inner.try_lock_elsewhere(kind, path)
         }
-        fn entry_stat(&self, path: &Path) -> std::io::Result<crate::platform::EntryStat> {
+        fn entry_stat(&self, path: &Path) -> std::io::Result<cargo_hive_platform::EntryStat> {
             if (self.deny)(path) {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -702,7 +702,7 @@ mod tests {
             &self,
             dir: &Path,
             cap: usize,
-        ) -> std::io::Result<Vec<(String, crate::platform::EntryKind)>> {
+        ) -> std::io::Result<Vec<(String, cargo_hive_platform::EntryKind)>> {
             self.inner.read_dir_bounded(dir, cap)
         }
         fn remove_tree(&self, path: &Path) -> std::io::Result<()> {
@@ -711,7 +711,7 @@ mod tests {
         fn remove_file(&self, path: &Path) -> std::io::Result<()> {
             self.inner.remove_file(path)
         }
-        fn volume(&self, path: &Path) -> std::io::Result<crate::platform::VolumeInfo> {
+        fn volume(&self, path: &Path) -> std::io::Result<cargo_hive_platform::VolumeInfo> {
             self.inner.volume(path)
         }
     }
@@ -780,7 +780,7 @@ mod tests {
             gc_window_days: None,
         };
         let fs = FailStat {
-            inner: crate::platform::current().unwrap().fs,
+            inner: cargo_hive_platform::current().unwrap().fs,
             deny,
         };
         let ctx = Ctx {

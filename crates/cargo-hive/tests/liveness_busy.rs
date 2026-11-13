@@ -3,9 +3,10 @@
 //! (a failed build, a build that never started, a renamed dependency, a host dependency): the
 //! not-current units must keep what they wanted live, and deleting the dead units must not make
 //! Cargo rebuild a live one.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 use cargo_hive::liveness::{Liveness, Uncertain, UnitRef};
-use cargo_hive::platform;
+use cargo_hive_platform as platform;
 use common::Scratch;
 use common::cargo_fixture::*;
 use common::prove::{self, WindowOutcome};

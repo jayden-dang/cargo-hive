@@ -1,3 +1,5 @@
+#![forbid(unsafe_code, reason = "only the platform crate may touch the OS (ARCH-15)")]
+
 pub mod bench;
 pub mod caps;
 pub mod cargo_target;
@@ -17,7 +19,6 @@ pub mod liveness;
 pub mod locks;
 pub mod metadata;
 pub mod plan_tier;
-pub mod platform;
 pub mod receipt;
 pub mod registry;
 pub mod seed;

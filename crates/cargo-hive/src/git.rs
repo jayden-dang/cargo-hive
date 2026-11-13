@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::metadata::METADATA_DEADLINE;
-use crate::platform::proc::{self, Capture, ChildOutputError, Ran, Spec};
+use cargo_hive_platform::proc::{self, Capture, ChildOutputError, Ran, Spec};
 
 #[derive(Debug)]
 pub enum GitError {
@@ -243,6 +243,7 @@ impl Git {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

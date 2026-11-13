@@ -15,9 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::ctx::Ctx;
 use crate::liveness;
-use crate::platform::{EntryKind, Fs};
 use crate::seed::store::{self, Row};
 use crate::size::{MAX_DEPTH, allocated_bytes};
+use cargo_hive_platform::{EntryKind, Fs};
 
 use super::Error;
 
@@ -651,7 +651,7 @@ impl Stop {
 #[cfg(test)]
 mod tests {
     use super::expand_capped;
-    use crate::platform::testing::Hooked;
+    use cargo_hive_platform::testing::Hooked;
     use std::fs;
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
@@ -671,7 +671,7 @@ mod tests {
         path
     }
 
-    fn pretend_compressed(inner: Box<dyn crate::platform::Fs>) -> Hooked {
+    fn pretend_compressed(inner: Box<dyn cargo_hive_platform::Fs>) -> Hooked {
         let once = Mutex::new(std::collections::HashSet::<PathBuf>::new());
         Hooked {
             inner,
@@ -679,7 +679,7 @@ mod tests {
             volume: None,
             sharing: None,
             entry_stat: Some(Box::new(move |path| {
-                let real = crate::platform::current().unwrap().fs;
+                let real = cargo_hive_platform::current().unwrap().fs;
                 let mut stat = real.entry_stat(path)?;
                 if once.lock().unwrap().insert(path.to_path_buf()) {
                     stat.compressed = true;
@@ -710,7 +710,7 @@ mod tests {
         let over = plant(&root, "over", (cap + 1) as usize);
         let over_ino = fs::symlink_metadata(&over).unwrap().ino();
         let over_bytes = fs::read(&over).unwrap();
-        let fs = pretend_compressed(crate::platform::current().unwrap().fs);
+        let fs = pretend_compressed(cargo_hive_platform::current().unwrap().fs);
         expand_capped(&fs, &exact, cap).unwrap();
         assert_eq!(fs::read(&exact).unwrap(), vec![7u8; cap as usize]);
         assert_eq!(

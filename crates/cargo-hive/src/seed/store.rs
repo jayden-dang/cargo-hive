@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::caps::CRATE_DIR_CAP;
 use crate::fingerprint;
-use crate::platform::{EntryKind, Fs};
 use crate::size::{MAX_DEPTH, SizeError, allocated_bytes};
 use crate::state::{State, StateError};
+use cargo_hive_platform::{EntryKind, Fs};
 
 pub const STORE_FILE: &str = "store.db";
 pub const MAX_STORE_BYTES: u64 = 32 * 1024 * 1024;
@@ -774,6 +774,7 @@ fn discard_tmp(tmp: &Path) -> Result<(), PublishFailed> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
     use crate::state::{State, StateError};
@@ -782,14 +783,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, SystemTime};
 
-    fn scratch_state(label: &str) -> (State, Box<dyn crate::platform::Fs>) {
+    fn scratch_state(label: &str) -> (State, Box<dyn cargo_hive_platform::Fs>) {
         let dir = PathBuf::from(format!(
             "/private/tmp/hive-it-store-{label}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let state = State::open_at(dir).unwrap();
-        let fs = crate::platform::current()
+        let fs = cargo_hive_platform::current()
             .expect("store tests run on macOS")
             .fs;
         (state, fs)
@@ -811,7 +812,7 @@ mod tests {
         }
     }
 
-    fn three_file_entry(state: &State, fs: &dyn crate::platform::Fs) -> (PathBuf, Row) {
+    fn three_file_entry(state: &State, fs: &dyn cargo_hive_platform::Fs) -> (PathBuf, Row) {
         let row = sample_row();
         let key = format!("{}-{}", row.name_meta, row.fingerprint_hash);
         let tmp = tmp_dir(state, &key);
@@ -1205,7 +1206,7 @@ mod tests {
     fn create_long_name(dir: &Path, name: &str) {
         let file = std::fs::File::open(dir).unwrap();
         let c_name = std::ffi::CString::new(name).unwrap();
-        crate::platform::testing::openat_raw(&file, &c_name).unwrap();
+        cargo_hive_platform::testing::openat_raw(&file, &c_name).unwrap();
     }
 
     fn unlink_long_name(dir: &Path, name: &str) {
@@ -1215,7 +1216,7 @@ mod tests {
         let Ok(c_name) = std::ffi::CString::new(name) else {
             return;
         };
-        crate::platform::testing::unlinkat_raw(&file, &c_name);
+        cargo_hive_platform::testing::unlinkat_raw(&file, &c_name);
     }
 
     struct ClearFlag(PathBuf);
@@ -1510,7 +1511,10 @@ mod tests {
         // Another holder: flock conflicts between two open file descriptions.
         let other = std::fs::File::open(state.root().join(".lock")).unwrap();
         assert_eq!(
-            crate::platform::testing::flock_raw(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB),
+            cargo_hive_platform::testing::flock_raw(
+                other.as_raw_fd(),
+                libc::LOCK_EX | libc::LOCK_NB
+            ),
             0
         );
         let plan = CommitPlan {

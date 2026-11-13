@@ -1,5 +1,6 @@
 //! Receipt `hive_version` matches `cargo-hive --version`.
 
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 
 use common::Hive;
