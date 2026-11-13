@@ -763,10 +763,7 @@ fn publish(state: &State, tmp: &Path, row: &Row) -> Result<Placed, PublishFailed
 }
 
 fn dest_present(err: &io::Error) -> bool {
-    err.raw_os_error() == Some(libc::EEXIST)
-        || err.raw_os_error() == Some(libc::ENOTEMPTY)
-        || err.kind() == io::ErrorKind::AlreadyExists
-        || err.kind() == io::ErrorKind::DirectoryNotEmpty
+    err.kind() == io::ErrorKind::AlreadyExists || err.kind() == io::ErrorKind::DirectoryNotEmpty
 }
 
 fn discard_tmp(tmp: &Path) -> Result<(), PublishFailed> {
@@ -782,7 +779,6 @@ mod tests {
     use super::*;
     use crate::state::{State, StateError};
     use std::collections::BTreeMap;
-    use std::os::unix::io::AsRawFd;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, SystemTime};
@@ -1210,19 +1206,7 @@ mod tests {
     fn create_long_name(dir: &Path, name: &str) {
         let file = std::fs::File::open(dir).unwrap();
         let c_name = std::ffi::CString::new(name).unwrap();
-        // SAFETY: `file` is an open directory and `c_name` is one NUL-terminated
-        // component, so `openat` creates that name only inside this directory.
-        let fd = unsafe {
-            libc::openat(
-                file.as_raw_fd(),
-                c_name.as_ptr(),
-                libc::O_CREAT | libc::O_WRONLY,
-                0o644,
-            )
-        };
-        assert!(fd >= 0, "{}", std::io::Error::last_os_error());
-        // SAFETY: `fd` is the descriptor just returned by `openat` and is not used again.
-        unsafe { libc::close(fd) };
+        crate::platform::testing::openat_raw(&file, &c_name).unwrap();
     }
 
     fn unlink_long_name(dir: &Path, name: &str) {
@@ -1232,10 +1216,7 @@ mod tests {
         let Ok(c_name) = std::ffi::CString::new(name) else {
             return;
         };
-        // SAFETY: `file` is an open directory and `c_name` is the component created above.
-        unsafe {
-            libc::unlinkat(file.as_raw_fd(), c_name.as_ptr(), 0);
-        }
+        crate::platform::testing::unlinkat_raw(&file, &c_name);
     }
 
     struct ClearFlag(PathBuf);
@@ -1529,9 +1510,8 @@ mod tests {
         let before = std::fs::read(state.root().join(STORE_FILE)).unwrap();
         // Another holder: flock conflicts between two open file descriptions.
         let other = std::fs::File::open(state.root().join(".lock")).unwrap();
-        // SAFETY: `other` owns a valid descriptor for the whole test.
         assert_eq!(
-            unsafe { libc::flock(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            crate::platform::testing::flock_raw(other.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB),
             0
         );
         let plan = CommitPlan {

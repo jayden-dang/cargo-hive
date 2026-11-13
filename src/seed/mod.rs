@@ -92,9 +92,7 @@ pub(crate) fn directory_listing(dir: &Path, err: &io::Error, again: &str) -> Str
         "shrink the directory below its cap"
     } else if err.kind() == io::ErrorKind::PermissionDenied {
         "make the directory readable"
-    } else if err.kind() == io::ErrorKind::NotADirectory
-        || err.raw_os_error() == Some(libc::ENOTDIR)
-    {
+    } else if err.kind() == io::ErrorKind::NotADirectory {
         "remove the path that is not a directory"
     } else {
         "fix that error"

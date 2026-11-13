@@ -607,7 +607,7 @@ fn area(rel: &Path) -> u8 {
 }
 
 fn is_full(err: &io::Error) -> bool {
-    err.raw_os_error() == Some(libc::ENOSPC) || err.kind() == io::ErrorKind::StorageFull
+    err.kind() == io::ErrorKind::StorageFull
 }
 
 fn name_removal(target: &Path, detail: impl Into<String>) -> String {
@@ -652,7 +652,7 @@ impl Stop {
 #[cfg(test)]
 mod tests {
     use super::expand_capped;
-    use crate::platform::Hooked;
+    use crate::platform::testing::Hooked;
     use std::fs;
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};

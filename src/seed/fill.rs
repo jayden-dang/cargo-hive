@@ -503,13 +503,11 @@ fn clone_unit(
                 Some(target.path.clone()),
                 detail,
             ));
-            if err.raw_os_error() == Some(libc::EXDEV) {
-                return Ok(ClonedUnit::StopTarget);
-            }
-            if err.raw_os_error() == Some(libc::ENOSPC) {
-                return Err(format!("{}: {err}", src.display()));
-            }
-            return Ok(ClonedUnit::Skip);
+            return match clone_io_branch(&err) {
+                CloneIoBranch::StopTarget => Ok(ClonedUnit::StopTarget),
+                CloneIoBranch::DiskFull => Err(format!("{}: {err}", src.display())),
+                CloneIoBranch::Skip => Ok(ClonedUnit::Skip),
+            };
         }
         size = size.saturating_add(stat.blocks.saturating_mul(512));
     }
@@ -747,10 +745,25 @@ fn clone_tag(ctx: &Ctx<'_>, target: &TargetDir) -> Result<(), Stop> {
 }
 
 fn stop_io(err: &io::Error, detail: &str) -> Stop {
-    if err.raw_os_error() == Some(libc::ENOSPC) || err.kind() == io::ErrorKind::StorageFull {
+    if err.kind() == io::ErrorKind::StorageFull {
         Stop::Full(detail.to_string())
     } else {
         Stop::Failed(detail.to_string())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CloneIoBranch {
+    StopTarget,
+    DiskFull,
+    Skip,
+}
+
+fn clone_io_branch(err: &io::Error) -> CloneIoBranch {
+    match err.kind() {
+        io::ErrorKind::CrossesDevices => CloneIoBranch::StopTarget,
+        io::ErrorKind::StorageFull => CloneIoBranch::DiskFull,
+        _ => CloneIoBranch::Skip,
     }
 }
 
@@ -1256,5 +1269,11 @@ mod tests {
             .iter()
             .any(|(kind, _, _)| kind == "lock.failed"));
         assert!(crate::seed::store::read(&state).unwrap().units.is_empty());
+    }
+
+    #[test]
+    fn a_permission_denied_clone_takes_the_non_cross_device_branch() {
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        assert_eq!(super::clone_io_branch(&err), super::CloneIoBranch::Skip);
     }
 }

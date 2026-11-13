@@ -10,13 +10,9 @@ use crate::fingerprint::{
 };
 use crate::gc::DEPS_CAP;
 use crate::platform::clock::utc_timestamp;
-use crate::platform::{
-    CompressOutcome, EntryKind, EntryStat, Fs, LockHolder, LockKind, LockState, Sharing, TempDir,
-    TryLock, VolumeInfo,
-};
+use crate::platform::Fs;
 use crate::receipt::{Finding, Measured};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -667,122 +663,8 @@ pub fn run(
     failed: FailedUnits,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Explanation, Cancelled> {
-    let host = host_fs();
+    let host = crate::platform::host_fs();
     run_with(host.as_ref(), DEPS_CAP, targets, limits, failed, cancelled)
-}
-
-fn host_fs() -> Box<dyn Fs> {
-    #[cfg(target_os = "macos")]
-    if let Ok(platform) = crate::platform::current() {
-        return platform.fs;
-    }
-    Box::new(DirListFs)
-}
-
-struct DirListFs;
-
-fn unsupported() -> io::Error {
-    io::Error::new(io::ErrorKind::Unsupported, "not supported")
-}
-
-impl Fs for DirListFs {
-    fn temp_dir(&self, _parent: &Path, _prefix: &str) -> io::Result<TempDir> {
-        Err(unsupported())
-    }
-
-    fn write_file(&self, _path: &Path, _bytes: &[u8]) -> io::Result<()> {
-        Err(unsupported())
-    }
-
-    fn read(&self, _path: &Path) -> io::Result<Vec<u8>> {
-        Err(unsupported())
-    }
-
-    fn hardlink(&self, _src: &Path, _dst: &Path) -> io::Result<()> {
-        Err(unsupported())
-    }
-
-    fn set_mtime(&self, _path: &Path, _t: SystemTime) -> io::Result<()> {
-        Err(unsupported())
-    }
-
-    fn mtime(&self, _path: &Path) -> io::Result<SystemTime> {
-        Err(unsupported())
-    }
-
-    fn inode(&self, _path: &Path) -> io::Result<u64> {
-        Err(unsupported())
-    }
-
-    fn clone_file(&self, _src: &Path, _dst: &Path) -> io::Result<()> {
-        Err(unsupported())
-    }
-
-    fn create_dir(&self, _path: &Path) -> io::Result<()> {
-        Err(unsupported())
-    }
-
-    fn sharing(&self, _path: &Path) -> io::Result<Sharing> {
-        Err(unsupported())
-    }
-
-    fn compress(&self, _path: &Path) -> CompressOutcome {
-        CompressOutcome::Failed("not supported".to_string())
-    }
-
-    fn hold_lock(&self, _kind: LockKind, _path: &Path) -> io::Result<LockHolder> {
-        Err(unsupported())
-    }
-
-    fn try_lock_exclusive(&self, _path: &Path) -> TryLock {
-        TryLock::Unopenable(unsupported())
-    }
-
-    fn try_lock_elsewhere(&self, _kind: LockKind, _path: &Path) -> io::Result<LockState> {
-        Err(unsupported())
-    }
-
-    fn entry_stat(&self, _path: &Path) -> io::Result<EntryStat> {
-        Err(unsupported())
-    }
-
-    fn read_dir_bounded(&self, dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>> {
-        read_dir_capped(dir, cap)
-    }
-
-    fn remove_tree(&self, _path: &Path) -> io::Result<()> {
-        Err(unsupported())
-    }
-
-    fn remove_file(&self, _path: &Path) -> io::Result<()> {
-        Err(unsupported())
-    }
-
-    fn volume(&self, _path: &Path) -> io::Result<VolumeInfo> {
-        Err(unsupported())
-    }
-}
-
-fn read_dir_capped(dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>> {
-    let mut out = Vec::new();
-    for (seen, entry) in std::fs::read_dir(dir)?.enumerate() {
-        if seen >= cap {
-            return Err(io::Error::other(format!(
-                "{} has more than {cap} entries",
-                dir.display()
-            )));
-        }
-        let entry = entry?;
-        let kind = crate::platform::entry_kind(entry.file_type()?);
-        let name = entry.file_name().into_string().map_err(|_| {
-            io::Error::other(format!(
-                "{} has a name that is not valid UTF-8",
-                dir.display()
-            ))
-        })?;
-        out.push((name, kind));
-    }
-    Ok(out)
 }
 
 fn run_with(

@@ -40,6 +40,8 @@ pub mod clock;
 pub mod flock;
 pub mod proc;
 pub mod signals;
+#[doc(hidden)]
+pub mod testing;
 
 /// Whether `pid` still names a live process (`kill(pid, 0)`).
 pub fn alive(pid: i32) -> bool {
@@ -337,109 +339,6 @@ pub trait Fs {
     }
 }
 
-#[cfg(test)]
-type Hook<T> = Box<dyn Fn(&Path) -> T + Send + Sync>;
-
-#[cfg(test)]
-pub(crate) struct Hooked {
-    pub inner: Box<dyn Fs>,
-    pub compress: Option<Hook<CompressOutcome>>,
-    pub volume: Option<Hook<io::Result<VolumeInfo>>>,
-    pub sharing: Option<Hook<io::Result<Sharing>>>,
-    pub entry_stat: Option<Hook<io::Result<EntryStat>>>,
-}
-
-#[cfg(test)]
-impl Fs for Hooked {
-    fn temp_dir(&self, parent: &Path, prefix: &str) -> io::Result<TempDir> {
-        self.inner.temp_dir(parent, prefix)
-    }
-
-    fn write_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.inner.write_file(path, bytes)
-    }
-
-    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        self.inner.read(path)
-    }
-
-    fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {
-        self.inner.hardlink(src, dst)
-    }
-
-    fn set_mtime(&self, path: &Path, t: SystemTime) -> io::Result<()> {
-        self.inner.set_mtime(path, t)
-    }
-
-    fn mtime(&self, path: &Path) -> io::Result<SystemTime> {
-        self.inner.mtime(path)
-    }
-
-    fn inode(&self, path: &Path) -> io::Result<u64> {
-        self.inner.inode(path)
-    }
-
-    fn clone_file(&self, src: &Path, dst: &Path) -> io::Result<()> {
-        self.inner.clone_file(src, dst)
-    }
-
-    fn create_dir(&self, path: &Path) -> io::Result<()> {
-        self.inner.create_dir(path)
-    }
-
-    fn sharing(&self, path: &Path) -> io::Result<Sharing> {
-        match &self.sharing {
-            Some(f) => f(path),
-            None => self.inner.sharing(path),
-        }
-    }
-
-    fn compress(&self, path: &Path) -> CompressOutcome {
-        match &self.compress {
-            Some(f) => f(path),
-            None => self.inner.compress(path),
-        }
-    }
-
-    fn hold_lock(&self, kind: LockKind, path: &Path) -> io::Result<LockHolder> {
-        self.inner.hold_lock(kind, path)
-    }
-
-    fn try_lock_exclusive(&self, path: &Path) -> TryLock {
-        self.inner.try_lock_exclusive(path)
-    }
-
-    fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState> {
-        self.inner.try_lock_elsewhere(kind, path)
-    }
-
-    fn entry_stat(&self, path: &Path) -> io::Result<EntryStat> {
-        match &self.entry_stat {
-            Some(f) => f(path),
-            None => self.inner.entry_stat(path),
-        }
-    }
-
-    fn read_dir_bounded(&self, dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>> {
-        self.inner.read_dir_bounded(dir, cap)
-    }
-
-    fn remove_tree(&self, path: &Path) -> io::Result<()> {
-        self.inner.remove_tree(path)
-    }
-
-    fn remove_file(&self, path: &Path) -> io::Result<()> {
-        self.inner.remove_file(path)
-    }
-
-    fn volume(&self, path: &Path) -> io::Result<VolumeInfo> {
-        match &self.volume {
-            Some(f) => f(path),
-            None => self.inner.volume(path),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Availability {
     Available,
@@ -463,6 +362,121 @@ pub fn current() -> Result<Platform, NotMacOs> {
     Err(NotMacOs)
 }
 
+/// Host filesystem for explain: APFS when available, otherwise a listing-only stub.
+pub fn host_fs() -> Box<dyn Fs> {
+    #[cfg(target_os = "macos")]
+    if let Ok(platform) = current() {
+        return platform.fs;
+    }
+    Box::new(DirListFs)
+}
+
+struct DirListFs;
+
+fn unsupported_fs() -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "not supported")
+}
+
+impl Fs for DirListFs {
+    fn temp_dir(&self, _parent: &Path, _prefix: &str) -> io::Result<TempDir> {
+        Err(unsupported_fs())
+    }
+
+    fn write_file(&self, _path: &Path, _bytes: &[u8]) -> io::Result<()> {
+        Err(unsupported_fs())
+    }
+
+    fn read(&self, _path: &Path) -> io::Result<Vec<u8>> {
+        Err(unsupported_fs())
+    }
+
+    fn hardlink(&self, _src: &Path, _dst: &Path) -> io::Result<()> {
+        Err(unsupported_fs())
+    }
+
+    fn set_mtime(&self, _path: &Path, _t: SystemTime) -> io::Result<()> {
+        Err(unsupported_fs())
+    }
+
+    fn mtime(&self, _path: &Path) -> io::Result<SystemTime> {
+        Err(unsupported_fs())
+    }
+
+    fn inode(&self, _path: &Path) -> io::Result<u64> {
+        Err(unsupported_fs())
+    }
+
+    fn clone_file(&self, _src: &Path, _dst: &Path) -> io::Result<()> {
+        Err(unsupported_fs())
+    }
+
+    fn create_dir(&self, _path: &Path) -> io::Result<()> {
+        Err(unsupported_fs())
+    }
+
+    fn sharing(&self, _path: &Path) -> io::Result<Sharing> {
+        Err(unsupported_fs())
+    }
+
+    fn compress(&self, _path: &Path) -> CompressOutcome {
+        CompressOutcome::Failed("not supported".to_string())
+    }
+
+    fn hold_lock(&self, _kind: LockKind, _path: &Path) -> io::Result<LockHolder> {
+        Err(unsupported_fs())
+    }
+
+    fn try_lock_exclusive(&self, _path: &Path) -> TryLock {
+        TryLock::Unopenable(unsupported_fs())
+    }
+
+    fn try_lock_elsewhere(&self, _kind: LockKind, _path: &Path) -> io::Result<LockState> {
+        Err(unsupported_fs())
+    }
+
+    fn entry_stat(&self, _path: &Path) -> io::Result<EntryStat> {
+        Err(unsupported_fs())
+    }
+
+    fn read_dir_bounded(&self, dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>> {
+        read_dir_capped(dir, cap)
+    }
+
+    fn remove_tree(&self, _path: &Path) -> io::Result<()> {
+        Err(unsupported_fs())
+    }
+
+    fn remove_file(&self, _path: &Path) -> io::Result<()> {
+        Err(unsupported_fs())
+    }
+
+    fn volume(&self, _path: &Path) -> io::Result<VolumeInfo> {
+        Err(unsupported_fs())
+    }
+}
+
+fn read_dir_capped(dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>> {
+    let mut out = Vec::new();
+    for (seen, entry) in std::fs::read_dir(dir)?.enumerate() {
+        if seen >= cap {
+            return Err(io::Error::other(format!(
+                "{} has more than {cap} entries",
+                dir.display()
+            )));
+        }
+        let entry = entry?;
+        let kind = entry_kind(entry.file_type()?);
+        let name = entry.file_name().into_string().map_err(|_| {
+            io::Error::other(format!(
+                "{} has a name that is not valid UTF-8",
+                dir.display()
+            ))
+        })?;
+        out.push((name, kind));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +487,29 @@ mod tests {
         assert_eq!(check_os("linux"), Err(NotMacOs));
         assert_eq!(check_os("windows"), Err(NotMacOs));
         assert_eq!(MACOS_ONLY_MESSAGE, "cargo-hive supports macOS only");
+    }
+
+    #[test]
+    fn seed_errno_values_map_to_the_error_kinds_seed_matches() {
+        let rows = [
+            (libc::ENOSPC, io::ErrorKind::StorageFull),
+            (libc::EXDEV, io::ErrorKind::CrossesDevices),
+            (libc::EEXIST, io::ErrorKind::AlreadyExists),
+            (libc::ENOTEMPTY, io::ErrorKind::DirectoryNotEmpty),
+            (libc::ENOTDIR, io::ErrorKind::NotADirectory),
+        ];
+        for (errno, kind) in rows {
+            assert_eq!(
+                io::Error::from_raw_os_error(errno).kind(),
+                kind,
+                "errno {errno}"
+            );
+        }
+        assert_eq!(libc::ENOSPC, 28);
+        assert_eq!(libc::EXDEV, 18);
+        assert_eq!(libc::EEXIST, 17);
+        assert_eq!(libc::ENOTEMPTY, 66);
+        assert_eq!(libc::ENOTDIR, 20);
     }
 
     #[test]
@@ -561,7 +598,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let fs = Hooked {
+        let fs = testing::Hooked {
             inner: Box::new(Refuse),
             compress: Some(Box::new(|_| CompressOutcome::Incompressible)),
             volume: Some(Box::new(|_| {

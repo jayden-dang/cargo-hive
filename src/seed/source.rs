@@ -824,21 +824,19 @@ mod tests {
     impl CargoHomeGuard {
         fn set(path: &Path) -> CargoHomeGuard {
             let prev = std::env::var_os("CARGO_HOME");
-            // SAFETY: `cargo metadata` inherits this process's environment. The previous
+            // `cargo metadata` inherits this process's environment. The previous
             // value is restored when the guard drops, including when an assertion panics.
-            unsafe { std::env::set_var("CARGO_HOME", path) };
+            crate::platform::testing::set_env("CARGO_HOME", path);
             CargoHomeGuard { prev }
         }
     }
 
     impl Drop for CargoHomeGuard {
         fn drop(&mut self) {
-            // SAFETY: paired with `CargoHomeGuard::set`. Restores the environment this test replaced.
-            unsafe {
-                match self.prev.take() {
-                    Some(value) => std::env::set_var("CARGO_HOME", value),
-                    None => std::env::remove_var("CARGO_HOME"),
-                }
+            // Paired with `CargoHomeGuard::set`. Restores the environment this test replaced.
+            match self.prev.take() {
+                Some(value) => crate::platform::testing::set_env("CARGO_HOME", value),
+                None => crate::platform::testing::remove_env("CARGO_HOME"),
             }
         }
     }
