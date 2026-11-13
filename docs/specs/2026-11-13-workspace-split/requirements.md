@@ -258,9 +258,10 @@ Every file under `src/` and `tests/` moves into a member crate (ROAD-15 surfaces
 
 - Whether the closure walk should also move onto a precomputed target-wide CSR. That is the part of the
   close-package D7 rework set this road does not deliver, because it would resolve edges of unreached units and add
-  `Undecided` reasons (a behaviour change, Lock L6). The alternative is a CSR that records unresolved edges and
-  reports them only when reached. Either needs the operator's call under Lock L12 — operator — at the sheet —
-  forbid-guess.
+  `Undecided` reasons (a behaviour change, Lock L6). A results-equal version (a CSR that records unresolved edges
+  and reports them only when reached) is delegated work (ROAD-15.md:23). Deferring it, which leaves part of Lock
+  L12's rework undone, is the operator's call: deliver that version in this road, or defer it. With no answer it
+  stays deferred, as Task 25 plans — operator — at the sheet — forbid-guess.
 
 - Resuming a `cargo publish --workspace` that fails partway (not atomic; re-run behaviour unprobed) — the release
   steps' owner, at the first real release — after this run — forbid-guess.
