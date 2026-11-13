@@ -952,13 +952,13 @@ _Requirements: SPLIT-4.4, SPLIT-4.6_
 
 **Depends-on:** Task 23
 
-- [ ] **Step 1: Failing test.** A table test covers each of the nine names, `"build-script-build"` →
+- [x] **Step 1: Failing test.** A table test covers each of the nine names, `"build-script-build"` →
   `BuildScript`, `"weird"` → `Other` printing `"other"`, and `"lib-foo"` → `Lib`. Run
   `cargo test -p cargo-hive-core fingerprint::`. Expect: a compile error.
-- [ ] **Step 2: Implement.** Replace `kind: String` with `UnitKind`, and `NEVER_COLLECTED` with a `matches!` on
+- [x] **Step 2: Implement.** Replace `kind: String` with `UnitKind`, and `NEVER_COLLECTED` with a `matches!` on
   the enum.
-- [ ] **Step 3: Run.** The full gate and the capture comparison pass.
-- [ ] **Step 4: Commit.** `git commit -m "refactor(core): unit kinds as an enum"`
+- [x] **Step 3: Run.** The full gate and the capture comparison pass.
+- [x] **Step 4: Commit.** `git commit -m "refactor(core): unit kinds as an enum"`
 
 _Requirements: SPLIT-4.4, SPLIT-4.5_
 
