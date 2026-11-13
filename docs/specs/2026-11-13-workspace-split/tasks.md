@@ -398,18 +398,18 @@ _Requirements: SPLIT-2.1, SPLIT-4.2_
 
 **Depends-on:** Task 6
 
-- [ ] **Step 1: Failing test.** The platform test asserts `io::Error::from_raw_os_error(n).kind()` for the rows
+- [x] **Step 1: Failing test.** The platform test asserts `io::Error::from_raw_os_error(n).kind()` for the rows
   `(28, StorageFull)`, `(18, CrossesDevices)`, `(17, AlreadyExists)`, `(66, DirectoryNotEmpty)`,
   `(20, NotADirectory)`, with `n` taken from `libc::{ENOSPC, EXDEV, EEXIST, ENOTEMPTY, ENOTDIR}`. The seed/fill.rs
   test asserts that a clone error with `ErrorKind::PermissionDenied` takes the non-EXDEV branch.
   Run `cargo test --lib platform:: seed::fill::`. Expect: the fill test fails to compile on the new matcher.
-- [ ] **Step 2: Implement.** Replace each errno match with the `ErrorKind` match (keeping any existing `ErrorKind`
+- [x] **Step 2: Implement.** Replace each errno match with the `ErrorKind` match (keeping any existing `ErrorKind`
   arm). Move `host_fs`/`DirListFs`. Move the unsafe test helpers into `platform::testing` and call them from
   seed's tests.
-- [ ] **Step 3: Run.** `cargo test` and the capture comparison pass. Check that
+- [x] **Step 3: Run.** `cargo test` and the capture comparison pass. Check that
   `grep -rn 'libc::\|unsafe\|cfg(target_os' src --include=*.rs | grep -v '^src/platform/'` lists only test-gated
   lines.
-- [ ] **Step 4: Commit.** `git commit -m "refactor: keep raw OS knowledge in platform"`
+- [x] **Step 4: Commit.** `git commit -m "refactor: keep raw OS knowledge in platform"`
 
 _Requirements: SPLIT-2.7, SPLIT-2.1_
 
