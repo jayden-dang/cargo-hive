@@ -363,7 +363,7 @@ _Requirements: SPLIT-2.5, SPLIT-2.6_
 
 **Depends-on:** Task 4
 
-- [ ] **Step 1: Failing test.**
+- [x] **Step 1: Failing test.**
   - flock: a second `try_exclusive` on the same file through another `File` returns `Ok(None)` while the first
     guard lives and `Ok(Some(_))` after it drops; `exclusive_or_cancelled` with a cancel that returns `true`
     returns `Err(Cancelled)` while another guard is held;
@@ -371,11 +371,11 @@ _Requirements: SPLIT-2.5, SPLIT-2.6_
     before the move. Read that string from the current code and paste it into the test.
 
   Run `cargo test --lib platform::`. Expect: a compile error.
-- [ ] **Step 2: Implement.** Move the code. `State`'s three lock methods call `flock::*`. doctor and cli call
+- [x] **Step 2: Implement.** Move the code. `State`'s three lock methods call `flock::*`. doctor and cli call
   `signals`. `sweep_stale` uses `alive`. receipt and explain use `clock`.
-- [ ] **Step 3: Run.** `cargo test`, including tests/platform_locks.rs and tests/liveness_busy.rs, and the capture
+- [x] **Step 3: Run.** `cargo test`, including tests/platform_locks.rs and tests/liveness_busy.rs, and the capture
   comparison pass.
-- [ ] **Step 4: Commit.** `git commit -m "refactor(platform): own flock, signals, process probes and the clock"`
+- [x] **Step 4: Commit.** `git commit -m "refactor(platform): own flock, signals, process probes and the clock"`
 
 _Requirements: SPLIT-2.1, SPLIT-4.2_
 
