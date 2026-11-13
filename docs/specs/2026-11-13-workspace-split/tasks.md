@@ -83,7 +83,7 @@ Modified (then moved under `crates/<role>/src/` by Tasks 15–21 as pure moves):
 - Create: `tests/cli_tree.rs`
 - Create: `tests/fixtures/v0.1.0/cli-tree.txt`
 
-**Reuse:** rung 2 — cli.rs (minus `cross_check_notes`), bench/*, main.rs; `locate_checkout` and `Refusal` stay (cli.rs:1579, :1586, used by cli and bench in this crate). lib.rs keeps `pub mod cli; pub mod bench;` for its own tests (tests/skill.rs:434, tests/skill/names.rs:7-11).
+**Reuse:** rung 5 — clap's `CommandFactory` on `cargo_hive::cli::Cli` (clap 4.6.7, already a dependency; tests/skill.rs:434 parses with the same `Cli`).
 
 **Interfaces:**
 - Consumes: `cargo_hive::cli::Cli` (clap `CommandFactory`), present in 0.1.0 and after every task.
@@ -562,12 +562,15 @@ _Requirements: SPLIT-4.1_
 **Depends-on:** Task 12
 
 - [ ] **Step 1: Run the migration lints.** With `edition = "2021"` still set, run `cargo fix --edition
-  --all-targets --allow-dirty 2>&1 | tee /private/tmp/hive-split/edition.log`. Expect: it completes. Run `grep -c 'if-let-rescope\|tail-expr-drop-order'
-  /private/tmp/hive-split/edition.log` and record the count.
+  --all-targets --allow-dirty 2>&1 | tee /private/tmp/hive-split/edition.log`. Expect: it completes. Save `git diff > /private/tmp/hive-split/edition-fix.diff`.
+  `cargo fix` applies the `if-let-rescope` rewrite itself and logs only per-file fix counts, so the diff, not the
+  log, lists every rewritten scrutinee. Check each hunk keeps the 2021 drop point and record the diff summary in
+  the evidence file.
 - [ ] **Step 2: Resolve each drop-order warning while still on edition 2021.** For every `if-let-rescope` or
   `tail-expr-drop-order` hit, rewrite the site to keep 0.1.0's drop point (a `match` or an explicit binding), as
   the lint suggests. Then run `cargo clippy --all-targets -- -W rust-2024-compatibility -D warnings` with
-  `edition = "2021"`. Expect: exit 0. Record the output in the evidence file. On edition 2024 these lints no
+  `edition = "2021"`. Expect: exit 0. This still catches `tail-expr-drop-order`, which has no auto-fix. The diff
+  and this exit 0 together are SPLIT-5.2's evidence in the evidence file. On edition 2024 these lints no
   longer fire, so the check must run before the flip.
 - [ ] **Step 3: Flip and format.** Set `edition = "2024"`, then run `cargo fmt`, because the 2024 style edition
   reorders some imports. As a second check, inspect the guard sites found by
@@ -601,7 +604,7 @@ _Requirements: SPLIT-5.2_
 
 **Depends-on:** Task 13
 
-- [ ] **Step 1: Failing test.** Write `workspace.rs` with four tests over `metadata()["packages"]`:
+- [ ] **Step 1: Failing test.** Write `workspace.rs` with six tests over `metadata()` (packages and workspace root):
   - `every_member_is_edition_2024`;
   - `members_depend_only_on_lower_layers_and_no_feature_on_another`: for each package, each dependency whose name
     is a member must have a strictly lower layer, and must not be in `FEATURES` when the package is;
@@ -618,7 +621,7 @@ _Requirements: SPLIT-5.2_
   `every_member_inherits_version_and_edition` fail, because the root is still a package.
 - [ ] **Step 2: Implement.**
   - Root `Cargo.toml`: `[workspace] members = ["crates/cargo-hive"] resolver = "3"`, with `[workspace.package]`
-    holding version 0.1.0, edition 2024, license, repository, description and rust-version unset, and
+    holding version 0.1.0, edition 2024, license, repository and description (no `rust-version`, as 0.1.0 has none), and
     `[workspace.dependencies]` holding clap, serde, serde_json, libc and applesauce at today's versions, and an empty
     `[workspace.lints.clippy]` table so later members can set `[lints] workspace = true`.
   - Move `src/` and `tests/` with `git mv`. `crates/cargo-hive/Cargo.toml` inherits the package fields, keeps
@@ -872,10 +875,9 @@ _Requirements: SPLIT-1.1, SPLIT-1.2, SPLIT-1.3, SPLIT-1.5_
 **Reuse:** rung 2 — `scripts/fresh-probe.sh` pattern (append a comment, `cargo build -v`, restore).
 
 **Interfaces:**
-- Produces: `#[test] #[ignore] fn a_gc_edit_leaves_seed_fresh()`. It copies the tracked tree
-  (`git ls-files -z | xargs -0 -I{} cp -c --parents {} /private/tmp/hive-split/rebuild` from the repo root; `cp -c`
-  clones on APFS, and `--parents` needs BSD `cp` 13+ or a `rsync -a --files-from` equivalent, both acceptable) and
-  runs `cargo build -v --offline` with `CARGO_TARGET_DIR=/private/tmp/hive-split/rebuild-target` in that copy. The
+- Produces: `#[test] #[ignore] fn a_gc_edit_leaves_seed_fresh()`. It copies the tracked tree with
+  `git ls-files -z | tar --null -T - -cf - | tar -xf - -C /private/tmp/hive-split/rebuild` from the repo root,
+  after `mkdir -p` (probed 2026-11-13 on macOS bsdtar: the copy equals `git ls-files`). It then runs `cargo build -v --offline` with `CARGO_TARGET_DIR=/private/tmp/hive-split/rebuild-target` in that copy. The
   shared `~/.cargo` registry is read, not written, as in any offline build. It
   appends a comment to `crates/gc/src/liveness.rs`, builds again, and asserts the output contains
   `Compiling cargo-hive-gc`, `Compiling cargo-hive v` and `Fresh cargo-hive-seed`. A second case runs
@@ -993,6 +995,19 @@ _Requirements: SPLIT-4.4, SPLIT-4.1_
 
 ---
 
+### Rename path (applies only if the operator changes a crate name at the sheet)
+
+If the sheet changes any working name, one mechanical commit lands after Task 25 and before Task 26. It renames:
+- the package name in `crates/<role>/Cargo.toml`;
+- the matching `[workspace.dependencies]` key and every `cargo-hive-<role>` dependency line;
+- every `cargo_hive_<role>` `use` path in `crates/` and `tests/`;
+- the `LAYERS`/`FEATURES` rows in `crates/cargo-hive/tests/workspace.rs`;
+- the crate READMEs, and the member list Task 26 writes.
+
+The directory names (`crates/<role>/`) do not change. The commit passes the full gate and the capture comparison
+and changes nothing else (`git commit -m "build: rename workspace crates to the approved names"`). It cites no
+requirement of its own; it keeps SPLIT-1.1's names in step with the operator's decision.
+
 ### Task 26: Release steps publish every member
 
 **Files:**
@@ -1003,15 +1018,16 @@ _Requirements: SPLIT-4.4, SPLIT-4.1_
 
 **Interfaces:**
 - Produces: release steps 0–6:
-  - 0: stop unless the line `Crate names approved:` in docs/agents/project.md holds a date;
   - 2: set `[workspace.package] version` and the three plugin files;
   - 3: `cargo package --workspace --list`, then `CARGO_TARGET_DIR=target/package-verify cargo publish
     --workspace --dry-run`, then `scripts/fresh-probe.sh` with one pair per member;
-  - 5: the same publish without `--dry-run`, and on a partial failure stop and report which members uploaded;
+  - 5: stop unless the line `Crate names approved:` in docs/agents/project.md holds a date; then the same
+    publish without `--dry-run`, and on a partial failure stop and report which members uploaded. Steps 1–4,
+    including the dry-run, work on working names.
   - 6: smoke as today.
 
-  The line `Crate names approved:` (no date) is added under `## release steps` in docs/agents/project.md, above
-  step 0.
+  The line `Crate names approved:` (no date) is added under `## release steps` in docs/agents/project.md, just
+  above step 5.
 
 **Depends-on:** Task 25
 
@@ -1078,8 +1094,10 @@ _Requirements: SPLIT-7.1, SPLIT-7.2_
 
 **Depends-on:** Task 27
 
-- [ ] **Step 1: Measure.** Append one comment line to `crates/gc/src/gc/run.rs`, run `cargo build` and time it. Do
-  this 5 times, restoring the line each time, and record the median beside Task 3's 0.1.0 median. If the new
+- [ ] **Step 1: Measure.** Append one comment line to `crates/gc/src/gc/run.rs`, run `cargo build --offline` (the
+  same flags as Task 3) and time it. Do
+  this 5 times, restoring the line each time, and record the median beside Task 3's 0.1.0 median. Re-run the 0.1.0 median in `/private/tmp/hive-0.1.0`
+  back to back as a second reading. If the new
   median is greater, write both medians as an open question for the operator. Do not change the target.
 - [ ] **Step 2: Status timing.** Run `cargo test -p cargo-hive --test guards -- --ignored` on the proof machine.
   Expect: both klynt timing tests pass (CORE-6.1: median of 5 warm runs and one cold run within 2 s; explain
