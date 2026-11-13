@@ -2,12 +2,13 @@
 mod common;
 
 use common::registry_fixture::RegistryRepo;
-use common::Hive;
+use common::{wait_within, Hive};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 const CAPTURE: &str = "/private/tmp/hive-capture";
 const GOLDEN: &str = "/private/tmp/hive-capture/golden";
@@ -15,6 +16,13 @@ const WORK: &str = "/private/tmp/hive-capture/work";
 const HOME: &str = "/private/tmp/hive-capture/home";
 const CARGO_HOME: &str = "/private/tmp/hive-capture/cargo-home";
 const REG: &str = "/private/tmp/hive-capture/reg";
+
+const COMMAND_DEADLINE: Duration = Duration::from_secs(300);
+const COPY_DEADLINE: Duration = Duration::from_secs(300);
+const REPAIR_DEADLINE: Duration = Duration::from_secs(60);
+const MAX_WALK_DEPTH: usize = 32;
+const MAX_WALK_ENTRIES: usize = 100_000;
+const FILE_READ_CAP: u64 = 512 * 1024 * 1024;
 
 const NORMALIZE_KEYS: &[&str] = &[
     "id",
@@ -96,31 +104,43 @@ fn norm_for_compare(v: &Value) -> Value {
 }
 
 fn cp_cr(src: &Path, dst: &Path) {
-    let status = Command::new("cp")
+    let child = Command::new("cp")
         .arg("-cR")
         .arg(src)
         .arg(dst)
-        .status()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    let out = wait_within(child, COPY_DEADLINE);
     assert!(
-        status.success(),
-        "cp -cR {} {} failed with {status}",
+        out.status.success(),
+        "cp -cR {} {} failed with {}: {}",
         src.display(),
-        dst.display()
+        dst.display(),
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
 fn repair_worktree(main: &Path, wt: &Path) {
-    let status = Command::new("git")
+    let child = Command::new("git")
         .args(["worktree", "repair"])
         .arg(wt)
         .current_dir(main)
-        .status()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    let out = wait_within(child, REPAIR_DEADLINE);
     assert!(
-        status.success(),
-        "git worktree repair {} failed with {status}",
-        wt.display()
+        out.status.success(),
+        "git worktree repair {} failed with {}: {}",
+        wt.display(),
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -230,7 +250,14 @@ fn run_sequence(bin: &Path) -> Vec<(String, Value, i32)> {
 
     let mut out = Vec::new();
     for args in steps {
-        let output = hive.command_with(bin, args).output().unwrap();
+        let child = hive
+            .command_with(bin, args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = wait_within(child, COMMAND_DEADLINE);
         let value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
         let code = output.status.code().unwrap_or(-1);
         out.push((args.join(" "), value, code));
@@ -253,8 +280,18 @@ fn is_json_state(path: &Path) -> bool {
     ) || path.file_name().and_then(|n| n.to_str()) == Some("store.db")
 }
 
+fn read_capped_bytes(path: &Path) -> Vec<u8> {
+    let len = fs::metadata(path).unwrap().len();
+    assert!(
+        len <= FILE_READ_CAP,
+        "{} is {len} bytes, over the {FILE_READ_CAP} byte cap",
+        path.display()
+    );
+    fs::read(path).unwrap()
+}
+
 fn read_normalized_file(path: &Path) -> Value {
-    let bytes = fs::read(path).unwrap();
+    let bytes = read_capped_bytes(path);
     if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
         let lines: Vec<Value> = String::from_utf8_lossy(&bytes)
             .lines()
@@ -273,14 +310,33 @@ fn read_normalized_file(path: &Path) -> Value {
 
 fn list_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut total = 0usize;
+    while let Some((dir, depth)) = stack.pop() {
+        assert!(
+            depth <= MAX_WALK_DEPTH,
+            "walk depth bound hit at {}",
+            dir.display()
+        );
+        let mut seen = 0usize;
         for entry in fs::read_dir(&dir).unwrap() {
+            seen += 1;
+            assert!(
+                seen <= MAX_WALK_ENTRIES,
+                "walk entry bound hit in {}",
+                dir.display()
+            );
+            total += 1;
+            assert!(
+                total <= MAX_WALK_ENTRIES,
+                "walk entry bound hit under {}",
+                root.display()
+            );
             let entry = entry.unwrap();
             let path = entry.path();
             let ft = entry.file_type().unwrap();
             if ft.is_dir() {
-                stack.push(path);
+                stack.push((path, depth + 1));
             } else if ft.is_file() {
                 files.push(path.strip_prefix(root).unwrap().to_path_buf());
             }
@@ -306,8 +362,8 @@ fn assert_homes_equal(a: &Path, b: &Path) {
             );
         } else {
             assert_eq!(
-                fs::read(&pa).unwrap(),
-                fs::read(&pb).unwrap(),
+                read_capped_bytes(&pa),
+                read_capped_bytes(&pb),
                 "bytes differ for {}",
                 rel.display()
             );
@@ -321,7 +377,14 @@ fn run_on_home(bin: &Path, home: &Path, args: &[&str]) -> i32 {
     let _ = fs::remove_dir_all(&hive.cargo_home.path);
     hive.home.path = home.to_path_buf();
     hive.cargo_home.path = PathBuf::from(CARGO_HOME);
-    let output = hive.command_with(bin, args).output().unwrap();
+    let child = hive
+        .command_with(bin, args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = wait_within(child, COMMAND_DEADLINE);
     let code = output.status.code().unwrap_or(-1);
     preserve_path(&mut hive.home);
     preserve_path(&mut hive.cargo_home);
