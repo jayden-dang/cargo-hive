@@ -353,27 +353,7 @@ pub fn floor_note(report: &DoctorReport) -> Option<String> {
     })
 }
 
-/// The rustup proxy hands every cargo subcommand `RUSTUP_TOOLCHAIN`, which beats
-/// directory resolution in a child. Only a toolchain the caller asked for by name
-/// (`cli`, `env`) may reach hive's children. One the caller's directory selected must
-/// not, and neither may the default: it beats a child directory's own
-/// `rust-toolchain.toml`, and with the variable removed rustup picks the default
-/// anyway wherever no override applies. Without a source (rustup before 1.29.0,
-/// `rustup run`) the origin is unknown, so it is dropped too.
-pub(crate) fn drop_directory_toolchain(spec: &mut Spec) {
-    if !caller_toolchain_kept() {
-        spec.env_remove.push("RUSTUP_TOOLCHAIN".into());
-        spec.env_remove.push("RUSTUP_TOOLCHAIN_SOURCE".into());
-    }
-}
-
-pub(crate) fn caller_toolchain_kept_from(source: Option<&std::ffi::OsStr>) -> bool {
-    source.is_some_and(|s| s == "cli" || s == "env")
-}
-
-pub(crate) fn caller_toolchain_kept() -> bool {
-    caller_toolchain_kept_from(std::env::var_os("RUSTUP_TOOLCHAIN_SOURCE").as_deref())
-}
+pub use crate::env::{caller_toolchain_kept, caller_toolchain_kept_from, ResolveEnv};
 
 /// `NotFound` is `(os error 2)` with the closing parenthesis. `(os error 20)` contains
 /// the shorter text and is a different failure.
@@ -403,22 +383,6 @@ pub(crate) fn toolchain_failure_exit(message: &str) -> i32 {
     }
 }
 
-#[derive(Clone, Copy)]
-enum ResolveEnv {
-    DropDirectoryToolchain,
-    OwnDirectory,
-}
-
-fn apply_resolve_env(spec: &mut Spec, env: ResolveEnv) {
-    match env {
-        ResolveEnv::DropDirectoryToolchain => drop_directory_toolchain(spec),
-        ResolveEnv::OwnDirectory => {
-            spec.env_remove.push("RUSTUP_TOOLCHAIN".into());
-            spec.env_remove.push("RUSTUP_TOOLCHAIN_SOURCE".into());
-        }
-    }
-}
-
 fn rustup_which(
     rustup: &Path,
     tool: &str,
@@ -429,10 +393,9 @@ fn rustup_which(
     let mut spec = Spec::new(rustup);
     spec.args = vec!["which".into(), tool.into()];
     spec.cwd = Some(cwd.to_path_buf());
-    spec.env_set
-        .push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
     spec.stdin_null = true;
-    apply_resolve_env(&mut spec, env);
+    let parent: Vec<_> = std::env::vars_os().collect();
+    crate::env::rustup_which(&mut spec, &parent, env);
     match child_output(&spec, cancel) {
         Err(ChildOutputError::Failed(msg)) if rustup_is_missing(&msg) => Ok(None),
         Err(err) => Err(tool_error("rustup", err)),
@@ -514,11 +477,13 @@ fn resolve_toolchain_with(
     let mut spec = Spec::new(&rustc);
     spec.args.push("-vV".into());
     spec.cwd = Some(cwd.to_path_buf());
-    spec.env_set
-        .push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
     spec.stdin_null = true;
+    let parent: Vec<_> = std::env::vars_os().collect();
     if matches!(env, ResolveEnv::OwnDirectory) {
-        apply_resolve_env(&mut spec, env);
+        crate::env::rustup_which(&mut spec, &parent, env);
+    } else {
+        spec.env_set
+            .push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
     }
     let out = child_output(&spec, cancel).map_err(|err| tool_error("rustc", err))?;
     if !out.status.success() {
@@ -752,19 +717,16 @@ fn probe_command(tc: &Toolchain, krate: &Path, target: &Path, cargo_home: &Path)
         .map(Into::into)
         .collect();
     spec.cwd = Some(krate.to_path_buf());
-    spec.env_clear = true;
-    for key in ["PATH", "HOME", "TMPDIR", "RUSTUP_HOME"] {
-        if let Some(value) = std::env::var_os(key) {
-            spec.env_set.push((key.into(), value));
-        }
-    }
-    if let Some(name) = &tc.name {
-        spec.env_set.push(("RUSTUP_TOOLCHAIN".into(), name.into()));
-    }
-    spec.env_set
-        .push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
-    spec.env_set
-        .push(("CARGO_HOME".into(), cargo_home.as_os_str().into()));
+    let parent: Vec<_> = std::env::vars_os().collect();
+    let rustup_home = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let name = tc
+        .name
+        .as_deref()
+        .map(std::ffi::OsStr::new)
+        .unwrap_or_else(|| std::ffi::OsStr::new(""));
+    crate::env::probe_build(&mut spec, &parent, cargo_home, &rustup_home, name);
     spec.env_set
         .push(("CARGO_TARGET_DIR".into(), target.as_os_str().into()));
     spec.env_set

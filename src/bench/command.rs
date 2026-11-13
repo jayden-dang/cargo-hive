@@ -5,9 +5,9 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::cargo_target::TARGET_VARS;
 use crate::doctor::Toolchain;
 use crate::platform::proc::Spec;
+use std::ffi::OsStr;
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum BuildCmd {
@@ -80,21 +80,11 @@ pub fn env_map(caller: impl IntoIterator<Item = (OsString, OsString)>, tc: &Tool
         "CARGO_BUILD_RUSTC_WRAPPER",
         "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
     ];
-    const DROP_EXACT: [&str; 8] = [
-        "CARGO_MANIFEST_DIR",
-        "OUT_DIR",
-        "CARGO_BUILD_RUSTC_WRAPPER",
-        "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
-        "RUSTC",
-        "CARGO_BUILD_RUSTC",
-        "RUSTUP_TOOLCHAIN",
-        "RUSTUP_TOOLCHAIN_SOURCE",
-    ];
 
-    let mut vars = BTreeMap::new();
+    let parent: Vec<(OsString, OsString)> = caller.into_iter().collect();
     let mut overridden = Vec::new();
 
-    for (key, value) in caller {
+    for (key, value) in &parent {
         let key_str = key.to_string_lossy();
         if WRAPPERS.iter().any(|w| *w == key_str.as_ref()) && !value.is_empty() {
             overridden.push((
@@ -110,25 +100,16 @@ pub fn env_map(caller: impl IntoIterator<Item = (OsString, OsString)>, tc: &Tool
                 value.to_string_lossy().into_owned(),
             ));
         }
-        let drop = TARGET_VARS.iter().any(|v| *v == key_str.as_ref())
-            || key_str.starts_with("GIT_")
-            || key_str.starts_with("CARGO_PKG_")
-            || DROP_EXACT.iter().any(|v| *v == key_str.as_ref());
-        if !drop {
-            vars.insert(key, value);
-        }
     }
 
-    vars.insert(OsString::from("RUSTC_WRAPPER"), OsString::from(""));
-    vars.insert(
-        OsString::from("RUSTC_WORKSPACE_WRAPPER"),
-        OsString::from(""),
-    );
-    vars.insert(OsString::from("RUSTUP_AUTO_INSTALL"), OsString::from("0"));
-    vars.insert(OsString::from("RUSTC"), OsString::from(&tc.rustc));
-    if let Some(name) = &tc.name {
-        vars.insert(OsString::from("RUSTUP_TOOLCHAIN"), OsString::from(name));
-    }
+    let mut spec = Spec::new(&tc.cargo);
+    let name = tc
+        .name
+        .as_deref()
+        .map(OsStr::new)
+        .unwrap_or_else(|| OsStr::new(""));
+    crate::env::timed_build(&mut spec, &parent, &tc.cargo, &tc.rustc, name);
+    let vars = spec.env_set.into_iter().collect();
 
     EnvMap { vars, overridden }
 }

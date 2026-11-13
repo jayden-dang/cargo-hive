@@ -69,11 +69,8 @@ impl Git {
             .extend(["-c".into(), "core.fsmonitor=false".into()]);
         spec.args.push("-C".into());
         spec.args.push(self.dir.as_os_str().into());
-        for (key, _) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with("GIT_") {
-                spec.env_remove.push(key);
-            }
-        }
+        let parent: Vec<_> = std::env::vars_os().collect();
+        crate::env::git(&mut spec, &parent);
         spec
     }
 

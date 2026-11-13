@@ -225,18 +225,9 @@ pub fn resolve(workspace_dir: &Path, cancel: impl FnMut() -> bool) -> Result<Res
     .map(Into::into)
     .collect();
     spec.cwd = Some(workspace_dir.to_path_buf());
-    spec.env_set
-        .push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
     spec.stdin_null = true;
-    for var in TARGET_VARS {
-        spec.env_remove.push(var.into());
-    }
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("GIT_") {
-            spec.env_remove.push(key);
-        }
-    }
-    crate::doctor::drop_directory_toolchain(&mut spec);
+    let parent: Vec<_> = std::env::vars_os().collect();
+    crate::env::metadata(&mut spec, &parent);
     let out =
         proc::output_with_deadline(&spec, METADATA_DEADLINE, cancel).map_err(|e| match e {
             ChildOutputError::TimedOut => "cargo metadata exceeded its deadline".to_string(),
