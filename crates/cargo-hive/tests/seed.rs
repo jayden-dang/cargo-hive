@@ -2536,7 +2536,7 @@ fn status_within(cmd: &mut Command, limit: Duration) -> Option<ExitStatus> {
 }
 
 fn kept_dir() -> PathBuf {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/klynt-run");
+    let dir = common::repo_root().join("target/klynt-run");
     fs::create_dir_all(&dir).unwrap();
     dir
 }

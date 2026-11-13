@@ -1,8 +1,9 @@
 //! Document tests for the hive skill, plugin manifests and README: they read
-//! repo files from `CARGO_MANIFEST_DIR`, parse command lines with the public
+//! repo files from the workspace root, parse command lines with the public
 //! `Cli` parser in-process, and touch nothing on the machine.
 
 use std::fs;
+use std::path::PathBuf;
 
 #[path = "skill/names.rs"]
 mod names;
@@ -11,8 +12,26 @@ const SKILL: &str = "plugin/skills/hive/SKILL.md";
 const CLAUDE_PLUGIN: &str = "plugin/.claude-plugin/plugin.json";
 const CODEX_PLUGIN: &str = "plugin/.codex-plugin/plugin.json";
 
+fn repo_root() -> PathBuf {
+    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    loop {
+        let manifest = dir.join("Cargo.toml");
+        if let Ok(text) = fs::read_to_string(&manifest)
+            && text.lines().any(|l| l.trim() == "[workspace]")
+        {
+            return dir;
+        }
+        assert!(
+            dir.pop(),
+            "no [workspace] Cargo.toml above {}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+    }
+}
+
 fn entries_of(rel: &str) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(format!("{}/{rel}", env!("CARGO_MANIFEST_DIR")))
+    let path = repo_root().join(rel);
+    let mut names: Vec<String> = fs::read_dir(&path)
         .unwrap_or_else(|e| panic!("{rel}: {e}"))
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| n != ".DS_Store")
@@ -22,8 +41,8 @@ fn entries_of(rel: &str) -> Vec<String> {
 }
 
 fn repo_file(rel: &str) -> String {
-    let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), rel);
-    fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
+    let path = repo_root().join(rel);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
 struct Frontmatter {

@@ -263,9 +263,22 @@ fn readme_config_keys() -> HashSet<String> {
 fn context() -> &'static Context {
     static CONTEXT: OnceLock<Context> = OnceLock::new();
     CONTEXT.get_or_init(|| {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let root = super::repo_root();
+        let crates = root.join("crates");
         let mut files = Vec::new();
-        rust_files(&src, 0, &mut files);
+        let mut members: Vec<_> = std::fs::read_dir(&crates)
+            .unwrap_or_else(|e| panic!("{}: {e}", crates.display()))
+            .map(|e| e.unwrap())
+            .filter(|e| e.file_type().unwrap().is_dir())
+            .map(|e| e.path())
+            .collect();
+        members.sort();
+        for member in &members {
+            let src = member.join("src");
+            if src.is_dir() {
+                rust_files(&src, 0, &mut files);
+            }
+        }
         let mut ctx = Context {
             literals: Vec::new(),
             bench_literals: Vec::new(),
@@ -277,7 +290,7 @@ fn context() -> &'static Context {
         };
         for file in files {
             let lits = string_literals(&std::fs::read_to_string(&file).unwrap());
-            if file == src.join("bench/mod.rs") {
+            if file.ends_with(Path::new("bench/mod.rs")) {
                 ctx.bench_literals.extend(lits.iter().cloned());
             }
             ctx.literals.extend(lits);

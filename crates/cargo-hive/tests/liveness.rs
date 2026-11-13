@@ -280,12 +280,32 @@ fn manifest_includes(manifest: &str) -> Vec<String> {
 
 #[test]
 fn the_package_ships_no_test_file() {
-    let manifest =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
-    let includes = manifest_includes(&manifest);
-    assert!(includes.iter().any(|e| e == "Cargo.toml"), "{includes:?}");
-    let tests: Vec<_> = includes.iter().filter(|e| e.starts_with("tests")).collect();
-    assert!(tests.is_empty(), "the package would ship {tests:?}");
+    let crates = common::repo_root().join("crates");
+    let mut members: Vec<_> = fs::read_dir(&crates)
+        .unwrap_or_else(|e| panic!("{}: {e}", crates.display()))
+        .map(|e| e.unwrap())
+        .filter(|e| e.file_type().unwrap().is_dir())
+        .map(|e| e.path())
+        .collect();
+    members.sort();
+    assert!(!members.is_empty(), "no crates under {}", crates.display());
+    for member in members {
+        let manifest_path = member.join("Cargo.toml");
+        let manifest = fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|e| panic!("{}: {e}", manifest_path.display()));
+        let includes = manifest_includes(&manifest);
+        assert!(
+            includes.iter().any(|e| e == "Cargo.toml"),
+            "{}: {includes:?}",
+            member.display()
+        );
+        let tests: Vec<_> = includes.iter().filter(|e| e.starts_with("tests")).collect();
+        assert!(
+            tests.is_empty(),
+            "{} would ship {tests:?}",
+            member.display()
+        );
+    }
 }
 
 #[test]

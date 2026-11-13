@@ -8,6 +8,24 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
+/// Nearest ancestor of this crate's manifest whose `Cargo.toml` has `[workspace]`.
+pub fn repo_root() -> PathBuf {
+    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    loop {
+        let manifest = dir.join("Cargo.toml");
+        if let Ok(text) = fs::read_to_string(&manifest)
+            && text.lines().any(|l| l.trim() == "[workspace]")
+        {
+            return dir;
+        }
+        assert!(
+            dir.pop(),
+            "no [workspace] Cargo.toml above {}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+    }
+}
+
 /// A scratch directory under /private/tmp, canonicalized, removed on drop.
 pub struct Scratch {
     pub path: PathBuf,

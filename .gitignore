@@ -1,4 +1,5 @@
 /.remember/
 .skills/
 /target
+/crates/*/target
 .worktrees/
