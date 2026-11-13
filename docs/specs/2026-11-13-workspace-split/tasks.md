@@ -487,12 +487,12 @@ _Requirements: SPLIT-1.2, SPLIT-1.3_
 
 **Depends-on:** Task 9
 
-- [ ] **Step 1: Failing check.** Point seed, liveness and explain at `crate::caps` and `crate::ledger`, and run
+- [x] **Step 1: Failing check.** Point seed, liveness and explain at `crate::caps` and `crate::ledger`, and run
   `cargo check`. Expect: unresolved imports.
-- [ ] **Step 2: Implement.** Move the items. `grep -rn 'crate::gc' src --include='*.rs' | grep -v '^src/gc'`
+- [x] **Step 2: Implement.** Move the items. `grep -rn 'crate::gc' src --include='*.rs' | grep -v '^src/gc'`
   must print only `src/plan_tier/*`, `src/cli.rs` and `src/bench/*` lines (callers above gc).
-- [ ] **Step 3: Run.** `cargo test` and the capture comparison pass.
-- [ ] **Step 4: Commit.** `git commit -m "refactor: move accounting and caps out of gc"`
+- [x] **Step 3: Run.** `cargo test` and the capture comparison pass.
+- [x] **Step 4: Commit.** `git commit -m "refactor: move accounting and caps out of gc"`
 
 _Requirements: SPLIT-1.3_
 
