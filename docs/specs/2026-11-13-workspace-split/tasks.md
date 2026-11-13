@@ -277,20 +277,20 @@ _Requirements: SPLIT-4.1_
 
 **Depends-on:** Task 1, Task 2
 
-- [ ] **Step 1: Failing test.** In `src/platform/proc.rs` tests:
+- [x] **Step 1: Failing test.** In `src/platform/proc.rs` tests:
   - `run_bounded` on `Spec::new("sleep")` with arg `5` and a 100 ms deadline returns `Err(TimedOut)`;
   - `output` on `Spec::new("sh")` with args `-c`, `echo $X`, `env_set` `X=1` and `env_clear: true` prints `1\n`;
   - `env_remove` of `HOME` leaves it unset in the child (`sh -c 'echo ${HOME-unset}'`).
 
   Run `cargo test --lib platform::proc::`. Expect: a compile error, because `platform::proc` does not exist.
-- [ ] **Step 2: Implement.** Move the runner from `cargo_target.rs` into `proc.rs`, taking `&Spec` and building
+- [x] **Step 2: Implement.** Move the runner from `cargo_target.rs` into `proc.rs`, taking `&Spec` and building
   `std::process::Command` inside. Rewrite the six production spawn sites outside platform to build a `Spec` with
   the same program, args, cwd and env calls as today: cargo_target.rs:554, git.rs:64, doctor.rs:428, :514, :748
   and bench/command.rs:142. The three sites already in platform (platform/mod.rs:24, apfs.rs:172, :238) move to
   `Spec` too. Re-export nothing from `cargo_target`.
-- [ ] **Step 3: Run.** `cargo test` (whole suite) and `cargo test --test cli_tree` pass, and
+- [x] **Step 3: Run.** `cargo test` (whole suite) and `cargo test --test cli_tree` pass, and
   `HIVE_V010_BIN=… cargo test --test capture -- --ignored` passes.
-- [ ] **Step 4: Commit.** `git commit -m "refactor(platform): own child-process spawning"`
+- [x] **Step 4: Commit.** `git commit -m "refactor(platform): own child-process spawning"`
 
 _Requirements: SPLIT-2.5_
 
