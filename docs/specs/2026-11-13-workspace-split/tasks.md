@@ -323,7 +323,7 @@ _Requirements: SPLIT-2.5_
 
 **Depends-on:** Task 4
 
-- [ ] **Step 1: Failing test.** A table-driven test runs each of the five rules on a fixed parent environment
+- [x] **Step 1: Failing test.** A table-driven test runs each of the five rules on a fixed parent environment
   that contains:
   - `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR`;
   - `GIT_DIR`, `GIT_WORK_TREE`;
@@ -334,9 +334,9 @@ _Requirements: SPLIT-2.5_
   (cargo_target.rs:564-574, git.rs:70-74, doctor.rs:355-374/:428/:514/:748-760, bench/command.rs:84-143). A
   second row per rule uses `RUSTUP_TOOLCHAIN_SOURCE=cli` and expects `RUSTUP_TOOLCHAIN` kept.
   Run `cargo test --lib env::`. Expect: a compile error, because `env` does not exist.
-- [ ] **Step 2: Implement.** Move each scrub block into its `env::*` function and call it from the site.
-- [ ] **Step 3: Run.** `cargo test` and the capture comparison pass.
-- [ ] **Step 4: Commit.** `git commit -m "refactor: one module for every child process environment"`
+- [x] **Step 2: Implement.** Move each scrub block into its `env::*` function and call it from the site.
+- [x] **Step 3: Run.** `cargo test` and the capture comparison pass.
+- [x] **Step 4: Commit.** `git commit -m "refactor: one module for every child process environment"`
 
 _Requirements: SPLIT-2.5, SPLIT-2.6_
 
