@@ -1,10 +1,11 @@
 //! Checkouts of a registered repo and its Cargo target dirs. Every walk is
 //! depth-bounded and never enters `node_modules`, `target` or `.git`.
 
-use crate::cargo_target::{self, Layout, Owner, Resolved, TargetDir};
+use crate::cargo_target::{self, Layout, Owner, TargetDir};
 use crate::classify::{classify, CheckoutFacts, CheckoutKind, Class};
 use crate::fingerprint::{self, Format};
 use crate::git::Git;
+use crate::metadata::{self, Resolved};
 use crate::registry::Repo;
 use crate::state::Config;
 use serde::{Deserialize, Serialize};
@@ -460,7 +461,7 @@ fn resolve_workspaces(
             let results: Vec<Result<Resolved, String>> = std::thread::scope(|s| {
                 let handles: Vec<_> = chunk
                     .iter()
-                    .map(|d| s.spawn(move || cargo_target::resolve(d, cancel)))
+                    .map(|d| s.spawn(move || metadata::resolve(d, cancel)))
                     .collect();
                 handles
                     .into_iter()
@@ -549,7 +550,7 @@ pub fn targets(
             )
         })
     });
-    let overrides = cargo_target::caller_overrides();
+    let overrides = metadata::caller_overrides();
 
     let mut found: Vec<(Found, bool)> = Vec::new();
     for checkout in &live {
@@ -749,7 +750,7 @@ pub fn merge_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cargo_target::Resolved;
+    use crate::metadata::Resolved;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 

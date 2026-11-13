@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::cargo_target::METADATA_DEADLINE;
+use crate::metadata::METADATA_DEADLINE;
 use crate::platform::proc::{self, Capture, ChildOutputError, Ran, Spec};
 
 #[derive(Debug)]

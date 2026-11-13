@@ -433,7 +433,7 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
     let env = DoctorEnv {
         tmp_parent: std::env::temp_dir(),
         macos: macos.clone(),
-        toolchain: doctor::resolve_toolchain(state.root()),
+        toolchain: crate::toolchain::resolve_toolchain(state.root()),
         cancel: doctor::process_cancel,
     };
     if let Err(e) = platform::signals::install() {
@@ -648,7 +648,7 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
     };
     b.note(format!("secondary_roots: {}", list(&cfg.secondary_roots)));
     b.note(format!("cache_roots: {}", list(&cfg.cache_roots)));
-    let release = doctor::resolve_toolchain(state.root())
+    let release = crate::toolchain::resolve_toolchain(state.root())
         .ok()
         .map(|t| t.release);
     b.toolchain(release.clone());
@@ -970,7 +970,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
         return 2;
     };
     let mut b = Receipt::new(command, Scope::default());
-    let caller_toolchain = doctor::resolve_toolchain(state.root()).ok();
+    let caller_toolchain = crate::toolchain::resolve_toolchain(state.root()).ok();
     let release = caller_toolchain.as_ref().map(|t| t.release.clone());
     b.toolchain(release.clone());
     for cap in [Capability::FingerprintReading, Capability::Deletion] {
@@ -1059,7 +1059,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
                         account_bytes,
                         now: opts.now,
                         caller_toolchain,
-                        caller_toolchain_kept: doctor::caller_toolchain_kept(),
+                        caller_toolchain_kept: crate::toolchain::caller_toolchain_kept(),
                         rustup: Path::new("rustup"),
                     },
                     Limits {
@@ -1181,7 +1181,7 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
     };
     let mut b = Receipt::new("apply", Scope::default());
     begin_plan_tier(&mut b);
-    let release = doctor::resolve_toolchain(state.root())
+    let release = crate::toolchain::resolve_toolchain(state.root())
         .ok()
         .map(|t| t.release);
     b.toolchain(release.clone());
@@ -1291,7 +1291,7 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
     };
     let mut b = Receipt::new("gc --plan", Scope::default());
     begin_plan_tier(&mut b);
-    let release = doctor::resolve_toolchain(state.root())
+    let release = crate::toolchain::resolve_toolchain(state.root())
         .ok()
         .map(|t| t.release);
     b.toolchain(release.clone());
@@ -1452,7 +1452,7 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
         Err(e) => return emit_failure(state, out, "explain", &e.to_string(), 1),
     };
     let mut b = Receipt::new("explain", Scope::default());
-    let release = doctor::resolve_toolchain(state.root())
+    let release = crate::toolchain::resolve_toolchain(state.root())
         .ok()
         .map(|t| t.release);
     b.toolchain(release.clone());
@@ -1592,7 +1592,7 @@ pub(crate) fn locate_checkout(
     (
         registry::Repo,
         crate::discover::Checkout,
-        crate::doctor::Toolchain,
+        crate::toolchain::Toolchain,
     ),
     Refusal,
 > {
@@ -1651,7 +1651,7 @@ pub(crate) fn locate_checkout(
             code: 1,
         });
     }
-    let toolchain = match doctor::resolve_toolchain(&real) {
+    let toolchain = match crate::toolchain::resolve_toolchain(&real) {
         Ok(toolchain) => toolchain,
         Err(err) => {
             let code = doctor::toolchain_failure_exit(&err);

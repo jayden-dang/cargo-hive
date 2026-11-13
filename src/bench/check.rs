@@ -3,13 +3,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::cargo_target;
 use crate::cli::locate_checkout;
 use crate::discover::Checkout;
-use crate::doctor::{Capabilities, Toolchain};
+use crate::doctor::Capabilities;
 use crate::git::Git;
 use crate::registry::{Registry, Repo};
 use crate::state::Config;
+use crate::toolchain::Toolchain;
 
 pub struct Checked {
     pub repo: Repo,
@@ -150,7 +150,7 @@ pub fn check(
     let mut seen_targets: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
     for (_repo, checkout, _tc) in cold_ok.iter().chain(seeded_ok.iter()) {
         let mut cancelled = || cancel();
-        match cargo_target::resolve(&checkout.path, &mut cancelled) {
+        match crate::metadata::resolve(&checkout.path, &mut cancelled) {
             Ok(resolved) => {
                 if resolved.target_directory.exists() {
                     unfair.push(Unfair {

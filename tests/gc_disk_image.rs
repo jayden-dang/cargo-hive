@@ -123,7 +123,7 @@ impl ImageHive {
             home,
             cargo_home: Scratch::new("cargo-home"),
         };
-        let release = cargo_hive::doctor::resolve_toolchain(&hive.home)
+        let release = cargo_hive::toolchain::resolve_toolchain(&hive.home)
             .expect("the proof machine has a Rust toolchain")
             .release;
         fs::write(

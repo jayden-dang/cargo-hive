@@ -878,7 +878,7 @@ pub fn toolchain_row(
     let text = read_capped(&path, RUSTC_INFO_CAP)?;
     let version = rustc_info_version(&text).map_err(|err| format!("{}: {err}", path.display()))?;
     let resolved =
-        crate::doctor::resolve_toolchain_until(source_checkout, cancel).map_err(|err| {
+        crate::toolchain::resolve_toolchain_until(source_checkout, cancel).map_err(|err| {
             if cancel() {
                 format!("{}: {err}", source_checkout.display())
             } else {
@@ -1000,8 +1000,8 @@ fn epoch_secs(now: SystemTime) -> u64 {
 mod tests {
     use super::rustc_info_version;
     use crate::cargo_target::{Owner, TargetDir};
-    use crate::doctor::resolve_toolchain;
     use crate::fingerprint::{Coverage, Format, ProfileReport, Unit, UnitGraph};
+    use crate::toolchain::resolve_toolchain;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};

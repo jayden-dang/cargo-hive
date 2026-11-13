@@ -10,13 +10,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::discover::{self, Checkout, Snapshot};
-use crate::doctor::Toolchain;
 use crate::gc;
 use crate::plan_tier::Ctx;
 use crate::platform::proc::{self, Capture, ChildOutputError};
 use crate::receipt::{Finding, Measured, ReceiptBuilder};
 use crate::registry::Repo;
 use crate::seed::{self, record, Fill};
+use crate::toolchain::Toolchain;
 
 use self::command::{BuildCmd, EnvMap};
 use self::order::Arm;

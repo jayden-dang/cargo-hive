@@ -643,7 +643,7 @@ fn the_receipt_separates_the_fill_from_the_clone_and_holds_no_time() {
             .any(|path| path.as_str() == Some(real.to_str().unwrap())),
         "{receipt}"
     );
-    let release = cargo_hive::doctor::resolve_toolchain(&lane)
+    let release = cargo_hive::toolchain::resolve_toolchain(&lane)
         .unwrap()
         .release;
     assert_eq!(receipt["toolchain"], release, "{receipt}");
@@ -2193,7 +2193,7 @@ fn run_seed_until(
     let lib = LibCtx::open(hive, recording.fs());
     let lane = lane.canonicalize().unwrap();
     let (repo, checkout) = locate(&lib, &lane);
-    let toolchain = cargo_hive::doctor::resolve_toolchain(&lane).unwrap();
+    let toolchain = cargo_hive::toolchain::resolve_toolchain(&lane).unwrap();
     let repos = [repo];
     let ctx = lib_ctx(&lib, &repos);
     cargo_hive::seed::run(&ctx, &repos[0], &checkout, &toolchain, cancel)
@@ -2211,7 +2211,7 @@ fn seeding_through_the_fill_and_clone_halves_reports_what_one_run_reports() {
         let _home = CargoHomeGuard::set(&hive.cargo_home.path);
         let lib = LibCtx::open(&hive, Recording::over_real().fs());
         let (repo_row, checkout) = locate(&lib, &lane);
-        let toolchain = cargo_hive::doctor::resolve_toolchain(&lane).unwrap();
+        let toolchain = cargo_hive::toolchain::resolve_toolchain(&lane).unwrap();
         let repos = [repo_row];
         let ctx = lib_ctx(&lib, &repos);
         match cargo_hive::seed::run_fill(&ctx, &repos[0], &|| false).unwrap() {
@@ -2244,7 +2244,7 @@ fn a_fill_half_holds_the_store_lock_until_clone_finishes() {
     let lib = LibCtx::open(&hive, Recording::over_real().fs());
     let lane = lane.canonicalize().unwrap();
     let (repo_row, checkout) = locate(&lib, &lane);
-    let toolchain = cargo_hive::doctor::resolve_toolchain(&lane).unwrap();
+    let toolchain = cargo_hive::toolchain::resolve_toolchain(&lane).unwrap();
     let repos = [repo_row];
     let ctx = lib_ctx(&lib, &repos);
     let filled = match cargo_hive::seed::run_fill(&ctx, &repos[0], &|| false).unwrap() {

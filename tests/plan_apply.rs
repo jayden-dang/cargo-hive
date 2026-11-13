@@ -11,7 +11,7 @@ use common::plan_fixture::{tree, Planned};
 use common::{init_repo, interrupt, register, wait_until_open, wait_within, Hive, Scratch};
 
 fn write_caps(p: &Planned, disabled: serde_json::Value) {
-    let release = cargo_hive::doctor::resolve_toolchain(&p.hive.home.path)
+    let release = cargo_hive::toolchain::resolve_toolchain(&p.hive.home.path)
         .unwrap()
         .release;
     let caps = serde_json::json!({"toolchain_release": release, "disabled": disabled, "lock_check": 1, "failed_marker_check": 1});

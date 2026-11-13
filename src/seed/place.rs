@@ -13,7 +13,6 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::cargo_target;
 use crate::liveness;
 use crate::plan_tier::Ctx;
 use crate::platform::{EntryKind, Fs};
@@ -190,7 +189,7 @@ pub fn place(
         return finish(ctx, PlaceReport::default(), &mut Added::default());
     }
     let mut report = PlaceReport::default();
-    let resolved = match cargo_target::resolve(checkout, cancel) {
+    let resolved = match crate::metadata::resolve(checkout, cancel) {
         Ok(resolved) => resolved,
         Err(reason) => {
             report.findings.push((

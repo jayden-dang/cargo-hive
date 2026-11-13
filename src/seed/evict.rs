@@ -9,7 +9,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cargo_target::TargetDir;
 use crate::discover::{Checkout, WalkFault};
-use crate::doctor::{self, Toolchain};
 use crate::gc::{self, Ledger};
 use crate::plan_tier::{faults_that_can_hide_an_owner, split_checkout_faults};
 use crate::platform::Fs;
@@ -20,6 +19,7 @@ use crate::seed::store::{
     row_matches, store_dir, CommitPlan, Inventory, Row, StoreKey,
 };
 use crate::state::{State, StateError};
+use crate::toolchain::{self, Toolchain};
 
 pub struct EvictCtx<'a> {
     pub state: &'a State,
@@ -569,7 +569,7 @@ fn toolchains_in_use(ctx: &EvictCtx<'_>, cancel: &dyn Fn() -> bool) -> Toolchain
         if cancel() {
             return ToolchainsInUse::Cancelled;
         }
-        match doctor::resolve_toolchain_own_dir_until(&checkout.path, ctx.rustup, cancel) {
+        match toolchain::resolve_toolchain_own_dir_until(&checkout.path, ctx.rustup, cancel) {
             Ok(toolchain) => texts.push(toolchain.version_text),
             Err(_) if cancel() => return ToolchainsInUse::Cancelled,
             Err(err) => {

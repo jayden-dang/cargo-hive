@@ -5,8 +5,8 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::doctor::Toolchain;
 use crate::platform::proc::Spec;
+use crate::toolchain::Toolchain;
 use std::ffi::OsStr;
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -150,7 +150,7 @@ impl EnvMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doctor::Toolchain;
+    use crate::toolchain::Toolchain;
     use std::ffi::OsString;
     use std::path::Path;
 

@@ -14,11 +14,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::discover::Checkout;
-use crate::doctor::Toolchain;
 use crate::gc::CRATE_DIR_CAP;
 use crate::plan_tier::Ctx;
 use crate::registry::Repo;
 use crate::state::window_days;
+use crate::toolchain::Toolchain;
 
 use choose::Choice;
 use fill::FillReport;

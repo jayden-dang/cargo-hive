@@ -11,6 +11,7 @@ pub mod gc;
 pub mod git;
 #[doc(hidden)]
 pub mod liveness;
+pub mod metadata;
 pub mod plan_tier;
 pub mod platform;
 pub mod receipt;
@@ -18,3 +19,4 @@ pub mod registry;
 pub mod seed;
 pub mod size;
 pub mod state;
+pub mod toolchain;
