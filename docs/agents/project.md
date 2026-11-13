@@ -131,10 +131,10 @@ None — not deployed. hive is a local CLI with no hosted component.
 
 1. Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo check --target x86_64-unknown-linux-gnu`.
 2. Version: set `version` in `Cargo.toml` to `X.Y.Z`, also set the same version in `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json` and `plugin/skills/hive/SKILL.md` `metadata.hive-version` (tests/skill.rs fails if they differ), then `cargo check` so `Cargo.lock` follows.
-3. Package check: `cargo package --list` shows only `src/`, `Cargo.toml`, `Cargo.lock`, `README.md` and license files; then `cargo publish --dry-run`.
+3. Package check: `cargo package --list` shows only `src/`, `Cargo.toml`, `Cargo.lock`, `README.md` and license files; then `CARGO_TARGET_DIR=target/package-verify cargo publish --dry-run`, then `scripts/fresh-probe.sh` prints `GREEN`. The verify build must never use the repo's own `target/` (FIX-1).
 4. Commit and tag: `git commit -am "release: vX.Y.Z"`, `git tag vX.Y.Z`, `git push origin main vX.Y.Z`.
-5. Publish: `cargo publish` (needs `cargo login`; a published version cannot be undone, only yanked).
-6. Smoke: `cargo install cargo-hive --version X.Y.Z --root <tmp>`; `<tmp>/bin/cargo-hive --version` prints `X.Y.Z`; `HIVE_HOME=<tmp>/home <tmp>/bin/cargo-hive doctor --json` exits 0.
+5. Publish: `CARGO_TARGET_DIR=target/package-verify cargo publish` (needs `cargo login`; a published version cannot be undone, only yanked).
+6. Smoke: `cargo install cargo-hive --version X.Y.Z --root <tmp>`; `<tmp>/bin/cargo-hive --version` prints `X.Y.Z`; `HIVE_HOME=<tmp>/home <tmp>/bin/cargo-hive doctor --json` exits 0; `scripts/fresh-probe.sh` prints `GREEN`.
 
 `Cargo.toml` carries an `include` list (2026-10-30), so the package holds only `src/`,
 `Cargo.toml`, `Cargo.lock` and `README.md`; the plugin (`plugin/`, `.claude-plugin/`) and
