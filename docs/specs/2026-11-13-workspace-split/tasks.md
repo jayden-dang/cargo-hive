@@ -921,16 +921,16 @@ _Requirements: SPLIT-1.4, SPLIT-1.5, SPLIT-4.1_
 
 **Depends-on:** Task 22
 
-- [ ] **Step 1: Failing test.**
+- [x] **Step 1: Failing test.**
   - `UnitHash::parse("00000000000000ab").unwrap().to_string() == "00000000000000ab"`;
   - `parse` rejects `"00000000000000AB"`, a 15-char and a 17-char input;
   - `serde_json::to_value(&unit)["hash_hex"]` equals the 16-hex string of a unit read from a fixture profile.
 
   Run `cargo test -p cargo-hive-core fingerprint::`. Expect: a compile error.
-- [ ] **Step 2: Implement.** Replace `hash_hex: String`, and the `HashMap<&str, …>` keys built from it, with
+- [x] **Step 2: Implement.** Replace `hash_hex: String`, and the `HashMap<&str, …>` keys built from it, with
   `UnitHash`.
-- [ ] **Step 3: Run.** The full gate and the capture comparison pass.
-- [ ] **Step 4: Commit.** `git commit -m "refactor(core): type unit hashes"`
+- [x] **Step 3: Run.** The full gate and the capture comparison pass.
+- [x] **Step 4: Commit.** `git commit -m "refactor(core): type unit hashes"`
 
 _Requirements: SPLIT-4.4, SPLIT-4.6_
 
