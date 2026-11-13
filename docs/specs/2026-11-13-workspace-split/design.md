@@ -481,7 +481,7 @@ Locality: leave.
 | existing integration suite through `CARGO_BIN_EXE_cargo-hive` (tests/common/mod.rs:98) | integration | SPLIT-3.2, 3.7, 3.8, 4.2, 5.2 |
 | clap tree dump vs v0.1.0 capture (`Cli::command()`) | unit | SPLIT-3.1 |
 | receipt version test (`hive_version` == `--version`) | integration | SPLIT-3.5 |
-| `crates/cargo-hive/tests/seed_liveness.rs` (seed `holds`/`Ctx` tests with the real `cargo_hive_gc::liveness`, moved from seed/source.rs) | integration | SPLIT-1.4 (seed keeps working through `LivenessFn`) |
+| `crates/cargo-hive/tests/seed_liveness.rs` (every seed unit test that reaches `holds` or `live_registry_units`, from seed/source.rs, seed/fill.rs and seed/mod.rs, run with the real `cargo_hive_gc::liveness`) | integration | SPLIT-1.4 (seed keeps working through `LivenessFn`) |
 | `crates/gc/tests/liveness_report.rs` (`#[ignore]`, klynt) vs v0.1.0 export | integration (manual, proof machine) | SPLIT-4.1 |
 | capture comparison: the new binary vs the v0.1.0 export's binary on the same fixtures (receipts, state files, `--json` envelopes under /private/tmp, Decision 9) | integration | SPLIT-4.3, 4.5 |
 | core unit tests: `UnitHash` `{:016x}` round trip, `UnitKind` names incl. `other`, CSR closure equals the 0.1.0 closure on the liveness fixtures | unit | SPLIT-4.4, 4.6 |
