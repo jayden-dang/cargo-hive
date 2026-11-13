@@ -517,19 +517,19 @@ _Requirements: SPLIT-1.3_
 
 **Depends-on:** Task 10
 
-- [ ] **Step 1: Failing test.** Create `tests/seed_liveness.rs` holding the seed unit tests that reach `holds` or
+- [x] **Step 1: Failing test.** Create `tests/seed_liveness.rs` holding the seed unit tests that reach `holds` or
   `live_registry_units`, copied with assertions unchanged and constructing `Ctx`/`EvictCtx` with
   `liveness: cargo_hive::gc::liveness::liveness`. Run `cargo test --test seed_liveness`. Expect: compile errors on
   the missing `liveness` field and module.
-- [ ] **Step 2: Implement.** Move the algorithm to `src/gc/liveness.rs`, together with the unit tests in
+- [x] **Step 2: Implement.** Move the algorithm to `src/gc/liveness.rs`, together with the unit tests in
   `src/liveness.rs`'s test module that call `liveness()` or the walk; tests of the types, `embedded_hashes` and
   `unit_timestamp` stay. Add the fields and the `holds`
   parameter. Call through the field at seed/source.rs:183 and :327. Production sites (cli.rs, bench/mod.rs) pass
   `gc::liveness::liveness`. Seed unit tests that stay pass `no_liveness`. Delete the moved tests from seed's test
   modules.
-- [ ] **Step 3: Run.** `cargo test`. Every remaining seed unit test passes without hitting the `no_liveness` panic.
+- [x] **Step 3: Run.** `cargo test`. Every remaining seed unit test passes without hitting the `no_liveness` panic.
   `grep -n 'liveness::liveness\|gc::' src/seed` prints nothing.
-- [ ] **Step 4: Commit.** `git commit -m "refactor(seed): take the liveness verdict as a function (ADR-0003)"`
+- [x] **Step 4: Commit.** `git commit -m "refactor(seed): take the liveness verdict as a function (ADR-0003)"`
 
 _Requirements: SPLIT-1.3, SPLIT-1.4_
 
