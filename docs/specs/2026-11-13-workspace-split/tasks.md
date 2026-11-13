@@ -897,11 +897,11 @@ _Requirements: SPLIT-1.1, SPLIT-1.2, SPLIT-1.3, SPLIT-1.5_
 
 **Depends-on:** Task 21
 
-- [ ] **Step 1: Write the test.** Run `cargo test --test rebuild_scope -- --ignored`. Expect: it passes. Before
+- [x] **Step 1: Write the test.** Run `cargo test --test rebuild_scope -- --ignored`. Expect: it passes. Before
   Task 21 it would fail, because there is no `cargo-hive-gc` package.
-- [ ] **Step 2: Checkpoint.** Following Task 3's checkpoint rule, run the 0.1.0 report and this branch's
+- [x] **Step 2: Checkpoint.** Following Task 3's checkpoint rule, run the 0.1.0 report and this branch's
   (`live-step4.json`) back to back on klynt, `cmp` them, run the capture comparison, and record both. A mismatch stops the plan.
-- [ ] **Step 3: Commit.** `git commit -m "test: a gc edit rebuilds only gc and the binary"`
+- [x] **Step 3: Commit.** `git commit -m "test: a gc edit rebuilds only gc and the binary"`
 
 _Requirements: SPLIT-1.4, SPLIT-1.5, SPLIT-4.1_
 
