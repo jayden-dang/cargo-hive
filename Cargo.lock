@@ -94,6 +94,7 @@ version = "0.1.0"
 dependencies = [
  "cargo-hive-cargo",
  "cargo-hive-core",
+ "cargo-hive-doctor",
  "cargo-hive-platform",
  "cargo-hive-state",
  "clap",
@@ -117,6 +118,17 @@ dependencies = [
 name = "cargo-hive-core"
 version = "0.1.0"
 dependencies = [
+ "cargo-hive-platform",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cargo-hive-doctor"
+version = "0.1.0"
+dependencies = [
+ "cargo-hive-cargo",
+ "cargo-hive-core",
  "cargo-hive-platform",
  "serde",
  "serde_json",

@@ -23,6 +23,7 @@ cargo-hive-platform = { workspace = true }
 cargo-hive-core = { workspace = true }
 cargo-hive-state = { workspace = true }
 cargo-hive-cargo = { workspace = true }
+cargo-hive-doctor = { workspace = true }
 
 [dev-dependencies]
 libc = { workspace = true }

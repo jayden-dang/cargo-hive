@@ -421,8 +421,8 @@ fn measured_text(
 }
 
 fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
-    use crate::doctor::{self, DoctorEnv, Verdict};
     use cargo_hive_core::receipt::CheckRecord;
+    use cargo_hive_doctor::{self as doctor, DoctorEnv, Verdict};
     let Ok(platform) = platform::current() else {
         eprintln!("{MACOS_ONLY_MESSAGE}");
         return 2;
@@ -622,9 +622,9 @@ fn live_checkouts(
 }
 
 fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: OutputArgs) -> i32 {
-    use crate::doctor::{self, Capabilities, Capability};
     use cargo_hive_cargo::discover::{self, SNAPSHOT_FILE, Snapshot};
     use cargo_hive_core::classify::Class;
+    use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
     let loaded = (|| -> Result<_, cargo_hive_state::StateError> {
         Ok((
             state.read::<Registry>(registry::FILE)?,
@@ -912,10 +912,10 @@ fn put_counts(b: &mut ReceiptBuilder, suffix: &str, c: &crate::gc::Counts) {
 }
 
 fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: OutputArgs) -> i32 {
-    use crate::doctor::{self, Capabilities, Capability};
     use crate::gc;
     use crate::seed::evict::{self, EvictCtx, Limits};
     use cargo_hive_cargo::discover::{self, SNAPSHOT_FILE, Snapshot};
+    use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
     use cargo_hive_state::window_days;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
@@ -1130,11 +1130,11 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
 }
 
 fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
-    use crate::doctor::{self, Capabilities, Capability};
     use crate::plan_tier::apply;
     use crate::plan_tier::build;
     use cargo_hive_cargo::ctx::Ctx;
     use cargo_hive_core::receipt::Outcome;
+    use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
     if let Err(e) = platform::signals::install() {
         return emit_failure(
             state,
@@ -1239,10 +1239,10 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
 }
 
 fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
-    use crate::doctor::{self, Capabilities, Capability};
     use crate::plan_tier::build::{self, MakeError};
     use crate::plan_tier::record;
     use cargo_hive_cargo::ctx::Ctx;
+    use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
     use std::collections::BTreeMap;
     use std::time::SystemTime;
     const ID_ATTEMPTS: u32 = 4;
@@ -1417,10 +1417,10 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
 }
 
 fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: OutputArgs) -> i32 {
-    use crate::doctor::{self, Capabilities, Capability};
     use crate::explain::{self, FailedUnits, Limits};
     use cargo_hive_cargo::discover::{self, SNAPSHOT_FILE, Snapshot};
     use cargo_hive_core::fingerprint::Format;
+    use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
     use cargo_hive_platform::Availability;
     let loaded = (|| -> Result<_, StateError> {
         Ok((
@@ -1569,7 +1569,7 @@ pub(crate) struct Refusal {
 pub(crate) fn locate_checkout(
     reg: &Registry,
     cfg: &cargo_hive_state::Config,
-    caps: &crate::doctor::Capabilities,
+    caps: &cargo_hive_doctor::Capabilities,
     path: &std::path::Path,
 ) -> Result<
     (
@@ -1579,8 +1579,8 @@ pub(crate) fn locate_checkout(
     ),
     Refusal,
 > {
-    use crate::doctor::{self, Capability};
     use cargo_hive_core::classify::Class;
+    use cargo_hive_doctor::{self as doctor, Capability};
 
     let real = match path.canonicalize() {
         Ok(path) => path,
@@ -1670,8 +1670,8 @@ pub(crate) fn locate_checkout(
 }
 
 fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
-    use crate::doctor::{self, Capabilities, Capability};
     use cargo_hive_cargo::ctx::Ctx;
+    use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
     use cargo_hive_state::window_days;
     let loaded = (|| -> Result<_, StateError> {
         Ok((
@@ -1769,9 +1769,9 @@ fn bench_cmd(
 ) -> i32 {
     use crate::bench::command::env_map;
     use crate::bench::{self, BUILD_DEADLINE, Limits, Plan};
-    use crate::doctor::{self, Capabilities, Capability};
     use cargo_hive_cargo::ctx::Ctx;
     use cargo_hive_core::receipt::Measured;
+    use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
     use cargo_hive_state::window_days;
     use std::collections::BTreeMap;
 
@@ -1893,8 +1893,8 @@ fn bench_cmd(
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
-    use crate::doctor::Capabilities;
     use cargo_hive_cargo::git::Git;
+    use cargo_hive_doctor::Capabilities;
     use cargo_hive_state::Config;
     use std::path::{Path, PathBuf};
     use std::process::Command;

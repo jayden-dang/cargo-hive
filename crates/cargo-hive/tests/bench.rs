@@ -118,7 +118,7 @@ fn checked_with_cancel(
     let state = State::open_at(hive.home.path.clone()).unwrap();
     let reg: Registry = state.read(cargo_hive_cargo::registry::FILE).unwrap();
     let cfg = state.config().unwrap();
-    let caps = state.read(cargo_hive::doctor::CAPABILITIES_FILE).unwrap();
+    let caps = state.read(cargo_hive_doctor::CAPABILITIES_FILE).unwrap();
     check(&reg, &cfg, &caps, cold, seeded, cancel)
 }
 

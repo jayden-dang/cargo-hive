@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::cli::locate_checkout;
-use crate::doctor::Capabilities;
 use cargo_hive_cargo::discover::Checkout;
 use cargo_hive_cargo::git::Git;
 use cargo_hive_cargo::registry::{Registry, Repo};
 use cargo_hive_cargo::toolchain::Toolchain;
+use cargo_hive_doctor::Capabilities;
 use cargo_hive_state::Config;
 
 pub struct Checked {

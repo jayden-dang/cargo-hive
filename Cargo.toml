@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/platform", "crates/core", "crates/state", "crates/cargo", "crates/cargo-hive"]
+members = ["crates/platform", "crates/core", "crates/state", "crates/cargo", "crates/doctor", "crates/cargo-hive"]
 resolver = "3"
 
 [workspace.package]
@@ -19,6 +19,7 @@ cargo-hive-platform = { path = "crates/platform", version = "=0.1.0" }
 cargo-hive-core = { path = "crates/core", version = "=0.1.0" }
 cargo-hive-state = { path = "crates/state", version = "=0.1.0" }
 cargo-hive-cargo = { path = "crates/cargo", version = "=0.1.0" }
+cargo-hive-doctor = { path = "crates/doctor", version = "=0.1.0" }
 
 [workspace.lints.clippy]
 disallowed_types = "warn"

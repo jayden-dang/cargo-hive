@@ -1,6 +1,8 @@
 //! `cargo hive doctor`: capability checks in a fresh temp dir, the check → capability map,
 //! and the `require` gate every capability-dependent command calls.
 
+#![forbid(unsafe_code, reason = "only the platform crate may touch the OS (ARCH-15)")]
+
 use cargo_hive_cargo::toolchain::Toolchain;
 use cargo_hive_core::receipt::Measured;
 use cargo_hive_platform::major_version;
@@ -318,7 +320,8 @@ pub fn floor_note(report: &DoctorReport) -> Option<String> {
 
 /// Seed maps a cancelled `rustup` or `rustc -vV` to exit 130. Any other toolchain
 /// failure stays a refusal.
-pub(crate) fn toolchain_failure_exit(message: &str) -> i32 {
+#[doc(hidden)]
+pub fn toolchain_failure_exit(message: &str) -> i32 {
     if message == "rustup was cancelled" || message == "rustc was cancelled" {
         130
     } else {
