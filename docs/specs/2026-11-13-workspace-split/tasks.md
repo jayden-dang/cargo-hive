@@ -615,7 +615,7 @@ _Requirements: SPLIT-5.2_
 
 **Depends-on:** Task 13
 
-- [ ] **Step 1: Failing test.** Write `workspace.rs` with six tests over `metadata()` (packages and workspace root):
+- [x] **Step 1: Failing test.** Write `workspace.rs` with six tests over `metadata()` (packages and workspace root):
   - `every_member_is_edition_2024`;
   - `members_depend_only_on_lower_layers_and_no_feature_on_another`: for each package, each dependency whose name
     is a member must have a strictly lower layer, and must not be in `FEATURES` when the package is;
@@ -630,7 +630,7 @@ _Requirements: SPLIT-5.2_
   doctor --json`, and assert the receipt's `hive_version` equals it. Run `cargo test --test workspace`, with the file
   still at `tests/workspace.rs` in the single crate. Expect: `the_root_is_a_virtual_workspace` and
   `every_member_inherits_version_and_edition` fail, because the root is still a package.
-- [ ] **Step 2: Implement.**
+- [x] **Step 2: Implement.**
   - Root `Cargo.toml`: `[workspace] members = ["crates/cargo-hive"] resolver = "3"`, with `[workspace.package]`
     holding version 0.1.0, edition 2024, license, repository and description (no `rust-version`, as 0.1.0 has none), and
     `[workspace.dependencies]` holding clap, serde, serde_json, libc and applesauce at today's versions, and an empty
@@ -642,11 +642,11 @@ _Requirements: SPLIT-5.2_
     tests/seed.rs:2533) to use `repo_root()`, and make names.rs sweep `crates/*/src`.
   - `fresh-probe.sh` defaults to `crates/cargo-hive/src/size.rs cargo-hive` and accepts several `<file>
     <package>` pairs.
-- [ ] **Step 3: Run.** At the root: `cargo test --workspace`, `cargo test --test workspace`, `cargo test --test
+- [x] **Step 3: Run.** At the root: `cargo test --workspace`, `cargo test --test workspace`, `cargo test --test
   version`, `cargo test --test cli_tree`, the capture comparison, `cargo clippy --workspace --all-targets -- -D
   warnings`, and `cargo check --workspace --target x86_64-unknown-linux-gnu` all pass. `scripts/fresh-probe.sh`
   prints `GREEN`.
-- [ ] **Step 4: Commit.** `git commit -m "build: make the root a workspace with cargo-hive as its member"`
+- [x] **Step 4: Commit.** `git commit -m "build: make the root a workspace with cargo-hive as its member"`
 
 _Requirements: SPLIT-1.1, SPLIT-3.3, SPLIT-3.4, SPLIT-3.5, SPLIT-3.6, SPLIT-5.1, SPLIT-6.2, SPLIT-7.4, SPLIT-7.5_
 
