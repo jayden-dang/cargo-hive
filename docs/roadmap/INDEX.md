@@ -76,8 +76,8 @@ ID rules:
 
 ## Focus
 
-**Now:** ROAD-14
-**Next:** None
+**Now:** ROAD-15
+**Next:** ROAD-14
 
 | ID | Milestone | Outcome | Depends-on | Commitment |
 |---|---|---|---|---|
@@ -138,6 +138,7 @@ ID rules:
 **Goals:** GOAL-8
 **Members:**
 - **ROAD-14** state-upgrade-safety — After: none — Surfaces: the `state` module (ARCH-16) and every file it writes (registry, capabilities, snapshot, plans, receipts, `store.db`); test fixtures taken from v0.1.0. — Card: [ROAD-14](roads/ROAD-14.md)
+- **ROAD-15** workspace-split — After: none — Surfaces: every module under `src/` and `tests/`, the root `Cargo.toml` (becomes a workspace), the release steps (publishing every crate), `docs/standards/` and the `docs/architecture/` spine. — Card: [ROAD-15](roads/ROAD-15.md)
 **Depends-on:** none
 **Commitment:** Committed 2026-11-13
 **Closed:** None
