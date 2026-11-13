@@ -838,13 +838,13 @@ _Requirements: SPLIT-1.2, SPLIT-1.3_
 
 **Depends-on:** Task 19
 
-- [ ] **Step 1: Failing test.** Add the rows and run `cargo test --test workspace`. Expect: the package is missing.
-- [ ] **Step 2: Implement.** Create the crate with no dependency on gc or doctor in any table, and move the files.
-- [ ] **Step 3: Run.** `cargo tree -p cargo-hive-seed -e normal,dev --prefix none | grep -E '^cargo-hive-(gc|doctor) '`
+- [x] **Step 1: Failing test.** Add the rows and run `cargo test --test workspace`. Expect: the package is missing.
+- [x] **Step 2: Implement.** Create the crate with no dependency on gc or doctor in any table, and move the files.
+- [x] **Step 3: Run.** `cargo tree -p cargo-hive-seed -e normal,dev --prefix none | grep -E '^cargo-hive-(gc|doctor) '`
   prints nothing (the dependency graph, not build output, proves seed reaches neither gc nor doctor, dev-deps
   included). The
   full gate, `tests/seed_liveness.rs` and the capture comparison pass.
-- [ ] **Step 4: Commit.** `git commit -m "build: extract the seed crate"`
+- [x] **Step 4: Commit.** `git commit -m "build: extract the seed crate"`
 
 _Requirements: SPLIT-1.3, SPLIT-1.5_
 
