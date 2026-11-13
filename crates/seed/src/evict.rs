@@ -7,8 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::seed::source::{self, Holds};
-use crate::seed::store::{
+use crate::source::{self, Holds};
+use crate::store::{
     self, CommitPlan, Inventory, Row, StoreKey, commit_eviction, entry_dir, evict_dir, inventory,
     key_dir, rename_out, row_key, row_matches, store_dir,
 };

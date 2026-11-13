@@ -12,9 +12,10 @@ const LAYERS: &[(&str, u8)] = &[
     ("cargo-hive-state", 2),
     ("cargo-hive-cargo", 3),
     ("cargo-hive-doctor", 4),
+    ("cargo-hive-seed", 4),
     ("cargo-hive", 5),
 ];
-const FEATURES: &[&str] = &["cargo-hive-doctor"];
+const FEATURES: &[&str] = &["cargo-hive-doctor", "cargo-hive-seed"];
 
 fn metadata() -> serde_json::Value {
     let out = Command::new("cargo")

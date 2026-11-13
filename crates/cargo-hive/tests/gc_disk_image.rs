@@ -182,7 +182,7 @@ fn plant_aged_entry(
     bytes: Vec<u8>,
     secs_ago: u64,
 ) -> PathBuf {
-    use cargo_hive::seed::store::{MAX_STORE_BYTES, Row, STORE_FILE, StoreFile};
+    use cargo_hive_seed::store::{MAX_STORE_BYTES, Row, STORE_FILE, StoreFile};
     use cargo_hive_state::State;
     use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -3,11 +3,11 @@
 
 #![allow(clippy::disallowed_types, clippy::disallowed_methods, reason = "test fixtures")]
 
-use cargo_hive::seed::source::{Skip, SourceUnit, holds, live_registry_units, unit_key};
 use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_core::caps::DEPS_CAP;
 use cargo_hive_core::fingerprint::{self, Format, le_hex, read_profile};
 use cargo_hive_core::target::{Owner, TargetDir};
+use cargo_hive_seed::source::{Skip, SourceUnit, holds, live_registry_units, unit_key};
 use cargo_hive_state::{Config, State};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -716,7 +716,7 @@ fn a_lock_that_cannot_be_read_is_skipped_and_fills_nothing() {
         size: None,
         unreadable: None,
     };
-    let report = cargo_hive::seed::fill::fill(&ctx, &repo, &[target], &|| false).unwrap();
+    let report = cargo_hive_seed::fill::fill(&ctx, &repo, &[target], &|| false).unwrap();
     assert_eq!(report.targets_skipped.get("lock.failed").copied(), Some(1));
     assert_eq!(report.entries_added, 0);
     assert_eq!(report.entries_held, 0);
@@ -727,7 +727,7 @@ fn a_lock_that_cannot_be_read_is_skipped_and_fills_nothing() {
             .any(|(kind, _, _)| kind == "lock.failed")
     );
     assert!(
-        cargo_hive::seed::store::read(&state)
+        cargo_hive_seed::store::read(&state)
             .unwrap()
             .units
             .is_empty()

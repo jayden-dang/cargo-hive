@@ -750,7 +750,7 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
         }
         b.count("bytes", bytes);
     }
-    let seeds = match crate::seed::record::read(state) {
+    let seeds = match cargo_hive_seed::record::read(state) {
         Ok(file) => Some(file),
         Err(err) => {
             b.note(err.to_string());
@@ -788,7 +788,7 @@ fn report_targets(
     b: &mut ReceiptBuilder,
     human: &mut String,
     scan: &cargo_hive_cargo::discover::TargetScan,
-    seeds: Option<&crate::seed::record::SeedsFile>,
+    seeds: Option<&cargo_hive_seed::record::SeedsFile>,
 ) {
     use cargo_hive_core::fingerprint::Format;
     use cargo_hive_core::target::Owner;
@@ -856,7 +856,7 @@ fn report_targets(
         if let Some(seeds) = seeds
             && let Some(record) = seeds.targets.get(&t.path)
         {
-            match crate::seed::record::counts(t, record, cargo_hive_core::caps::DEPS_CAP) {
+            match cargo_hive_seed::record::counts(t, record, cargo_hive_core::caps::DEPS_CAP) {
                 Ok(Some(counts)) => {
                     let path = t.path.display();
                     b.count(&format!("reused_fresh:{path}"), counts.fresh)
@@ -913,9 +913,9 @@ fn put_counts(b: &mut ReceiptBuilder, suffix: &str, c: &crate::gc::Counts) {
 
 fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: OutputArgs) -> i32 {
     use crate::gc;
-    use crate::seed::evict::{self, EvictCtx, Limits};
     use cargo_hive_cargo::discover::{self, SNAPSHOT_FILE, Snapshot};
     use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
+    use cargo_hive_seed::evict::{self, EvictCtx, Limits};
     use cargo_hive_state::window_days;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
@@ -1730,9 +1730,9 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
     };
     b.toolchain(Some(toolchain.release.clone()));
     b.scope_mut().checkouts.push(real.clone());
-    let result = crate::seed::run(&ctx, &repos[0], &row, &toolchain, &cancelled);
-    let code = crate::seed::exit_code(&result);
-    crate::seed::record_seed_result(&mut b, &result);
+    let result = cargo_hive_seed::run(&ctx, &repos[0], &row, &toolchain, &cancelled);
+    let code = cargo_hive_seed::exit_code(&result);
+    cargo_hive_seed::record_seed_result(&mut b, &result);
     match result {
         Ok(outcome) => {
             let human = format!(

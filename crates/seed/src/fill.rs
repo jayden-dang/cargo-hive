@@ -11,8 +11,8 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::seed::source::{self, Skip, SourceUnit};
-use crate::seed::store::{self, PublishFailed, Published, Row};
+use crate::source::{self, Skip, SourceUnit};
+use crate::store::{self, PublishFailed, Published, Row};
 use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_cargo::registry::Repo;
 use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};

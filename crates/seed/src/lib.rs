@@ -8,6 +8,8 @@
 //! counts the units before the ones with an open edge are dropped, so it is
 //! cloned plus existing plus failed plus dropped.
 
+#![forbid(unsafe_code, reason = "only the platform crate may touch the OS (ARCH-15)")]
+
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -612,7 +614,7 @@ mod tests {
         assert!(off.unmeasured.iter().any(|(field, reason)| {
             field == "clone_bytes_not_shared" && reason == "doctor check (c) did not pass"
         }));
-        let store = crate::seed::store::store_dir(&state);
+        let store = crate::store::store_dir(&state);
         std::fs::write(&store, b"not a directory").unwrap();
         let blocked = outcome_of(&state, &platform, &cfg, true);
         assert_eq!(

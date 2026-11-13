@@ -11,10 +11,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cargo_hive::seed::Error;
 use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_cargo::discover::Checkout;
 use cargo_hive_cargo::registry::Repo;
+use cargo_hive_seed::Error;
 use common::cargo_fixture::backdate_all;
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
@@ -242,7 +242,7 @@ fn a_bad_window_inside_run_is_a_refusal() {
     );
     let err = result.as_ref().unwrap_err();
     assert!(err.to_string().contains("gc_window_days"), "{err}");
-    assert_eq!(cargo_hive::seed::exit_code(&result), 1);
+    assert_eq!(cargo_hive_seed::exit_code(&result), 1);
     assert!(!lane.join("target").exists());
 }
 
@@ -835,17 +835,17 @@ fn a_signal_exits_130() {
 #[test]
 fn the_exit_code_follows_the_result() {
     let ok = Ok(blank_outcome(false));
-    assert_eq!(cargo_hive::seed::exit_code(&ok), 0);
+    assert_eq!(cargo_hive_seed::exit_code(&ok), 0);
     let cancelled = Ok(blank_outcome(true));
-    assert_eq!(cargo_hive::seed::exit_code(&cancelled), 130);
-    let full = Err(cargo_hive::seed::Error::DiskFull(Box::new(
-        cargo_hive::seed::FullDisk::new("no space"),
+    assert_eq!(cargo_hive_seed::exit_code(&cancelled), 130);
+    let full = Err(cargo_hive_seed::Error::DiskFull(Box::new(
+        cargo_hive_seed::FullDisk::new("no space"),
     )));
-    assert_eq!(cargo_hive::seed::exit_code(&full), 1);
-    let state = Err(cargo_hive::seed::Error::State(
+    assert_eq!(cargo_hive_seed::exit_code(&full), 1);
+    let state = Err(cargo_hive_seed::Error::State(
         cargo_hive_state::StateError::Cancelled,
     ));
-    assert_eq!(cargo_hive::seed::exit_code(&state), 1);
+    assert_eq!(cargo_hive_seed::exit_code(&state), 1);
 }
 
 #[test]
@@ -952,9 +952,9 @@ fn seed_writes_a_record_holding_each_cloned_unit_and_its_stamp() {
     assert!(cloned > 0, "{receipt}");
     let target = lane.join("target").canonicalize().unwrap();
     let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
-    let path = state.root().join(cargo_hive::seed::record::SEEDS_FILE);
+    let path = state.root().join(cargo_hive_seed::record::SEEDS_FILE);
     assert!(path.is_file(), "{}", path.display());
-    let file = cargo_hive::seed::record::read(&state).unwrap();
+    let file = cargo_hive_seed::record::read(&state).unwrap();
     let record = file
         .targets
         .get(&target)
@@ -1030,10 +1030,10 @@ fn a_cancelled_seed_records_what_it_cloned() {
         "cancel should leave a stored unit uncloned: {:?}",
         outcome.placed
     );
-    assert_eq!(cargo_hive::seed::exit_code(&Ok(ref_outcome(&outcome))), 130);
+    assert_eq!(cargo_hive_seed::exit_code(&Ok(ref_outcome(&outcome))), 130);
     let (path, identity) = outcome.target.clone().expect("the target was created");
     let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
-    let file = cargo_hive::seed::record::read(&state).unwrap();
+    let file = cargo_hive_seed::record::read(&state).unwrap();
     let record = file
         .targets
         .get(&path)
@@ -1052,7 +1052,7 @@ fn a_seed_that_cloned_nothing_writes_no_record() {
     let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(0), "{receipt}");
     assert_eq!(receipt["counts"]["clone_units_cloned"], 0, "{receipt}");
-    let path = hive.home.path.join(cargo_hive::seed::record::SEEDS_FILE);
+    let path = hive.home.path.join(cargo_hive_seed::record::SEEDS_FILE);
     assert!(!path.exists(), "{}", path.display());
 }
 
@@ -1678,7 +1678,7 @@ fn seeding_a_new_worktree_of_a_real_repo_recompiles_no_cloned_unit() {
     cargo_home_left_unchanged(&homes_before, &homes_after).unwrap_or_else(|err| panic!("{err}"));
 }
 
-fn stamp_under_build(unit: &cargo_hive::seed::record::SeededUnit) -> bool {
+fn stamp_under_build(unit: &cargo_hive_seed::record::SeededUnit) -> bool {
     let Some((rel, _)) = &unit.stamp else {
         return false;
     };
@@ -1698,8 +1698,8 @@ fn is_seed_count(key: &str) -> bool {
     .any(|name| key == *name || key.starts_with(&format!("{name}:")))
 }
 
-fn ref_outcome(outcome: &cargo_hive::seed::Outcome) -> cargo_hive::seed::Outcome {
-    cargo_hive::seed::Outcome {
+fn ref_outcome(outcome: &cargo_hive_seed::Outcome) -> cargo_hive_seed::Outcome {
+    cargo_hive_seed::Outcome {
         counts: outcome.counts.clone(),
         findings: outcome.findings.clone(),
         unmeasured: outcome.unmeasured.clone(),
@@ -1813,7 +1813,7 @@ fn stored_paths(stored: &serde_json::Value) -> Vec<String> {
 fn seeded_dir_names(hive: &Hive, target: &Path) -> Vec<String> {
     let target = target.canonicalize().unwrap();
     let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
-    let file = cargo_hive::seed::record::read(&state).unwrap();
+    let file = cargo_hive_seed::record::read(&state).unwrap();
     let record = file
         .targets
         .get(&target)
@@ -2140,8 +2140,8 @@ fn pid_alive(pid: u32) -> bool {
     wait_within(child, Duration::from_secs(10)).status.success()
 }
 
-fn blank_outcome(cancelled: bool) -> cargo_hive::seed::Outcome {
-    cargo_hive::seed::Outcome {
+fn blank_outcome(cancelled: bool) -> cargo_hive_seed::Outcome {
+    cargo_hive_seed::Outcome {
         counts: BTreeMap::new(),
         findings: Vec::new(),
         unmeasured: Vec::new(),
@@ -2156,7 +2156,7 @@ fn run_seed(
     hive: &Hive,
     recording: Recording,
     lane: &Path,
-) -> Result<cargo_hive::seed::Outcome, Error> {
+) -> Result<cargo_hive_seed::Outcome, Error> {
     run_seed_until(hive, recording, lane, &|| false)
 }
 
@@ -2193,7 +2193,7 @@ fn run_seed_until(
     recording: Recording,
     lane: &Path,
     cancel: &(dyn Fn() -> bool + Sync),
-) -> Result<cargo_hive::seed::Outcome, Error> {
+) -> Result<cargo_hive_seed::Outcome, Error> {
     let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
     let _home = CargoHomeGuard::set(&hive.cargo_home.path);
     let lib = LibCtx::open(hive, recording.fs());
@@ -2202,7 +2202,7 @@ fn run_seed_until(
     let toolchain = cargo_hive_cargo::toolchain::resolve_toolchain(&lane).unwrap();
     let repos = [repo];
     let ctx = lib_ctx(&lib, &repos);
-    cargo_hive::seed::run(&ctx, &repos[0], &checkout, &toolchain, cancel)
+    cargo_hive_seed::run(&ctx, &repos[0], &checkout, &toolchain, cancel)
 }
 
 #[test]
@@ -2220,18 +2220,18 @@ fn seeding_through_the_fill_and_clone_halves_reports_what_one_run_reports() {
         let toolchain = cargo_hive_cargo::toolchain::resolve_toolchain(&lane).unwrap();
         let repos = [repo_row];
         let ctx = lib_ctx(&lib, &repos);
-        let fill = cargo_hive::seed::run_fill(&ctx, &repos[0], &|| false).unwrap();
+        let fill = cargo_hive_seed::run_fill(&ctx, &repos[0], &|| false).unwrap();
         match fill {
-            cargo_hive::seed::Fill::Continue(filled) => {
-                cargo_hive::seed::run_clone(&ctx, &repos[0], &checkout, &toolchain, filled, &|| {
+            cargo_hive_seed::Fill::Continue(filled) => {
+                cargo_hive_seed::run_clone(&ctx, &repos[0], &checkout, &toolchain, filled, &|| {
                     false
                 })
                 .unwrap()
             }
-            cargo_hive::seed::Fill::Stopped(_) => panic!("nothing cancelled this fill"),
+            cargo_hive_seed::Fill::Stopped(_) => panic!("nothing cancelled this fill"),
         }
     };
-    let keys = |o: &cargo_hive::seed::Outcome| o.counts.keys().cloned().collect::<Vec<_>>();
+    let keys = |o: &cargo_hive_seed::Outcome| o.counts.keys().cloned().collect::<Vec<_>>();
     assert_eq!(keys(&whole), keys(&halves));
     assert_eq!(
         whole.counts["clone_units_cloned"],
@@ -2254,15 +2254,15 @@ fn a_fill_half_holds_the_store_lock_until_clone_finishes() {
     let toolchain = cargo_hive_cargo::toolchain::resolve_toolchain(&lane).unwrap();
     let repos = [repo_row];
     let ctx = lib_ctx(&lib, &repos);
-    let filled = match cargo_hive::seed::run_fill(&ctx, &repos[0], &|| false).unwrap() {
-        cargo_hive::seed::Fill::Continue(filled) => filled,
-        cargo_hive::seed::Fill::Stopped(_) => panic!("nothing cancelled this fill"),
+    let filled = match cargo_hive_seed::run_fill(&ctx, &repos[0], &|| false).unwrap() {
+        cargo_hive_seed::Fill::Continue(filled) => filled,
+        cargo_hive_seed::Fill::Stopped(_) => panic!("nothing cancelled this fill"),
     };
     assert!(
         lib.state.try_store_exclusive().unwrap().is_none(),
         "fill half must keep the shared store lock so gc cannot evict"
     );
-    cargo_hive::seed::run_clone(&ctx, &repos[0], &checkout, &toolchain, filled, &|| false).unwrap();
+    cargo_hive_seed::run_clone(&ctx, &repos[0], &checkout, &toolchain, filled, &|| false).unwrap();
     assert!(
         lib.state.try_store_exclusive().unwrap().is_some(),
         "clone must release the store lock"

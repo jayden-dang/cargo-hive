@@ -4,7 +4,7 @@
 //! a registry unit. An undecided target, an unsupported profile, or a hit bound
 //! fills nothing from that target.
 
-use crate::seed::store::StoreKey;
+use crate::store::StoreKey;
 use cargo_hive_cargo::ctx::{Ctx, checkout_walk};
 use cargo_hive_cargo::discover::{self, Snapshot};
 use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
@@ -875,7 +875,7 @@ mod tests {
                 account_bytes: false,
                 repos: &[],
                 mains: &[],
-                liveness: crate::seed::no_liveness,
+                liveness: crate::no_liveness,
             }
         }
     }
@@ -1212,7 +1212,7 @@ mod tests {
             account_bytes: false,
             repos: &repos,
             mains: &mains,
-            liveness: crate::seed::no_liveness,
+            liveness: crate::no_liveness,
         };
         let cargo_home = scratch.0.join("cargo-home");
         fs::create_dir_all(&cargo_home).unwrap();

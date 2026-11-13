@@ -5,4 +5,3 @@ pub mod cli;
 pub mod explain;
 pub mod gc;
 pub mod plan_tier;
-pub mod seed;

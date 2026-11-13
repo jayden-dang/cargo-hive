@@ -13,7 +13,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::seed::store::{self, Row};
+use crate::store::{self, Row};
 use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_core::liveness;
 use cargo_hive_core::size::{MAX_DEPTH, allocated_bytes};

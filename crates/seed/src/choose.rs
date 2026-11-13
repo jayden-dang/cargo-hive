@@ -163,7 +163,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{Choice, choose, source_order};
-    use crate::seed::store::{Row, SourceRecord, SourceUnitRef, StoreFile};
+    use crate::store::{Row, SourceRecord, SourceUnitRef, StoreFile};
 
     fn row(name_meta: &str, fp: &str, value: u64, repo: &str, variant: u32, deps: &[&str]) -> Row {
         Row {

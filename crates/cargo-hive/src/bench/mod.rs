@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::seed::{self, Fill, record};
 use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_cargo::discover::{self, Checkout, Snapshot};
 use cargo_hive_cargo::registry::Repo;
@@ -17,6 +16,7 @@ use cargo_hive_cargo::toolchain::Toolchain;
 use cargo_hive_core::caps::DEPS_CAP;
 use cargo_hive_core::receipt::{Finding, Measured, ReceiptBuilder};
 use cargo_hive_platform::proc::{self, Capture, ChildOutputError};
+use cargo_hive_seed::{self as seed, Fill, record};
 
 use self::command::{BuildCmd, EnvMap};
 use self::order::Arm;

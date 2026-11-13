@@ -9,11 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cargo_hive::seed::Error;
-use cargo_hive::seed::fill::FillReport;
-use cargo_hive::seed::place::{self, PlaceReport};
-use cargo_hive::seed::source::{SourceUnit, live_registry_units, unit_files};
-use cargo_hive::seed::store::{self, tag_path};
 use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive_core::fingerprint::read_profile;
 use cargo_hive_core::liveness::unit_timestamp;
@@ -23,6 +18,11 @@ use cargo_hive_platform::{
     CompressOutcome, EntryKind, EntryStat, Fs, LockHolder, LockKind, LockState, Sharing, TempDir,
     TryLock, VolumeInfo,
 };
+use cargo_hive_seed::Error;
+use cargo_hive_seed::fill::FillReport;
+use cargo_hive_seed::place::{self, PlaceReport};
+use cargo_hive_seed::source::{SourceUnit, live_registry_units, unit_files};
+use cargo_hive_seed::store::{self, tag_path};
 use common::Hive;
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
@@ -105,7 +105,7 @@ fn fill_in(
 ) -> FillReport {
     let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
     let _home = CargoHomeGuard::set(&hive.cargo_home.path);
-    cargo_hive::seed::fill::fill(
+    cargo_hive_seed::fill::fill(
         &lib.ctx(),
         &lib.repos[0],
         std::slice::from_ref(target),
@@ -820,10 +820,10 @@ fn try_fill(
     hive: &Hive,
     lib: &LibCtx,
     target: &TargetDir,
-) -> Result<FillReport, cargo_hive::seed::Error> {
+) -> Result<FillReport, cargo_hive_seed::Error> {
     let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
     let _home = CargoHomeGuard::set(&hive.cargo_home.path);
-    cargo_hive::seed::fill::fill(
+    cargo_hive_seed::fill::fill(
         &lib.ctx(),
         &lib.repos[0],
         std::slice::from_ref(target),
@@ -839,7 +839,7 @@ fn a_full_disk_cloning_the_tag_is_disk_full() {
     let recording = Recording::over_real().fail_clone(&tag, libc::ENOSPC);
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
     let err = try_fill(&built.hive, &lib, &built.target).expect_err("a full disk is not success");
-    assert!(matches!(err, cargo_hive::seed::Error::DiskFull(_)), "{err}");
+    assert!(matches!(err, cargo_hive_seed::Error::DiskFull(_)), "{err}");
 }
 
 #[test]
@@ -858,7 +858,7 @@ fn a_full_disk_resetting_the_temp_directory_is_disk_full() {
     let recording = Recording::over_real();
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
     let err = try_fill(&built.hive, &lib, &built.target).expect_err("a full disk is not success");
-    assert!(matches!(err, cargo_hive::seed::Error::DiskFull(_)), "{err}");
+    assert!(matches!(err, cargo_hive_seed::Error::DiskFull(_)), "{err}");
 }
 
 #[test]
@@ -869,7 +869,7 @@ fn a_full_disk_creating_the_temp_parent_is_disk_full() {
     let recording = Recording::over_real();
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
     let err = try_fill(&built.hive, &lib, &built.target).expect_err("a full disk is not success");
-    assert!(matches!(err, cargo_hive::seed::Error::DiskFull(_)), "{err}");
+    assert!(matches!(err, cargo_hive_seed::Error::DiskFull(_)), "{err}");
 }
 
 struct FullDisk {
@@ -1086,7 +1086,7 @@ fn a_clean_target_writes_a_row_matching_its_toolchain() {
         .unwrap()
         .version_text;
     assert_eq!(
-        cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false).unwrap(),
+        cargo_hive_seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false).unwrap(),
         (text.clone(), value)
     );
     let recording = Recording::over_real();
@@ -1115,7 +1115,7 @@ fn a_target_with_two_toolchain_values_writes_no_row_and_one_finding() {
     let mut target = built.target.clone();
     reread(&mut target);
     let err =
-        cargo_hive::seed::fill::toolchain_row(&target, &built.repo.main, &|| false).unwrap_err();
+        cargo_hive_seed::fill::toolchain_row(&target, &built.repo.main, &|| false).unwrap_err();
     assert!(
         err.contains(&built.target_path.display().to_string()),
         "{err}"
@@ -1136,7 +1136,7 @@ fn a_malformed_rustc_info_writes_no_row_and_one_finding() {
     let built = built();
     let path = built.target_path.join(".rustc_info.json");
     std::fs::write(&path, b"not json").unwrap();
-    let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false)
+    let err = cargo_hive_seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false)
         .unwrap_err();
     assert!(err.contains(&path.display().to_string()), "{err}");
     let recording = Recording::over_real();
@@ -1152,7 +1152,7 @@ fn a_missing_rustc_info_writes_no_row_and_one_finding() {
     let built = built();
     let path = built.target_path.join(".rustc_info.json");
     std::fs::remove_file(&path).unwrap();
-    let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false)
+    let err = cargo_hive_seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false)
         .unwrap_err();
     assert!(err.contains(&path.display().to_string()), "{err}");
     // Cargo skips writing the file when a rustc wrapper is set to the empty string or
@@ -1193,10 +1193,10 @@ fn text_that_differs_from_the_source_checkout_writes_no_row() {
         .unwrap()
         .version_text;
     let parsed_text =
-        cargo_hive::seed::fill::rustc_info_version(&std::fs::read_to_string(&path).unwrap())
+        cargo_hive_seed::fill::rustc_info_version(&std::fs::read_to_string(&path).unwrap())
             .unwrap();
     assert_ne!(parsed_text, checkout);
-    let err = cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false)
+    let err = cargo_hive_seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false)
         .unwrap_err();
     assert!(
         err.contains(&built.target_path.display().to_string()),
@@ -1237,11 +1237,11 @@ fn two_targets_with_one_toolchain_share_one_row() {
         .unwrap()
         .version_text;
     assert_eq!(
-        cargo_hive::seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false).unwrap(),
+        cargo_hive_seed::fill::toolchain_row(&built.target, &built.repo.main, &|| false).unwrap(),
         (text.clone(), value)
     );
     assert_eq!(
-        cargo_hive::seed::fill::toolchain_row(&copy, &built.repo.main, &|| false).unwrap(),
+        cargo_hive_seed::fill::toolchain_row(&copy, &built.repo.main, &|| false).unwrap(),
         (text.clone(), value)
     );
     let recording = Recording::over_real();

@@ -9,9 +9,6 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cargo_hive::seed::choose::{self, Choice};
-use cargo_hive::seed::evict::{self, EvictCtx, Limits};
-use cargo_hive::seed::store::{self, MAX_STORE_BYTES, Row, STORE_FILE, StoreFile, store_dir};
 use cargo_hive_cargo::discover::Checkout;
 use cargo_hive_core::classify::{CheckoutKind, Class};
 use cargo_hive_core::fingerprint;
@@ -20,6 +17,9 @@ use cargo_hive_core::receipt::Measured;
 use cargo_hive_core::target::{Owner, TAG_LINE, TargetDir};
 use cargo_hive_platform::Fs;
 use cargo_hive_platform::apfs::Apfs;
+use cargo_hive_seed::choose::{self, Choice};
+use cargo_hive_seed::evict::{self, EvictCtx, Limits};
+use cargo_hive_seed::store::{self, MAX_STORE_BYTES, Row, STORE_FILE, StoreFile, store_dir};
 use cargo_hive_state::State;
 use common::store_fixture::{
     count, drop_row, entry_dirs, has_finding, plant_rowless, rows, seeded_store, set_last_live_at,
