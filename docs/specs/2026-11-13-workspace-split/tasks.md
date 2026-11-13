@@ -814,10 +814,10 @@ _Requirements: SPLIT-1.2, SPLIT-2.6_
 
 **Depends-on:** Task 18
 
-- [ ] **Step 1: Failing test.** Add the rows and run `cargo test --test workspace`. Expect: the package is missing.
-- [ ] **Step 2: Implement.** Create the crate and move the file.
-- [ ] **Step 3: Run.** The full gate, `cargo test -p cargo-hive-doctor` and the capture comparison pass.
-- [ ] **Step 4: Commit.** `git commit -m "build: extract the doctor crate"`
+- [x] **Step 1: Failing test.** Add the rows and run `cargo test --test workspace`. Expect: the package is missing.
+- [x] **Step 2: Implement.** Create the crate and move the file.
+- [x] **Step 3: Run.** The full gate, `cargo test -p cargo-hive-doctor` and the capture comparison pass.
+- [x] **Step 4: Commit.** `git commit -m "build: extract the doctor crate"`
 
 _Requirements: SPLIT-1.2, SPLIT-1.3_
 
