@@ -171,7 +171,10 @@ _Requirements: SPLIT-3.1_
     - `id`, `at`, `ts`, `made_at`, `attempted_at`, `written_at`;
     - `filled_at`, `last_live_at`, `newest_at`, `stamp`, `identity`, `root_dev`, `root_ino`.
 
-    `hive_version` is compared literally, since both binaries are 0.1.0 until a release bumps it.
+    `hive_version` is compared literally while both binaries report the same version. When they differ (a
+    released binary via `HIVE_NEW_BIN`, release step 6), it is normalized too, and the new binary's
+    `hive_version` is checked against its own `--version` instead (the SPLIT-3.5 check in
+    `crates/cargo-hive/tests/version.rs`, run with the same binary).
   - the new binary is `HIVE_NEW_BIN` when set (a crates.io-installed binary, release step 6), else
     `env!("CARGO_BIN_EXE_cargo-hive")`;
   - `fn run_sequence(bin: &Path) -> Vec<(String, serde_json::Value, i32)>`. It first resets `work` and `home`

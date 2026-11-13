@@ -177,8 +177,9 @@ Labels used below:
   earlier members uploaded.
 - **SPLIT-6.6** WHEN the release's post-publish smoke step runs, THE SYSTEM's release steps SHALL install
   `cargo-hive` from crates.io into a temp root and run the Task 2 comparison (command tree, `--json` keys, exit
-  codes, state files) with that binary against the 0.1.0 binary, and stop on any difference (ROAD-15.md:12,
-  example 3).
+  codes, state files) with that binary against the 0.1.0 binary, and stop on any difference other than the
+  `hive_version` value, which differs by design and is checked against that binary's own `--version`
+  (SPLIT-3.5) (ROAD-15.md:12, example 3).
 
 ## 7. The documented commands work on the workspace
 
@@ -249,8 +250,9 @@ Every file under `src/` and `tests/` moves into a member crate (ROAD-15 surfaces
 - Linux support; the non-macOS build stays a compile-only stub (ROAD-15.md:18-19).
 - Any change to a state file's layout, name or meaning (ROAD-14, issue #13).
 - Publishing to crates.io in this run; the release steps are written, not run past the dry-run.
-- Keeping 0.1.0's `cargo_hive::<module>` Rust paths as an API: `cargo-hive` keeps a library target only for
-  what its own tests need (agent-decided; ROAD-15.md:17 lists the contract, and no doc names a Rust API).
+- Keeping 0.1.0's `cargo_hive::<module>` Rust paths as an API: proposed out of scope (`cargo-hive` keeps a library
+  target only for what its own tests need; ROAD-15.md:17 lists the contract, and no doc names a Rust API). Because it
+  drives the version number users see, the operator decides it (Open Questions); the fallback is one re-export block.
 - Edits to docs/architecture/INDEX.md (ARCH-15, ARCH-16 wording) and docs/product/vision.md; proposed text goes
   to the operator's `/define-project`.
 - A build script in any member; any new third-party dependency.
