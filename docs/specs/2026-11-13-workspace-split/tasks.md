@@ -43,7 +43,10 @@ table, task gate). Every task inherits these:
   - tests and manual steps write only inside the worktree, `/private/tmp` or `$TMPDIR`;
   - klynt is read, never written;
   - `HIVE_HOME` always points under `/private/tmp`;
-  - cargo builds of the v0.1.0 export run `--offline`.
+  - cargo builds of the v0.1.0 export run `--offline`;
+  - one known exception: `cargo package --workspace` and `cargo publish --workspace --dry-run` (Task 26 Step 3)
+    update the crates.io index cache under the cargo home ("Updating crates.io index"), as any release does. That
+    step is a release-time manual step, run only by the operator or with the operator's go-ahead.
 - **Team:** Solo (docs/agents/project.md `## Team`); the agent pairs, and there are no assignee fields.
 - **Commits:** a conventional subject, with no AI or co-author trailer.
 
@@ -512,7 +515,9 @@ _Requirements: SPLIT-1.3_
   `live_registry_units`, copied with assertions unchanged and constructing `Ctx`/`EvictCtx` with
   `liveness: cargo_hive::gc::liveness::liveness`. Run `cargo test --test seed_liveness`. Expect: compile errors on
   the missing `liveness` field and module.
-- [ ] **Step 2: Implement.** Move the algorithm to `src/gc/liveness.rs`. Add the fields and the `holds`
+- [ ] **Step 2: Implement.** Move the algorithm to `src/gc/liveness.rs`, together with the unit tests in
+  `src/liveness.rs`'s test module that call `liveness()` or the walk; tests of the types, `embedded_hashes` and
+  `unit_timestamp` stay. Add the fields and the `holds`
   parameter. Call through the field at seed/source.rs:183 and :327. Production sites (cli.rs, bench/mod.rs) pass
   `gc::liveness::liveness`. Seed unit tests that stay pass `no_liveness`. Delete the moved tests from seed's test
   modules.
@@ -978,12 +983,14 @@ bitset types (design Decision 9).
 **Depends-on:** Task 24
 
 - [ ] **Step 1: Failing test.**
-  - fingerprint: for the profiles in the liveness unit-test fixtures (liveness.rs:744), `successors` of each unit
-    equals the 0.1.0 `edges` filtered by source, and `edge_count` equals `edges.len()`. Capture the 0.1.0 lists
-    by keeping the old builder in the test module until Step 3.
+  - in `crates/gc/src/liveness.rs`'s test module, where the liveness fixtures live by now (`target_of`,
+    moved by Task 11 from liveness.rs:744): for each fixture profile, `successors` of each unit equals the 0.1.0
+    `edges` filtered by source, and `edge_count` equals `edges.len()`. Capture the 0.1.0 lists by keeping the old
+    builder as a `#[doc(hidden)]` function in core until Step 3.
   - BitSet: table cases at bit 0, 63, 64 and `len - 1`.
 
-  Run `cargo test -p cargo-hive-core fingerprint:: bitset::`. Expect: a compile error.
+  Run `cargo test -p cargo-hive-gc liveness::` and `cargo test -p cargo-hive-core bitset::`. Expect: a compile
+  error.
 - [ ] **Step 2: Implement.** Build the CSR, switch the index keys, and swap `mark_live`'s vectors for `BitSet`.
   Delete the old builder.
 - [ ] **Step 3: Checkpoint.** The full gate (all liveness suites, tests/liveness_prove.rs) and the capture
@@ -1017,7 +1024,7 @@ requirement of its own; it keeps SPLIT-1.1's names in step with the operator's d
 **Reuse:** rung 2 — the existing release steps (docs/agents/project.md:130-137), scripts/fresh-probe.sh, tests/skill.rs, tests/skill/names.rs, tests/liveness.rs:279-293.
 
 **Interfaces:**
-- Produces: release steps 0–6:
+- Produces: release steps 1–6:
   - 2: set `[workspace.package] version` and the three plugin files;
   - 3: `cargo package --workspace --list`, then `CARGO_TARGET_DIR=target/package-verify cargo publish
     --workspace --dry-run`, then `scripts/fresh-probe.sh` with one pair per member;

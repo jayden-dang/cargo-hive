@@ -130,9 +130,12 @@ Labels used below:
   forms) apart from the `hive_version` value and values derived from the clock, checked against output captured
   from 0.1.0.
 - **SPLIT-4.4** THE SYSTEM SHALL represent unit indexes and unit hashes as distinct newtypes, a unit's kind as
-  an enum, and the fingerprint graph as a compressed adjacency (CSR) with a bitset closure, in place of 0.1.0's
-  `usize` indexes, `String` `hash_hex` and `kind`, `Vec<(usize, usize)>` edges and `HashMap<&str, Vec<usize>>`
-  index (src/fingerprint.rs:78-120, :520) (agent-decided rework set).
+  an enum, each profile's fingerprint graph edges as a compressed adjacency (CSR) in place of
+  `Vec<(usize, usize)>`, its hash index keyed by the unit-hash newtype in place of `HashMap<&str, Vec<usize>>`
+  (src/fingerprint.rs:78-120, :520), and the closure walk's live marks as a bitset in place of `Vec<bool>`
+  (src/liveness.rs:396-406) (agent-decided rework set). The closure walk keeps resolving edges lazily, as 0.1.0
+  does, because a precomputed target-wide CSR would record `Uncertain` reasons for edges the walk never reaches
+  (see Open Questions).
 - **SPLIT-4.5** (guard) IF a unit's name stem matches none of 0.1.0's nine kind names, THEN THE SYSTEM SHALL
   CONTINUE TO class it as kind `other` and print `other`, as `kind_of` does (src/fingerprint.rs:146-152); the
   kind enum carries a variant for it (agent-decided).
@@ -166,7 +169,8 @@ Labels used below:
   that member when a file under its `src/` changes, as `scripts/fresh-probe.sh` checks for every member by
   printing `GREEN` (extends FIX-1.2).
 - **SPLIT-6.4** IF any member's crate name has not been approved by the operator, THEN THE SYSTEM's release
-  steps SHALL stop before the first `cargo publish`.
+  steps SHALL stop before the first `cargo publish` run without `--dry-run`; the dry-run and every earlier step
+  run on working names.
 
 ## 7. The documented commands work on the workspace
 
@@ -251,6 +255,12 @@ Every file under `src/` and `tests/` moves into a member crate (ROAD-15 surfaces
 - Speed work beyond SPLIT-4.4's rework set.
 
 ## Open Questions
+
+- Whether the closure walk should also move onto a precomputed target-wide CSR. That is the part of the
+  close-package D7 rework set this road does not deliver, because it would resolve edges of unreached units and add
+  `Undecided` reasons (a behaviour change, Lock L6). The alternative is a CSR that records unresolved edges and
+  reports them only when reached. Either needs the operator's call under Lock L12 — operator — at the sheet —
+  forbid-guess.
 
 - Resuming a `cargo publish --workspace` that fails partway (not atomic; re-run behaviour unprobed) — the release
   steps' owner, at the first real release — after this run — forbid-guess.

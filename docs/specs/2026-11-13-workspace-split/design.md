@@ -49,7 +49,8 @@ the unchanged suite plus the SPLIT-4.1 liveness comparison prove the results equ
 2. **OS boundary** (agent-decided, close-package D1/D2, W1/W3): outside platform there is no `unsafe`, no `libc`,
    no non-test `cfg(target_os)` and no `std::process::Command`. Enforcement: a crate-root
    `#![forbid(unsafe_code, reason = "only the platform crate may touch the OS (ARCH-15)")]`; a root `clippy.toml`
-   with `disallowed-types`/`disallowed-methods` reasons (platform opts out in its own `[lints.clippy]`); and a
+   with `disallowed-types`/`disallowed-methods` reasons (platform opts out with its own `[lints.clippy]` allows and
+   does not inherit `[workspace.lints]`, since Cargo rejects combining the two); and a
    guard test. Probes: research-build-rule.md.
 3. **Spawning**: platform owns the mechanism. It keeps today's bounded runner (deadline, pipe drain,
    process-group kill) and a plain unbounded `output`, because git's `run`/`has_commits` (git.rs:115, :176) have
@@ -97,10 +98,12 @@ the unchanged suite plus the SPLIT-4.1 liveness comparison prove the results equ
    - `UnitId(u32)` for unit indexes;
    - `UnitHash(u64)` for unit hashes, parsed from and printed as 16 lowercase hex;
    - `UnitKind`, an enum of the nine `KINDS` names (fingerprint.rs:31), including `Other` = `"other"`;
-   - a CSR graph per profile (`offsets: Vec<u32>`, `targets: Vec<UnitId>`) plus a `BitSet` for the live marks
-     of the closure walk, which keeps its lazy target-wide edge resolution so `Uncertain` reasons stay as in 0.1.0
-     (plan review, tasks.md Task 25), in place of
-     `Vec<(usize, usize)>` and `HashMap<&str, Vec<usize>>`.
+   - a CSR graph per profile (`offsets: Vec<u32>`, `targets: Vec<UnitId>`) in place of `Vec<(usize, usize)>`;
+   - the hash index keyed by `UnitHash` in place of `HashMap<&str, Vec<usize>>`;
+   - a `BitSet` for the closure walk's live marks in place of `Vec<bool>`.
+
+   The walk keeps its lazy target-wide edge resolution, so `Uncertain` reasons stay as in 0.1.0 (tasks.md
+   Task 25). A target-wide CSR for the walk is an Open Question for the operator (requirements).
 
    `UnitGraph` is never serialized to output (`ProfileReport.graph` is `#[serde(skip)]`, fingerprint.rs:130-131).
    `Unit`'s serialized fields keep their 0.1.0 form through `serialize_with`/`Display` on the new types, and
@@ -138,7 +141,8 @@ Surface:
 - tests/skill.rs:259-261 (`env!("CARGO_PKG_VERSION")` against the plugin files): replace. Its value is unchanged,
   because every member inherits the one version.
 Interface: members `crates/{platform,core,state,cargo,doctor,seed,gc,cargo-hive}`, each with
-`version.workspace = true`, `edition.workspace = true`, `[lints] workspace = true`, and its own `include`, README
+`version.workspace = true`, `edition.workspace = true`, `[lints] workspace = true` (every member except
+platform, which declares its own lints), and its own `include`, README
 and license files. Guard test `crates/cargo-hive/tests/workspace.rs` asserts, from `cargo metadata`:
 - every member's `edition == "2024"`;
 - each member depends only on members of a lower layer (a fixed `LAYERS` table in the test), and no feature
@@ -268,11 +272,14 @@ Reuse: rung 2 — these move whole:
 
 New: the `env` module (rung 7, the minimum that gives ARCH-13 one owner), holding every child's environment rule
 as it is in 0.1.0:
-- `env::metadata(&mut Spec)`: cargo_target.rs:564-574;
-- `env::git(&mut Spec)`: git.rs:70-74;
-- `env::rustup_which(&mut Spec, ResolveEnv)`: doctor.rs:428, :514;
-- `env::probe_build(&mut Spec, …)`: doctor.rs:748-760;
-- `env::timed_build(&mut Spec, &Toolchain)`: bench/command.rs:84-143.
+- `env::metadata(&mut Spec, parent)`: cargo_target.rs:564-574;
+- `env::git(&mut Spec, parent)`: git.rs:70-74;
+- `env::rustup_which(&mut Spec, parent, ResolveEnv)`: doctor.rs:428, :514;
+- `env::probe_build(&mut Spec, parent, cargo_home, rustup_home, toolchain_name)`: doctor.rs:748-760;
+- `env::timed_build(&mut Spec, parent, cargo, rustc, toolchain_name)`: bench/command.rs:84-143.
+
+Here `parent` is `&[(OsString, OsString)]` (production passes `std::env::vars_os()`). `env` owns `ResolveEnv` and
+takes plain data, never `Toolchain`, so `toolchain` depends on `env` and not the reverse (tasks.md Task 5).
 Respects: ARCH-13, ARCH-17 (ownership only from `cargo metadata --no-deps --locked --offline`, flags unchanged)
 Surface:
 - cargo_target.rs:565-574 (metadata env) and git.rs:70-74 (git env): replace. They call `env::metadata` /
@@ -338,8 +345,9 @@ Respects: ARCH-17, ARCH-18, ARCH-20
 Surface:
 - cli.rs callers of `cross_check_notes`, `plan_tier::apply::exit_code` (cli.rs:1215), `explain::*`: replace
   (path).
-- tests/guards.rs:437 `include_str!("../src/liveness.rs")`: replace with the new path,
-  `include_str!("../../gc/src/liveness.rs")`.
+- tests/guards.rs:437 `include_str!("../src/liveness.rs")`: replace. The no-process guard reads both liveness
+  files, the types (`../../core/src/liveness.rs`) and the algorithm (`../../gc/src/liveness.rs`), with the
+  intermediate paths in tasks.md Tasks 11, 16 and 21.
 - `plans.json` (plan_tier/record.rs:12): frozen (SPLIT-4.2/4.3).
 Interface: `liveness()`, `gc::{auto, plan, Scope}`, `plan_tier::{build, apply, orphan, record}`,
 `explain::run`, `cross_check_notes`.
@@ -355,8 +363,9 @@ make, liveness.rs:744-754), runs `liveness(&*platform::current()?.fs, &target, n
 The 0.1.0 side is the same file compiled against an export of the v0.1.0 tag (`git archive v0.1.0 | tar -x -C
 /private/tmp/hive-0.1.0`, a read-only operation on the repo) with its `cargo_hive::` paths, and built `--offline`.
 Both read the target through `Fs` and fingerprint files only: no `cargo metadata`, no process, no write
-(liveness.rs:1-3). With the same `now` and window, the two outputs must be byte-equal. Baseline before step 1,
-re-run after steps 1, 4 and 5 (W5a).
+(liveness.rs:1-3). With the same `now` and window, the two outputs must be byte-equal. A first comparison runs before
+step 1. Because klynt's target changes in between, each checkpoint after steps 1, 4 and 5 re-runs the 0.1.0
+report and the new one back to back with one fresh `now` (W5a; tasks.md Task 3's checkpoint rule).
 
 ### `cargo-hive` (binary)
 
@@ -436,8 +445,8 @@ Surface:
   - run locally (:115-124): unchanged `target/debug/cargo-hive`;
   - release steps (:130-137): step 2 sets `[workspace.package] version`; step 3 runs
     `cargo package --workspace --list`, then `CARGO_TARGET_DIR=target/package-verify cargo publish --workspace
-    --dry-run`, then fresh-probe per member; step 5 runs the same without `--dry-run`; a new step 0 stops unless
-    the line `Crate names approved:` in this file holds a date (SPLIT-6.4).
+    --dry-run`, then fresh-probe per member; step 5 first stops unless the line `Crate names approved:` in this file holds a date
+    (SPLIT-6.4), then runs the same without `--dry-run`. Steps 1–4 run on working names.
 
   All replace.
 - scripts/fresh-probe.sh: replace. Its default file `src/size.rs` no longer exists. It takes `<member> <file>`
@@ -448,7 +457,7 @@ Surface:
 - tests/liveness.rs:279-286 `the_package_ships_no_test_file`: replace. It runs over every member's manifest.
 - docs/standards/code.md:15, testing.md:22-25: replace (SPLIT-7.2).
 - README.md:113: replace with `cargo install --path crates/cargo-hive`.
-Interface: release steps 0–6 as listed. `fresh-probe.sh <member> <file> …`.
+Interface: release steps 1–6 as listed. `fresh-probe.sh <member> <file> …`.
 Depth: n/a.
 Locality: extend.
 
