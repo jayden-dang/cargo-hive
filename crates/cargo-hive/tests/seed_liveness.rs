@@ -107,7 +107,7 @@ fn write_unit(
     )
     .unwrap();
     let stamp =
-        cargo_hive_core::liveness::unit_timestamp(profile, name, &fingerprint::kind_of(stem));
+        cargo_hive_core::liveness::unit_timestamp(profile, name, fingerprint::UnitKind::of(stem));
     touch(&stamp, now, age);
 }
 
@@ -124,9 +124,9 @@ fn empty_hash(profile: &Path, name: &str, stem: &str, now: SystemTime, age: Dura
 
 fn write_dep_info(profile: &Path, stem: &str, dir_name: &str, first_input: &str) -> PathBuf {
     let hash = fingerprint::unit_hash(dir_name).unwrap();
-    let kind = fingerprint::kind_of(stem);
+    let kind = fingerprint::UnitKind::of(stem);
     let crate_name = stem
-        .strip_prefix(&format!("{kind}-"))
+        .strip_prefix(&format!("{}-", kind.as_str()))
         .filter(|name| !name.is_empty())
         .unwrap_or(stem);
     let deps = profile.join("deps");

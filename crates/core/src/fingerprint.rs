@@ -30,17 +30,73 @@ pub const KEYS: [&str; 11] = [
     "config",
     "compile_kind",
 ];
-const KINDS: [&str; 9] = [
-    "run-build-script",
-    "build-script",
-    "doc-lib",
-    "doc-bin",
-    "test",
-    "lib",
-    "bin",
-    "example",
-    "bench",
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnitKind {
+    RunBuildScript,
+    BuildScript,
+    DocLib,
+    DocBin,
+    Test,
+    Lib,
+    Bin,
+    Example,
+    Bench,
+    Other,
+}
+
+const KINDS: [(&str, UnitKind); 9] = [
+    ("run-build-script", UnitKind::RunBuildScript),
+    ("build-script", UnitKind::BuildScript),
+    ("doc-lib", UnitKind::DocLib),
+    ("doc-bin", UnitKind::DocBin),
+    ("test", UnitKind::Test),
+    ("lib", UnitKind::Lib),
+    ("bin", UnitKind::Bin),
+    ("example", UnitKind::Example),
+    ("bench", UnitKind::Bench),
 ];
+
+impl UnitKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RunBuildScript => "run-build-script",
+            Self::BuildScript => "build-script",
+            Self::DocLib => "doc-lib",
+            Self::DocBin => "doc-bin",
+            Self::Test => "test",
+            Self::Lib => "lib",
+            Self::Bin => "bin",
+            Self::Example => "example",
+            Self::Bench => "bench",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn of(stem: &str) -> UnitKind {
+        KINDS
+            .iter()
+            .find(|(name, _)| {
+                stem == *name
+                    || stem
+                        .strip_prefix(name)
+                        .is_some_and(|rest| rest.starts_with('-'))
+            })
+            .map(|(_, kind)| *kind)
+            .unwrap_or(Self::Other)
+    }
+}
+
+impl fmt::Display for UnitKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for UnitKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", content = "reason", rename_all = "lowercase")]
@@ -104,7 +160,7 @@ impl Serialize for UnitHash {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Unit {
     pub dir_name: String,
-    pub kind: String,
+    pub kind: UnitKind,
     #[serde(rename = "hash_hex")]
     pub hash: UnitHash,
     pub deps: Vec<DepEdge>,
@@ -167,15 +223,6 @@ pub fn le_hex(value: u64) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
-}
-
-#[doc(hidden)]
-pub fn kind_of(stem: &str) -> String {
-    KINDS
-        .iter()
-        .find(|k| stem == **k || stem.starts_with(&format!("{k}-")))
-        .map(|k| k.to_string())
-        .unwrap_or_else(|| "other".into())
 }
 
 fn is_hash(bytes: &[u8]) -> bool {
@@ -318,7 +365,7 @@ fn read_unit(
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default(),
-        kind: kind_of(&stem),
+        kind: UnitKind::of(&stem),
         hash: UnitHash::parse(&hash_text).expect("checked hex"),
         deps,
         stem,
@@ -659,7 +706,36 @@ mod tests {
         let unit = &report.graph.as_ref().unwrap().units[0];
         let value = serde_json::to_value(unit).unwrap();
         assert_eq!(value["hash_hex"], "ab00000000000000");
+        assert_eq!(value["kind"], "lib");
         fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_unit_kind_matches_the_stem_prefix_table_and_falls_back_to_other() {
+        let cases = [
+            (
+                "run-build-script",
+                UnitKind::RunBuildScript,
+                "run-build-script",
+            ),
+            ("build-script", UnitKind::BuildScript, "build-script"),
+            ("doc-lib", UnitKind::DocLib, "doc-lib"),
+            ("doc-bin", UnitKind::DocBin, "doc-bin"),
+            ("test", UnitKind::Test, "test"),
+            ("lib", UnitKind::Lib, "lib"),
+            ("bin", UnitKind::Bin, "bin"),
+            ("example", UnitKind::Example, "example"),
+            ("bench", UnitKind::Bench, "bench"),
+            ("build-script-build", UnitKind::BuildScript, "build-script"),
+            ("lib-foo", UnitKind::Lib, "lib"),
+            ("weird", UnitKind::Other, "other"),
+        ];
+        for (stem, want, printed) in cases {
+            let kind = UnitKind::of(stem);
+            assert_eq!(kind, want, "stem {stem}");
+            assert_eq!(kind.as_str(), printed, "stem {stem}");
+            assert_eq!(kind.to_string(), printed, "stem {stem}");
+        }
     }
 
     #[test]
@@ -797,16 +873,9 @@ mod tests {
         );
         let r = read_profile(&p);
         assert_eq!(r.format, Format::Supported);
-        let kinds: Vec<String> = r
-            .graph
-            .unwrap()
-            .units
-            .iter()
-            .map(|u| u.kind.clone())
-            .collect();
+        let kinds: Vec<UnitKind> = r.graph.unwrap().units.iter().map(|u| u.kind).collect();
         assert!(
-            kinds.contains(&"doc-lib".to_string())
-                && kinds.contains(&"run-build-script".to_string()),
+            kinds.contains(&UnitKind::DocLib) && kinds.contains(&UnitKind::RunBuildScript),
             "{kinds:?}"
         );
         fs::remove_dir_all(p).unwrap();

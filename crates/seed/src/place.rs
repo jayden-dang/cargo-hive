@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::store::{self, Row};
 use cargo_hive_cargo::ctx::Ctx;
+use cargo_hive_core::fingerprint;
 use cargo_hive_core::liveness;
 use cargo_hive_core::size::{MAX_DEPTH, allocated_bytes};
 use cargo_hive_platform::{EntryKind, Fs};
@@ -563,8 +564,11 @@ fn ensure_dirs(
 }
 
 fn read_stamp(fs: &dyn Fs, target: &Path, row: &Row) -> Option<(PathBuf, u64)> {
-    let absolute =
-        liveness::unit_timestamp(&target.join(&row.rel_profile), &row.name_meta, &row.kind);
+    let absolute = liveness::unit_timestamp(
+        &target.join(&row.rel_profile),
+        &row.name_meta,
+        fingerprint::UnitKind::of(&row.kind),
+    );
     let mtime = fs.mtime(&absolute).ok()?;
     let ns = mtime.duration_since(UNIX_EPOCH).ok()?.as_nanos();
     let ns = u64::try_from(ns).ok()?;

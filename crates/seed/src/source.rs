@@ -375,7 +375,7 @@ pub fn live_registry_units(
                 rel_profile: rel.clone(),
                 dir_name: key.name_meta.clone(),
                 stem: unit.stem.clone(),
-                kind: unit.kind.clone(),
+                kind: unit.kind.as_str().to_string(),
                 fingerprint_hash: key.fingerprint_hash,
                 toolchain_value: key.toolchain_value,
                 deps: unit.deps.iter().map(|dep| dep.fingerprint).collect(),
@@ -745,8 +745,8 @@ fn take_entry(
 }
 
 fn dep_info_crate(stem: &str) -> &str {
-    let kind = fingerprint::kind_of(stem);
-    match stem.strip_prefix(&format!("{kind}-")) {
+    let kind = fingerprint::UnitKind::of(stem);
+    match stem.strip_prefix(&format!("{}-", kind.as_str())) {
         Some(name) if !name.is_empty() => name,
         _ => stem,
     }
@@ -1278,7 +1278,7 @@ mod tests {
         let fingerprint = 0x0102_0304_0506_0708u64;
         let unit = Unit {
             dir_name: format!("serde-{}", le_hex(fingerprint)),
-            kind: "lib".into(),
+            kind: fingerprint::UnitKind::Lib,
             hash: UnitHash::parse(&le_hex(fingerprint)).unwrap(),
             deps: Vec::new(),
             stem: "lib-serde".into(),

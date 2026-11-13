@@ -300,13 +300,14 @@ pub fn stamps(fs: &dyn Fs, target: &TargetDir) -> Result<Stamps, String> {
     let mut out = Stamps::new();
     for profile in &target.profiles {
         let rel = rel(&profile.path, &target.path);
-        let stamp =
-            |dir: &str, kind: &str| fs.mtime(&unit_timestamp(&profile.path, dir, kind)).ok();
+        let stamp = |dir: &str, kind: fingerprint::UnitKind| {
+            fs.mtime(&unit_timestamp(&profile.path, dir, kind)).ok()
+        };
         if let Some(graph) = &profile.graph {
             for unit in &graph.units {
                 out.insert(
                     (rel.clone(), unit.dir_name.clone()),
-                    stamp(&unit.dir_name, &unit.kind),
+                    stamp(&unit.dir_name, unit.kind),
                 );
             }
         }
@@ -320,8 +321,8 @@ pub fn stamps(fs: &dyn Fs, target: &TargetDir) -> Result<Stamps, String> {
             let kind = nc
                 .stem
                 .as_deref()
-                .map_or_else(|| "other".to_string(), fingerprint::kind_of);
-            out.insert((rel.clone(), dir.to_string()), stamp(dir, &kind));
+                .map_or(fingerprint::UnitKind::Other, fingerprint::UnitKind::of);
+            out.insert((rel.clone(), dir.to_string()), stamp(dir, kind));
         }
     }
     Ok(out)

@@ -1072,7 +1072,7 @@ mod tests {
     fn sample_unit(value: u64) -> Unit {
         Unit {
             dir_name: "dep-0000000000000001".to_string(),
-            kind: "lib".to_string(),
+            kind: cargo_hive_core::fingerprint::UnitKind::Lib,
             hash: UnitHash::parse("0123456789abcdef").unwrap(),
             deps: Vec::new(),
             stem: "lib-dep".to_string(),

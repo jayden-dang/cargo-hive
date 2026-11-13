@@ -727,7 +727,7 @@ mod tests {
             if spec.in_graph {
                 graph_units.push(Unit {
                     dir_name: dir_name.clone(),
-                    kind: "lib".to_string(),
+                    kind: cargo_hive_core::fingerprint::UnitKind::Lib,
                     hash: UnitHash::parse(&hex).unwrap(),
                     deps: spec
                         .deps

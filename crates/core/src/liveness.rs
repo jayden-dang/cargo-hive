@@ -123,11 +123,10 @@ impl fmt::Display for Uncertain {
 }
 
 /// Where a unit's `invoked.timestamp` lives: `build/<dir>/` for run-build-script, `.fingerprint/<dir>/` for every other kind.
-pub fn unit_timestamp(profile: &Path, dir_name: &str, kind: &str) -> PathBuf {
-    let base = if kind == "run-build-script" {
-        "build"
-    } else {
-        ".fingerprint"
+pub fn unit_timestamp(profile: &Path, dir_name: &str, kind: fingerprint::UnitKind) -> PathBuf {
+    let base = match kind {
+        fingerprint::UnitKind::RunBuildScript => "build",
+        _ => ".fingerprint",
     };
     profile
         .join(base)
@@ -163,11 +162,15 @@ mod tests {
     #[test]
     fn a_run_build_script_unit_is_timed_by_its_build_dir() {
         assert_eq!(
-            unit_timestamp(Path::new("/t/debug"), "x-1", "run-build-script"),
+            unit_timestamp(
+                Path::new("/t/debug"),
+                "x-1",
+                fingerprint::UnitKind::RunBuildScript
+            ),
             Path::new("/t/debug/build/x-1/invoked.timestamp")
         );
         assert_eq!(
-            unit_timestamp(Path::new("/t/debug"), "x-1", "lib"),
+            unit_timestamp(Path::new("/t/debug"), "x-1", fingerprint::UnitKind::Lib),
             Path::new("/t/debug/.fingerprint/x-1/invoked.timestamp")
         );
     }

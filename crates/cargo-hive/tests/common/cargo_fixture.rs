@@ -177,7 +177,7 @@ pub fn kinds(target: &Path) -> BTreeMap<UnitRef, (String, String)> {
                     profile: profile.path.clone(),
                     dir_name: unit.dir_name.clone(),
                 },
-                (unit.kind.clone(), unit.stem.clone()),
+                (unit.kind.as_str().to_string(), unit.stem.clone()),
             );
         }
     }
@@ -207,5 +207,9 @@ pub fn only(units: Vec<UnitRef>) -> UnitRef {
 }
 
 pub fn timestamp_of(unit: &UnitRef, kind: &str) -> PathBuf {
-    cargo_hive_core::liveness::unit_timestamp(&unit.profile, &unit.dir_name, kind)
+    cargo_hive_core::liveness::unit_timestamp(
+        &unit.profile,
+        &unit.dir_name,
+        cargo_hive_core::fingerprint::UnitKind::of(kind),
+    )
 }

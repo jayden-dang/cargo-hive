@@ -6,7 +6,7 @@
 
 use cargo_hive_core::caps::DEPS_CAP;
 use cargo_hive_core::fingerprint::{
-    Format, NotCurrentUnit, Unit, UnitHash, error_code, is_summary_line, kind_of, read_capped,
+    Format, NotCurrentUnit, Unit, UnitHash, UnitKind, error_code, is_summary_line, read_capped,
 };
 use cargo_hive_core::receipt::{Finding, Measured};
 use cargo_hive_core::target::TargetDir;
@@ -310,14 +310,14 @@ fn directory_crate<'a>(dir_name: &'a str, hash: &UnitHash) -> &'a str {
 }
 
 fn crate_and_kind(stem: &str) -> (String, String) {
-    let kind = kind_of(stem);
-    let crate_name = if kind == "other" {
+    let kind = UnitKind::of(stem);
+    let crate_name = if kind == UnitKind::Other {
         stem.to_string()
     } else {
-        let prefix = format!("{kind}-");
+        let prefix = format!("{}-", kind.as_str());
         stem.strip_prefix(&prefix).unwrap_or(stem).to_string()
     };
-    (crate_name, kind)
+    (crate_name, kind.as_str().to_string())
 }
 
 fn unit_mode(dir_name: &str, hash: &UnitHash, deps: &ModeIndex) -> Mode {
@@ -611,7 +611,7 @@ fn failed_crate(item: &NotCurrentInput) -> String {
 
 fn failed_kind(item: &NotCurrentInput) -> String {
     if let Some(stem) = &item.unit.stem {
-        return kind_of(stem);
+        return UnitKind::of(stem).as_str().to_string();
     }
     if let Some(kind) = &item.kind_from_output {
         return kind.clone();
@@ -620,8 +620,8 @@ fn failed_kind(item: &NotCurrentInput) -> String {
         .outputs
         .iter()
         .find_map(|name| name.strip_prefix("output-"))
-        .map(kind_of)
-        .unwrap_or_else(|| "other".to_string())
+        .map(|stem| UnitKind::of(stem).as_str().to_string())
+        .unwrap_or_else(|| UnitKind::Other.as_str().to_string())
 }
 
 fn divergence_finding(group: &Group<'_>, mode: Mode, feature_sets: usize) -> Finding {
@@ -817,7 +817,7 @@ fn measured_count(finding: &Finding, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{DIVERGENCE_DETAIL, FailedUnits, Limits, NotCurrentInput, ProfileInput, analyse};
-    use cargo_hive_core::fingerprint::{Coverage, NotCurrentUnit, UnitHash, kind_of};
+    use cargo_hive_core::fingerprint::{Coverage, NotCurrentUnit, UnitHash, UnitKind};
     use cargo_hive_core::receipt::{Finding, Measured};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -835,7 +835,7 @@ mod tests {
         let (profile, target, path) = place;
         cargo_hive_core::fingerprint::Unit {
             dir_name: format!("{dir_crate}-{hash}"),
-            kind: kind_of(stem),
+            kind: UnitKind::of(stem),
             hash: UnitHash::parse(hash).unwrap(),
             deps: Vec::new(),
             stem: stem.to_string(),

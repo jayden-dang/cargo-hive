@@ -3,7 +3,7 @@
 //! runs no process and writes nothing.
 
 use cargo_hive_core::caps::DEPS_CAP;
-use cargo_hive_core::fingerprint::{self, DepEdge, Format, Unit, UnitHash, le_hex};
+use cargo_hive_core::fingerprint::{self, DepEdge, Format, Unit, UnitHash, UnitKind, le_hex};
 use cargo_hive_core::liveness::{
     DeadUnit, Liveness, Uncertain, UnitRef, embedded_hashes, unit_timestamp,
 };
@@ -13,14 +13,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-
-const NEVER_COLLECTED: [&str; 5] = [
-    "build-script",
-    "run-build-script",
-    "doc-lib",
-    "doc-bin",
-    "other",
-];
 
 fn in_window(mtime: SystemTime, now: SystemTime, window: Duration) -> bool {
     now.checked_sub(window).is_none_or(|cutoff| mtime >= cutoff)
@@ -66,8 +58,8 @@ impl NotCurrentNode<'_> {
     /// The later of the unit timestamp's and the emptied hash file's mtimes. Both files are read
     /// even when the first fails, so every unreadable one is reported.
     fn last_wanted(&self, fs: &dyn Fs, reasons: &mut Vec<Uncertain>) -> Option<SystemTime> {
-        let kind = fingerprint::kind_of(self.stem);
-        let stamp = unit_timestamp(self.profile, self.dir_name, &kind);
+        let kind = UnitKind::of(self.stem);
+        let stamp = unit_timestamp(self.profile, self.dir_name, kind);
         let hash = fingerprint_dir(self.profile, self.dir_name).join(self.stem);
         let mut latest = None;
         for path in [stamp, hash] {
@@ -167,7 +159,7 @@ fn collect_units<'a>(
                 });
                 continue;
             }
-            let stamp = unit_timestamp(&profile.path, dir_name, "other");
+            let stamp = unit_timestamp(&profile.path, dir_name, UnitKind::Other);
             match invoked_in_window(fs, &stamp, now, window) {
                 Ok(true) => reasons.push(Uncertain::NotCurrentInWindow {
                     dir: nc.dir.clone(),
@@ -277,7 +269,7 @@ fn mark_live(
     let mut node_live = vec![false; nodes.len()];
     let mut queue: Vec<Walk> = Vec::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
-        let stamp = unit_timestamp(profile, &unit.dir_name, &unit.kind);
+        let stamp = unit_timestamp(profile, &unit.dir_name, unit.kind);
         match invoked_in_window(fs, &stamp, now, window) {
             Ok(true) => enqueue(&mut live, &mut queue, i, Walk::Unit(i)),
             Ok(false) => {}
@@ -372,7 +364,14 @@ fn dead_indices(units: &[ProfileUnit], live: &[bool]) -> Vec<usize> {
     (0..units.len())
         .filter(|&i| {
             !live[i]
-                && !NEVER_COLLECTED.contains(&units[i].1.kind.as_str())
+                && !matches!(
+                    units[i].1.kind,
+                    UnitKind::BuildScript
+                        | UnitKind::RunBuildScript
+                        | UnitKind::DocLib
+                        | UnitKind::DocBin
+                        | UnitKind::Other
+                )
                 && fingerprint::unit_hash(&units[i].1.dir_name).is_some()
         })
         .collect()
@@ -602,7 +601,7 @@ mod tests {
         )
         .unwrap();
         if let Some(age) = age {
-            let stamp = unit_timestamp(profile, name, &fingerprint::kind_of(stem));
+            let stamp = unit_timestamp(profile, name, UnitKind::of(stem));
             touch(&stamp, age);
         }
     }
@@ -713,7 +712,7 @@ mod tests {
         let s = Scratch::new("future");
         let p = s.0.join("debug");
         write_unit(&p, A, "lib-a", 101, &[], None);
-        let stamp = unit_timestamp(&p, A, "lib");
+        let stamp = unit_timestamp(&p, A, UnitKind::Lib);
         fs::create_dir_all(stamp.parent().unwrap()).unwrap();
         fs::File::create(&stamp)
             .unwrap()
@@ -738,11 +737,14 @@ mod tests {
     #[test]
     fn never_collected_kinds_are_roots_and_carry_edges_but_are_never_dead() {
         for (stem, kind) in [
-            ("build-script-build", "build-script"),
-            ("run-build-script-build-script-build", "run-build-script"),
-            ("doc-lib-a", "doc-lib"),
-            ("doc-bin-a", "doc-bin"),
-            ("weird", "other"),
+            ("build-script-build", UnitKind::BuildScript),
+            (
+                "run-build-script-build-script-build",
+                UnitKind::RunBuildScript,
+            ),
+            ("doc-lib-a", UnitKind::DocLib),
+            ("doc-bin-a", UnitKind::DocBin),
+            ("weird", UnitKind::Other),
         ] {
             let s = Scratch::new("never");
             let p = s.0.join("debug");
@@ -1696,7 +1698,7 @@ mod tests {
             let reasons = undecided(liveness(&mtime_fails_with(kind), &target, now(), 6 * HOUR));
             assert!(
                 matches!(&reasons[..], [Uncertain::TimestampUnreadable { path, .. }]
-                    if *path == unit_timestamp(&p, A, "lib")),
+                    if *path == unit_timestamp(&p, A, UnitKind::Lib)),
                 "{kind:?}: {reasons:?}"
             );
         }
@@ -1706,7 +1708,7 @@ mod tests {
             now(),
             6 * HOUR,
         ));
-        let stamp = unit_timestamp(&p, A, "lib");
+        let stamp = unit_timestamp(&p, A, UnitKind::Lib);
         assert!(
             reasons[0].to_string().starts_with(&format!(
                 "{}: invocation timestamp unreadable: ",
