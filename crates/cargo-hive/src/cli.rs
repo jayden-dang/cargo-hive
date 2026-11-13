@@ -2,9 +2,9 @@
 
 use crate::bench::command::BuildCmd;
 use crate::registry::{self, Registry};
-use crate::state::{State, StateError};
 use cargo_hive_core::receipt::{PlanRecord, PlanTierBody, Receipt, ReceiptBuilder, Scope};
 use cargo_hive_platform::{self as platform, MACOS_ONLY_MESSAGE};
+use cargo_hive_state::{State, StateError};
 use clap::{Args, Parser, Subcommand};
 use std::ffi::OsString;
 
@@ -592,7 +592,7 @@ fn select(reg: &Registry, args: &[std::path::PathBuf], b: &mut ReceiptBuilder) -
 fn live_checkouts(
     repos: &[registry::Repo],
     registered_mains: &[std::path::PathBuf],
-    cfg: &crate::state::Config,
+    cfg: &cargo_hive_state::Config,
     b: &mut ReceiptBuilder,
 ) -> (
     Vec<crate::discover::Checkout>,
@@ -625,7 +625,7 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
     use crate::discover::{self, SNAPSHOT_FILE, Snapshot};
     use crate::doctor::{self, Capabilities, Capability};
     use cargo_hive_core::classify::Class;
-    let loaded = (|| -> Result<_, crate::state::StateError> {
+    let loaded = (|| -> Result<_, cargo_hive_state::StateError> {
         Ok((
             state.read::<Registry>(registry::FILE)?,
             state.config()?,
@@ -916,7 +916,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
     use crate::doctor::{self, Capabilities, Capability};
     use crate::gc;
     use crate::seed::evict::{self, EvictCtx, Limits};
-    use crate::state::window_days;
+    use cargo_hive_state::window_days;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
     use std::time::Duration;
@@ -1568,7 +1568,7 @@ pub(crate) struct Refusal {
 
 pub(crate) fn locate_checkout(
     reg: &Registry,
-    cfg: &crate::state::Config,
+    cfg: &cargo_hive_state::Config,
     caps: &crate::doctor::Capabilities,
     path: &std::path::Path,
 ) -> Result<
@@ -1672,7 +1672,7 @@ pub(crate) fn locate_checkout(
 fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
     use crate::ctx::Ctx;
     use crate::doctor::{self, Capabilities, Capability};
-    use crate::state::window_days;
+    use cargo_hive_state::window_days;
     let loaded = (|| -> Result<_, StateError> {
         Ok((
             state.read::<Registry>(registry::FILE)?,
@@ -1771,8 +1771,8 @@ fn bench_cmd(
     use crate::bench::{self, BUILD_DEADLINE, Limits, Plan};
     use crate::ctx::Ctx;
     use crate::doctor::{self, Capabilities, Capability};
-    use crate::state::window_days;
     use cargo_hive_core::receipt::Measured;
+    use cargo_hive_state::window_days;
     use std::collections::BTreeMap;
 
     let loaded = (|| -> Result<_, StateError> {
@@ -1895,7 +1895,7 @@ mod tests {
     use super::*;
     use crate::doctor::Capabilities;
     use crate::git::Git;
-    use crate::state::Config;
+    use cargo_hive_state::Config;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 

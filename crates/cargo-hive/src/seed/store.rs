@@ -12,11 +12,11 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::{State, StateError};
 use cargo_hive_core::caps::CRATE_DIR_CAP;
 use cargo_hive_core::fingerprint;
 use cargo_hive_core::size::{MAX_DEPTH, SizeError, allocated_bytes};
 use cargo_hive_platform::{EntryKind, Fs};
+use cargo_hive_state::{State, StateError};
 
 pub const STORE_FILE: &str = "store.db";
 pub const MAX_STORE_BYTES: u64 = 32 * 1024 * 1024;
@@ -777,7 +777,7 @@ fn discard_tmp(tmp: &Path) -> Result<(), PublishFailed> {
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
-    use crate::state::{State, StateError};
+    use cargo_hive_state::{State, StateError};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};

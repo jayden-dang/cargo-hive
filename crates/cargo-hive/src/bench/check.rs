@@ -8,8 +8,8 @@ use crate::discover::Checkout;
 use crate::doctor::Capabilities;
 use crate::git::Git;
 use crate::registry::{Registry, Repo};
-use crate::state::Config;
 use crate::toolchain::Toolchain;
+use cargo_hive_state::Config;
 
 pub struct Checked {
     pub repo: Repo,

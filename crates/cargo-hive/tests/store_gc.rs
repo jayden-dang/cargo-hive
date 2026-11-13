@@ -13,7 +13,6 @@ use cargo_hive::discover::Checkout;
 use cargo_hive::seed::choose::{self, Choice};
 use cargo_hive::seed::evict::{self, EvictCtx, Limits};
 use cargo_hive::seed::store::{self, MAX_STORE_BYTES, Row, STORE_FILE, StoreFile, store_dir};
-use cargo_hive::state::State;
 use cargo_hive_core::classify::{CheckoutKind, Class};
 use cargo_hive_core::fingerprint;
 use cargo_hive_core::ledger;
@@ -21,6 +20,7 @@ use cargo_hive_core::receipt::Measured;
 use cargo_hive_core::target::{Owner, TAG_LINE, TargetDir};
 use cargo_hive_platform::Fs;
 use cargo_hive_platform::apfs::Apfs;
+use cargo_hive_state::State;
 use common::store_fixture::{
     count, drop_row, entry_dirs, has_finding, plant_rowless, rows, seeded_store, set_last_live_at,
     synth_entry, synth_entry_at, tree_files,
@@ -2126,7 +2126,7 @@ fn a_cancel_during_commit_records_what_was_renamed_and_releases_both_locks() {
             "cancel_after {cancel_after}: store lock still held"
         );
         state
-            .locked(|_| Ok::<(), cargo_hive::state::StateError>(()))
+            .locked(|_| Ok::<(), cargo_hive_state::StateError>(()))
             .unwrap();
     }
     assert!(

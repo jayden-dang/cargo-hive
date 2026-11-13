@@ -15,7 +15,6 @@ use crate::plan_tier::orphan::{self, Counted, Removal};
 use crate::plan_tier::record::{
     self, BytesRec, Lookup, Plan, PlanClass, PlannedEntry, PlannedTarget, Taken, kind_of,
 };
-use crate::state::StateError;
 use cargo_hive_core::caps::CRATE_DIR_CAP;
 use cargo_hive_core::fingerprint::{Format, ProfileReport, read_profile};
 use cargo_hive_core::ledger::{self, Bytes, Ledger};
@@ -24,6 +23,7 @@ use cargo_hive_core::locks::{self, Acquired, Locked, Reason};
 use cargo_hive_core::receipt::{Outcome, Unmeasured};
 use cargo_hive_core::target::{self, Owner, TargetDir};
 use cargo_hive_platform::Fs;
+use cargo_hive_state::StateError;
 
 pub(crate) fn cross_check_notes(
     before: &std::collections::BTreeMap<String, (std::path::PathBuf, u64)>,
@@ -127,7 +127,7 @@ pub fn apply(
         }
         Lookup::Live(plan) => plan,
     };
-    if let Err(err) = crate::state::window_days(Some(plan.window_days)) {
+    if let Err(err) = cargo_hive_state::window_days(Some(plan.window_days)) {
         return Ok(window_refused(&plan, &err));
     }
     let now = SystemTime::now()
@@ -385,7 +385,7 @@ pub fn execute(
     resolved: &[ResolvedTarget],
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Applied {
-    if let Err(err) = crate::state::window_days(Some(plan.window_days)) {
+    if let Err(err) = cargo_hive_state::window_days(Some(plan.window_days)) {
         return window_refused(&plan, &err);
     }
     let mut order: Vec<&PlannedTarget> = plan.targets.iter().collect();
@@ -1078,7 +1078,7 @@ fn refusal_findings(refusal: &Refusal) -> Vec<(String, Option<PathBuf>, String)>
     vec![(kind, Some(path), detail)]
 }
 
-fn window_refused(plan: &Plan, err: &crate::state::WindowError) -> Applied {
+fn window_refused(plan: &Plan, err: &cargo_hive_state::WindowError) -> Applied {
     let mut applied = refused(&plan.id, plan.class, "window", target_paths(plan));
     applied
         .findings

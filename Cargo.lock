@@ -94,6 +94,7 @@ version = "0.1.0"
 dependencies = [
  "cargo-hive-core",
  "cargo-hive-platform",
+ "cargo-hive-state",
  "clap",
  "libc",
  "serde",
@@ -115,6 +116,15 @@ version = "0.1.0"
 dependencies = [
  "applesauce",
  "libc",
+]
+
+[[package]]
+name = "cargo-hive-state"
+version = "0.1.0"
+dependencies = [
+ "cargo-hive-platform",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

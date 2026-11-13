@@ -13,10 +13,10 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::{State, StateError};
 use cargo_hive_core::fingerprint::{self, DepEdge};
 use cargo_hive_core::liveness;
 use cargo_hive_core::target::TargetDir;
+use cargo_hive_state::{State, StateError};
 
 pub const SEEDS_FILE: &str = "seeds.json";
 pub const MAX_SEEDS_BYTES: u64 = 16 * 1024 * 1024;
@@ -405,9 +405,9 @@ mod tests {
 
     use super::*;
 
-    use crate::state::State;
     use cargo_hive_core::fingerprint::{Coverage, DepEdge, Format, ProfileReport, Unit, UnitGraph};
     use cargo_hive_core::target::{Owner, TargetDir};
+    use cargo_hive_state::State;
 
     /// A scratch root under /private/tmp, removed when the test drops it.
     struct Root(PathBuf);

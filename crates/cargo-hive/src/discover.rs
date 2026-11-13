@@ -4,10 +4,10 @@
 use crate::git::Git;
 use crate::metadata::{self, Resolved};
 use crate::registry::Repo;
-use crate::state::Config;
 use cargo_hive_core::classify::{CheckoutFacts, CheckoutKind, Class, classify};
 use cargo_hive_core::fingerprint::{self, Format};
 use cargo_hive_core::target::{self, Layout, Owner, TargetDir};
+use cargo_hive_state::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

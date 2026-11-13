@@ -1,7 +1,7 @@
 //! Registered repositories. Task 3 adds `register`.
 
 use crate::git::{Git, GitError};
-use crate::state::{StateError, Tx};
+use cargo_hive_state::{StateError, Tx};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;

@@ -14,7 +14,6 @@ use crate::seed::store::{
     self, CommitPlan, Inventory, Row, StoreKey, commit_eviction, entry_dir, evict_dir, inventory,
     key_dir, rename_out, row_key, row_matches, store_dir,
 };
-use crate::state::{State, StateError};
 use crate::toolchain::{self, Toolchain};
 use cargo_hive_core::caps::CRATE_DIR_CAP;
 use cargo_hive_core::ledger::{self, Ledger};
@@ -22,6 +21,7 @@ use cargo_hive_core::liveness::LivenessFn;
 use cargo_hive_core::receipt::{Finding, Measured};
 use cargo_hive_core::target::TargetDir;
 use cargo_hive_platform::Fs;
+use cargo_hive_state::{State, StateError};
 
 pub struct EvictCtx<'a> {
     pub state: &'a State,
@@ -619,7 +619,7 @@ fn toolchains_in_use(ctx: &EvictCtx<'_>, cancel: &dyn Fn() -> bool) -> Toolchain
 fn values_for_texts(
     state: &State,
     texts: &[String],
-) -> Result<BTreeSet<u64>, crate::state::StateError> {
+) -> Result<BTreeSet<u64>, cargo_hive_state::StateError> {
     let file = store::read(state)?;
     let mut values = BTreeSet::new();
     for text in texts {
@@ -703,7 +703,7 @@ fn preview_dropped_values(
     state: &State,
     inv: &Inventory,
     renamed: &BTreeSet<StoreKey>,
-) -> Result<u64, crate::state::StateError> {
+) -> Result<u64, cargo_hive_state::StateError> {
     let file = store::read(state)?;
     let mut values = BTreeSet::new();
     for value in file.toolchains.values().copied() {

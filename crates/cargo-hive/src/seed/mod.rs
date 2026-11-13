@@ -16,9 +16,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::ctx::Ctx;
 use crate::discover::Checkout;
 use crate::registry::Repo;
-use crate::state::window_days;
 use crate::toolchain::Toolchain;
 use cargo_hive_core::caps::CRATE_DIR_CAP;
+use cargo_hive_state::window_days;
 
 use choose::Choice;
 use fill::FillReport;
@@ -46,7 +46,7 @@ pub(crate) fn no_liveness(
 
 use std::fmt;
 
-use crate::state::{StateError, StoreLock};
+use cargo_hive_state::{StateError, StoreLock};
 
 #[derive(Debug)]
 pub struct FullDisk {
@@ -548,7 +548,7 @@ fn read_lock_file(checkout: &std::path::Path) -> Option<Vec<u8>> {
 mod tests {
     use super::{Error, Outcome, empty_fill, from_fill, record_seed_result};
     use crate::ctx::Ctx;
-    use crate::state::{Config, State};
+    use cargo_hive_state::{Config, State};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};

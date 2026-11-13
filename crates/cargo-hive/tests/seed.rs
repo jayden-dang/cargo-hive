@@ -665,7 +665,7 @@ fn a_seed_waits_for_an_exclusive_store_lock_and_then_seeds() {
     let repo = RegistryRepo::new(&hive);
     cargo_json(&hive, &repo.main, &["build"]);
     let lane = repo.worktree("store-lock-wait");
-    let state = cargo_hive::state::State::open_at(hive.home.path.clone()).unwrap();
+    let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
     let held = state
         .try_store_exclusive()
         .unwrap()
@@ -843,7 +843,7 @@ fn the_exit_code_follows_the_result() {
     )));
     assert_eq!(cargo_hive::seed::exit_code(&full), 1);
     let state = Err(cargo_hive::seed::Error::State(
-        cargo_hive::state::StateError::Cancelled,
+        cargo_hive_state::StateError::Cancelled,
     ));
     assert_eq!(cargo_hive::seed::exit_code(&state), 1);
 }
@@ -951,7 +951,7 @@ fn seed_writes_a_record_holding_each_cloned_unit_and_its_stamp() {
     let cloned = receipt["counts"]["clone_units_cloned"].as_u64().unwrap();
     assert!(cloned > 0, "{receipt}");
     let target = lane.join("target").canonicalize().unwrap();
-    let state = cargo_hive::state::State::open_at(hive.home.path.clone()).unwrap();
+    let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
     let path = state.root().join(cargo_hive::seed::record::SEEDS_FILE);
     assert!(path.is_file(), "{}", path.display());
     let file = cargo_hive::seed::record::read(&state).unwrap();
@@ -1032,7 +1032,7 @@ fn a_cancelled_seed_records_what_it_cloned() {
     );
     assert_eq!(cargo_hive::seed::exit_code(&Ok(ref_outcome(&outcome))), 130);
     let (path, identity) = outcome.target.clone().expect("the target was created");
-    let state = cargo_hive::state::State::open_at(hive.home.path.clone()).unwrap();
+    let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
     let file = cargo_hive::seed::record::read(&state).unwrap();
     let record = file
         .targets
@@ -1812,7 +1812,7 @@ fn stored_paths(stored: &serde_json::Value) -> Vec<String> {
 
 fn seeded_dir_names(hive: &Hive, target: &Path) -> Vec<String> {
     let target = target.canonicalize().unwrap();
-    let state = cargo_hive::state::State::open_at(hive.home.path.clone()).unwrap();
+    let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
     let file = cargo_hive::seed::record::read(&state).unwrap();
     let record = file
         .targets

@@ -2,6 +2,8 @@
 //! the only code that writes hive's files; every write is a whole-file atomic
 //! replace taken under one `flock`, so a kill never leaves a half-written file.
 
+#![forbid(unsafe_code, reason = "only the platform crate may touch the OS (ARCH-15)")]
+
 use cargo_hive_platform::clock::utc_date;
 use cargo_hive_platform::flock::{self, FlockError, FlockGuard};
 use serde::{Serialize, de::DeserializeOwned};

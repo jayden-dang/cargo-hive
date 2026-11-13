@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime};
 
 use cargo_hive::ctx::Ctx;
 use cargo_hive::registry::{FILE as REGISTRY_FILE, Registry};
-use cargo_hive::state::{Config, State};
 use cargo_hive_platform::Fs;
+use cargo_hive_state::{Config, State};
 
 /// A registered main checkout and linked worktrees under `/private/tmp` (a default
 /// secondary root, so hive classes the worktrees Secondary and the main Protected; never

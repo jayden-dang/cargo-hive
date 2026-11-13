@@ -15,12 +15,12 @@ use crate::ctx::Ctx;
 use crate::registry::Repo;
 use crate::seed::source::{self, Skip, SourceUnit};
 use crate::seed::store::{self, PublishFailed, Published, Row};
-use crate::state::{StateError, window_days};
 use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive_core::locks::{self, Acquired, Locked};
 use cargo_hive_core::size::MAX_DEPTH;
 use cargo_hive_core::target::{Owner, TargetDir};
 use cargo_hive_platform::{EntryKind, Fs};
+use cargo_hive_state::{StateError, window_days};
 
 use super::Error;
 

@@ -145,7 +145,7 @@ fn first_clone_dst(hive: &Hive, target: &TargetDir) -> (SourceUnit, PathBuf) {
     let files = unit_files(fs.as_ref(), &target.path, &unit, &listing, CRATE_DIR_CAP)
         .unwrap_or_else(|err| panic!("files: {err}"));
     assert!(!files.is_empty(), "a unit has at least one file");
-    let state = cargo_hive::state::State::open_at(hive.home.path.clone()).unwrap();
+    let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
     let key = format!("{}-{}", unit.dir_name, unit.fingerprint_hash);
     let dst = store::tmp_dir(&state, &key).join(&files[0]);
     (unit, dst)
@@ -834,7 +834,7 @@ fn try_fill(
 #[test]
 fn a_full_disk_cloning_the_tag_is_disk_full() {
     let built = built();
-    let state = cargo_hive::state::State::open_at(built.hive.home.path.clone()).unwrap();
+    let state = cargo_hive_state::State::open_at(built.hive.home.path.clone()).unwrap();
     let tag = tag_path(&state);
     let recording = Recording::over_real().fail_clone(&tag, libc::ENOSPC);
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
@@ -1360,11 +1360,11 @@ fn first_file_rel(root: &Path) -> PathBuf {
     walk(root, root, 0).expect("the entry has a file")
 }
 
-fn open_state(filled: &Filled) -> cargo_hive::state::State {
-    cargo_hive::state::State::open_at(filled.built.hive.home.path.clone()).unwrap()
+fn open_state(filled: &Filled) -> cargo_hive_state::State {
+    cargo_hive_state::State::open_at(filled.built.hive.home.path.clone()).unwrap()
 }
 
-fn rewrite_entry(state: &cargo_hive::state::State, row: &store::Row, files: &[&str]) {
+fn rewrite_entry(state: &cargo_hive_state::State, row: &store::Row, files: &[&str]) {
     let root = store::entry_dir(state, row);
     std::fs::remove_dir_all(&root).unwrap();
     assert!(files.len() < 100_000, "walk bound hit");

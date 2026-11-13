@@ -13,5 +13,4 @@ pub mod metadata;
 pub mod plan_tier;
 pub mod registry;
 pub mod seed;
-pub mod state;
 pub mod toolchain;

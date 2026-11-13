@@ -14,13 +14,13 @@ use crate::discover::{self, Checkout, Scope, Snapshot};
 use crate::plan_tier::record::{
     BytesRec, OrphanScope, Plan, PlanClass, PlanState, PlannedEntry, PlannedTarget, kind_name,
 };
-use crate::state::window_days;
 use cargo_hive_core::caps::CRATE_DIR_CAP;
 use cargo_hive_core::classify::Class;
 use cargo_hive_core::ledger;
 use cargo_hive_core::liveness::{Liveness, Uncertain, UnitRef};
 use cargo_hive_core::receipt::{ReasonRecord, UndecidedRecord, Unmeasured};
 use cargo_hive_core::target::{Owner, TargetDir};
+use cargo_hive_state::window_days;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetClass {
@@ -60,7 +60,7 @@ pub fn command_code(made: &Made) -> i32 {
 
 #[derive(Debug)]
 pub enum MakeError {
-    Window(crate::state::WindowError),
+    Window(cargo_hive_state::WindowError),
     Cancelled,
 }
 
@@ -775,8 +775,8 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     fn plan_with(target: &TargetDir, deny: fn(&Path) -> bool) -> TargetPlan {
-        let state = crate::state::State::open_at(target.path.join("home")).unwrap();
-        let cfg = crate::state::Config {
+        let state = cargo_hive_state::State::open_at(target.path.join("home")).unwrap();
+        let cfg = cargo_hive_state::Config {
             secondary_roots: Vec::new(),
             cache_roots: Vec::new(),
             gc_window_days: None,

@@ -5,9 +5,9 @@ use std::time::SystemTime;
 
 use crate::discover::WalkFault;
 use crate::registry::Repo;
-use crate::state::{Config, State};
 use cargo_hive_core::liveness::LivenessFn;
 use cargo_hive_platform::Fs;
+use cargo_hive_state::{Config, State};
 
 pub struct Ctx<'a> {
     pub state: &'a State,

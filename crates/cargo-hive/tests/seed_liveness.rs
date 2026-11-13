@@ -5,10 +5,10 @@
 
 use cargo_hive::ctx::Ctx;
 use cargo_hive::seed::source::{Skip, SourceUnit, holds, live_registry_units, unit_key};
-use cargo_hive::state::{Config, State};
 use cargo_hive_core::caps::DEPS_CAP;
 use cargo_hive_core::fingerprint::{self, Format, le_hex, read_profile};
 use cargo_hive_core::target::{Owner, TargetDir};
+use cargo_hive_state::{Config, State};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -684,9 +684,9 @@ fn a_lock_that_cannot_be_read_is_skipped_and_fills_nothing() {
     }
     let _restore = Restore(target_path.clone());
     let home = scratch.0.join("home");
-    let state = cargo_hive::state::State::open_at(home).unwrap();
+    let state = cargo_hive_state::State::open_at(home).unwrap();
     let platform = cargo_hive_platform::current().unwrap();
-    let cfg = cargo_hive::state::Config {
+    let cfg = cargo_hive_state::Config {
         secondary_roots: Vec::new(),
         cache_roots: Vec::new(),
         gc_window_days: None,

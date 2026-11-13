@@ -787,11 +787,11 @@ mod tests {
     use super::*;
     use crate::ctx::Ctx;
     use crate::registry::Repo;
-    use crate::state::{Config, State};
     use cargo_hive_core::fingerprint::le_hex;
     use cargo_hive_core::size::MAX_DEPTH;
     use cargo_hive_core::target::{Owner, TAG_LINE};
     use cargo_hive_platform::EntryKind;
+    use cargo_hive_state::{Config, State};
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
