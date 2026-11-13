@@ -572,24 +572,24 @@ _Requirements: SPLIT-4.1_
 
 **Depends-on:** Task 12
 
-- [ ] **Step 1: Run the migration lints.** With `edition = "2021"` still set, run `cargo fix --edition
+- [x] **Step 1: Run the migration lints.** With `edition = "2021"` still set, run `cargo fix --edition
   --all-targets --allow-dirty 2>&1 | tee /private/tmp/hive-split/edition.log`. Expect: it completes. Save `git diff > /private/tmp/hive-split/edition-fix.diff`.
   `cargo fix` applies the `if-let-rescope` rewrite itself and logs only per-file fix counts, so the diff, not the
   log, lists every rewritten scrutinee. Check each hunk keeps the 2021 drop point and record the diff summary in
   the evidence file.
-- [ ] **Step 2: Resolve each drop-order warning while still on edition 2021.** For every `if-let-rescope` or
+- [x] **Step 2: Resolve each drop-order warning while still on edition 2021.** For every `if-let-rescope` or
   `tail-expr-drop-order` hit, rewrite the site to keep 0.1.0's drop point (a `match` or an explicit binding), as
   the lint suggests. Then run `cargo clippy --all-targets -- -W rust-2024-compatibility -D warnings` with
   `edition = "2021"`. Expect: exit 0. This still catches `tail-expr-drop-order`, which has no auto-fix. The diff
   and this exit 0 together are SPLIT-5.2's evidence in the evidence file. On edition 2024 these lints no
   longer fire, so the check must run before the flip.
-- [ ] **Step 3: Flip and format.** Set `edition = "2024"`, then run `cargo fmt`, because the 2024 style edition
+- [x] **Step 3: Flip and format.** Set `edition = "2024"`, then run `cargo fmt`, because the 2024 style edition
   reorders some imports. As a second check, inspect the guard sites found by
   `grep -rn 'try_lock_exclusive\|store_shared_or_cancelled\|try_store_exclusive\|\.locked(\|locked_or_cancelled\|acquire(' src`;
   the line numbers have moved since design-scan.md §6.
-- [ ] **Step 4: Run.** The full gate (including `cargo fmt --check`), tests/platform_locks.rs,
+- [x] **Step 4: Run.** The full gate (including `cargo fmt --check`), tests/platform_locks.rs,
   tests/liveness_busy.rs and the capture comparison pass.
-- [ ] **Step 5: Commit.** `git commit -m "build: move to edition 2024"`
+- [x] **Step 5: Commit.** `git commit -m "build: move to edition 2024"`
 
 _Requirements: SPLIT-5.2_
 
