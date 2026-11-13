@@ -1042,6 +1042,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
                         caller_toolchain,
                         caller_toolchain_kept: crate::toolchain::caller_toolchain_kept(),
                         rustup: Path::new("rustup"),
+                        liveness: crate::gc::liveness::liveness,
                     },
                     Limits {
                         cap_bytes: CAP_BYTES,
@@ -1181,6 +1182,7 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
         account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
         repos: &reg.repos,
         mains: &registered_mains,
+        liveness: crate::gc::liveness::liveness,
     };
     let applied = match apply::apply(&ctx, id, &cancelled) {
         Ok(applied) => applied,
@@ -1318,6 +1320,7 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
         account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
         repos: &reg.repos,
         mains: &registered_mains,
+        liveness: crate::gc::liveness::liveness,
     };
     let made = match build::make(&ctx, args, &cancelled) {
         Ok(made) => made,
@@ -1724,6 +1727,7 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
         account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
         repos: &repos,
         mains: &registered_mains,
+        liveness: crate::gc::liveness::liveness,
     };
     b.toolchain(Some(toolchain.release.clone()));
     b.scope_mut().checkouts.push(real.clone());
@@ -1839,6 +1843,7 @@ fn bench_cmd(
         account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
         repos: &repos,
         mains: &registered_mains,
+        liveness: crate::gc::liveness::liveness,
     };
     let report = bench::run(
         &ctx,

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::discover::WalkFault;
+use crate::liveness::LivenessFn;
 use crate::platform::Fs;
 use crate::registry::Repo;
 use crate::state::{Config, State};
@@ -16,6 +17,7 @@ pub struct Ctx<'a> {
     pub account_bytes: bool,
     pub repos: &'a [Repo],
     pub mains: &'a [PathBuf],
+    pub liveness: LivenessFn,
 }
 
 pub(crate) fn checkout_walk(

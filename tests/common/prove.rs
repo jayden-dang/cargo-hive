@@ -14,8 +14,9 @@
 use cargo_hive::cargo_target::{self, Owner, TargetDir};
 use cargo_hive::ctx::Ctx;
 use cargo_hive::fingerprint;
+use cargo_hive::gc::liveness::liveness;
 use cargo_hive::ledger::{measure, Footprint};
-use cargo_hive::liveness::{liveness, unit_timestamp, Liveness};
+use cargo_hive::liveness::{unit_timestamp, Liveness};
 use cargo_hive::plan_tier::apply::{self, ResolvedTarget};
 use cargo_hive::plan_tier::build::{self, TargetPlan};
 use cargo_hive::plan_tier::guard::{delete_checked, Deleted, Expect};
@@ -935,6 +936,7 @@ pub fn trial_through_execute(fx: &super::cargo_fixture::Fixture) -> Result<Execu
         account_bytes: false,
         repos: &repos,
         mains: &mains,
+        liveness: cargo_hive::gc::liveness::liveness,
     };
     let verdict = liveness(fs, &target, now, window);
     let (live, has_dead_file) = match &verdict {
@@ -1162,6 +1164,7 @@ fn delete_window_through_execute(
         account_bytes: false,
         repos: &repos,
         mains: &mains,
+        liveness: cargo_hive::gc::liveness::liveness,
     };
     let resolved = [ResolvedTarget {
         path: clone.to_path_buf(),

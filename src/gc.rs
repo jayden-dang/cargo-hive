@@ -3,6 +3,7 @@
 //! session with no lock file is deleted without one. Temp dirs are deleted under the
 //! profile's `.cargo-build-lock`. Freed bytes are counted per inode and reported as totals.
 
+pub mod liveness;
 mod plan;
 mod run;
 

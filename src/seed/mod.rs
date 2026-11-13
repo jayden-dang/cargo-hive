@@ -34,6 +34,16 @@ pub mod record;
 pub mod source;
 pub mod store;
 
+#[cfg(test)]
+pub(crate) fn no_liveness(
+    _: &dyn crate::platform::Fs,
+    _: &crate::cargo_target::TargetDir,
+    _: std::time::SystemTime,
+    _: std::time::Duration,
+) -> crate::liveness::Liveness {
+    panic!("this test reaches liveness; move it to tests/seed_liveness.rs")
+}
+
 use std::fmt;
 
 use crate::state::{StateError, StoreLock};
@@ -583,6 +593,7 @@ mod tests {
             account_bytes,
             repos: &repos,
             mains: &mains,
+            liveness: super::no_liveness,
         };
         from_fill(&ctx, &empty_fill(), Vec::new(), false, 0)
     }

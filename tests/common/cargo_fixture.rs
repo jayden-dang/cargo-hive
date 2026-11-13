@@ -4,7 +4,8 @@
 
 use super::{prove, wait_within, Scratch};
 use cargo_hive::cargo_target::TargetDir;
-use cargo_hive::liveness::{liveness, DeadUnit, Liveness, UnitRef};
+use cargo_hive::gc::liveness::liveness;
+use cargo_hive::liveness::{DeadUnit, Liveness, UnitRef};
 use cargo_hive::platform;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

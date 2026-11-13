@@ -13,7 +13,7 @@ use crate::ctx::Ctx;
 use crate::discover::{self, Snapshot};
 use crate::fingerprint::{read_profile, Format, ProfileReport};
 use crate::ledger::{self, Bytes, Ledger};
-use crate::liveness::{self, Liveness};
+use crate::liveness::Liveness;
 use crate::locks::{self, Acquired, Locked, Reason};
 use crate::plan_tier::build::{class_label, class_of_target, TargetClass};
 use crate::plan_tier::guard::{check_entry, Deleted as EntryMismatch, Expect};
@@ -823,7 +823,7 @@ fn dead_paths(
         size: None,
         unreadable: None,
     };
-    match liveness::liveness(ctx.fs, &dir, now, window) {
+    match crate::gc::liveness::liveness(ctx.fs, &dir, now, window) {
         Liveness::Decided { dead, .. } => Ok(dead
             .iter()
             .flat_map(|unit| unit.files.iter().cloned())

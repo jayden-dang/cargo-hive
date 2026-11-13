@@ -2,7 +2,8 @@
 
 use cargo_hive::cargo_target::{identify, Owner, TargetDir};
 use cargo_hive::fingerprint::read_profile;
-use cargo_hive::liveness::{liveness, Liveness};
+use cargo_hive::gc::liveness::liveness;
+use cargo_hive::liveness::Liveness;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};

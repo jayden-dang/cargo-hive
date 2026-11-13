@@ -15,7 +15,7 @@ use crate::classify::Class;
 use crate::ctx::Ctx;
 use crate::discover::{self, Checkout, Scope, Snapshot};
 use crate::ledger;
-use crate::liveness::{self, Liveness, Uncertain, UnitRef};
+use crate::liveness::{Liveness, Uncertain, UnitRef};
 use crate::plan_tier::record::{
     kind_name, BytesRec, OrphanScope, Plan, PlanClass, PlanState, PlannedEntry, PlannedTarget,
 };
@@ -97,7 +97,7 @@ pub fn class_of_target(owner: &Owner, checkouts: &[Checkout]) -> TargetClass {
 }
 
 pub fn plan_for_target(ctx: &Ctx, target: &TargetDir, window: Duration) -> TargetPlan {
-    let dead = match liveness::liveness(ctx.fs, target, ctx.now, window) {
+    let dead = match crate::gc::liveness::liveness(ctx.fs, target, ctx.now, window) {
         Liveness::Undecided { reasons } => return TargetPlan::Undecided(reasons),
         Liveness::Decided { dead, .. } => dead,
     };
@@ -791,6 +791,7 @@ mod tests {
             account_bytes: false,
             repos: &[],
             mains: &[],
+            liveness: crate::gc::liveness::liveness,
         };
         plan_for_target(&ctx, target, Duration::from_secs(7 * 86_400))
     }

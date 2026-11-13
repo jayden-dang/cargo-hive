@@ -247,6 +247,7 @@ impl LibCtx {
             account_bytes: true,
             repos: &self.repos,
             mains: &self.mains,
+            liveness: cargo_hive::gc::liveness::liveness,
         }
     }
 }

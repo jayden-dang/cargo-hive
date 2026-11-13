@@ -12,6 +12,7 @@ use crate::cargo_target::TargetDir;
 use crate::ctx::{faults_that_can_hide_an_owner, split_checkout_faults};
 use crate::discover::{Checkout, WalkFault};
 use crate::ledger::{self, Ledger};
+use crate::liveness::LivenessFn;
 use crate::platform::Fs;
 use crate::receipt::{Finding, Measured};
 use crate::seed::source::{self, Holds};
@@ -36,6 +37,7 @@ pub struct EvictCtx<'a> {
     pub caller_toolchain: Option<Toolchain>,
     pub caller_toolchain_kept: bool,
     pub rustup: &'a Path,
+    pub liveness: LivenessFn,
 }
 
 pub struct Limits {
@@ -65,7 +67,7 @@ pub fn run(
         cancelled: false,
     };
 
-    let mut held = source::holds(ctx.fs, ctx.targets, ctx.now, ctx.window);
+    let mut held = source::holds(ctx.fs, ctx.targets, ctx.now, ctx.window, ctx.liveness);
     absorb_walk_faults(
         &mut held,
         ctx.checkout_faults,
