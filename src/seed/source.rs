@@ -5,11 +5,11 @@
 //! fills nothing from that target.
 
 use crate::cargo_target::{Owner, TargetDir};
+use crate::ctx::{checkout_walk, Ctx};
 use crate::discover::{self, Snapshot};
 use crate::fingerprint::{self, le_hex, Format, Unit};
 use crate::gc::{CRATE_DIR_CAP, DEPS_CAP};
 use crate::liveness::{self, Liveness, Uncertain};
-use crate::plan_tier::{checkout_walk, Ctx};
 use crate::platform::{EntryKind, Fs};
 use crate::receipt::Finding;
 use crate::seed::store::StoreKey;
@@ -781,9 +781,9 @@ fn unescape_spaces(input: &str) -> String {
 mod tests {
     use super::*;
     use crate::cargo_target::{Owner, TargetDir, TAG_LINE};
+    use crate::ctx::Ctx;
     use crate::fingerprint::{self, le_hex, read_profile};
     use crate::gc::DEPS_CAP;
-    use crate::plan_tier::Ctx;
     use crate::platform::EntryKind;
     use crate::registry::Repo;
     use crate::size::MAX_DEPTH;

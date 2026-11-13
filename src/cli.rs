@@ -912,25 +912,6 @@ fn put_counts(b: &mut ReceiptBuilder, suffix: &str, c: &crate::gc::Counts) {
     }
 }
 
-pub(crate) fn cross_check_notes(
-    before: &std::collections::BTreeMap<String, (std::path::PathBuf, u64)>,
-    after: &std::collections::BTreeMap<String, (std::path::PathBuf, u64)>,
-    touched: &std::collections::BTreeSet<String>,
-) -> Vec<String> {
-    let mut notes = Vec::new();
-    for container in touched {
-        if let (Some((mount, was)), Some((_, now))) = (before.get(container), after.get(container))
-        {
-            let change = i128::from(*now) - i128::from(*was);
-            notes.push(format!(
-                "cross-check, not a count: available bytes in APFS container {container} (mounted at {}) changed by {change:+} during this run",
-                mount.display()
-            ));
-        }
-    }
-    notes
-}
-
 fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: OutputArgs) -> i32 {
     use crate::discover::{self, Snapshot, SNAPSHOT_FILE};
     use crate::doctor::{self, Capabilities, Capability};
@@ -1033,7 +1014,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             })
             .filter_map(|(p, _)| platform.fs.volume(p).ok().map(|v| v.container))
             .collect();
-        for note in cross_check_notes(&before, &after, &touched) {
+        for note in crate::plan_tier::apply::cross_check_notes(&before, &after, &touched) {
             b.note(note);
         }
     }
@@ -1149,10 +1130,10 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
 }
 
 fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
+    use crate::ctx::Ctx;
     use crate::doctor::{self, Capabilities, Capability};
     use crate::plan_tier::apply;
     use crate::plan_tier::build;
-    use crate::plan_tier::Ctx;
     use crate::receipt::Outcome;
     if let Err(e) = platform::signals::install() {
         return emit_failure(
@@ -1257,10 +1238,10 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
 }
 
 fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
+    use crate::ctx::Ctx;
     use crate::doctor::{self, Capabilities, Capability};
     use crate::plan_tier::build::{self, MakeError};
     use crate::plan_tier::record;
-    use crate::plan_tier::Ctx;
     use std::collections::BTreeMap;
     use std::time::SystemTime;
     const ID_ATTEMPTS: u32 = 4;
@@ -1687,8 +1668,8 @@ pub(crate) fn locate_checkout(
 }
 
 fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
+    use crate::ctx::Ctx;
     use crate::doctor::{self, Capabilities, Capability};
-    use crate::plan_tier::Ctx;
     use crate::state::window_days;
     let loaded = (|| -> Result<_, StateError> {
         Ok((
@@ -1785,8 +1766,8 @@ fn bench_cmd(
 ) -> i32 {
     use crate::bench::command::env_map;
     use crate::bench::{self, Limits, Plan, BUILD_DEADLINE};
+    use crate::ctx::Ctx;
     use crate::doctor::{self, Capabilities, Capability};
-    use crate::plan_tier::Ctx;
     use crate::receipt::Measured;
     use crate::state::window_days;
     use std::collections::BTreeMap;

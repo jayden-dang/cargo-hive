@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use cargo_hive::ctx::Ctx;
 use cargo_hive::discover::Checkout;
-use cargo_hive::plan_tier::Ctx;
 use cargo_hive::registry::Repo;
 use cargo_hive::seed::Error;
 use common::cargo_fixture::backdate_all;

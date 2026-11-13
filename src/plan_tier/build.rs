@@ -11,13 +11,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cargo_target::{Owner, TargetDir};
 use crate::classify::Class;
+use crate::ctx::Ctx;
 use crate::discover::{self, Checkout, Scope, Snapshot};
 use crate::gc;
 use crate::liveness::{self, Liveness, Uncertain, UnitRef};
 use crate::plan_tier::record::{
     kind_name, BytesRec, OrphanScope, Plan, PlanClass, PlanState, PlannedEntry, PlannedTarget,
 };
-use crate::plan_tier::Ctx;
 use crate::receipt::{ReasonRecord, UndecidedRecord, Unmeasured};
 use crate::state::window_days;
 

@@ -5,12 +5,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::cargo_target::{self, Owner};
+use crate::ctx::Ctx;
 use crate::discover::{self, Snapshot, WalkFault};
 use crate::gc::{self, Ledger, CRATE_DIR_CAP};
+use crate::locks::{self, Acquired};
 use crate::plan_tier::guard::{check_entry, Deleted, Expect};
-use crate::plan_tier::locks::{self, Acquired};
 use crate::plan_tier::record::{kind_of, BytesRec, PlannedTarget};
-use crate::plan_tier::Ctx;
 use crate::platform::{EntryKind, Fs};
 
 pub struct Counted {
@@ -170,11 +170,11 @@ fn still_orphan(
     if cancel() {
         return Err(Stop::Cancelled);
     }
-    let (checkouts, faults) = super::checkout_walk(ctx);
+    let (checkouts, faults) = crate::ctx::checkout_walk(ctx);
     if cancel() {
         return Err(Stop::Cancelled);
     }
-    let (faults, cannot_enter) = super::split_checkout_faults(faults);
+    let (faults, cannot_enter) = crate::ctx::split_checkout_faults(faults);
     noted.extend(cannot_enter);
     if !faults.is_empty() {
         return Err(Stop::Unreadable(faults));
@@ -184,7 +184,7 @@ fn still_orphan(
     if cancel() {
         return Err(Stop::Cancelled);
     }
-    let faults = super::faults_that_can_hide_an_owner(scan.walk_faults, &ctx.cfg.cache_roots);
+    let faults = crate::ctx::faults_that_can_hide_an_owner(scan.walk_faults, &ctx.cfg.cache_roots);
     if !faults.is_empty() {
         return Err(Stop::Unreadable(faults));
     }

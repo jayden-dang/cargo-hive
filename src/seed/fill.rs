@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cargo_target::{Owner, TargetDir};
+use crate::ctx::Ctx;
 use crate::gc::{CRATE_DIR_CAP, DEPS_CAP};
-use crate::plan_tier::locks::{self, Acquired, Locked};
-use crate::plan_tier::Ctx;
+use crate::locks::{self, Acquired, Locked};
 use crate::platform::{EntryKind, Fs};
 use crate::registry::Repo;
 use crate::seed::source::{self, Skip, SourceUnit};
@@ -1242,7 +1242,7 @@ mod tests {
         };
         let repos = [repo.clone()];
         let mains = [scratch.0.clone()];
-        let ctx = crate::plan_tier::Ctx {
+        let ctx = crate::ctx::Ctx {
             state: &state,
             fs: platform.fs.as_ref(),
             cfg: &cfg,

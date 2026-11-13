@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use cargo_hive::plan_tier::Ctx;
+use cargo_hive::ctx::Ctx;
 use cargo_hive::platform::Fs;
 use cargo_hive::registry::{Registry, FILE as REGISTRY_FILE};
 use cargo_hive::state::{Config, State};

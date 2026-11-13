@@ -13,8 +13,8 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::ctx::Ctx;
 use crate::liveness;
-use crate::plan_tier::Ctx;
 use crate::platform::{EntryKind, Fs};
 use crate::seed::store::{self, Row};
 use crate::size::{allocated_bytes, MAX_DEPTH};

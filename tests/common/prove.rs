@@ -12,6 +12,7 @@
 //! (deadline, output, walk, config size) is an error when hit, and nothing is silently skipped.
 
 use cargo_hive::cargo_target::{self, Owner, TargetDir};
+use cargo_hive::ctx::Ctx;
 use cargo_hive::fingerprint;
 use cargo_hive::gc::{measure, Footprint};
 use cargo_hive::liveness::{liveness, unit_timestamp, Liveness};
@@ -19,7 +20,6 @@ use cargo_hive::plan_tier::apply::{self, ResolvedTarget};
 use cargo_hive::plan_tier::build::{self, TargetPlan};
 use cargo_hive::plan_tier::guard::{delete_checked, Deleted, Expect};
 use cargo_hive::plan_tier::record::{kind_name, Plan, PlanClass, PlannedEntry, PlannedTarget};
-use cargo_hive::plan_tier::Ctx;
 use cargo_hive::platform::{self, EntryKind, Fs, TryLock};
 use cargo_hive::receipt::Outcome;
 use cargo_hive::state::State;

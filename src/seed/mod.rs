@@ -13,9 +13,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::ctx::Ctx;
 use crate::discover::Checkout;
 use crate::gc::CRATE_DIR_CAP;
-use crate::plan_tier::Ctx;
 use crate::registry::Repo;
 use crate::state::window_days;
 use crate::toolchain::Toolchain;
@@ -537,7 +537,7 @@ fn read_lock_file(checkout: &std::path::Path) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{empty_fill, from_fill, record_seed_result, Error, Outcome};
-    use crate::plan_tier::Ctx;
+    use crate::ctx::Ctx;
     use crate::state::{Config, State};
     use std::collections::BTreeMap;
     use std::path::PathBuf;

@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cargo_target::TargetDir;
+use crate::ctx::{faults_that_can_hide_an_owner, split_checkout_faults};
 use crate::discover::{Checkout, WalkFault};
 use crate::gc::{self, Ledger};
-use crate::plan_tier::{faults_that_can_hide_an_owner, split_checkout_faults};
 use crate::platform::Fs;
 use crate::receipt::{Finding, Measured};
 use crate::seed::source::{self, Holds};

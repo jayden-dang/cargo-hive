@@ -3,8 +3,8 @@
 mod common;
 use std::os::unix::fs::PermissionsExt;
 
+use cargo_hive::locks::{acquire, Acquired, Reason};
 use cargo_hive::plan_tier::apply::apply;
-use cargo_hive::plan_tier::locks::{acquire, Acquired, Reason};
 use cargo_hive::receipt::Outcome;
 use common::plan_fixture::Planned;
 use common::recording_fs::Recording;
@@ -19,7 +19,7 @@ fn skipped(a: Acquired) -> Reason {
 
 #[test]
 fn a_profile_listing_past_the_cap_is_an_error_and_under_the_cap_still_locks() {
-    use cargo_hive::plan_tier::locks::acquire_capped;
+    use cargo_hive::locks::acquire_capped;
     let p = Planned::new("list-cap");
     let target = p.worktree_target();
     let n = std::fs::read_dir(&target).unwrap().count();

@@ -8,22 +8,40 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cargo_target::{self, Owner, TargetDir};
-use crate::cli::cross_check_notes;
+use crate::ctx::Ctx;
 use crate::discover::{self, Snapshot};
 use crate::fingerprint::{read_profile, Format, ProfileReport};
 use crate::gc::{self, Bytes, Ledger};
 use crate::liveness::{self, Liveness};
+use crate::locks::{self, Acquired, Locked, Reason};
 use crate::plan_tier::build::{class_label, class_of_target, TargetClass};
 use crate::plan_tier::guard::{check_entry, Deleted as EntryMismatch, Expect};
-use crate::plan_tier::locks::{self, Acquired, Locked, Reason};
 use crate::plan_tier::orphan::{self, Counted, Removal};
 use crate::plan_tier::record::{
     self, kind_of, BytesRec, Lookup, Plan, PlanClass, PlannedEntry, PlannedTarget, Taken,
 };
-use crate::plan_tier::Ctx;
 use crate::platform::Fs;
 use crate::receipt::{Outcome, Unmeasured};
 use crate::state::StateError;
+
+pub(crate) fn cross_check_notes(
+    before: &std::collections::BTreeMap<String, (std::path::PathBuf, u64)>,
+    after: &std::collections::BTreeMap<String, (std::path::PathBuf, u64)>,
+    touched: &std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    for container in touched {
+        if let (Some((mount, was)), Some((_, now))) = (before.get(container), after.get(container))
+        {
+            let change = i128::from(*now) - i128::from(*was);
+            notes.push(format!(
+                "cross-check, not a count: available bytes in APFS container {container} (mounted at {}) changed by {change:+} during this run",
+                mount.display()
+            ));
+        }
+    }
+    notes
+}
 
 #[derive(Debug)]
 pub enum ApplyError {
@@ -566,11 +584,11 @@ fn resolve(
     cancel: &(dyn Fn() -> bool + Sync),
     noted: &mut Vec<crate::discover::WalkFault>,
 ) -> Result<Vec<ResolvedTarget>, ResolveStop> {
-    let (checkouts, faults) = super::checkout_walk(ctx);
+    let (checkouts, faults) = crate::ctx::checkout_walk(ctx);
     if cancel() {
         return Err(ResolveStop::Cancelled);
     }
-    let (faults, cannot_enter) = super::split_checkout_faults(faults);
+    let (faults, cannot_enter) = crate::ctx::split_checkout_faults(faults);
     noted.extend(cannot_enter);
     if !faults.is_empty() {
         return Err(walk_refusal(plan, faults));
@@ -580,7 +598,7 @@ fn resolve(
     if cancel() {
         return Err(ResolveStop::Cancelled);
     }
-    let faults = super::faults_that_can_hide_an_owner(scan.walk_faults, &ctx.cfg.cache_roots);
+    let faults = crate::ctx::faults_that_can_hide_an_owner(scan.walk_faults, &ctx.cfg.cache_roots);
     if !faults.is_empty() {
         return Err(walk_refusal(plan, faults));
     }

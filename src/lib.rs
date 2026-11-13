@@ -2,6 +2,7 @@ pub mod bench;
 pub mod cargo_target;
 pub mod classify;
 pub mod cli;
+pub mod ctx;
 pub mod discover;
 pub mod doctor;
 pub mod env;
@@ -11,6 +12,7 @@ pub mod gc;
 pub mod git;
 #[doc(hidden)]
 pub mod liveness;
+pub mod locks;
 pub mod metadata;
 pub mod plan_tier;
 pub mod platform;

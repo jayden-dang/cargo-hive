@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 use cargo_hive::bench::check::{check, CheckStop, Checked};
 use cargo_hive::bench::command::{env_map, BuildCmd};
 use cargo_hive::bench::{run, End, Limits, Plan, Report, BUILD_DEADLINE};
-use cargo_hive::plan_tier::Ctx;
+use cargo_hive::ctx::Ctx;
 use cargo_hive::receipt::Measured;
 use cargo_hive::registry::Registry;
 use cargo_hive::seed::{self, Fill};

@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::ctx::Ctx;
 use crate::discover::{self, Checkout, Snapshot};
 use crate::gc;
-use crate::plan_tier::Ctx;
 use crate::platform::proc::{self, Capture, ChildOutputError};
 use crate::receipt::{Finding, Measured, ReceiptBuilder};
 use crate::registry::Repo;
