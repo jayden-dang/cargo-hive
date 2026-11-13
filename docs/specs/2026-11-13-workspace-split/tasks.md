@@ -460,12 +460,12 @@ _Requirements: SPLIT-1.2, SPLIT-1.3_
 
 **Depends-on:** Task 8
 
-- [ ] **Step 1: Failing check.** Point seed's imports at `crate::ctx::Ctx` and `crate::locks`, and run
+- [x] **Step 1: Failing check.** Point seed's imports at `crate::ctx::Ctx` and `crate::locks`, and run
   `cargo check`. Expect: unresolved imports.
-- [ ] **Step 2: Implement.** Move the items. `grep -n 'crate::cli' src/plan_tier src/seed` and
+- [x] **Step 2: Implement.** Move the items. `grep -n 'crate::cli' src/plan_tier src/seed` and
   `grep -n 'crate::plan_tier' src/seed` must both print nothing.
-- [ ] **Step 3: Run.** `cargo test` and the capture comparison pass.
-- [ ] **Step 4: Commit.** `git commit -m "refactor: move shared context and target locks below plan_tier"`
+- [x] **Step 3: Run.** `cargo test` and the capture comparison pass.
+- [x] **Step 4: Commit.** `git commit -m "refactor: move shared context and target locks below plan_tier"`
 
 _Requirements: SPLIT-1.2, SPLIT-1.3_
 
