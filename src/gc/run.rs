@@ -2,24 +2,17 @@
 //! lock, re-check under the lock, measure, remove the dir, remove the lock file, release. A
 //! plan made from a stale listing therefore never deletes what replaced its entry.
 
-use super::account::RemoveFailed;
 use super::is_temp_entry;
-use super::ledger::{Bytes, Ledger};
 use super::plan::{self, Action};
-use super::remove_counted;
+use crate::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use crate::cargo_target::TargetDir;
 use crate::discover::Scope;
 use crate::fingerprint::Format;
-use crate::platform::{EntryKind, EntryStat, Fs, HeldLock, Sharing, TryLock};
-use crate::size::MAX_DEPTH;
+use crate::ledger::{remove_counted, Bytes, Ledger, RemoveFailed};
+use crate::platform::{EntryKind, Fs, HeldLock, TryLock};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-
-/// Most entries listed from one `incremental/` level, crate dir or scanned directory.
-pub const CRATE_DIR_CAP: usize = 100_000;
-/// Most entries listed from one `deps/` directory.
-pub const DEPS_CAP: usize = 1_000_000;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RunOpts {
@@ -55,8 +48,6 @@ pub struct GcReport {
     pub unmeasured_more: u64,
     pub cancelled: bool,
 }
-
-type Scanned = Vec<(PathBuf, io::Result<(EntryStat, Option<Sharing>)>)>;
 
 struct Runner<'a> {
     fs: &'a dyn Fs,
@@ -377,131 +368,17 @@ impl Runner<'_> {
     }
 }
 
-/// What deleting a set of paths would free, counted per inode.
-/// `unmeasured` lists each path that could not be measured, up to the ledger cap.
-#[doc(hidden)]
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Footprint {
-    pub bytes: Bytes,
-    pub unmeasured: Vec<(PathBuf, String)>,
-    pub unmeasured_more: u64,
-}
-
-/// Measures `paths` as one set for `target`, so a hard link listed only once stays shared.
-/// Duplicates and paths under another listed path are ignored. A missing path counts nothing.
-#[doc(hidden)]
-pub fn measure(fs: &dyn Fs, target: &Path, paths: &[PathBuf], account_bytes: bool) -> Footprint {
-    let mut roots: Vec<&PathBuf> = paths.iter().collect();
-    roots.sort();
-    roots.dedup();
-    // Sorted, a path's descendants follow it directly, so only the last kept root can contain `p`.
-    let mut outermost: Vec<&PathBuf> = Vec::new();
-    for p in roots {
-        if outermost.last().is_none_or(|q| !p.starts_with(q)) {
-            outermost.push(p);
-        }
-    }
-    let mut ledger = Ledger::new();
-    for path in outermost {
-        let stat = match fs.entry_stat(path) {
-            Ok(stat) => stat,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                ledger.unmeasured(path.clone(), e.to_string());
-                continue;
-            }
-        };
-        match stat.kind {
-            EntryKind::File => {
-                let sharing = if account_bytes {
-                    match fs.sharing(path) {
-                        Ok(s) => Some(s),
-                        Err(e) => {
-                            ledger.unmeasured(path.clone(), e.to_string());
-                            continue;
-                        }
-                    }
-                } else {
-                    None
-                };
-                ledger.file(target, &stat, sharing.as_ref());
-            }
-            EntryKind::Dir => match scan(fs, path, account_bytes) {
-                Ok(None) => {}
-                Ok(Some(files)) => record(&mut ledger, target, files),
-                Err(why) => ledger.unmeasured(path.clone(), why),
-            },
-            EntryKind::Symlink | EntryKind::Other => {}
-        }
-    }
-    let tally = ledger.finish();
-    Footprint {
-        bytes: tally.total,
-        unmeasured: tally.unmeasured,
-        unmeasured_more: tally.unmeasured_more,
-    }
-}
-
-pub(super) fn record(ledger: &mut Ledger, target: &Path, files: Scanned) {
-    for (file, measured) in files {
-        match measured {
-            Ok((stat, sharing)) => ledger.file(target, &stat, sharing.as_ref()),
-            Err(e) => ledger.unmeasured(file, e.to_string()),
-        }
-    }
-}
-
-/// The regular files under `root`, without following links and at most `MAX_DEPTH` deep.
-/// `Ok(None)` means the root vanished between listing and measure.
-pub(super) fn scan(
-    fs: &dyn Fs,
-    root: &Path,
-    account_bytes: bool,
-) -> Result<Option<Scanned>, String> {
-    let mut files = Vec::new();
-    let mut stack = vec![(root.to_path_buf(), 0usize)];
-    while let Some((dir, depth)) = stack.pop() {
-        let entries = match fs.read_dir_bounded(&dir, CRATE_DIR_CAP) {
-            Ok(v) => v,
-            Err(e) if e.kind() == io::ErrorKind::NotFound && dir == root => return Ok(None),
-            Err(e) => return Err(format!("could not list {}: {e}", dir.display())),
-        };
-        for (name, kind) in entries {
-            let path = dir.join(&name);
-            match kind {
-                EntryKind::Dir if depth + 1 > MAX_DEPTH => {
-                    return Err(format!(
-                        "{} is deeper than {MAX_DEPTH} levels",
-                        path.display()
-                    ))
-                }
-                EntryKind::Dir => stack.push((path, depth + 1)),
-                EntryKind::File => {
-                    let measured = fs.entry_stat(&path).and_then(|stat| {
-                        let sharing = if account_bytes {
-                            Some(fs.sharing(&path)?)
-                        } else {
-                            None
-                        };
-                        Ok((stat, sharing))
-                    });
-                    files.push((path, measured));
-                }
-                EntryKind::Symlink | EntryKind::Other => {}
-            }
-        }
-    }
-    Ok(Some(files))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cargo_target::Owner;
     use crate::fingerprint::ProfileReport;
+    use crate::ledger::{measure, Footprint};
     use crate::platform::{
-        CompressOutcome, HeldLock, LockHolder, LockKind, LockState, TempDir, VolumeInfo,
+        CompressOutcome, EntryStat, HeldLock, LockHolder, LockKind, LockState, Sharing, TempDir,
+        VolumeInfo,
     };
+    use crate::size::MAX_DEPTH;
     use std::collections::{BTreeSet, HashMap};
     use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicUsize, Ordering};

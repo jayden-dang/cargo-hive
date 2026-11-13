@@ -41,7 +41,7 @@ pub enum Acquired {
 }
 
 pub fn acquire(fs: &dyn Fs, target: &Path, lists_examples: bool) -> Acquired {
-    acquire_capped(fs, target, lists_examples, crate::gc::CRATE_DIR_CAP)
+    acquire_capped(fs, target, lists_examples, crate::caps::CRATE_DIR_CAP)
 }
 
 pub fn acquire_capped(fs: &dyn Fs, target: &Path, lists_examples: bool, cap: usize) -> Acquired {

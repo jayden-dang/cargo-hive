@@ -299,7 +299,7 @@ pub fn place(
 /// Cargo calls a unit stale when a dependency's output is newer than its own. With one
 /// mtime, no dependency is newer. The seed record's stamps take that mtime too.
 fn align_mtimes(ctx: &Ctx<'_>, target: &Path, report: &mut PlaceReport) {
-    let files = match list_files(ctx.fs, target, crate::gc::DEPS_CAP) {
+    let files = match list_files(ctx.fs, target, crate::caps::DEPS_CAP) {
         Ok(files) => files,
         Err(detail) => {
             report.findings.push((

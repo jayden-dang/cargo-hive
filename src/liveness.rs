@@ -5,9 +5,9 @@
 //! current unit matches keeps the not-current units of its package. Anything it cannot decide is
 //! reported, never guessed.
 
+use crate::caps::DEPS_CAP;
 use crate::cargo_target::TargetDir;
 use crate::fingerprint::{self, le_hex, DepEdge, Format, Unit};
-use crate::gc::DEPS_CAP;
 use crate::platform::Fs;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;

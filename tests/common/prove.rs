@@ -14,7 +14,7 @@
 use cargo_hive::cargo_target::{self, Owner, TargetDir};
 use cargo_hive::ctx::Ctx;
 use cargo_hive::fingerprint;
-use cargo_hive::gc::{measure, Footprint};
+use cargo_hive::ledger::{measure, Footprint};
 use cargo_hive::liveness::{liveness, unit_timestamp, Liveness};
 use cargo_hive::plan_tier::apply::{self, ResolvedTarget};
 use cargo_hive::plan_tier::build::{self, TargetPlan};

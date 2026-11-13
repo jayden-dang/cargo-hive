@@ -856,7 +856,7 @@ fn report_targets(
         }
         if let Some(seeds) = seeds {
             if let Some(record) = seeds.targets.get(&t.path) {
-                match crate::seed::record::counts(t, record, crate::gc::DEPS_CAP) {
+                match crate::seed::record::counts(t, record, crate::caps::DEPS_CAP) {
                     Ok(Some(counts)) => {
                         let path = t.path.display();
                         b.count(&format!("reused_fresh:{path}"), counts.fresh)

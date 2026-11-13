@@ -12,7 +12,7 @@ use cargo_hive::cargo_target::{Owner, TargetDir, TAG_LINE};
 use cargo_hive::classify::{CheckoutKind, Class};
 use cargo_hive::discover::Checkout;
 use cargo_hive::fingerprint;
-use cargo_hive::gc;
+use cargo_hive::ledger;
 use cargo_hive::platform::apfs::Apfs;
 use cargo_hive::platform::Fs;
 use cargo_hive::receipt::Measured;
@@ -989,7 +989,9 @@ fn entry_path(
 }
 
 fn freeable_of(fs: &Apfs, dir: &Path) -> u64 {
-    gc::measure(fs, dir, &[dir.to_path_buf()], true).bytes.freed
+    ledger::measure(fs, dir, &[dir.to_path_buf()], true)
+        .bytes
+        .freed
 }
 
 fn run_evict(

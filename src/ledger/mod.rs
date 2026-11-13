@@ -1,8 +1,17 @@
-//! Per-inode accounting of the bytes a gc run frees. Bytes a surviving hard link or clone
-//! still holds are counted apart, never as freed.
+//! Per-inode accounting of freed bytes, and measuring a set of paths into that ledger.
+//! Bytes a surviving hard link or clone still holds are counted apart, never as freed.
 
-use crate::platform::{EntryStat, Sharing};
+mod account;
+
+#[doc(hidden)]
+pub use account::Removed;
+pub(crate) use account::{remove_counted, RemoveFailed};
+
+use crate::caps::CRATE_DIR_CAP;
+use crate::platform::{EntryKind, EntryStat, Fs, Sharing};
+use crate::size::MAX_DEPTH;
 use std::collections::{BTreeMap, HashMap};
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// At most this many unmeasured paths are listed in a receipt; the rest are only counted.
@@ -102,6 +111,125 @@ impl Ledger {
             unmeasured_more: self.unmeasured_more,
         }
     }
+}
+
+/// What deleting a set of paths would free, counted per inode.
+/// `unmeasured` lists each path that could not be measured, up to the ledger cap.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Footprint {
+    pub bytes: Bytes,
+    pub unmeasured: Vec<(PathBuf, String)>,
+    pub unmeasured_more: u64,
+}
+
+pub(crate) type Scanned = Vec<(PathBuf, io::Result<(EntryStat, Option<Sharing>)>)>;
+
+/// Measures `paths` as one set for `target`, so a hard link listed only once stays shared.
+/// Duplicates and paths under another listed path are ignored. A missing path counts nothing.
+#[doc(hidden)]
+pub fn measure(fs: &dyn Fs, target: &Path, paths: &[PathBuf], account_bytes: bool) -> Footprint {
+    let mut roots: Vec<&PathBuf> = paths.iter().collect();
+    roots.sort();
+    roots.dedup();
+    // Sorted, a path's descendants follow it directly, so only the last kept root can contain `p`.
+    let mut outermost: Vec<&PathBuf> = Vec::new();
+    for p in roots {
+        if outermost.last().is_none_or(|q| !p.starts_with(q)) {
+            outermost.push(p);
+        }
+    }
+    let mut ledger = Ledger::new();
+    for path in outermost {
+        let stat = match fs.entry_stat(path) {
+            Ok(stat) => stat,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                ledger.unmeasured(path.clone(), e.to_string());
+                continue;
+            }
+        };
+        match stat.kind {
+            EntryKind::File => {
+                let sharing = if account_bytes {
+                    match fs.sharing(path) {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            ledger.unmeasured(path.clone(), e.to_string());
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+                ledger.file(target, &stat, sharing.as_ref());
+            }
+            EntryKind::Dir => match scan(fs, path, account_bytes) {
+                Ok(None) => {}
+                Ok(Some(files)) => record(&mut ledger, target, files),
+                Err(why) => ledger.unmeasured(path.clone(), why),
+            },
+            EntryKind::Symlink | EntryKind::Other => {}
+        }
+    }
+    let tally = ledger.finish();
+    Footprint {
+        bytes: tally.total,
+        unmeasured: tally.unmeasured,
+        unmeasured_more: tally.unmeasured_more,
+    }
+}
+
+pub(crate) fn record(ledger: &mut Ledger, target: &Path, files: Scanned) {
+    for (file, measured) in files {
+        match measured {
+            Ok((stat, sharing)) => ledger.file(target, &stat, sharing.as_ref()),
+            Err(e) => ledger.unmeasured(file, e.to_string()),
+        }
+    }
+}
+
+/// The regular files under `root`, without following links and at most `MAX_DEPTH` deep.
+/// `Ok(None)` means the root vanished between listing and measure.
+pub(crate) fn scan(
+    fs: &dyn Fs,
+    root: &Path,
+    account_bytes: bool,
+) -> Result<Option<Scanned>, String> {
+    let mut files = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let entries = match fs.read_dir_bounded(&dir, CRATE_DIR_CAP) {
+            Ok(v) => v,
+            Err(e) if e.kind() == io::ErrorKind::NotFound && dir == root => return Ok(None),
+            Err(e) => return Err(format!("could not list {}: {e}", dir.display())),
+        };
+        for (name, kind) in entries {
+            let path = dir.join(&name);
+            match kind {
+                EntryKind::Dir if depth + 1 > MAX_DEPTH => {
+                    return Err(format!(
+                        "{} is deeper than {MAX_DEPTH} levels",
+                        path.display()
+                    ))
+                }
+                EntryKind::Dir => stack.push((path, depth + 1)),
+                EntryKind::File => {
+                    let measured = fs.entry_stat(&path).and_then(|stat| {
+                        let sharing = if account_bytes {
+                            Some(fs.sharing(&path)?)
+                        } else {
+                            None
+                        };
+                        Ok((stat, sharing))
+                    });
+                    files.push((path, measured));
+                }
+                EntryKind::Symlink | EntryKind::Other => {}
+            }
+        }
+    }
+    Ok(Some(files))
 }
 
 #[cfg(test)]

@@ -11,9 +11,9 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use crate::cargo_target::{Owner, TargetDir};
 use crate::ctx::Ctx;
-use crate::gc::{CRATE_DIR_CAP, DEPS_CAP};
 use crate::locks::{self, Acquired, Locked};
 use crate::platform::{EntryKind, Fs};
 use crate::registry::Repo;

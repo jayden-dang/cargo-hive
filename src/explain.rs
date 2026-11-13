@@ -4,11 +4,11 @@
 //! `analyse` only reads values already in memory. `run` does the bounded
 //! reads and fills `Explanation::human`.
 
+use crate::caps::DEPS_CAP;
 use crate::cargo_target::TargetDir;
 use crate::fingerprint::{
     error_code, is_summary_line, kind_of, read_capped, Format, NotCurrentUnit, Unit,
 };
-use crate::gc::DEPS_CAP;
 use crate::platform::clock::utc_timestamp;
 use crate::platform::Fs;
 use crate::receipt::{Finding, Measured};

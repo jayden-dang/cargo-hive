@@ -13,9 +13,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::caps::CRATE_DIR_CAP;
 use crate::ctx::Ctx;
 use crate::discover::Checkout;
-use crate::gc::CRATE_DIR_CAP;
 use crate::registry::Repo;
 use crate::state::window_days;
 use crate::toolchain::Toolchain;

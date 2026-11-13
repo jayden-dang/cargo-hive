@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use cargo_hive::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive::cargo_target::{Owner, TargetDir};
 use cargo_hive::fingerprint::read_profile;
-use cargo_hive::gc::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive::liveness::unit_timestamp;
 use cargo_hive::platform::apfs::Apfs;
 use cargo_hive::platform::{

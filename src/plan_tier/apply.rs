@@ -7,11 +7,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::caps::CRATE_DIR_CAP;
 use crate::cargo_target::{self, Owner, TargetDir};
 use crate::ctx::Ctx;
 use crate::discover::{self, Snapshot};
 use crate::fingerprint::{read_profile, Format, ProfileReport};
-use crate::gc::{self, Bytes, Ledger};
+use crate::ledger::{self, Bytes, Ledger};
 use crate::liveness::{self, Liveness};
 use crate::locks::{self, Acquired, Locked, Reason};
 use crate::plan_tier::build::{class_label, class_of_target, TargetClass};
@@ -761,7 +762,7 @@ fn recheck(
 }
 
 fn listed_profiles(fs: &dyn Fs, target: &PlannedTarget) -> Result<Vec<PathBuf>, Refusal> {
-    match cargo_target::identify_bounded(fs, &target.path, crate::gc::CRATE_DIR_CAP) {
+    match cargo_target::identify_bounded(fs, &target.path, CRATE_DIR_CAP) {
         Some(Ok(profiles)) => Ok(profiles.into_iter().map(|(path, _)| path).collect()),
         Some(Err(why)) => Err(Refusal {
             reason: "unsupported_format",
@@ -904,7 +905,7 @@ fn delete_entry(ctx: &Ctx, ledger: &mut Ledger, target: &Path, entry: &PlannedEn
             entry.path.display()
         ));
     }
-    match gc::remove_counted(
+    match ledger::remove_counted(
         ctx.fs,
         ledger,
         target,

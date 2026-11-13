@@ -1,4 +1,5 @@
 pub mod bench;
+pub mod caps;
 pub mod cargo_target;
 pub mod classify;
 pub mod cli;
@@ -10,6 +11,7 @@ pub mod explain;
 pub mod fingerprint;
 pub mod gc;
 pub mod git;
+pub mod ledger;
 #[doc(hidden)]
 pub mod liveness;
 pub mod locks;

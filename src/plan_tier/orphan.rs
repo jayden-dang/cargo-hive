@@ -4,10 +4,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::caps::CRATE_DIR_CAP;
 use crate::cargo_target::{self, Owner};
 use crate::ctx::Ctx;
 use crate::discover::{self, Snapshot, WalkFault};
-use crate::gc::{self, Ledger, CRATE_DIR_CAP};
+use crate::ledger::{self, Ledger, RemoveFailed};
 use crate::locks::{self, Acquired};
 use crate::plan_tier::guard::{check_entry, Deleted, Expect};
 use crate::plan_tier::record::{kind_of, BytesRec, PlannedTarget};
@@ -84,7 +85,7 @@ pub fn remove(
         return Removal::Skipped("cancelled".to_string());
     }
     let mut ledger = Ledger::new();
-    let removal = match gc::remove_counted(
+    let removal = match ledger::remove_counted(
         ctx.fs,
         &mut ledger,
         parent,
@@ -226,8 +227,7 @@ fn into_counted(ledger: Ledger) -> Counted {
     }
 }
 
-fn removal_error(err: crate::gc::account::RemoveFailed, ledger: Ledger) -> Removal {
-    use crate::gc::account::RemoveFailed;
+fn removal_error(err: RemoveFailed, ledger: Ledger) -> Removal {
     match err {
         RemoveFailed::Scan(why) => Removal::MeasureRefused(format!("could not measure: {why}")),
         RemoveFailed::Remove(error) => Removal::Failed(FailedRemoval {

@@ -12,8 +12,8 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use crate::caps::CRATE_DIR_CAP;
 use crate::fingerprint;
-use crate::gc::CRATE_DIR_CAP;
 use crate::platform::{EntryKind, Fs};
 use crate::size::{allocated_bytes, SizeError, MAX_DEPTH};
 use crate::state::{State, StateError};

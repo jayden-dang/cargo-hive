@@ -4,11 +4,11 @@
 //! a registry unit. An undecided target, an unsupported profile, or a hit bound
 //! fills nothing from that target.
 
+use crate::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use crate::cargo_target::{Owner, TargetDir};
 use crate::ctx::{checkout_walk, Ctx};
 use crate::discover::{self, Snapshot};
 use crate::fingerprint::{self, le_hex, Format, Unit};
-use crate::gc::{CRATE_DIR_CAP, DEPS_CAP};
 use crate::liveness::{self, Liveness, Uncertain};
 use crate::platform::{EntryKind, Fs};
 use crate::receipt::Finding;
@@ -780,10 +780,10 @@ fn unescape_spaces(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caps::DEPS_CAP;
     use crate::cargo_target::{Owner, TargetDir, TAG_LINE};
     use crate::ctx::Ctx;
     use crate::fingerprint::{self, le_hex, read_profile};
-    use crate::gc::DEPS_CAP;
     use crate::platform::EntryKind;
     use crate::registry::Repo;
     use crate::size::MAX_DEPTH;

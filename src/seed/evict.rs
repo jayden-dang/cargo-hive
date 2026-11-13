@@ -7,10 +7,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::caps::CRATE_DIR_CAP;
 use crate::cargo_target::TargetDir;
 use crate::ctx::{faults_that_can_hide_an_owner, split_checkout_faults};
 use crate::discover::{Checkout, WalkFault};
-use crate::gc::{self, Ledger};
+use crate::ledger::{self, Ledger};
 use crate::platform::Fs;
 use crate::receipt::{Finding, Measured};
 use crate::seed::source::{self, Holds};
@@ -298,7 +299,7 @@ pub fn run(
         let store_root = store_dir(ctx.state);
         for key in &renamed {
             if let Some(path) = path_for_key(ctx.state, &inv, key) {
-                let _ = gc::remove_counted(
+                let _ = ledger::remove_counted(
                     ctx.fs,
                     &mut ledger,
                     &store_root,
@@ -474,7 +475,7 @@ pub fn run(
         } else if cap_keys.contains(key) {
             cap_evicted += 1;
         }
-        if let Err(err) = gc::remove_counted(
+        if let Err(err) = ledger::remove_counted(
             ctx.fs,
             &mut ledger,
             &store_root,
@@ -755,7 +756,7 @@ fn plan_cap(
             continue;
         }
         let dir = entry_dir(state, row);
-        let freeable = gc::measure(fs, &dir, std::slice::from_ref(&dir), true)
+        let freeable = ledger::measure(fs, &dir, std::slice::from_ref(&dir), true)
             .bytes
             .freed;
         sum += freeable;
@@ -774,7 +775,7 @@ fn plan_cap(
         if planned.contains(key) {
             continue;
         }
-        let freeable = gc::measure(fs, dir, std::slice::from_ref(dir), true)
+        let freeable = ledger::measure(fs, dir, std::slice::from_ref(dir), true)
             .bytes
             .freed;
         sum += freeable;
@@ -950,7 +951,7 @@ fn absorb_walk_faults(
 }
 
 fn remove_stale_evict_trees(state: &State) -> Result<(), String> {
-    remove_stale_evict_trees_bounded(state, crate::gc::CRATE_DIR_CAP)
+    remove_stale_evict_trees_bounded(state, CRATE_DIR_CAP)
 }
 
 fn remove_stale_evict_trees_bounded(state: &State, cap: usize) -> Result<(), String> {
@@ -988,7 +989,7 @@ fn remove_stale_evict_trees_bounded(state: &State, cap: usize) -> Result<(), Str
 }
 
 fn remove_emptied_value_dirs(state: &State, renamed: &[(StoreKey, PathBuf)]) -> Result<(), String> {
-    remove_emptied_value_dirs_bounded(state, renamed, crate::gc::CRATE_DIR_CAP)
+    remove_emptied_value_dirs_bounded(state, renamed, CRATE_DIR_CAP)
 }
 
 fn remove_emptied_value_dirs_bounded(

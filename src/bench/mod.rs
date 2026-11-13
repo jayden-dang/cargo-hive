@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::caps::DEPS_CAP;
 use crate::ctx::Ctx;
 use crate::discover::{self, Checkout, Snapshot};
-use crate::gc;
 use crate::platform::proc::{self, Capture, ChildOutputError};
 use crate::receipt::{Finding, Measured, ReceiptBuilder};
 use crate::registry::Repo;
@@ -210,7 +210,7 @@ fn attach_seed_counts(
         report.unmeasured.push((field, "no seed record".into()));
         return;
     };
-    match record::counts(target, rec, gc::DEPS_CAP) {
+    match record::counts(target, rec, DEPS_CAP) {
         Ok(Some(c)) => {
             measured.insert("seeded_fresh".into(), Measured::Int(c.fresh));
             measured.insert("seeded_unneeded".into(), Measured::Int(c.unneeded));

@@ -9,11 +9,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::caps::CRATE_DIR_CAP;
 use crate::cargo_target::{Owner, TargetDir};
 use crate::classify::Class;
 use crate::ctx::Ctx;
 use crate::discover::{self, Checkout, Scope, Snapshot};
-use crate::gc;
+use crate::ledger;
 use crate::liveness::{self, Liveness, Uncertain, UnitRef};
 use crate::plan_tier::record::{
     kind_name, BytesRec, OrphanScope, Plan, PlanClass, PlanState, PlannedEntry, PlannedTarget,
@@ -138,7 +139,7 @@ pub fn plan_for_target(ctx: &Ctx, target: &TargetDir, window: Duration) -> Targe
         Owner::OrphanCandidate { .. } | Owner::Unresolved { .. } => None,
     };
     let (planned, unmeasured, unmeasured_more) = if ctx.account_bytes {
-        let foot = gc::measure(ctx.fs, &target.path, &paths, true);
+        let foot = ledger::measure(ctx.fs, &target.path, &paths, true);
         (
             Some(BytesRec {
                 freed: foot.bytes.freed,
@@ -337,27 +338,25 @@ fn plan_orphan(
         }
     };
     let kind = kind_name(stat.kind).to_string();
-    let dirs =
-        match crate::cargo_target::identify_bounded(ctx.fs, &target.path, crate::gc::CRATE_DIR_CAP)
-        {
-            Some(Ok(found)) => found.into_iter().map(|(dir, _)| dir).collect(),
-            Some(Err(why)) => {
-                findings.push((
-                    "plan.unreadable".to_string(),
-                    Some(target.path.clone()),
-                    why,
-                ));
-                return None;
-            }
-            None => {
-                findings.push((
-                    "plan.unreadable".to_string(),
-                    Some(target.path.clone()),
-                    format!("{} is no longer a Cargo target dir", target.path.display()),
-                ));
-                return None;
-            }
-        };
+    let dirs = match crate::cargo_target::identify_bounded(ctx.fs, &target.path, CRATE_DIR_CAP) {
+        Some(Ok(found)) => found.into_iter().map(|(dir, _)| dir).collect(),
+        Some(Err(why)) => {
+            findings.push((
+                "plan.unreadable".to_string(),
+                Some(target.path.clone()),
+                why,
+            ));
+            return None;
+        }
+        None => {
+            findings.push((
+                "plan.unreadable".to_string(),
+                Some(target.path.clone()),
+                format!("{} is no longer a Cargo target dir", target.path.display()),
+            ));
+            return None;
+        }
+    };
     Some(PlannedTarget {
         path: target.path.clone(),
         owner: None,
@@ -387,7 +386,7 @@ fn measured_orphan(
         return None;
     }
     let paths = [target.path.clone()];
-    let foot = gc::measure(ctx.fs, &target.path, &paths, true);
+    let foot = ledger::measure(ctx.fs, &target.path, &paths, true);
     push_gaps(unmeasured, foot.unmeasured, foot.unmeasured_more);
     Some(BytesRec {
         freed: foot.bytes.freed,
