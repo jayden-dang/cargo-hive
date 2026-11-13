@@ -7,6 +7,6 @@ pub mod liveness;
 mod plan;
 mod run;
 
-pub use crate::discover::Scope;
+pub use cargo_hive_cargo::discover::Scope;
 pub use plan::{MIN_AGE, is_temp_entry};
 pub use run::{Counts, GcReport, RunOpts, Skip, run};

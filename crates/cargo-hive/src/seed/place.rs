@@ -13,8 +13,8 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::ctx::Ctx;
 use crate::seed::store::{self, Row};
+use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_core::liveness;
 use cargo_hive_core::size::{MAX_DEPTH, allocated_bytes};
 use cargo_hive_platform::{EntryKind, Fs};
@@ -189,7 +189,7 @@ pub fn place(
         return finish(ctx, PlaceReport::default(), &mut Added::default());
     }
     let mut report = PlaceReport::default();
-    let resolved = match crate::metadata::resolve(checkout, cancel) {
+    let resolved = match cargo_hive_cargo::metadata::resolve(checkout, cancel) {
         Ok(resolved) => resolved,
         Err(reason) => {
             report.findings.push((

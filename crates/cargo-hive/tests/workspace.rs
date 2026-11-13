@@ -10,6 +10,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("cargo-hive-platform", 0),
     ("cargo-hive-core", 1),
     ("cargo-hive-state", 2),
+    ("cargo-hive-cargo", 3),
     ("cargo-hive", 5),
 ];
 const FEATURES: &[&str] = &[];

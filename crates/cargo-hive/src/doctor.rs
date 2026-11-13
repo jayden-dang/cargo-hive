@@ -1,7 +1,7 @@
 //! `cargo hive doctor`: capability checks in a fresh temp dir, the check → capability map,
 //! and the `require` gate every capability-dependent command calls.
 
-use crate::toolchain::Toolchain;
+use cargo_hive_cargo::toolchain::Toolchain;
 use cargo_hive_core::receipt::Measured;
 use cargo_hive_platform::major_version;
 use cargo_hive_platform::proc::{self, ChildOutputError, Spec};
@@ -555,7 +555,7 @@ fn probe_command(tc: &Toolchain, krate: &Path, target: &Path, cargo_home: &Path)
         .as_deref()
         .map(std::ffi::OsStr::new)
         .unwrap_or_else(|| std::ffi::OsStr::new(""));
-    crate::env::probe_build(&mut spec, &parent, cargo_home, &rustup_home, name);
+    cargo_hive_cargo::env::probe_build(&mut spec, &parent, cargo_home, &rustup_home, name);
     spec.env_set
         .push(("CARGO_TARGET_DIR".into(), target.as_os_str().into()));
     spec.env_set

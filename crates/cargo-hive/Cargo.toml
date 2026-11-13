@@ -22,6 +22,7 @@ serde_json = { workspace = true }
 cargo-hive-platform = { workspace = true }
 cargo-hive-core = { workspace = true }
 cargo-hive-state = { workspace = true }
+cargo-hive-cargo = { workspace = true }
 
 [dev-dependencies]
 libc = { workspace = true }

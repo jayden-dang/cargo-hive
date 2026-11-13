@@ -11,10 +11,10 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::ctx::Ctx;
-use crate::registry::Repo;
 use crate::seed::source::{self, Skip, SourceUnit};
 use crate::seed::store::{self, PublishFailed, Published, Row};
+use cargo_hive_cargo::ctx::Ctx;
+use cargo_hive_cargo::registry::Repo;
 use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive_core::locks::{self, Acquired, Locked};
 use cargo_hive_core::size::MAX_DEPTH;
@@ -878,7 +878,7 @@ pub fn toolchain_row(
     let text = read_capped(&path, RUSTC_INFO_CAP)?;
     let version = rustc_info_version(&text).map_err(|err| format!("{}: {err}", path.display()))?;
     let resolved =
-        crate::toolchain::resolve_toolchain_until(source_checkout, cancel).map_err(|err| {
+        cargo_hive_cargo::toolchain::resolve_toolchain_until(source_checkout, cancel).map_err(|err| {
             if cancel() {
                 format!("{}: {err}", source_checkout.display())
             } else {
@@ -999,7 +999,7 @@ fn epoch_secs(now: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::rustc_info_version;
-    use crate::toolchain::resolve_toolchain;
+    use cargo_hive_cargo::toolchain::resolve_toolchain;
     use cargo_hive_core::fingerprint::{Coverage, Format, ProfileReport, Unit, UnitGraph};
     use cargo_hive_core::target::{Owner, TargetDir};
     use std::path::{Path, PathBuf};

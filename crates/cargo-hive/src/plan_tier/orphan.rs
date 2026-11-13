@@ -4,10 +4,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::ctx::Ctx;
-use crate::discover::{self, Snapshot, WalkFault};
 use crate::plan_tier::guard::{Deleted, Expect, check_entry};
 use crate::plan_tier::record::{BytesRec, PlannedTarget, kind_of};
+use cargo_hive_cargo::ctx::Ctx;
+use cargo_hive_cargo::discover::{self, Snapshot, WalkFault};
 use cargo_hive_core::caps::CRATE_DIR_CAP;
 use cargo_hive_core::ledger::{self, Ledger, RemoveFailed};
 use cargo_hive_core::locks::{self, Acquired};
@@ -171,11 +171,11 @@ fn still_orphan(
     if cancel() {
         return Err(Stop::Cancelled);
     }
-    let (checkouts, faults) = crate::ctx::checkout_walk(ctx);
+    let (checkouts, faults) = cargo_hive_cargo::ctx::checkout_walk(ctx);
     if cancel() {
         return Err(Stop::Cancelled);
     }
-    let (faults, cannot_enter) = crate::ctx::split_checkout_faults(faults);
+    let (faults, cannot_enter) = cargo_hive_cargo::ctx::split_checkout_faults(faults);
     noted.extend(cannot_enter);
     if !faults.is_empty() {
         return Err(Stop::Unreadable(faults));
@@ -185,7 +185,10 @@ fn still_orphan(
     if cancel() {
         return Err(Stop::Cancelled);
     }
-    let faults = crate::ctx::faults_that_can_hide_an_owner(scan.walk_faults, &ctx.cfg.cache_roots);
+    let faults = cargo_hive_cargo::ctx::faults_that_can_hide_an_owner(
+        scan.walk_faults,
+        &ctx.cfg.cache_roots,
+    );
     if !faults.is_empty() {
         return Err(Stop::Unreadable(faults));
     }

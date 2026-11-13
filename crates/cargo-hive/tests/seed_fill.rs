@@ -1042,7 +1042,7 @@ fn unit_json_path(target: &Path, unit: &SourceUnit) -> PathBuf {
 }
 
 fn plant_rustc_info(target: &Path, checkout: &Path) {
-    let text = cargo_hive::toolchain::resolve_toolchain(checkout)
+    let text = cargo_hive_cargo::toolchain::resolve_toolchain(checkout)
         .unwrap()
         .version_text;
     let body = serde_json::json!({
@@ -1082,7 +1082,7 @@ fn a_clean_target_writes_a_row_matching_its_toolchain() {
         units.iter().all(|unit| unit.toolchain_value == value),
         "a clean target's units share one toolchain value"
     );
-    let text = cargo_hive::toolchain::resolve_toolchain(&built.repo.main)
+    let text = cargo_hive_cargo::toolchain::resolve_toolchain(&built.repo.main)
         .unwrap()
         .version_text;
     assert_eq!(
@@ -1189,7 +1189,7 @@ fn text_that_differs_from_the_source_checkout_writes_no_row() {
     }
     assert_eq!(changed, 1, "the built target has one release stdout");
     std::fs::write(&path, serde_json::to_string(&parsed).unwrap()).unwrap();
-    let checkout = cargo_hive::toolchain::resolve_toolchain(&built.repo.main)
+    let checkout = cargo_hive_cargo::toolchain::resolve_toolchain(&built.repo.main)
         .unwrap()
         .version_text;
     let parsed_text =
@@ -1233,7 +1233,7 @@ fn two_targets_with_one_toolchain_share_one_row() {
         size: None,
         unreadable: None,
     };
-    let text = cargo_hive::toolchain::resolve_toolchain(&built.repo.main)
+    let text = cargo_hive_cargo::toolchain::resolve_toolchain(&built.repo.main)
         .unwrap()
         .version_text;
     assert_eq!(

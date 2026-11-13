@@ -1,7 +1,7 @@
 //! Thin adapter: arguments → library calls → one receipt.
 
 use crate::bench::command::BuildCmd;
-use crate::registry::{self, Registry};
+use cargo_hive_cargo::registry::{self, Registry};
 use cargo_hive_core::receipt::{PlanRecord, PlanTierBody, Receipt, ReceiptBuilder, Scope};
 use cargo_hive_platform::{self as platform, MACOS_ONLY_MESSAGE};
 use cargo_hive_state::{State, StateError};
@@ -313,7 +313,7 @@ fn begin_plan_tier(b: &mut ReceiptBuilder) {
 }
 
 fn repo_add(state: &State, path: &std::path::Path, out: OutputArgs) -> i32 {
-    use crate::registry::{RegisterOutcome, register};
+    use cargo_hive_cargo::registry::{RegisterOutcome, register};
     let result = state.locked(|tx| register(path, tx));
     let mut b = Receipt::new("repo add", Scope::default());
     match result {
@@ -431,7 +431,7 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
     let env = DoctorEnv {
         tmp_parent: std::env::temp_dir(),
         macos: macos.clone(),
-        toolchain: crate::toolchain::resolve_toolchain(state.root()),
+        toolchain: cargo_hive_cargo::toolchain::resolve_toolchain(state.root()),
         cancel: doctor::process_cancel,
     };
     if let Err(e) = platform::signals::install() {
@@ -528,7 +528,7 @@ fn owning_repo<'a>(reg: &'a Registry, path: &std::path::Path) -> Option<&'a regi
     {
         return Some(inside);
     }
-    let common = crate::git::Git::at(path).common_dir().ok()?;
+    let common = cargo_hive_cargo::git::Git::at(path).common_dir().ok()?;
     let common = common.canonicalize().unwrap_or(common);
     let main = common.parent()?;
     reg.repos.iter().find(|r| r.main == main)
@@ -595,14 +595,14 @@ fn live_checkouts(
     cfg: &cargo_hive_state::Config,
     b: &mut ReceiptBuilder,
 ) -> (
-    Vec<crate::discover::Checkout>,
-    Vec<crate::discover::WalkFault>,
+    Vec<cargo_hive_cargo::discover::Checkout>,
+    Vec<cargo_hive_cargo::discover::WalkFault>,
 ) {
     let mut checkouts = Vec::new();
     let mut walk_faults = Vec::new();
     for repo in repos {
         b.scope_mut().repos.push(repo.main.clone());
-        let (rows, faults) = crate::discover::checkouts(repo, registered_mains, cfg);
+        let (rows, faults) = cargo_hive_cargo::discover::checkouts(repo, registered_mains, cfg);
         for fault in &faults {
             b.finding(
                 "walk.unreadable",
@@ -622,8 +622,8 @@ fn live_checkouts(
 }
 
 fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: OutputArgs) -> i32 {
-    use crate::discover::{self, SNAPSHOT_FILE, Snapshot};
     use crate::doctor::{self, Capabilities, Capability};
+    use cargo_hive_cargo::discover::{self, SNAPSHOT_FILE, Snapshot};
     use cargo_hive_core::classify::Class;
     let loaded = (|| -> Result<_, cargo_hive_state::StateError> {
         Ok((
@@ -646,7 +646,7 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
     };
     b.note(format!("secondary_roots: {}", list(&cfg.secondary_roots)));
     b.note(format!("cache_roots: {}", list(&cfg.cache_roots)));
-    let release = crate::toolchain::resolve_toolchain(state.root())
+    let release = cargo_hive_cargo::toolchain::resolve_toolchain(state.root())
         .ok()
         .map(|t| t.release);
     b.toolchain(release.clone());
@@ -787,7 +787,7 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
 fn report_targets(
     b: &mut ReceiptBuilder,
     human: &mut String,
-    scan: &crate::discover::TargetScan,
+    scan: &cargo_hive_cargo::discover::TargetScan,
     seeds: Option<&crate::seed::record::SeedsFile>,
 ) {
     use cargo_hive_core::fingerprint::Format;
@@ -912,10 +912,10 @@ fn put_counts(b: &mut ReceiptBuilder, suffix: &str, c: &crate::gc::Counts) {
 }
 
 fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: OutputArgs) -> i32 {
-    use crate::discover::{self, SNAPSHOT_FILE, Snapshot};
     use crate::doctor::{self, Capabilities, Capability};
     use crate::gc;
     use crate::seed::evict::{self, EvictCtx, Limits};
+    use cargo_hive_cargo::discover::{self, SNAPSHOT_FILE, Snapshot};
     use cargo_hive_state::window_days;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
@@ -950,7 +950,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
         return 2;
     };
     let mut b = Receipt::new(command, Scope::default());
-    let caller_toolchain = crate::toolchain::resolve_toolchain(state.root()).ok();
+    let caller_toolchain = cargo_hive_cargo::toolchain::resolve_toolchain(state.root()).ok();
     let release = caller_toolchain.as_ref().map(|t| t.release.clone());
     b.toolchain(release.clone());
     for cap in [Capability::FingerprintReading, Capability::Deletion] {
@@ -1039,7 +1039,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
                         account_bytes,
                         now: opts.now,
                         caller_toolchain,
-                        caller_toolchain_kept: crate::toolchain::caller_toolchain_kept(),
+                        caller_toolchain_kept: cargo_hive_cargo::toolchain::caller_toolchain_kept(),
                         rustup: Path::new("rustup"),
                         liveness: crate::gc::liveness::liveness,
                     },
@@ -1130,10 +1130,10 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
 }
 
 fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
-    use crate::ctx::Ctx;
     use crate::doctor::{self, Capabilities, Capability};
     use crate::plan_tier::apply;
     use crate::plan_tier::build;
+    use cargo_hive_cargo::ctx::Ctx;
     use cargo_hive_core::receipt::Outcome;
     if let Err(e) = platform::signals::install() {
         return emit_failure(
@@ -1162,7 +1162,7 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
     };
     let mut b = Receipt::new("apply", Scope::default());
     begin_plan_tier(&mut b);
-    let release = crate::toolchain::resolve_toolchain(state.root())
+    let release = cargo_hive_cargo::toolchain::resolve_toolchain(state.root())
         .ok()
         .map(|t| t.release);
     b.toolchain(release.clone());
@@ -1239,10 +1239,10 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
 }
 
 fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 {
-    use crate::ctx::Ctx;
     use crate::doctor::{self, Capabilities, Capability};
     use crate::plan_tier::build::{self, MakeError};
     use crate::plan_tier::record;
+    use cargo_hive_cargo::ctx::Ctx;
     use std::collections::BTreeMap;
     use std::time::SystemTime;
     const ID_ATTEMPTS: u32 = 4;
@@ -1273,7 +1273,7 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
     };
     let mut b = Receipt::new("gc --plan", Scope::default());
     begin_plan_tier(&mut b);
-    let release = crate::toolchain::resolve_toolchain(state.root())
+    let release = cargo_hive_cargo::toolchain::resolve_toolchain(state.root())
         .ok()
         .map(|t| t.release);
     b.toolchain(release.clone());
@@ -1299,7 +1299,7 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
     let (_checkouts, _) = live_checkouts(&named, &registered_mains, &cfg, &mut b);
     if !args.is_empty() {
         for repo in &reg.repos {
-            let (rows, _) = crate::discover::checkouts(repo, &registered_mains, &cfg);
+            let (rows, _) = cargo_hive_cargo::discover::checkouts(repo, &registered_mains, &cfg);
             for arg in args {
                 let real = arg.canonicalize().unwrap_or_else(|_| arg.clone());
                 if rows.iter().any(|row| !row.missing && row.path == real)
@@ -1417,9 +1417,9 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
 }
 
 fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: OutputArgs) -> i32 {
-    use crate::discover::{self, SNAPSHOT_FILE, Snapshot};
     use crate::doctor::{self, Capabilities, Capability};
     use crate::explain::{self, FailedUnits, Limits};
+    use cargo_hive_cargo::discover::{self, SNAPSHOT_FILE, Snapshot};
     use cargo_hive_core::fingerprint::Format;
     use cargo_hive_platform::Availability;
     let loaded = (|| -> Result<_, StateError> {
@@ -1435,7 +1435,7 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
         Err(e) => return emit_failure(state, out, "explain", &e.to_string(), 1),
     };
     let mut b = Receipt::new("explain", Scope::default());
-    let release = crate::toolchain::resolve_toolchain(state.root())
+    let release = cargo_hive_cargo::toolchain::resolve_toolchain(state.root())
         .ok()
         .map(|t| t.release);
     b.toolchain(release.clone());
@@ -1574,8 +1574,8 @@ pub(crate) fn locate_checkout(
 ) -> Result<
     (
         registry::Repo,
-        crate::discover::Checkout,
-        crate::toolchain::Toolchain,
+        cargo_hive_cargo::discover::Checkout,
+        cargo_hive_cargo::toolchain::Toolchain,
     ),
     Refusal,
 > {
@@ -1600,7 +1600,7 @@ pub(crate) fn locate_checkout(
     let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
     let mut matched = None;
     for repo in &reg.repos {
-        let (rows, _) = crate::discover::checkouts(repo, &registered_mains, cfg);
+        let (rows, _) = cargo_hive_cargo::discover::checkouts(repo, &registered_mains, cfg);
         if let Some(row) = rows
             .into_iter()
             .find(|row| row.path == real && !row.missing)
@@ -1634,7 +1634,7 @@ pub(crate) fn locate_checkout(
             code: 1,
         });
     }
-    let toolchain = match crate::toolchain::resolve_toolchain(&real) {
+    let toolchain = match cargo_hive_cargo::toolchain::resolve_toolchain(&real) {
         Ok(toolchain) => toolchain,
         Err(err) => {
             let code = doctor::toolchain_failure_exit(&err);
@@ -1670,8 +1670,8 @@ pub(crate) fn locate_checkout(
 }
 
 fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
-    use crate::ctx::Ctx;
     use crate::doctor::{self, Capabilities, Capability};
+    use cargo_hive_cargo::ctx::Ctx;
     use cargo_hive_state::window_days;
     let loaded = (|| -> Result<_, StateError> {
         Ok((
@@ -1769,8 +1769,8 @@ fn bench_cmd(
 ) -> i32 {
     use crate::bench::command::env_map;
     use crate::bench::{self, BUILD_DEADLINE, Limits, Plan};
-    use crate::ctx::Ctx;
     use crate::doctor::{self, Capabilities, Capability};
+    use cargo_hive_cargo::ctx::Ctx;
     use cargo_hive_core::receipt::Measured;
     use cargo_hive_state::window_days;
     use std::collections::BTreeMap;
@@ -1894,7 +1894,7 @@ fn bench_cmd(
 mod tests {
     use super::*;
     use crate::doctor::Capabilities;
-    use crate::git::Git;
+    use cargo_hive_cargo::git::Git;
     use cargo_hive_state::Config;
     use std::path::{Path, PathBuf};
     use std::process::Command;

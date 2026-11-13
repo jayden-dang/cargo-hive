@@ -92,11 +92,23 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 name = "cargo-hive"
 version = "0.1.0"
 dependencies = [
+ "cargo-hive-cargo",
  "cargo-hive-core",
  "cargo-hive-platform",
  "cargo-hive-state",
  "clap",
  "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cargo-hive-cargo"
+version = "0.1.0"
+dependencies = [
+ "cargo-hive-core",
+ "cargo-hive-platform",
+ "cargo-hive-state",
  "serde",
  "serde_json",
 ]

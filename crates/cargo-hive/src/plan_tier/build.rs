@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::ctx::Ctx;
-use crate::discover::{self, Checkout, Scope, Snapshot};
 use crate::plan_tier::record::{
     BytesRec, OrphanScope, Plan, PlanClass, PlanState, PlannedEntry, PlannedTarget, kind_name,
 };
+use cargo_hive_cargo::ctx::Ctx;
+use cargo_hive_cargo::discover::{self, Checkout, Scope, Snapshot};
 use cargo_hive_core::caps::CRATE_DIR_CAP;
 use cargo_hive_core::classify::Class;
 use cargo_hive_core::ledger;
@@ -559,7 +559,7 @@ fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discover::Checkout;
+    use cargo_hive_cargo::discover::Checkout;
     use cargo_hive_core::classify::{CheckoutKind, Class};
     use cargo_hive_core::target::Owner;
 

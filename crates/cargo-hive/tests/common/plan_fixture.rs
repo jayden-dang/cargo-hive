@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use cargo_hive::ctx::Ctx;
-use cargo_hive::registry::{FILE as REGISTRY_FILE, Registry};
+use cargo_hive_cargo::ctx::Ctx;
+use cargo_hive_cargo::registry::{FILE as REGISTRY_FILE, Registry};
 use cargo_hive_platform::Fs;
 use cargo_hive_state::{Config, State};
 
@@ -218,7 +218,7 @@ impl Planned {
 pub struct LibCtx {
     pub state: State,
     pub cfg: Config,
-    pub repos: Vec<cargo_hive::registry::Repo>,
+    pub repos: Vec<cargo_hive_cargo::registry::Repo>,
     pub mains: Vec<PathBuf>,
     pub fs: Box<dyn Fs>,
 }

@@ -7,14 +7,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::ctx::{faults_that_can_hide_an_owner, split_checkout_faults};
-use crate::discover::{Checkout, WalkFault};
 use crate::seed::source::{self, Holds};
 use crate::seed::store::{
     self, CommitPlan, Inventory, Row, StoreKey, commit_eviction, entry_dir, evict_dir, inventory,
     key_dir, rename_out, row_key, row_matches, store_dir,
 };
-use crate::toolchain::{self, Toolchain};
+use cargo_hive_cargo::ctx::{faults_that_can_hide_an_owner, split_checkout_faults};
+use cargo_hive_cargo::discover::{Checkout, WalkFault};
+use cargo_hive_cargo::toolchain::{self, Toolchain};
 use cargo_hive_core::caps::CRATE_DIR_CAP;
 use cargo_hive_core::ledger::{self, Ledger};
 use cargo_hive_core::liveness::LivenessFn;

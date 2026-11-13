@@ -13,9 +13,9 @@ use std::time::{Duration, Instant, SystemTime};
 use cargo_hive::bench::check::{CheckStop, Checked, check};
 use cargo_hive::bench::command::{BuildCmd, env_map};
 use cargo_hive::bench::{BUILD_DEADLINE, End, Limits, Plan, Report, run};
-use cargo_hive::ctx::Ctx;
-use cargo_hive::registry::Registry;
 use cargo_hive::seed::{self, Fill};
+use cargo_hive_cargo::ctx::Ctx;
+use cargo_hive_cargo::registry::Registry;
 use cargo_hive_core::receipt::Measured;
 use cargo_hive_state::{Config, State};
 use common::plan_fixture::LibCtx;
@@ -116,7 +116,7 @@ fn checked_with_cancel(
     let _env = env_lock().lock().unwrap_or_else(|err| err.into_inner());
     let _home = CargoHomeGuard::set(&hive.cargo_home.path);
     let state = State::open_at(hive.home.path.clone()).unwrap();
-    let reg: Registry = state.read(cargo_hive::registry::FILE).unwrap();
+    let reg: Registry = state.read(cargo_hive_cargo::registry::FILE).unwrap();
     let cfg = state.config().unwrap();
     let caps = state.read(cargo_hive::doctor::CAPABILITIES_FILE).unwrap();
     check(&reg, &cfg, &caps, cold, seeded, cancel)

@@ -4,7 +4,7 @@
 
 use super::is_temp_entry;
 use super::plan::{self, Action};
-use crate::discover::Scope;
+use cargo_hive_cargo::discover::Scope;
 use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive_core::fingerprint::Format;
 use cargo_hive_core::ledger::{Bytes, Ledger, RemoveFailed, remove_counted};

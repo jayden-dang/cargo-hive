@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 /// The reason a cache-root target stays `Unresolved` when only some repositories are named.
-pub(crate) const CACHE_ROOT_UNJUDGED: &str = "a cache-root target is judged against every registered repository; run `cargo hive status` without arguments";
+#[doc(hidden)]
+pub const CACHE_ROOT_UNJUDGED: &str = "a cache-root target is judged against every registered repository; run `cargo hive status` without arguments";
 
 pub const SKIP_DIRS: [&str; 3] = ["node_modules", "target", ".git"];
 

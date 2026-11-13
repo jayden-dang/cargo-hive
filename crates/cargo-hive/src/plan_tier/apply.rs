@@ -7,14 +7,14 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::ctx::Ctx;
-use crate::discover::{self, Snapshot};
 use crate::plan_tier::build::{TargetClass, class_label, class_of_target};
 use crate::plan_tier::guard::{Deleted as EntryMismatch, Expect, check_entry};
 use crate::plan_tier::orphan::{self, Counted, Removal};
 use crate::plan_tier::record::{
     self, BytesRec, Lookup, Plan, PlanClass, PlannedEntry, PlannedTarget, Taken, kind_of,
 };
+use cargo_hive_cargo::ctx::Ctx;
+use cargo_hive_cargo::discover::{self, Snapshot};
 use cargo_hive_core::caps::CRATE_DIR_CAP;
 use cargo_hive_core::fingerprint::{Format, ProfileReport, read_profile};
 use cargo_hive_core::ledger::{self, Bytes, Ledger};
@@ -563,7 +563,7 @@ enum ResolveStop {
 /// Reports walk faults that did not stop the plan, each path once.
 fn note_faults(
     findings: &mut Vec<(String, Option<PathBuf>, String)>,
-    faults: Vec<crate::discover::WalkFault>,
+    faults: Vec<cargo_hive_cargo::discover::WalkFault>,
 ) {
     for fault in faults {
         let seen = findings
@@ -583,13 +583,13 @@ fn resolve(
     ctx: &Ctx,
     plan: &Plan,
     cancel: &(dyn Fn() -> bool + Sync),
-    noted: &mut Vec<crate::discover::WalkFault>,
+    noted: &mut Vec<cargo_hive_cargo::discover::WalkFault>,
 ) -> Result<Vec<ResolvedTarget>, ResolveStop> {
-    let (checkouts, faults) = crate::ctx::checkout_walk(ctx);
+    let (checkouts, faults) = cargo_hive_cargo::ctx::checkout_walk(ctx);
     if cancel() {
         return Err(ResolveStop::Cancelled);
     }
-    let (faults, cannot_enter) = crate::ctx::split_checkout_faults(faults);
+    let (faults, cannot_enter) = cargo_hive_cargo::ctx::split_checkout_faults(faults);
     noted.extend(cannot_enter);
     if !faults.is_empty() {
         return Err(walk_refusal(plan, faults));
@@ -599,7 +599,10 @@ fn resolve(
     if cancel() {
         return Err(ResolveStop::Cancelled);
     }
-    let faults = crate::ctx::faults_that_can_hide_an_owner(scan.walk_faults, &ctx.cfg.cache_roots);
+    let faults = cargo_hive_cargo::ctx::faults_that_can_hide_an_owner(
+        scan.walk_faults,
+        &ctx.cfg.cache_roots,
+    );
     if !faults.is_empty() {
         return Err(walk_refusal(plan, faults));
     }
@@ -666,7 +669,7 @@ fn resolve(
     Ok(resolved)
 }
 
-fn walk_refusal(plan: &Plan, faults: Vec<crate::discover::WalkFault>) -> ResolveStop {
+fn walk_refusal(plan: &Plan, faults: Vec<cargo_hive_cargo::discover::WalkFault>) -> ResolveStop {
     let target = plan
         .targets
         .first()

@@ -11,12 +11,12 @@
 //! reports lies inside its clone (a build script writing elsewhere is not detected); every limit
 //! (deadline, output, walk, config size) is an error when hit, and nothing is silently skipped.
 
-use cargo_hive::ctx::Ctx;
 use cargo_hive::gc::liveness::liveness;
 use cargo_hive::plan_tier::apply::{self, ResolvedTarget};
 use cargo_hive::plan_tier::build::{self, TargetPlan};
 use cargo_hive::plan_tier::guard::{Deleted, Expect, delete_checked};
 use cargo_hive::plan_tier::record::{Plan, PlanClass, PlannedEntry, PlannedTarget, kind_name};
+use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_core::fingerprint;
 use cargo_hive_core::ledger::{Footprint, measure};
 use cargo_hive_core::liveness::{Liveness, unit_timestamp};

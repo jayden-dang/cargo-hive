@@ -3,8 +3,8 @@
 
 #![allow(clippy::disallowed_types, clippy::disallowed_methods, reason = "test fixtures")]
 
-use cargo_hive::ctx::Ctx;
 use cargo_hive::seed::source::{Skip, SourceUnit, holds, live_registry_units, unit_key};
+use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_core::caps::DEPS_CAP;
 use cargo_hive_core::fingerprint::{self, Format, le_hex, read_profile};
 use cargo_hive_core::target::{Owner, TargetDir};
@@ -691,13 +691,13 @@ fn a_lock_that_cannot_be_read_is_skipped_and_fills_nothing() {
         cache_roots: Vec::new(),
         gc_window_days: None,
     };
-    let repo = cargo_hive::registry::Repo {
+    let repo = cargo_hive_cargo::registry::Repo {
         main: scratch.0.clone(),
         root_commits: std::collections::BTreeSet::new(),
     };
     let repos = [repo.clone()];
     let mains = [scratch.0.clone()];
-    let ctx = cargo_hive::ctx::Ctx {
+    let ctx = cargo_hive_cargo::ctx::Ctx {
         state: &state,
         fs: platform.fs.as_ref(),
         cfg: &cfg,

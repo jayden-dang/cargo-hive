@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::toolchain::Toolchain;
+use cargo_hive_cargo::toolchain::Toolchain;
 use cargo_hive_platform::proc::Spec;
 use std::ffi::OsStr;
 
@@ -108,7 +108,7 @@ pub fn env_map(caller: impl IntoIterator<Item = (OsString, OsString)>, tc: &Tool
         .as_deref()
         .map(OsStr::new)
         .unwrap_or_else(|| OsStr::new(""));
-    crate::env::timed_build(&mut spec, &parent, &tc.cargo, &tc.rustc, name);
+    cargo_hive_cargo::env::timed_build(&mut spec, &parent, &tc.cargo, &tc.rustc, name);
     let vars = spec.env_set.into_iter().collect();
 
     EnvMap { vars, overridden }
@@ -150,7 +150,7 @@ impl EnvMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::toolchain::Toolchain;
+    use cargo_hive_cargo::toolchain::Toolchain;
     use std::ffi::OsString;
     use std::path::Path;
 

@@ -100,7 +100,7 @@ impl Hive {
     }
 
     pub fn write_capabilities(&self, disabled: serde_json::Value) {
-        let release = cargo_hive::toolchain::resolve_toolchain(&self.home.path)
+        let release = cargo_hive_cargo::toolchain::resolve_toolchain(&self.home.path)
             .expect("the proof machine has a Rust toolchain")
             .release;
         let caps = serde_json::json!({

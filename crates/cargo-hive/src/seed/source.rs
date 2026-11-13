@@ -4,9 +4,9 @@
 //! a registry unit. An undecided target, an unsupported profile, or a hit bound
 //! fills nothing from that target.
 
-use crate::ctx::{Ctx, checkout_walk};
-use crate::discover::{self, Snapshot};
 use crate::seed::store::StoreKey;
+use cargo_hive_cargo::ctx::{Ctx, checkout_walk};
+use cargo_hive_cargo::discover::{self, Snapshot};
 use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive_core::fingerprint::{self, Format, Unit, le_hex};
 use cargo_hive_core::liveness::{self, Liveness, LivenessFn, Uncertain};
@@ -785,8 +785,8 @@ fn unescape_spaces(input: &str) -> String {
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
-    use crate::ctx::Ctx;
-    use crate::registry::Repo;
+    use cargo_hive_cargo::ctx::Ctx;
+    use cargo_hive_cargo::registry::Repo;
     use cargo_hive_core::fingerprint::le_hex;
     use cargo_hive_core::size::MAX_DEPTH;
     use cargo_hive_core::target::{Owner, TAG_LINE};
