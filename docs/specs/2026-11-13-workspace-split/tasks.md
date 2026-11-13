@@ -866,12 +866,12 @@ _Requirements: SPLIT-1.3, SPLIT-1.5_
 
 **Depends-on:** Task 20
 
-- [ ] **Step 1: Failing test.** Add the rows and run `cargo test --test workspace`. Expect: the package is missing.
-- [ ] **Step 2: Implement.** Create the crate and move the files. `crates/cargo-hive/src/lib.rs` keeps only
+- [x] **Step 1: Failing test.** Add the rows and run `cargo test --test workspace`. Expect: the package is missing.
+- [x] **Step 2: Implement.** Create the crate and move the files. `crates/cargo-hive/src/lib.rs` keeps only
   `pub mod cli; pub mod bench;`.
-- [ ] **Step 3: Run.** The full gate, `cargo test -p cargo-hive-gc`, `cargo test --test workspace` (all layer rows,
+- [x] **Step 3: Run.** The full gate, `cargo test -p cargo-hive-gc`, `cargo test --test workspace` (all layer rows,
   no feature-to-feature edge) and the capture comparison pass.
-- [ ] **Step 4: Commit.** `git commit -m "build: extract the gc crate"`
+- [x] **Step 4: Commit.** `git commit -m "build: extract the gc crate"`
 
 _Requirements: SPLIT-1.1, SPLIT-1.2, SPLIT-1.3, SPLIT-1.5_
 
