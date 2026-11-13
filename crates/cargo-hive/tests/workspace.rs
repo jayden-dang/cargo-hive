@@ -6,7 +6,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-const LAYERS: &[(&str, u8)] = &[("cargo-hive-platform", 0), ("cargo-hive", 5)];
+const LAYERS: &[(&str, u8)] = &[
+    ("cargo-hive-platform", 0),
+    ("cargo-hive-core", 1),
+    ("cargo-hive", 5),
+];
 const FEATURES: &[&str] = &[];
 
 fn metadata() -> serde_json::Value {

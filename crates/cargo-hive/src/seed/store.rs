@@ -12,10 +12,10 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::caps::CRATE_DIR_CAP;
-use crate::fingerprint;
-use crate::size::{MAX_DEPTH, SizeError, allocated_bytes};
 use crate::state::{State, StateError};
+use cargo_hive_core::caps::CRATE_DIR_CAP;
+use cargo_hive_core::fingerprint;
+use cargo_hive_core::size::{MAX_DEPTH, SizeError, allocated_bytes};
 use cargo_hive_platform::{EntryKind, Fs};
 
 pub const STORE_FILE: &str = "store.db";

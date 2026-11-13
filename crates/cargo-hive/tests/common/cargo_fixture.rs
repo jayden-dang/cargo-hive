@@ -3,9 +3,9 @@
 //! decide liveness. Shared by the liveness tests; `cargo_in` kills a cargo that outlives its deadline.
 
 use super::{Scratch, prove, wait_within};
-use cargo_hive::cargo_target::TargetDir;
 use cargo_hive::gc::liveness::liveness;
-use cargo_hive::liveness::{DeadUnit, Liveness, UnitRef};
+use cargo_hive_core::liveness::{DeadUnit, Liveness, UnitRef};
+use cargo_hive_core::target::TargetDir;
 use cargo_hive_platform as platform;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -207,5 +207,5 @@ pub fn only(units: Vec<UnitRef>) -> UnitRef {
 }
 
 pub fn timestamp_of(unit: &UnitRef, kind: &str) -> PathBuf {
-    cargo_hive::liveness::unit_timestamp(&unit.profile, &unit.dir_name, kind)
+    cargo_hive_core::liveness::unit_timestamp(&unit.profile, &unit.dir_name, kind)
 }

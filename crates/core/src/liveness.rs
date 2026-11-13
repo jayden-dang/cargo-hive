@@ -1,9 +1,9 @@
 //! Liveness result types and shared fingerprint helpers. The algorithm that
-//! decides live vs dead units lives in `crate::gc::liveness`; callers pass it
-//! into seed as a `LivenessFn`.
+//! decides live vs dead units lives outside this crate; callers pass it into
+//! seed as a `LivenessFn`.
 
-use crate::cargo_target::TargetDir;
 use crate::fingerprint;
+use crate::target::TargetDir;
 use cargo_hive_platform::Fs;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -137,7 +137,8 @@ pub fn unit_timestamp(profile: &Path, dir_name: &str, kind: &str) -> PathBuf {
 
 /// The `<hash>` of every `-<hash>` in `name` where `<hash>` is 16 lowercase hex digits and is
 /// followed by `.` or the end of the name.
-pub(crate) fn embedded_hashes(name: &str) -> impl Iterator<Item = &str> {
+#[doc(hidden)]
+pub fn embedded_hashes(name: &str) -> impl Iterator<Item = &str> {
     name.match_indices('-').filter_map(move |(at, _)| {
         let tail = &name[at + 1..];
         let hash = tail.get(..16)?;

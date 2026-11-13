@@ -5,7 +5,7 @@
 //! Cargo rebuild a live one.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
-use cargo_hive::liveness::{Liveness, Uncertain, UnitRef};
+use cargo_hive_core::liveness::{Liveness, Uncertain, UnitRef};
 use cargo_hive_platform as platform;
 use common::Scratch;
 use common::cargo_fixture::*;

@@ -7,13 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::caps::CRATE_DIR_CAP;
-use crate::cargo_target::TargetDir;
 use crate::ctx::{faults_that_can_hide_an_owner, split_checkout_faults};
 use crate::discover::{Checkout, WalkFault};
-use crate::ledger::{self, Ledger};
-use crate::liveness::LivenessFn;
-use crate::receipt::{Finding, Measured};
 use crate::seed::source::{self, Holds};
 use crate::seed::store::{
     self, CommitPlan, Inventory, Row, StoreKey, commit_eviction, entry_dir, evict_dir, inventory,
@@ -21,6 +16,11 @@ use crate::seed::store::{
 };
 use crate::state::{State, StateError};
 use crate::toolchain::{self, Toolchain};
+use cargo_hive_core::caps::CRATE_DIR_CAP;
+use cargo_hive_core::ledger::{self, Ledger};
+use cargo_hive_core::liveness::LivenessFn;
+use cargo_hive_core::receipt::{Finding, Measured};
+use cargo_hive_core::target::TargetDir;
 use cargo_hive_platform::Fs;
 
 pub struct EvictCtx<'a> {

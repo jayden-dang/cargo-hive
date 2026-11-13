@@ -7,22 +7,22 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::caps::CRATE_DIR_CAP;
-use crate::cargo_target::{self, Owner, TargetDir};
 use crate::ctx::Ctx;
 use crate::discover::{self, Snapshot};
-use crate::fingerprint::{Format, ProfileReport, read_profile};
-use crate::ledger::{self, Bytes, Ledger};
-use crate::liveness::Liveness;
-use crate::locks::{self, Acquired, Locked, Reason};
 use crate::plan_tier::build::{TargetClass, class_label, class_of_target};
 use crate::plan_tier::guard::{Deleted as EntryMismatch, Expect, check_entry};
 use crate::plan_tier::orphan::{self, Counted, Removal};
 use crate::plan_tier::record::{
     self, BytesRec, Lookup, Plan, PlanClass, PlannedEntry, PlannedTarget, Taken, kind_of,
 };
-use crate::receipt::{Outcome, Unmeasured};
 use crate::state::StateError;
+use cargo_hive_core::caps::CRATE_DIR_CAP;
+use cargo_hive_core::fingerprint::{Format, ProfileReport, read_profile};
+use cargo_hive_core::ledger::{self, Bytes, Ledger};
+use cargo_hive_core::liveness::Liveness;
+use cargo_hive_core::locks::{self, Acquired, Locked, Reason};
+use cargo_hive_core::receipt::{Outcome, Unmeasured};
+use cargo_hive_core::target::{self, Owner, TargetDir};
 use cargo_hive_platform::Fs;
 
 pub(crate) fn cross_check_notes(
@@ -762,7 +762,7 @@ fn recheck(
 }
 
 fn listed_profiles(fs: &dyn Fs, target: &PlannedTarget) -> Result<Vec<PathBuf>, Refusal> {
-    match cargo_target::identify_bounded(fs, &target.path, CRATE_DIR_CAP) {
+    match target::identify_bounded(fs, &target.path, CRATE_DIR_CAP) {
         Some(Ok(profiles)) => Ok(profiles.into_iter().map(|(path, _)| path).collect()),
         Some(Err(why)) => Err(Refusal {
             reason: "unsupported_format",

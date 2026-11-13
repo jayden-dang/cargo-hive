@@ -1,13 +1,13 @@
 //! Checkouts of a registered repo and its Cargo target dirs. Every walk is
 //! depth-bounded and never enters `node_modules`, `target` or `.git`.
 
-use crate::cargo_target::{self, Layout, Owner, TargetDir};
-use crate::classify::{CheckoutFacts, CheckoutKind, Class, classify};
-use crate::fingerprint::{self, Format};
 use crate::git::Git;
 use crate::metadata::{self, Resolved};
 use crate::registry::Repo;
 use crate::state::Config;
+use cargo_hive_core::classify::{CheckoutFacts, CheckoutKind, Class, classify};
+use cargo_hive_core::fingerprint::{self, Format};
+use cargo_hive_core::target::{self, Layout, Owner, TargetDir};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -403,7 +403,7 @@ pub fn find_targets(root: &Path, depth: usize, out: &mut Vec<Found>, faults: &mu
     }
     dirs.sort();
     for dir in dirs {
-        match cargo_target::identify(&dir) {
+        match target::identify(&dir) {
             Some(found) => out.push((dir, found)),
             None => find_targets(&dir, depth - 1, out, faults),
         }
@@ -564,7 +564,7 @@ pub fn targets(
         found.extend(v.into_iter().map(|f| (f, true)));
     }
     for r in &resolved {
-        if let Some(identified) = cargo_target::identify(&r.build_directory) {
+        if let Some(identified) = target::identify(&r.build_directory) {
             found.push(((r.build_directory.clone(), identified), false));
         }
     }

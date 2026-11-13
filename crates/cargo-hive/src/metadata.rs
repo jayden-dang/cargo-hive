@@ -1,6 +1,6 @@
 //! `cargo metadata` resolve: target directories with caller overrides scrubbed.
 
-use crate::cargo_target::realpath_lossy;
+use cargo_hive_core::target::realpath_lossy;
 use cargo_hive_platform::proc::{self, ChildOutputError, Spec};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

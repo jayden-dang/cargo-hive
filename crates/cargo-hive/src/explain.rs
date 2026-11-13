@@ -4,12 +4,12 @@
 //! `analyse` only reads values already in memory. `run` does the bounded
 //! reads and fills `Explanation::human`.
 
-use crate::caps::DEPS_CAP;
-use crate::cargo_target::TargetDir;
-use crate::fingerprint::{
+use cargo_hive_core::caps::DEPS_CAP;
+use cargo_hive_core::fingerprint::{
     Format, NotCurrentUnit, Unit, error_code, is_summary_line, kind_of, read_capped,
 };
-use crate::receipt::{Finding, Measured};
+use cargo_hive_core::receipt::{Finding, Measured};
+use cargo_hive_core::target::TargetDir;
 use cargo_hive_platform::Fs;
 use cargo_hive_platform::clock::utc_timestamp;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -302,7 +302,7 @@ fn directory_crate<'a>(dir_name: &'a str, hash_hex: &str) -> &'a str {
     {
         return head;
     }
-    match crate::fingerprint::unit_hash(dir_name) {
+    match cargo_hive_core::fingerprint::unit_hash(dir_name) {
         Some(suffix) => &dir_name[..dir_name.len() - suffix.len() - 1],
         None => dir_name,
     }
@@ -320,7 +320,7 @@ fn crate_and_kind(stem: &str) -> (String, String) {
 }
 
 fn unit_mode(dir_name: &str, hash_hex: &str, deps: &ModeIndex) -> Mode {
-    let hash = crate::fingerprint::unit_hash(dir_name).unwrap_or(hash_hex);
+    let hash = cargo_hive_core::fingerprint::unit_hash(dir_name).unwrap_or(hash_hex);
     match deps.get(hash) {
         Some(&(true, _)) => Mode::Build,
         Some(&(false, true)) => Mode::Check,
@@ -600,7 +600,7 @@ fn failed_crate(item: &NotCurrentInput) -> String {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    match crate::fingerprint::unit_hash(&name) {
+    match cargo_hive_core::fingerprint::unit_hash(&name) {
         Some(hash) => name[..name.len() - hash.len() - 1].to_string(),
         None => name,
     }
@@ -756,7 +756,7 @@ fn read_output(path: &Path) -> Result<String, String> {
 }
 
 fn invoked_mtime(dir: &Path) -> Option<SystemTime> {
-    std::fs::metadata(dir.join(crate::fingerprint::INVOKED_TIMESTAMP))
+    std::fs::metadata(dir.join(cargo_hive_core::fingerprint::INVOKED_TIMESTAMP))
         .and_then(|meta| meta.modified())
         .ok()
 }
@@ -814,8 +814,8 @@ fn measured_count(finding: &Finding, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{DIVERGENCE_DETAIL, FailedUnits, Limits, NotCurrentInput, ProfileInput, analyse};
-    use crate::fingerprint::{Coverage, NotCurrentUnit, kind_of};
-    use crate::receipt::{Finding, Measured};
+    use cargo_hive_core::fingerprint::{Coverage, NotCurrentUnit, kind_of};
+    use cargo_hive_core::receipt::{Finding, Measured};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -828,9 +828,9 @@ mod tests {
         features: &str,
         coverage: Coverage,
         place: (u64, u64, u64),
-    ) -> crate::fingerprint::Unit {
+    ) -> cargo_hive_core::fingerprint::Unit {
         let (profile, target, path) = place;
-        crate::fingerprint::Unit {
+        cargo_hive_core::fingerprint::Unit {
             dir_name: format!("{dir_crate}-{hash}"),
             kind: kind_of(stem),
             hash_hex: hash.to_string(),
@@ -848,7 +848,7 @@ mod tests {
     fn profile(
         target: &str,
         profile_dir: &str,
-        units: Vec<crate::fingerprint::Unit>,
+        units: Vec<cargo_hive_core::fingerprint::Unit>,
         deps: Option<Vec<String>>,
     ) -> ProfileInput {
         ProfileInput {
@@ -889,7 +889,7 @@ mod tests {
             .collect()
     }
 
-    fn persistence_units() -> Vec<crate::fingerprint::Unit> {
+    fn persistence_units() -> Vec<cargo_hive_core::fingerprint::Unit> {
         vec![
             unit(
                 "persistence",
@@ -1297,7 +1297,8 @@ mod tests {
             )
         })
         .collect();
-        let mut by_profile: BTreeMap<&str, Vec<crate::fingerprint::Unit>> = BTreeMap::new();
+        let mut by_profile: BTreeMap<&str, Vec<cargo_hive_core::fingerprint::Unit>> =
+            BTreeMap::new();
         let mut n = 1_u32;
         for (copies, profile_dir, dir_crate, stem) in plan.into_iter().rev() {
             for _ in 0..copies {
@@ -1938,7 +1939,7 @@ mod tests {
                 vec![("build", vec!["[]", "[\"x\"]"])],
             ),
         ];
-        let mut by_profile: BTreeMap<&str, (Vec<crate::fingerprint::Unit>, Vec<String>)> =
+        let mut by_profile: BTreeMap<&str, (Vec<cargo_hive_core::fingerprint::Unit>, Vec<String>)> =
             BTreeMap::new();
         let mut n = 1_u32;
         for (profile_dir, dir_crate, stem, arms) in plans.into_iter().rev() {
@@ -3153,14 +3154,14 @@ mod tests {
                 (2, 1, 1),
             ),
         ];
-        let target = crate::cargo_target::TargetDir {
+        let target = cargo_hive_core::target::TargetDir {
             path: root.clone(),
-            owner: crate::cargo_target::Owner::Owned {
+            owner: cargo_hive_core::target::Owner::Owned {
                 checkout: root.clone(),
             },
-            profiles: vec![crate::fingerprint::ProfileReport {
+            profiles: vec![cargo_hive_core::fingerprint::ProfileReport {
                 path: profile.clone(),
-                format: crate::fingerprint::Format::Supported,
+                format: cargo_hive_core::fingerprint::Format::Supported,
                 units: 2,
                 not_current: 2,
                 not_current_units: vec![
@@ -3180,7 +3181,7 @@ mod tests {
                     },
                 ],
                 edges: None,
-                graph: Some(crate::fingerprint::UnitGraph {
+                graph: Some(cargo_hive_core::fingerprint::UnitGraph {
                     units,
                     edges: Vec::new(),
                 }),

@@ -1,9 +1,9 @@
 //! Thin adapter: arguments → library calls → one receipt.
 
 use crate::bench::command::BuildCmd;
-use crate::receipt::{PlanRecord, PlanTierBody, Receipt, ReceiptBuilder, Scope};
 use crate::registry::{self, Registry};
 use crate::state::{State, StateError};
+use cargo_hive_core::receipt::{PlanRecord, PlanTierBody, Receipt, ReceiptBuilder, Scope};
 use cargo_hive_platform::{self as platform, MACOS_ONLY_MESSAGE};
 use clap::{Args, Parser, Subcommand};
 use std::ffi::OsString;
@@ -406,8 +406,10 @@ fn repo_list(state: &State, out: OutputArgs) -> i32 {
     emit(state, out, b.finish(), &human, 0)
 }
 
-fn measured_text(m: &std::collections::BTreeMap<String, crate::receipt::Measured>) -> String {
-    use crate::receipt::Measured;
+fn measured_text(
+    m: &std::collections::BTreeMap<String, cargo_hive_core::receipt::Measured>,
+) -> String {
+    use cargo_hive_core::receipt::Measured;
     m.iter()
         .map(|(k, v)| match v {
             Measured::Int(n) => format!("{k}={n}"),
@@ -420,7 +422,7 @@ fn measured_text(m: &std::collections::BTreeMap<String, crate::receipt::Measured
 
 fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
     use crate::doctor::{self, DoctorEnv, Verdict};
-    use crate::receipt::CheckRecord;
+    use cargo_hive_core::receipt::CheckRecord;
     let Ok(platform) = platform::current() else {
         eprintln!("{MACOS_ONLY_MESSAGE}");
         return 2;
@@ -620,9 +622,9 @@ fn live_checkouts(
 }
 
 fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: OutputArgs) -> i32 {
-    use crate::classify::Class;
     use crate::discover::{self, SNAPSHOT_FILE, Snapshot};
     use crate::doctor::{self, Capabilities, Capability};
+    use cargo_hive_core::classify::Class;
     let loaded = (|| -> Result<_, crate::state::StateError> {
         Ok((
             state.read::<Registry>(registry::FILE)?,
@@ -734,7 +736,8 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
                 b.unmeasured(&key, format!("the target dir is unreadable: {why}"));
                 continue;
             }
-            match crate::size::allocated_bytes(&t.path, crate::size::MAX_DEPTH) {
+            match cargo_hive_core::size::allocated_bytes(&t.path, cargo_hive_core::size::MAX_DEPTH)
+            {
                 Ok(n) => {
                     t.size = Some(n);
                     bytes += n;
@@ -787,8 +790,8 @@ fn report_targets(
     scan: &crate::discover::TargetScan,
     seeds: Option<&crate::seed::record::SeedsFile>,
 ) {
-    use crate::cargo_target::Owner;
-    use crate::fingerprint::Format;
+    use cargo_hive_core::fingerprint::Format;
+    use cargo_hive_core::target::Owner;
     let (mut owned, mut orphans, mut unresolved, mut unreadable, mut unsupported) =
         (0u64, 0u64, 0u64, 0u64, 0u64);
     let (mut units, mut resolved, mut dangling, mut ambiguous) = (0u64, 0u64, 0u64, 0u64);
@@ -853,7 +856,7 @@ fn report_targets(
         if let Some(seeds) = seeds
             && let Some(record) = seeds.targets.get(&t.path)
         {
-            match crate::seed::record::counts(t, record, crate::caps::DEPS_CAP) {
+            match crate::seed::record::counts(t, record, cargo_hive_core::caps::DEPS_CAP) {
                 Ok(Some(counts)) => {
                     let path = t.path.display();
                     b.count(&format!("reused_fresh:{path}"), counts.fresh)
@@ -1131,7 +1134,7 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
     use crate::doctor::{self, Capabilities, Capability};
     use crate::plan_tier::apply;
     use crate::plan_tier::build;
-    use crate::receipt::Outcome;
+    use cargo_hive_core::receipt::Outcome;
     if let Err(e) = platform::signals::install() {
         return emit_failure(
             state,
@@ -1417,7 +1420,7 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
     use crate::discover::{self, SNAPSHOT_FILE, Snapshot};
     use crate::doctor::{self, Capabilities, Capability};
     use crate::explain::{self, FailedUnits, Limits};
-    use crate::fingerprint::Format;
+    use cargo_hive_core::fingerprint::Format;
     use cargo_hive_platform::Availability;
     let loaded = (|| -> Result<_, StateError> {
         Ok((
@@ -1576,8 +1579,8 @@ pub(crate) fn locate_checkout(
     ),
     Refusal,
 > {
-    use crate::classify::Class;
     use crate::doctor::{self, Capability};
+    use cargo_hive_core::classify::Class;
 
     let real = match path.canonicalize() {
         Ok(path) => path,
@@ -1768,8 +1771,8 @@ fn bench_cmd(
     use crate::bench::{self, BUILD_DEADLINE, Limits, Plan};
     use crate::ctx::Ctx;
     use crate::doctor::{self, Capabilities, Capability};
-    use crate::receipt::Measured;
     use crate::state::window_days;
+    use cargo_hive_core::receipt::Measured;
     use std::collections::BTreeMap;
 
     let loaded = (|| -> Result<_, StateError> {

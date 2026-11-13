@@ -4,11 +4,11 @@
 
 use super::is_temp_entry;
 use super::plan::{self, Action};
-use crate::caps::{CRATE_DIR_CAP, DEPS_CAP};
-use crate::cargo_target::TargetDir;
 use crate::discover::Scope;
-use crate::fingerprint::Format;
-use crate::ledger::{Bytes, Ledger, RemoveFailed, remove_counted};
+use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
+use cargo_hive_core::fingerprint::Format;
+use cargo_hive_core::ledger::{Bytes, Ledger, RemoveFailed, remove_counted};
+use cargo_hive_core::target::TargetDir;
 use cargo_hive_platform::{EntryKind, Fs, HeldLock, TryLock};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -371,10 +371,10 @@ impl Runner<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cargo_target::Owner;
-    use crate::fingerprint::ProfileReport;
-    use crate::ledger::{Footprint, measure};
-    use crate::size::MAX_DEPTH;
+    use cargo_hive_core::fingerprint::ProfileReport;
+    use cargo_hive_core::ledger::{Footprint, measure};
+    use cargo_hive_core::size::MAX_DEPTH;
+    use cargo_hive_core::target::Owner;
     use cargo_hive_platform::{
         CompressOutcome, EntryStat, HeldLock, LockHolder, LockKind, LockState, Sharing, TempDir,
         VolumeInfo,

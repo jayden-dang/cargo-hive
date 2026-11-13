@@ -474,7 +474,8 @@ fn each_target_reports_its_allocated_bytes_unless_sizes_are_skipped() {
     register(&hive, &repo);
     let target = repo.join("target");
     let r = status(&hive, &[repo.to_str().unwrap()]);
-    let expected = cargo_hive::size::allocated_bytes(&target, cargo_hive::size::MAX_DEPTH).unwrap();
+    let expected =
+        cargo_hive_core::size::allocated_bytes(&target, cargo_hive_core::size::MAX_DEPTH).unwrap();
     assert!(expected > 0);
     assert_eq!(
         count(&r, &format!("bytes:{}", target.display())),

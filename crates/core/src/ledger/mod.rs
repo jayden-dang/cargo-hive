@@ -5,7 +5,8 @@ mod account;
 
 #[doc(hidden)]
 pub use account::Removed;
-pub(crate) use account::{RemoveFailed, remove_counted};
+#[doc(hidden)]
+pub use account::{RemoveFailed, remove_counted};
 
 use crate::caps::CRATE_DIR_CAP;
 use crate::size::MAX_DEPTH;
@@ -33,21 +34,29 @@ struct Seen {
     target: PathBuf,
 }
 
-pub(crate) struct Ledger {
+#[doc(hidden)]
+pub struct Ledger {
     inodes: HashMap<(u64, u64), Seen>,
     unmeasured: Vec<(PathBuf, String)>,
     unmeasured_more: u64,
 }
 
-pub(crate) struct Tally {
+#[doc(hidden)]
+pub struct Tally {
     pub per_target: BTreeMap<PathBuf, Bytes>,
     pub total: Bytes,
     pub unmeasured: Vec<(PathBuf, String)>,
     pub unmeasured_more: u64,
 }
 
+impl Default for Ledger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Ledger {
-    pub(crate) fn new() -> Ledger {
+    pub fn new() -> Ledger {
         Ledger {
             inodes: HashMap::new(),
             unmeasured: Vec::new(),
@@ -56,7 +65,7 @@ impl Ledger {
     }
 
     /// One regular file, inside `target`, that this run deletes (or a dry run would).
-    pub(crate) fn file(&mut self, target: &Path, stat: &EntryStat, sharing: Option<&Sharing>) {
+    pub fn file(&mut self, target: &Path, stat: &EntryStat, sharing: Option<&Sharing>) {
         let seen = self
             .inodes
             .entry((stat.dev, stat.ino))
@@ -80,7 +89,7 @@ impl Ledger {
         }
     }
 
-    pub(crate) fn unmeasured(&mut self, path: PathBuf, why: String) {
+    pub fn unmeasured(&mut self, path: PathBuf, why: String) {
         if self.unmeasured.len() < UNMEASURED_CAP {
             self.unmeasured.push((path, why));
         } else {
@@ -88,7 +97,7 @@ impl Ledger {
         }
     }
 
-    pub(crate) fn finish(self) -> Tally {
+    pub fn finish(self) -> Tally {
         let mut per_target: BTreeMap<PathBuf, Bytes> = BTreeMap::new();
         let mut total = Bytes::default();
         for seen in self.inodes.into_values() {

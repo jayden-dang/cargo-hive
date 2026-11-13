@@ -11,18 +11,18 @@
 //! reports lies inside its clone (a build script writing elsewhere is not detected); every limit
 //! (deadline, output, walk, config size) is an error when hit, and nothing is silently skipped.
 
-use cargo_hive::cargo_target::{self, Owner, TargetDir};
 use cargo_hive::ctx::Ctx;
-use cargo_hive::fingerprint;
 use cargo_hive::gc::liveness::liveness;
-use cargo_hive::ledger::{Footprint, measure};
-use cargo_hive::liveness::{Liveness, unit_timestamp};
 use cargo_hive::plan_tier::apply::{self, ResolvedTarget};
 use cargo_hive::plan_tier::build::{self, TargetPlan};
 use cargo_hive::plan_tier::guard::{Deleted, Expect, delete_checked};
 use cargo_hive::plan_tier::record::{Plan, PlanClass, PlannedEntry, PlannedTarget, kind_name};
-use cargo_hive::receipt::Outcome;
 use cargo_hive::state::State;
+use cargo_hive_core::fingerprint;
+use cargo_hive_core::ledger::{Footprint, measure};
+use cargo_hive_core::liveness::{Liveness, unit_timestamp};
+use cargo_hive_core::receipt::Outcome;
+use cargo_hive_core::target::{self, Owner, TargetDir};
 use cargo_hive_platform::{self as platform, EntryKind, Fs, TryLock};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -725,7 +725,7 @@ fn clone_target<'a>(
 }
 
 pub fn profile_dirs_of(path: &Path) -> Result<Vec<PathBuf>, String> {
-    match cargo_target::identify(path) {
+    match target::identify(path) {
         None => Err(format!("{}: not a Cargo target dir", path.display())),
         Some(Err(why)) => Err(format!("{}: {why}", path.display())),
         Some(Ok(profiles)) => Ok(profiles.into_iter().map(|(dir, _)| dir).collect()),

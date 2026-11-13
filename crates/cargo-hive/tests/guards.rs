@@ -440,7 +440,7 @@ fn explain_on_klynt_stays_within_two_seconds_of_status() {
 #[test]
 fn liveness_spawns_no_process() {
     for source in [
-        include_str!("../src/liveness.rs"),
+        include_str!("../../core/src/liveness.rs"),
         include_str!("../src/gc/liveness.rs"),
     ] {
         let production = source.split("#[cfg(test)]").next().unwrap();

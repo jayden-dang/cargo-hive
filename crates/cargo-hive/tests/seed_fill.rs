@@ -9,15 +9,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cargo_hive::caps::{CRATE_DIR_CAP, DEPS_CAP};
-use cargo_hive::cargo_target::{Owner, TargetDir};
-use cargo_hive::fingerprint::read_profile;
-use cargo_hive::liveness::unit_timestamp;
 use cargo_hive::seed::Error;
 use cargo_hive::seed::fill::FillReport;
 use cargo_hive::seed::place::{self, PlaceReport};
 use cargo_hive::seed::source::{SourceUnit, live_registry_units, unit_files};
 use cargo_hive::seed::store::{self, tag_path};
+use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
+use cargo_hive_core::fingerprint::read_profile;
+use cargo_hive_core::liveness::unit_timestamp;
+use cargo_hive_core::target::{Owner, TargetDir};
 use cargo_hive_platform::apfs::Apfs;
 use cargo_hive_platform::{
     CompressOutcome, EntryKind, EntryStat, Fs, LockHolder, LockKind, LockState, Sharing, TempDir,
@@ -638,7 +638,7 @@ fn planted_unresolved() -> Planted {
         target_path.join("CACHEDIR.TAG"),
         format!(
             "Signature: 8a477f597d28d172789f06886806bc55\n{}\n",
-            cargo_hive::cargo_target::TAG_LINE
+            cargo_hive_core::target::TAG_LINE
         ),
     )
     .unwrap();
@@ -647,7 +647,7 @@ fn planted_unresolved() -> Planted {
     assert!(
         matches!(
             profile_report.format,
-            cargo_hive::fingerprint::Format::Supported
+            cargo_hive_core::fingerprint::Format::Supported
         ),
         "{:?}",
         profile_report.format
@@ -681,7 +681,7 @@ fn plant_unit(
 ) {
     let dir = profile.join(".fingerprint").join(name);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(stem), cargo_hive::fingerprint::le_hex(fp)).unwrap();
+    std::fs::write(dir.join(stem), cargo_hive_core::fingerprint::le_hex(fp)).unwrap();
     let body: Vec<String> = deps
         .iter()
         .map(|(dep, package, hash)| format!("[{package},\"{dep}\",false,{hash}]"))
@@ -694,8 +694,8 @@ fn plant_unit(
         ),
     )
     .unwrap();
-    let kind = cargo_hive::fingerprint::kind_of(stem);
-    let stamp = cargo_hive::liveness::unit_timestamp(profile, name, &kind);
+    let kind = cargo_hive_core::fingerprint::kind_of(stem);
+    let stamp = cargo_hive_core::liveness::unit_timestamp(profile, name, &kind);
     std::fs::write(&stamp, b"").unwrap();
     let when = SystemTime::now() - age;
     std::fs::File::options()
@@ -718,8 +718,8 @@ fn empty_hash(profile: &Path, name: &str, stem: &str, age: Duration) {
 }
 
 fn plant_dep_info(profile: &Path, stem: &str, dir_name: &str, first_input: &str) {
-    let meta = cargo_hive::fingerprint::unit_hash(dir_name).unwrap();
-    let kind = cargo_hive::fingerprint::kind_of(stem);
+    let meta = cargo_hive_core::fingerprint::unit_hash(dir_name).unwrap();
+    let kind = cargo_hive_core::fingerprint::kind_of(stem);
     let crate_name = stem
         .strip_prefix(&format!("{kind}-"))
         .filter(|name| !name.is_empty())
@@ -1483,7 +1483,7 @@ fn an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it() {
     .unwrap();
     let target = work.join("target");
     assert!(
-        cargo_hive::cargo_target::identify(&target).is_some_and(|found| found.is_ok()),
+        cargo_hive_core::target::identify(&target).is_some_and(|found| found.is_ok()),
         "identify accepts the seeded target before any build"
     );
     let state = open_state(&filled);

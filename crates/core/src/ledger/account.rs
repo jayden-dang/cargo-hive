@@ -15,8 +15,9 @@ pub struct Removed {
     pub existed: bool,
 }
 
+#[doc(hidden)]
 #[derive(Debug)]
-pub(crate) enum RemoveFailed {
+pub enum RemoveFailed {
     Scan(String),
     Remove(io::Error),
 }
@@ -39,7 +40,8 @@ impl std::error::Error for RemoveFailed {
     }
 }
 
-pub(crate) fn remove_counted(
+#[doc(hidden)]
+pub fn remove_counted(
     fs: &dyn Fs,
     ledger: &mut Ledger,
     target: &Path,

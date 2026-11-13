@@ -4,15 +4,15 @@
 //! a registry unit. An undecided target, an unsupported profile, or a hit bound
 //! fills nothing from that target.
 
-use crate::caps::{CRATE_DIR_CAP, DEPS_CAP};
-use crate::cargo_target::{Owner, TargetDir};
 use crate::ctx::{Ctx, checkout_walk};
 use crate::discover::{self, Snapshot};
-use crate::fingerprint::{self, Format, Unit, le_hex};
-use crate::liveness::{self, Liveness, LivenessFn, Uncertain};
-use crate::receipt::Finding;
 use crate::seed::store::StoreKey;
-use crate::size::MAX_DEPTH;
+use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
+use cargo_hive_core::fingerprint::{self, Format, Unit, le_hex};
+use cargo_hive_core::liveness::{self, Liveness, LivenessFn, Uncertain};
+use cargo_hive_core::receipt::Finding;
+use cargo_hive_core::size::MAX_DEPTH;
+use cargo_hive_core::target::{Owner, TargetDir};
 use cargo_hive_platform::{EntryKind, Fs};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -785,12 +785,12 @@ fn unescape_spaces(input: &str) -> String {
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
-    use crate::cargo_target::{Owner, TAG_LINE};
     use crate::ctx::Ctx;
-    use crate::fingerprint::le_hex;
     use crate::registry::Repo;
-    use crate::size::MAX_DEPTH;
     use crate::state::{Config, State};
+    use cargo_hive_core::fingerprint::le_hex;
+    use cargo_hive_core::size::MAX_DEPTH;
+    use cargo_hive_core::target::{Owner, TAG_LINE};
     use cargo_hive_platform::EntryKind;
     use std::collections::BTreeSet;
     use std::fs;
@@ -1269,7 +1269,7 @@ mod tests {
 
     #[test]
     fn a_unit_key_carries_the_toolchain_value_directory_name_and_fingerprint() {
-        use crate::fingerprint::{Coverage, Unit};
+        use cargo_hive_core::fingerprint::{Coverage, Unit};
         use std::sync::Arc;
 
         let fingerprint = 0x0102_0304_0506_0708u64;

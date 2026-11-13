@@ -1,10 +1,10 @@
 //! Read-only liveness report for comparing releases against a fixed target.
 
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
-use cargo_hive::cargo_target::{Owner, TargetDir, identify};
-use cargo_hive::fingerprint::read_profile;
 use cargo_hive::gc::liveness::liveness;
-use cargo_hive::liveness::Liveness;
+use cargo_hive_core::fingerprint::read_profile;
+use cargo_hive_core::liveness::Liveness;
+use cargo_hive_core::target::{Owner, TargetDir, identify};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};

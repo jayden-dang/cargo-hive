@@ -13,10 +13,10 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cargo_target::TargetDir;
-use crate::fingerprint::{self, DepEdge};
-use crate::liveness;
 use crate::state::{State, StateError};
+use cargo_hive_core::fingerprint::{self, DepEdge};
+use cargo_hive_core::liveness;
+use cargo_hive_core::target::TargetDir;
 
 pub const SEEDS_FILE: &str = "seeds.json";
 pub const MAX_SEEDS_BYTES: u64 = 16 * 1024 * 1024;
@@ -244,11 +244,11 @@ fn count_files(path: &Path, cap: usize, depth: usize) -> Result<u32, String> {
     if !meta.is_dir() {
         return Ok(0);
     }
-    if depth > crate::size::MAX_DEPTH {
+    if depth > cargo_hive_core::size::MAX_DEPTH {
         return Err(format!(
             "{} is deeper than {} levels; remove directories past that depth and build the target again",
             path.display(),
-            crate::size::MAX_DEPTH
+            cargo_hive_core::size::MAX_DEPTH
         ));
     }
     let mut count = 0u32;
@@ -405,9 +405,9 @@ mod tests {
 
     use super::*;
 
-    use crate::cargo_target::{Owner, TargetDir};
-    use crate::fingerprint::{Coverage, DepEdge, Format, ProfileReport, Unit, UnitGraph};
     use crate::state::State;
+    use cargo_hive_core::fingerprint::{Coverage, DepEdge, Format, ProfileReport, Unit, UnitGraph};
+    use cargo_hive_core::target::{Owner, TargetDir};
 
     /// A scratch root under /private/tmp, removed when the test drops it.
     struct Root(PathBuf);
@@ -689,7 +689,7 @@ mod tests {
         let mut graph_units = Vec::new();
         let mut recorded = Vec::new();
         for spec in specs {
-            let hex = crate::fingerprint::le_hex(spec.id);
+            let hex = cargo_hive_core::fingerprint::le_hex(spec.id);
             let dir_name = format!("unit-{hex}");
             if spec.fingerprint {
                 let dir = profile.join(".fingerprint").join(&dir_name);
@@ -1047,7 +1047,7 @@ mod tests {
             .expect("two files inside the directory");
         assert_eq!(kept.missing, 0, "{kept:?}");
         assert_eq!(kept.unneeded, 1, "{kept:?}");
-        let hex = crate::fingerprint::le_hex(14);
+        let hex = cargo_hive_core::fingerprint::le_hex(14);
         let part = scratch
             .0
             .join("target/debug/deps")

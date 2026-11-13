@@ -53,7 +53,7 @@ fn tag_target(dir: &Path) {
 }
 
 fn write_unit(profile: &Path, dir_crate: &str, n: u64) {
-    let hash = cargo_hive::fingerprint::le_hex(n);
+    let hash = cargo_hive_core::fingerprint::le_hex(n);
     let dir = profile
         .join(".fingerprint")
         .join(format!("{dir_crate}-{hash}"));

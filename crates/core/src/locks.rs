@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::cargo_target;
+use crate::target;
 use cargo_hive_platform::{Fs, HeldLock, TryLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub fn acquire(fs: &dyn Fs, target: &Path, lists_examples: bool) -> Acquired {
 }
 
 pub fn acquire_capped(fs: &dyn Fs, target: &Path, lists_examples: bool, cap: usize) -> Acquired {
-    let found = match cargo_target::identify_bounded(fs, target, cap) {
+    let found = match target::identify_bounded(fs, target, cap) {
         Some(Ok(found)) => found,
         Some(Err(why)) => return Acquired::Failed(why),
         None => return Acquired::Skipped(Reason::Missing),
@@ -107,7 +107,7 @@ fn same_directories(
     profiles: &[PathBuf],
     cap: usize,
 ) -> Result<bool, String> {
-    let found = match cargo_target::identify_bounded(fs, target, cap) {
+    let found = match target::identify_bounded(fs, target, cap) {
         Some(Ok(found)) => found,
         Some(Err(why)) => return Err(why),
         None => return Ok(false),

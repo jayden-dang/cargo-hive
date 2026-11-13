@@ -9,13 +9,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::caps::DEPS_CAP;
 use crate::ctx::Ctx;
 use crate::discover::{self, Checkout, Snapshot};
-use crate::receipt::{Finding, Measured, ReceiptBuilder};
 use crate::registry::Repo;
 use crate::seed::{self, Fill, record};
 use crate::toolchain::Toolchain;
+use cargo_hive_core::caps::DEPS_CAP;
+use cargo_hive_core::receipt::{Finding, Measured, ReceiptBuilder};
 use cargo_hive_platform::proc::{self, Capture, ChildOutputError};
 
 use self::command::{BuildCmd, EnvMap};

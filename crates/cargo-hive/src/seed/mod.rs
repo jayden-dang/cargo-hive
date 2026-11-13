@@ -13,12 +13,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::caps::CRATE_DIR_CAP;
 use crate::ctx::Ctx;
 use crate::discover::Checkout;
 use crate::registry::Repo;
 use crate::state::window_days;
 use crate::toolchain::Toolchain;
+use cargo_hive_core::caps::CRATE_DIR_CAP;
 
 use choose::Choice;
 use fill::FillReport;
@@ -37,10 +37,10 @@ pub mod store;
 #[cfg(test)]
 pub(crate) fn no_liveness(
     _: &dyn cargo_hive_platform::Fs,
-    _: &crate::cargo_target::TargetDir,
+    _: &cargo_hive_core::target::TargetDir,
     _: std::time::SystemTime,
     _: std::time::Duration,
-) -> crate::liveness::Liveness {
+) -> cargo_hive_core::liveness::Liveness {
     panic!("this test reaches liveness; move it to tests/seed_liveness.rs")
 }
 
@@ -144,7 +144,7 @@ pub fn exit_code(result: &Result<Outcome, Error>) -> i32 {
 }
 
 pub fn record_seed_result(
-    receipt: &mut crate::receipt::ReceiptBuilder,
+    receipt: &mut cargo_hive_core::receipt::ReceiptBuilder,
     result: &Result<Outcome, Error>,
 ) {
     match result {
@@ -171,7 +171,7 @@ fn result_text(result: &Result<Outcome, Error>) -> String {
     }
 }
 
-fn copy_outcome(receipt: &mut crate::receipt::ReceiptBuilder, outcome: &Outcome) {
+fn copy_outcome(receipt: &mut cargo_hive_core::receipt::ReceiptBuilder, outcome: &Outcome) {
     for (name, n) in &outcome.counts {
         receipt.count(name, *n);
     }
@@ -400,10 +400,10 @@ fn from_fill(
     }
 }
 
-fn measured_store(ctx: &Ctx<'_>) -> Result<u64, crate::size::SizeError> {
+fn measured_store(ctx: &Ctx<'_>) -> Result<u64, cargo_hive_core::size::SizeError> {
     let root = store::store_dir(ctx.state);
-    match crate::size::allocated_bytes(&root, crate::size::MAX_DEPTH) {
-        Err(crate::size::SizeError::Io(path, err))
+    match cargo_hive_core::size::allocated_bytes(&root, cargo_hive_core::size::MAX_DEPTH) {
+        Err(cargo_hive_core::size::SizeError::Io(path, err))
             if path == root && err.kind() == io::ErrorKind::NotFound =>
         {
             Ok(0)
@@ -651,7 +651,10 @@ mod tests {
             ),
             outcome,
         );
-        let mut receipt = crate::receipt::Receipt::new("seed", crate::receipt::Scope::default());
+        let mut receipt = cargo_hive_core::receipt::Receipt::new(
+            "seed",
+            cargo_hive_core::receipt::Scope::default(),
+        );
         record_seed_result(&mut receipt, &Err(err));
         let receipt = receipt.finish();
         assert_eq!(receipt.counts.get("clone_units_cloned").copied(), Some(2));

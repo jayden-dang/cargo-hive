@@ -14,9 +14,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::ctx::Ctx;
-use crate::liveness;
 use crate::seed::store::{self, Row};
-use crate::size::{MAX_DEPTH, allocated_bytes};
+use cargo_hive_core::liveness;
+use cargo_hive_core::size::{MAX_DEPTH, allocated_bytes};
 use cargo_hive_platform::{EntryKind, Fs};
 
 use super::Error;
@@ -299,7 +299,7 @@ pub fn place(
 /// Cargo calls a unit stale when a dependency's output is newer than its own. With one
 /// mtime, no dependency is newer. The seed record's stamps take that mtime too.
 fn align_mtimes(ctx: &Ctx<'_>, target: &Path, report: &mut PlaceReport) {
-    let files = match list_files(ctx.fs, target, crate::caps::DEPS_CAP) {
+    let files = match list_files(ctx.fs, target, cargo_hive_core::caps::DEPS_CAP) {
         Ok(files) => files,
         Err(detail) => {
             report.findings.push((

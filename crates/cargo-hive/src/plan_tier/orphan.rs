@@ -4,14 +4,14 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::caps::CRATE_DIR_CAP;
-use crate::cargo_target::{self, Owner};
 use crate::ctx::Ctx;
 use crate::discover::{self, Snapshot, WalkFault};
-use crate::ledger::{self, Ledger, RemoveFailed};
-use crate::locks::{self, Acquired};
 use crate::plan_tier::guard::{Deleted, Expect, check_entry};
 use crate::plan_tier::record::{BytesRec, PlannedTarget, kind_of};
+use cargo_hive_core::caps::CRATE_DIR_CAP;
+use cargo_hive_core::ledger::{self, Ledger, RemoveFailed};
+use cargo_hive_core::locks::{self, Acquired};
+use cargo_hive_core::target::{self, Owner};
 use cargo_hive_platform::{EntryKind, Fs};
 
 pub struct Counted {
@@ -126,7 +126,7 @@ fn same_entry(fs: &dyn Fs, path: &Path, kind: EntryKind, dev: u64, ino: u64) -> 
 }
 
 fn profiles_match_plan(fs: &dyn Fs, target: &Path, planned: &[PathBuf]) -> Result<(), Removal> {
-    let found = match cargo_target::identify_bounded(fs, target, CRATE_DIR_CAP) {
+    let found = match target::identify_bounded(fs, target, CRATE_DIR_CAP) {
         Some(Ok(found)) => found,
         Some(Err(why)) => return Err(Removal::Refused(why)),
         None => return Err(Removal::Refused("unsupported_format".to_string())),

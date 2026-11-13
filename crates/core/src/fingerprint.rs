@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The file Cargo touches when it starts compiling a unit.
-pub(crate) const INVOKED_TIMESTAMP: &str = "invoked.timestamp";
+#[doc(hidden)]
+pub const INVOKED_TIMESTAMP: &str = "invoked.timestamp";
 
 const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -219,7 +220,8 @@ fn check_types(obj: &Map<String, Value>) -> Result<Vec<DepEdge>, String> {
         .collect()
 }
 
-pub(crate) fn read_capped(reader: &mut impl Read) -> Result<Vec<u8>, String> {
+#[doc(hidden)]
+pub fn read_capped(reader: &mut impl Read) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     reader
         .by_ref()

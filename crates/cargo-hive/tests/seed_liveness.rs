@@ -3,12 +3,12 @@
 
 #![allow(clippy::disallowed_types, clippy::disallowed_methods, reason = "test fixtures")]
 
-use cargo_hive::caps::DEPS_CAP;
-use cargo_hive::cargo_target::{Owner, TargetDir};
 use cargo_hive::ctx::Ctx;
-use cargo_hive::fingerprint::{self, Format, le_hex, read_profile};
 use cargo_hive::seed::source::{Skip, SourceUnit, holds, live_registry_units, unit_key};
 use cargo_hive::state::{Config, State};
+use cargo_hive_core::caps::DEPS_CAP;
+use cargo_hive_core::fingerprint::{self, Format, le_hex, read_profile};
+use cargo_hive_core::target::{Owner, TargetDir};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -106,7 +106,8 @@ fn write_unit(
         ),
     )
     .unwrap();
-    let stamp = cargo_hive::liveness::unit_timestamp(profile, name, &fingerprint::kind_of(stem));
+    let stamp =
+        cargo_hive_core::liveness::unit_timestamp(profile, name, &fingerprint::kind_of(stem));
     touch(&stamp, now, age);
 }
 

@@ -1,8 +1,8 @@
 //! `cargo hive doctor`: capability checks in a fresh temp dir, the check → capability map,
 //! and the `require` gate every capability-dependent command calls.
 
-use crate::receipt::Measured;
 use crate::toolchain::Toolchain;
+use cargo_hive_core::receipt::Measured;
 use cargo_hive_platform::major_version;
 use cargo_hive_platform::proc::{self, ChildOutputError, Spec};
 use cargo_hive_platform::{
@@ -634,27 +634,27 @@ fn check_format(
                 ]),
             }));
         }
-        let report = crate::fingerprint::read_profile(&target.join("debug"));
+        let report = cargo_hive_core::fingerprint::read_profile(&target.join("debug"));
         let mut measured = Measures::from([
             ("toolchain".to_string(), Measured::Text(tc.release.clone())),
             ("units".to_string(), Measured::Int(report.units as u64)),
         ]);
         let ok = match (&report.format, &report.edges) {
-            (crate::fingerprint::Format::Supported, Some(e)) => {
+            (cargo_hive_core::fingerprint::Format::Supported, Some(e)) => {
                 measured.insert("format".into(), Measured::Text("supported".into()));
                 measured.insert("edges_resolved".into(), Measured::Int(e.resolved));
                 measured.insert("edges_unresolved".into(), Measured::Int(e.unresolved));
                 measured.insert("edges_ambiguous".into(), Measured::Int(e.ambiguous));
                 report.units > 0 && e.resolved > 0 && e.unresolved == 0 && e.ambiguous == 0
             }
-            (crate::fingerprint::Format::Unsupported(why), _) => {
+            (cargo_hive_core::fingerprint::Format::Unsupported(why), _) => {
                 measured.insert(
                     "format".into(),
                     Measured::Text(format!("unsupported: {why}")),
                 );
                 false
             }
-            (crate::fingerprint::Format::Supported, None) => false,
+            (cargo_hive_core::fingerprint::Format::Supported, None) => false,
         };
         Ok(Ok(Check {
             id: CheckId::F,
@@ -680,7 +680,7 @@ fn summary_line_count(outputs: &[String]) -> u64 {
     outputs
         .iter()
         .flat_map(|text| text.lines())
-        .filter(|line| crate::fingerprint::is_summary_line(line) == Some(true))
+        .filter(|line| cargo_hive_core::fingerprint::is_summary_line(line) == Some(true))
         .count() as u64
 }
 
@@ -724,7 +724,7 @@ fn probe_output_texts(fs: &dyn Fs, fingerprint: &Path) -> Result<Vec<String>, St
     for path in paths {
         let mut file =
             std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let bytes = crate::fingerprint::read_capped(&mut file)
+        let bytes = cargo_hive_core::fingerprint::read_capped(&mut file)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         texts.push(String::from_utf8(bytes).map_err(|e| format!("{}: {e}", path.display()))?);
     }

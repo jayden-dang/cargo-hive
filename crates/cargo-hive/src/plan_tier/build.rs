@@ -9,18 +9,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::caps::CRATE_DIR_CAP;
-use crate::cargo_target::{Owner, TargetDir};
-use crate::classify::Class;
 use crate::ctx::Ctx;
 use crate::discover::{self, Checkout, Scope, Snapshot};
-use crate::ledger;
-use crate::liveness::{Liveness, Uncertain, UnitRef};
 use crate::plan_tier::record::{
     BytesRec, OrphanScope, Plan, PlanClass, PlanState, PlannedEntry, PlannedTarget, kind_name,
 };
-use crate::receipt::{ReasonRecord, UndecidedRecord, Unmeasured};
 use crate::state::window_days;
+use cargo_hive_core::caps::CRATE_DIR_CAP;
+use cargo_hive_core::classify::Class;
+use cargo_hive_core::ledger;
+use cargo_hive_core::liveness::{Liveness, Uncertain, UnitRef};
+use cargo_hive_core::receipt::{ReasonRecord, UndecidedRecord, Unmeasured};
+use cargo_hive_core::target::{Owner, TargetDir};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetClass {
@@ -338,7 +338,8 @@ fn plan_orphan(
         }
     };
     let kind = kind_name(stat.kind).to_string();
-    let dirs = match crate::cargo_target::identify_bounded(ctx.fs, &target.path, CRATE_DIR_CAP) {
+    let dirs = match cargo_hive_core::target::identify_bounded(ctx.fs, &target.path, CRATE_DIR_CAP)
+    {
         Some(Ok(found)) => found.into_iter().map(|(dir, _)| dir).collect(),
         Some(Err(why)) => {
             findings.push((
@@ -534,8 +535,9 @@ fn repos_recorded(ctx: &Ctx, scope_repos: &[PathBuf], checkouts: &[Checkout]) ->
             continue;
         };
         let main = match &checkout.kind {
-            crate::classify::CheckoutKind::Linked { main } => Some(main.clone()),
-            crate::classify::CheckoutKind::Main | crate::classify::CheckoutKind::Clone => ctx
+            cargo_hive_core::classify::CheckoutKind::Linked { main } => Some(main.clone()),
+            cargo_hive_core::classify::CheckoutKind::Main
+            | cargo_hive_core::classify::CheckoutKind::Clone => ctx
                 .repos
                 .iter()
                 .find(|repo| repo.main == checkout.path)
@@ -557,9 +559,9 @@ fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cargo_target::Owner;
-    use crate::classify::{CheckoutKind, Class};
     use crate::discover::Checkout;
+    use cargo_hive_core::classify::{CheckoutKind, Class};
+    use cargo_hive_core::target::Owner;
 
     fn checkout(path: &str, class: Class) -> Checkout {
         Checkout {
@@ -764,7 +766,7 @@ mod tests {
             owner: Owner::Owned {
                 checkout: root.clone(),
             },
-            profiles: vec![crate::fingerprint::read_profile(&profile)],
+            profiles: vec![cargo_hive_core::fingerprint::read_profile(&profile)],
             size: None,
             unreadable: None,
         };

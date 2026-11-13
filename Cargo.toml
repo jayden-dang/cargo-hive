@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/platform", "crates/cargo-hive"]
+members = ["crates/platform", "crates/core", "crates/cargo-hive"]
 resolver = "3"
 
 [workspace.package]
@@ -16,6 +16,7 @@ serde_json = "1.0.154"
 libc = "0.2.191"
 applesauce = "0.8.10"
 cargo-hive-platform = { path = "crates/platform", version = "=0.1.0" }
+cargo-hive-core = { path = "crates/core", version = "=0.1.0" }
 
 [workspace.lints.clippy]
 disallowed_types = "warn"

@@ -1914,7 +1914,7 @@ fn hashes_of(units: &[FingerprintUnit], package: &str, fresh_only: bool) -> Vec<
         if package_name(&unit.name).as_deref() != Some(package) {
             continue;
         }
-        let Some(hash) = cargo_hive::fingerprint::unit_hash(&unit.name) else {
+        let Some(hash) = cargo_hive_core::fingerprint::unit_hash(&unit.name) else {
             continue;
         };
         if !hashes.iter().any(|seen| seen == hash) {
@@ -1970,7 +1970,7 @@ fn stored_entries(stored: &serde_json::Value) -> Vec<StoredEntry> {
 
 fn label_hash(unit: &str) -> Option<&str> {
     let name = Path::new(unit).file_name()?.to_str()?;
-    cargo_hive::fingerprint::unit_hash(name)
+    cargo_hive_core::fingerprint::unit_hash(name)
 }
 
 fn embedded_hashes(name: &str) -> impl Iterator<Item = &str> {
@@ -2620,7 +2620,7 @@ fn cloned_unit_hashes(hive: &Hive, lane: &Path) -> Vec<String> {
             let Some(dir_name) = unit["dir_name"].as_str() else {
                 continue;
             };
-            let Some(hash) = cargo_hive::fingerprint::unit_hash(dir_name) else {
+            let Some(hash) = cargo_hive_core::fingerprint::unit_hash(dir_name) else {
                 continue;
             };
             if !hashes.iter().any(|seen| seen == hash) {

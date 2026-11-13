@@ -2,10 +2,12 @@
 //! Read-only: it reads fingerprint reports and invocation mtimes through `Fs`,
 //! runs no process and writes nothing.
 
-use crate::caps::DEPS_CAP;
-use crate::cargo_target::TargetDir;
-use crate::fingerprint::{self, DepEdge, Format, Unit, le_hex};
-use crate::liveness::{DeadUnit, Liveness, Uncertain, UnitRef, embedded_hashes, unit_timestamp};
+use cargo_hive_core::caps::DEPS_CAP;
+use cargo_hive_core::fingerprint::{self, DepEdge, Format, Unit, le_hex};
+use cargo_hive_core::liveness::{
+    DeadUnit, Liveness, Uncertain, UnitRef, embedded_hashes, unit_timestamp,
+};
+use cargo_hive_core::target::TargetDir;
 use cargo_hive_platform::Fs;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
@@ -512,9 +514,9 @@ fn make_unit_ref(profile: &Path, dir_name: &str) -> UnitRef {
 #[cfg(target_os = "macos")]
 mod tests {
     use super::*;
-    use crate::cargo_target::Owner;
-    use crate::fingerprint::{le_hex, read_profile};
-    use crate::liveness::DEFAULT_WINDOW;
+    use cargo_hive_core::fingerprint::{le_hex, read_profile};
+    use cargo_hive_core::liveness::DEFAULT_WINDOW;
+    use cargo_hive_core::target::Owner;
     use std::fs;
     use std::io;
     use std::time::UNIX_EPOCH;
@@ -1747,7 +1749,7 @@ mod tests {
         let mut target = target_of(&s.0, &[&p]);
         target.profiles[0]
             .not_current_units
-            .push(crate::fingerprint::NotCurrentUnit {
+            .push(cargo_hive_core::fingerprint::NotCurrentUnit {
                 dir: odd.clone(),
                 stem: None,
                 features: None,

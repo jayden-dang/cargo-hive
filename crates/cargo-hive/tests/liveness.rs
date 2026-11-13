@@ -1,9 +1,9 @@
 #![cfg(target_os = "macos")]
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
-use cargo_hive::cargo_target::{self, TargetDir};
-use cargo_hive::fingerprint;
-use cargo_hive::liveness::{Liveness, UnitRef};
+use cargo_hive_core::fingerprint;
+use cargo_hive_core::liveness::{Liveness, UnitRef};
+use cargo_hive_core::target::{self, TargetDir};
 use cargo_hive_platform as platform;
 use clap::CommandFactory;
 use common::cargo_fixture::*;
@@ -867,12 +867,12 @@ fn a_window_is_vacuous_when_undecided_empty_failed_or_silent() {
         profile: PathBuf::from("/t/debug"),
         dir_name: "a-0123456789abcdef".into(),
     };
-    let dead = |files: Vec<PathBuf>| cargo_hive::liveness::DeadUnit {
+    let dead = |files: Vec<PathBuf>| cargo_hive_core::liveness::DeadUnit {
         unit: unit.clone(),
         files,
     };
     let undecided = Liveness::Undecided {
-        reasons: vec![cargo_hive::liveness::Uncertain::TargetUnreadable {
+        reasons: vec![cargo_hive_core::liveness::Uncertain::TargetUnreadable {
             target: PathBuf::from("/t"),
             why: "denied".into(),
         }],
@@ -2221,7 +2221,7 @@ fn profile_report(path: &Path) -> fingerprint::ProfileReport {
 fn target_with(root: &Path, profile: fingerprint::ProfileReport) -> TargetDir {
     TargetDir {
         path: root.to_path_buf(),
-        owner: cargo_target::Owner::Unresolved {
+        owner: target::Owner::Unresolved {
             reason: "test".into(),
         },
         profiles: vec![profile],

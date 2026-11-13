@@ -11,15 +11,15 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::caps::{CRATE_DIR_CAP, DEPS_CAP};
-use crate::cargo_target::{Owner, TargetDir};
 use crate::ctx::Ctx;
-use crate::locks::{self, Acquired, Locked};
 use crate::registry::Repo;
 use crate::seed::source::{self, Skip, SourceUnit};
 use crate::seed::store::{self, PublishFailed, Published, Row};
-use crate::size::MAX_DEPTH;
 use crate::state::{StateError, window_days};
+use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
+use cargo_hive_core::locks::{self, Acquired, Locked};
+use cargo_hive_core::size::MAX_DEPTH;
+use cargo_hive_core::target::{Owner, TargetDir};
 use cargo_hive_platform::{EntryKind, Fs};
 
 use super::Error;
@@ -999,9 +999,9 @@ fn epoch_secs(now: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::rustc_info_version;
-    use crate::cargo_target::{Owner, TargetDir};
-    use crate::fingerprint::{Coverage, Format, ProfileReport, Unit, UnitGraph};
     use crate::toolchain::resolve_toolchain;
+    use cargo_hive_core::fingerprint::{Coverage, Format, ProfileReport, Unit, UnitGraph};
+    use cargo_hive_core::target::{Owner, TargetDir};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
