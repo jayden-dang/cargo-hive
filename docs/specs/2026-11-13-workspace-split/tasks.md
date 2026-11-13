@@ -432,12 +432,12 @@ _Requirements: SPLIT-2.7, SPLIT-2.1_
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1: Failing check.** Add `src/lib.rs` `pub mod toolchain; pub mod metadata;` and change seed's imports
+- [x] **Step 1: Failing check.** Add `src/lib.rs` `pub mod toolchain; pub mod metadata;` and change seed's imports
   to `crate::toolchain::Toolchain`. Run `cargo check`. Expect: unresolved-import errors.
-- [ ] **Step 2: Implement.** Move the items. Nothing in `cargo_target` imports `doctor`, and nothing in `seed`
+- [x] **Step 2: Implement.** Move the items. Nothing in `cargo_target` imports `doctor`, and nothing in `seed`
   imports `doctor`. Check with `grep -n 'crate::doctor' src/cargo_target.rs src/seed`, which must print nothing.
-- [ ] **Step 3: Run.** `cargo test` and the capture comparison pass.
-- [ ] **Step 4: Commit.** `git commit -m "refactor: move toolchain and metadata out of doctor and cargo_target"`
+- [x] **Step 3: Run.** `cargo test` and the capture comparison pass.
+- [x] **Step 4: Commit.** `git commit -m "refactor: move toolchain and metadata out of doctor and cargo_target"`
 
 _Requirements: SPLIT-1.2, SPLIT-1.3_
 
