@@ -53,7 +53,7 @@ Labels used below:
 - **SPLIT-2.1** THE SYSTEM SHALL confine `unsafe` code, `libc` as a normal (non-dev) dependency,
   `cfg(target_os = …)` and `std::process::Command`, each outside test code, to the platform crate; `std::fs` stays allowed in every member
   (agent-decided reach of "touch the OS").
-- **SPLIT-2.2** IF a non-platform member contains an `unsafe` block THEN `cargo build` SHALL fail with an error
+- **SPLIT-2.2** IF a non-platform member's library or binary source contains an `unsafe` block THEN `cargo build` SHALL fail with an error
   whose text contains "only the platform crate may touch the OS" (agent-decided mechanism: a crate-root
   `#![forbid(unsafe_code, reason = …)]`).
 - **SPLIT-2.3** IF a non-platform member's code names `std::process::Command` THEN `cargo clippy --all-targets
@@ -251,6 +251,9 @@ Every file under `src/` and `tests/` moves into a member crate (ROAD-15 surfaces
 - Speed work beyond SPLIT-4.4's rework set.
 
 ## Open Questions
+
+- Resuming a `cargo publish --workspace` that fails partway (not atomic; re-run behaviour unprobed) — the release
+  steps' owner, at the first real release — after this run — forbid-guess.
 
 - Crate names (SPLIT-1.1 working names) — operator — before the first publish — forbid-guess.
 - ~~How a member's `cargo publish --dry-run` verifies while the members it depends on are not yet on crates.io~~

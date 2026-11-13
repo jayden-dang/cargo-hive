@@ -8,5 +8,7 @@ crate and the binary, not seed (ROAD-15.md:8). So the result types (`Liveness`, 
 `Uncertain`, `LivenessFn`) go in `cargo-hive-core`, the algorithm stays in `cargo-hive-gc`, and seed's context
 carries a `LivenessFn` that the binary fills with `cargo_hive_gc::liveness`. The rejected alternative put liveness
 in core or its own crate under both gc and seed, which is simpler but rebuilds seed on every liveness edit.
-Accepted cost: one function field to wire at each seed entry point, and test code must pass the real function.
+Accepted cost: one function field to wire at each seed entry point, and seed tests that reach the verdict live in
+the binary's tests. Editing the shared fingerprint helpers in core (`embedded_hashes`, `unit_timestamp`) still
+rebuilds seed; that is legitimate sharing, not the dead-unit decision.
 Revisit if seed ever needs liveness internals beyond the verdict, or if ROAD-15's example 1 is dropped.

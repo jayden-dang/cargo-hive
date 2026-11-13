@@ -66,10 +66,16 @@ the unchanged suite plus the SPLIT-4.1 liveness comparison prove the results equ
 6. **Integration tests stay in `cargo-hive`** (agent-decided test layout): `tests/common/mod.rs:98` and `:413`
    use `env!("CARGO_BIN_EXE_cargo-hive")`, and `common::prove` imports plan_tier and gc (design-scan.md §4).
    Moving the few liveness-only test files would split `tests/common` for little gain. Unit tests move with
-   their modules, so `cargo test -p <member>` runs a member's unit tests (SPLIT-1.5). The exception: seed unit
-   tests that need the real liveness algorithm (the six `holds` calls and four `Ctx` builds in seed/source.rs's
-   test module) move to `crates/cargo-hive/tests/seed_liveness.rs`. seed therefore has no dev-dependency on gc,
-   and `cargo test -p cargo-hive-seed` never builds gc.
+   their modules, so `cargo test -p <member>` runs a member's unit tests (SPLIT-1.5). The exception is every seed
+   unit test whose call path reaches the liveness algorithm, through `source::holds` (seed/source.rs:163) or
+   `source::live_registry_units` (seed/source.rs:310, :327, reached from `fill` at seed/fill.rs:136). These
+   include the tests in seed/source.rs's test module, the fill tests that build a `Ctx` (seed/fill.rs:986-1232)
+   and the seed/mod.rs tests that build one (seed/mod.rs:539-580). They move to
+   `crates/cargo-hive/tests/seed_liveness.rs` with assertions unchanged.
+   Seed unit tests that never reach liveness pass a `LivenessFn` stub that panics if
+   called. A test that does reach liveness therefore fails loudly instead of passing on a fake verdict, which also
+   finds any test the list above missed. seed has no dev-dependency on gc, and `cargo test -p cargo-hive-seed`
+   never builds gc.
    The unsafe test helpers in seed (`set_var`/`remove_var` at seed/source.rs:829, :837; `libc::openat`,
    `unlinkat` and `flock` at seed/store.rs:1215-1237, :1534) move into `platform::testing`, because a crate-root
    `forbid(unsafe_code)` also covers `cfg(test)` code. Integration-test files in `crates/cargo-hive/tests/` are
@@ -78,8 +84,8 @@ the unchanged suite plus the SPLIT-4.1 liveness comparison prove the results equ
    (89 `Command::new` sites in 20 files), and they use `libc` as a dev-dependency of `cargo-hive`.
 7. **Versions** (L7 + agent-decided pin): one `[workspace.package] version`. Inter-member deps are
    `{ path = "../<role>", version = "=X.Y.Z" }` through `[workspace.dependencies]`. The first release after the
-   split is a 0.x minor bump (0.2.0), because the `cargo_hive::<module>` library paths change (out of scope to
-   keep, requirements Out of Scope). The bump is flagged for the operator. If the operator wants the old paths
+   split is a 0.x minor bump, 0.2.0 (agent-decided), because the `cargo_hive::<module>` library paths change
+   (out of scope to keep, requirements Out of Scope). The bump is flagged for the operator. If the operator wants the old paths
    kept, the fallback is a re-export in `crates/cargo-hive/src/lib.rs` (`pub use cargo_hive_seed as seed;` and so on
    for every 0.1.0 module). That changes no other section.
 8. **Publishing** (research-publish-workspace.md): `CARGO_TARGET_DIR=target/package-verify cargo publish
@@ -95,12 +101,18 @@ the unchanged suite plus the SPLIT-4.1 liveness comparison prove the results equ
      `Vec<(usize, usize)>` and `HashMap<&str, Vec<usize>>`.
 
    `UnitGraph` is never serialized to output (`ProfileReport.graph` is `#[serde(skip)]`, fingerprint.rs:130-131).
-   `Unit`'s serialized fields keep their 0.1.0 form through `serialize_with`/`Display` on the new types. The
-   shape test against captured 0.1.0 JSON covers every printed or persisted shape. This work happens last, inside
+   `Unit`'s serialized fields keep their 0.1.0 form through `serialize_with`/`Display` on the new types, and
+   `UnitHash` round-trips through `{:016x}` (SPLIT-4.6). The 0.1.0 capture comes from the v0.1.0 export
+   (`git archive v0.1.0`, below). Its binary runs a fixed set of fixture commands under a `HIVE_HOME` in
+   /private/tmp and saves the receipts, the state files and every `--json` envelope there. SPLIT-4.3 compares
+   the new binary's output from the same fixtures against that capture. This work happens last, inside
    core and gc, after the extractions.
-10. **Edition 2024**: `cargo fix --edition` on the single crate before the workspace exists. A scan of every
-    named lock site found no guard created in an `if let` scrutinee or a tail expression (design-scan.md §6), so
-    the SPLIT-5.2 guard is held by inspection plus the existing lock tests.
+10. **Edition 2024**: `cargo fix --edition` on the single crate before the workspace exists. It enables the
+    `rust-2024-compatibility` lint group, which includes `if-let-rescope` and `tail-expr-drop-order` (rustc 1.97.1
+    `rustc -W help`). Those lints flag exactly a guard whose drop point moves. The SPLIT-5.2 evidence is the
+    recorded output of that step: no `if-let-rescope` or `tail-expr-drop-order` warning left unresolved, which
+    covers every `State::locked` caller mechanically. The named-site inspection (design-scan.md §6: no guard in an
+    `if let` scrutinee or a tail expression) and the existing lock tests are the second check.
 
 ## Architecture
 
@@ -201,9 +213,9 @@ unchanged)
 Surface:
 - `Unit.kind: String`, `hash_hex: String`, `UnitGraph.edges` (fingerprint.rs:78-120): replace in place. Readers
   are liveness, explain, seed/record, seed/source, plan_tier/build, and tests/seed.rs, tests/liveness.rs,
-  tests/explain.rs (grep `hash_hex|\.kind\b|\.edges`). The serialized form is frozen: `Unit` serializes
-  `dir_name`, `kind`, `hash_hex`, `deps` exactly as 0.1.0 does, held by a shape test against captured 0.1.0
-  JSON.
+  tests/explain.rs (grep `hash_hex|\.kind\b|\.edges`). `UnitGraph` is never emitted. Every printed or persisted
+  form that contains unit fields is frozen and is held by the SPLIT-4.3 comparison against the v0.1.0 capture
+  (Decision 9).
 - `receipt::Receipt` and records (receipt.rs:88-108): frozen. They move unchanged; the receipt keys are read by
   the plugin skill (plugin/skills/hive/SKILL.md) and by agents.
 - `pub(crate)` items that now cross crates (`INVOKED_TIMESTAMP`, `read_capped`, `embedded_hashes`, `Ledger`,
@@ -261,9 +273,8 @@ as it is in 0.1.0:
 - `env::timed_build(&mut Spec, &Toolchain)`: bench/command.rs:84-143.
 Respects: ARCH-13, ARCH-17 (ownership only from `cargo metadata --no-deps --locked --offline`, flags unchanged)
 Surface:
-- cargo_target.rs:565-574 (metadata env) and git.rs:70-74 (git env): replace. Both call `env::for_cargo` /
-  `env::for_git`, and the resulting environment is equal (SPLIT-2.6), held by a test that diffs the `Spec` env
-  against 0.1.0's list.
+- cargo_target.rs:565-574 (metadata env) and git.rs:70-74 (git env): replace. They call `env::metadata` /
+  `env::git`, and the resulting environment is equal (SPLIT-2.6).
 - doctor.rs:428, :514, :748 and bench/command.rs:113-114, :142: replace. They call the matching `env::*` function,
   and the resulting environment is unchanged (design-scan.md §2.1). The same env-diff test covers each.
 - seed/evict.rs:12, :572 and seed/fill.rs:868 (`doctor::resolve_toolchain*`): replace with the adapter paths.
@@ -301,10 +312,12 @@ Surface:
   `EvictCtx` (seed/evict.rs:24) gains a `liveness` field.
 - `EvictCtx` construction sites (cli.rs:1050, tests/store_gc.rs four sites): replace, passing
   `cargo_hive_gc::liveness`.
-- seed/source.rs's test module (six `holds` calls, four `Ctx` builds that need the real algorithm): move to
-  `crates/cargo-hive/tests/seed_liveness.rs` unchanged in assertions; `holds` becomes `#[doc(hidden)] pub`.
-- `Ctx` construction sites (cli.rs, bench/mod.rs, test helpers seed/source.rs:786, fill.rs:1232, tests/seed*.rs):
-  replace. Each passes `liveness: cargo_hive_gc::liveness`.
+- every seed unit test that reaches `holds` or `live_registry_units` (Decision 6): move to
+  `crates/cargo-hive/tests/seed_liveness.rs` with assertions unchanged. `holds`, `live_registry_units` and any
+  private helper those tests call become `#[doc(hidden)] pub`.
+- production `Ctx` construction sites (cli.rs, bench/mod.rs) and tests/seed*.rs: replace. Each passes
+  `liveness: cargo_hive_gc::liveness`. Unit-test `Ctx` builds that stay in seed pass the panicking stub
+  (Decision 6).
 Interface: unchanged seed entry points (`seed`, `fill`, `evict`, `status counts`). `Ctx` and `EvictCtx` each gain
 one field, `liveness: LivenessFn`.
 Depth: n/a — extends src/seed.
@@ -351,10 +364,9 @@ Reuse: rung 2 — cli.rs (minus `cross_check_notes`), bench/*, main.rs; `locate_
 tests (tests/skill.rs:434, tests/skill/names.rs:7-11).
 Respects: ARCH-8, ARCH-14
 Surface:
-- `cargo_hive::<module>` paths outside `cli`/`bench`, read by external library users of 0.1.0: frozen, discharged
-  by a gate. Dropping them ships only if the operator agrees at the sheet (D6). 0.1.0 stays on crates.io
-  unchanged, and 0.2.0 is a semver-breaking minor for 0.x. If the operator declines, the fallback re-export of
-  Decision 7 keeps every path.
+- `cargo_hive::<module>` paths outside `cli`/`bench`, read by external library users of 0.1.0: replace. They are
+  removed in 0.2.0 (agent-decided, close-package D6), and 0.1.0 stays on crates.io unchanged. This is flagged for
+  the operator, with Decision 7's re-export as the fallback.
 - tests/*.rs using `cargo_hive::{seed,plan_tier,platform,state,…}` (scan.md §4: 57 + 28 + 20 + … refs): replace.
   They import from the member crates, which `crates/cargo-hive/Cargo.toml` lists as `[dev-dependencies]` where not
   already normal deps.
@@ -450,6 +462,13 @@ Interface: a recorded procedure in `.skills/` evidence (code.md "Measured claims
 Depth: n/a.
 Locality: leave.
 
+## Open items
+
+- Resuming a partial publish. `cargo publish --workspace` is not atomic, and whether a re-run skips versions
+  already on the index is unprobed (research-publish-workspace.md). The release steps say only "stop and report
+  which members uploaded". The resume procedure is decided when it is probed at the first real release, not in
+  this run.
+
 ## Seams for testing
 
 | Seam | Kind | Covers |
@@ -458,13 +477,14 @@ Locality: leave.
 | `cargo build -v` after touching a gc-crate file (scripted in the same test file, `#[ignore]`, builds into a temp `CARGO_TARGET_DIR`) | integration | SPLIT-1.4, 1.5 |
 | `crates/cargo-hive/tests/os_boundary.rs` + a deliberately bad fixture member built in a temp dir | integration | SPLIT-2.1, 2.2, 2.3, 2.4 |
 | platform `proc`/`flock`/`signals` unit tests; errno→kind mapping test | unit | SPLIT-2.5, 2.7 |
-| adapter `env::for_cargo`/`for_git` unit test against 0.1.0's removal list | unit | SPLIT-2.6 |
+| adapter `env` unit test: for each of `metadata`, `git`, `rustup_which`, `probe_build`, `timed_build`, the `Spec` built from a fixed parent environment yields the same final child environment (cleared or not, every set and removed variable) as 0.1.0's code yields from that parent | unit | SPLIT-2.6 |
 | existing integration suite through `CARGO_BIN_EXE_cargo-hive` (tests/common/mod.rs:98) | integration | SPLIT-3.2, 3.7, 3.8, 4.2, 5.2 |
 | clap tree dump vs v0.1.0 capture (`Cli::command()`) | unit | SPLIT-3.1 |
 | receipt version test (`hive_version` == `--version`) | integration | SPLIT-3.5 |
 | `crates/cargo-hive/tests/seed_liveness.rs` (seed `holds`/`Ctx` tests with the real `cargo_hive_gc::liveness`, moved from seed/source.rs) | integration | SPLIT-1.4 (seed keeps working through `LivenessFn`) |
 | `crates/gc/tests/liveness_report.rs` (`#[ignore]`, klynt) vs v0.1.0 export | integration (manual, proof machine) | SPLIT-4.1 |
-| core shape tests vs captured 0.1.0 JSON (`Unit`, `UnitGraph`, receipts, state files) | unit | SPLIT-4.3, 4.4, 4.5, 4.6 |
+| capture comparison: the new binary vs the v0.1.0 export's binary on the same fixtures (receipts, state files, `--json` envelopes under /private/tmp, Decision 9) | integration | SPLIT-4.3, 4.5 |
+| core unit tests: `UnitHash` `{:016x}` round trip, `UnitKind` names incl. `other`, CSR closure equals the 0.1.0 closure on the liveness fixtures | unit | SPLIT-4.4, 4.6 |
 | `cargo package --workspace --list`, `cargo publish --workspace --dry-run`, `fresh-probe.sh` | manual (release steps) | SPLIT-6.1, 6.2, 6.3, 6.4 |
 | tests/skill.rs, tests/skill/names.rs, tests/liveness.rs manifest test | integration | SPLIT-7.4, 7.5, 6.2 |
 | running the docs' commands at the workspace root (task-close check) | manual | SPLIT-7.1, 7.2, 3.9 |
