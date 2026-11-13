@@ -218,9 +218,12 @@ fn counted_deps(
     let Some(meta) = fingerprint::unit_hash(dir_name) else {
         return Ok(0);
     };
+    let meta_text = meta.to_string();
     let mut count = 0u32;
     for name in names {
-        if name.ends_with(".rcgu.o") || !liveness::embedded_hashes(name).any(|hash| hash == meta) {
+        if name.ends_with(".rcgu.o")
+            || !liveness::embedded_hashes(name).any(|hash| hash == meta_text)
+        {
             continue;
         }
         count = count.saturating_add(count_files(&deps_dir.join(name), cap, 0)?);
@@ -306,7 +309,7 @@ fn reached_units(target: &TargetDir, record: &SeedRecord) -> BTreeSet<(PathBuf, 
             .to_path_buf();
         for unit in &graph.units {
             let idx = nodes.len();
-            by_hash.entry(unit.hash_hex.clone()).or_default().push(idx);
+            by_hash.entry(unit.hash.to_string()).or_default().push(idx);
             nodes.push(GraphNode {
                 rel: rel.clone(),
                 dir_name: unit.dir_name.clone(),
@@ -405,7 +408,9 @@ mod tests {
 
     use super::*;
 
-    use cargo_hive_core::fingerprint::{Coverage, DepEdge, Format, ProfileReport, Unit, UnitGraph};
+    use cargo_hive_core::fingerprint::{
+        Coverage, DepEdge, Format, ProfileReport, Unit, UnitGraph, UnitHash,
+    };
     use cargo_hive_core::target::{Owner, TargetDir};
     use cargo_hive_state::State;
 
@@ -723,7 +728,7 @@ mod tests {
                 graph_units.push(Unit {
                     dir_name: dir_name.clone(),
                     kind: "lib".to_string(),
-                    hash_hex: hex.clone(),
+                    hash: UnitHash::parse(&hex).unwrap(),
                     deps: spec
                         .deps
                         .iter()

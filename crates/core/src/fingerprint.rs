@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -76,11 +77,36 @@ pub struct DepEdge {
     pub fingerprint: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnitHash(u64);
+
+impl UnitHash {
+    pub fn parse(text: &str) -> Option<UnitHash> {
+        if !is_hash(text.as_bytes()) {
+            return None;
+        }
+        u64::from_str_radix(text, 16).ok().map(UnitHash)
+    }
+}
+
+impl fmt::Display for UnitHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+impl Serialize for UnitHash {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Unit {
     pub dir_name: String,
     pub kind: String,
-    pub hash_hex: String,
+    #[serde(rename = "hash_hex")]
+    pub hash: UnitHash,
     pub deps: Vec<DepEdge>,
     #[serde(skip)]
     pub stem: String,
@@ -160,9 +186,9 @@ fn is_hash(bytes: &[u8]) -> bool {
 }
 
 /// The `<hash>` of a `<name>-<hash>` unit dir name, when it is exactly 16 lowercase hex digits.
-pub fn unit_hash(dir_name: &str) -> Option<&str> {
+pub fn unit_hash(dir_name: &str) -> Option<UnitHash> {
     let (_, tail) = dir_name.rsplit_once('-')?;
-    is_hash(tail.as_bytes()).then_some(tail)
+    UnitHash::parse(tail)
 }
 
 /// The crate name of dependency `dep` in the unit's fingerprint report, when it can be read.
@@ -286,13 +312,14 @@ fn read_unit(
             deps,
         });
     }
+    let hash_text = String::from_utf8(hash).expect("checked ASCII hex");
     Ok(ParsedUnit::Current(Unit {
         dir_name: dir
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default(),
         kind: kind_of(&stem),
-        hash_hex: String::from_utf8(hash).expect("checked ASCII hex"),
+        hash: UnitHash::parse(&hash_text).expect("checked hex"),
         deps,
         stem,
         features,
@@ -519,18 +546,17 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
     if let Some(reason) = problem {
         return unsupported(counted, reason);
     }
-    let mut index: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut index: HashMap<UnitHash, Vec<usize>> = HashMap::new();
     for (i, u) in units.iter().enumerate() {
-        index.entry(u.hash_hex.as_str()).or_default().push(i);
+        index.entry(u.hash).or_default().push(i);
     }
     let mut counts = EdgeCounts::default();
     let mut edges = Vec::new();
     for (i, u) in units.iter().enumerate() {
         for dep in &u.deps {
-            match index
-                .get(le_hex(dep.fingerprint).as_str())
-                .map(Vec::as_slice)
-            {
+            let key =
+                UnitHash::parse(&le_hex(dep.fingerprint)).expect("le_hex is 16 lowercase hex");
+            match index.get(&key).map(Vec::as_slice) {
                 Some([j]) => {
                     counts.resolved += 1;
                     edges.push((i, *j));
@@ -597,14 +623,43 @@ mod tests {
 
     #[test]
     fn the_unit_hash_is_the_sixteen_hex_tail_of_the_dir_name() {
-        assert_eq!(unit_hash("dep-4360aef667e9273e"), Some("4360aef667e9273e"));
         assert_eq!(
-            unit_hash("build_script_build-9a4d89fe046fe1ba"),
-            Some("9a4d89fe046fe1ba")
+            unit_hash("dep-4360aef667e9273e").map(|h| h.to_string()),
+            Some("4360aef667e9273e".into())
+        );
+        assert_eq!(
+            unit_hash("build_script_build-9a4d89fe046fe1ba").map(|h| h.to_string()),
+            Some("9a4d89fe046fe1ba".into())
         );
         assert_eq!(unit_hash("dep-4360AEF667E9273E"), None);
         assert_eq!(unit_hash("dep-4360aef667e9273"), None);
         assert_eq!(unit_hash("nodash"), None);
+    }
+
+    #[test]
+    fn a_unit_hash_round_trips_as_sixteen_lowercase_hex() {
+        assert_eq!(
+            UnitHash::parse("00000000000000ab").unwrap().to_string(),
+            "00000000000000ab"
+        );
+    }
+
+    #[test]
+    fn unit_hash_parse_rejects_uppercase_and_wrong_lengths() {
+        assert!(UnitHash::parse("00000000000000AB").is_none());
+        assert!(UnitHash::parse("00000000000000a").is_none());
+        assert!(UnitHash::parse("00000000000000abc").is_none());
+    }
+
+    #[test]
+    fn a_units_hash_serializes_under_hash_hex_as_the_sixteen_hex_string() {
+        let p = scratch();
+        write_unit(&p, "dep-0000000000000001", "lib-dep", 0xab, &[]);
+        let report = read_profile(&p);
+        let unit = &report.graph.as_ref().unwrap().units[0];
+        let value = serde_json::to_value(unit).unwrap();
+        assert_eq!(value["hash_hex"], "ab00000000000000");
+        fs::remove_dir_all(p).unwrap();
     }
 
     #[test]

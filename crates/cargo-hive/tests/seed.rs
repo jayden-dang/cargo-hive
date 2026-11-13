@@ -1423,7 +1423,7 @@ fn gc_still_lists_rcgu_objects_of_a_dead_unit() {
         .collect();
     assert!(
         rcgu.iter().any(|entry| {
-            label_hash(&entry.unit).is_some_and(|hash| left.iter().any(|left| left == hash))
+            label_hash(&entry.unit).is_some_and(|hash| left.contains(&hash))
                 && file_embeds_any(&entry.path, &left)
         }),
         "stored plan listed no .rcgu.o of a unit the version bump left behind ({left:?}) among {:?}",
@@ -1432,8 +1432,7 @@ fn gc_still_lists_rcgu_objects_of_a_dead_unit() {
     let live: Vec<&str> = rcgu
         .iter()
         .filter(|entry| {
-            label_hash(&entry.unit)
-                .is_some_and(|hash| fresh_hashes.iter().any(|fresh| fresh == hash))
+            label_hash(&entry.unit).is_some_and(|hash| fresh_hashes.contains(&hash))
                 || file_embeds_any(&entry.path, &fresh_hashes)
         })
         .map(|entry| entry.path.as_str())
@@ -1917,8 +1916,9 @@ fn hashes_of(units: &[FingerprintUnit], package: &str, fresh_only: bool) -> Vec<
         let Some(hash) = cargo_hive_core::fingerprint::unit_hash(&unit.name) else {
             continue;
         };
-        if !hashes.iter().any(|seen| seen == hash) {
-            hashes.push(hash.to_string());
+        let text = hash.to_string();
+        if !hashes.iter().any(|seen| seen == &text) {
+            hashes.push(text);
         }
     }
     hashes
@@ -1968,9 +1968,9 @@ fn stored_entries(stored: &serde_json::Value) -> Vec<StoredEntry> {
     entries
 }
 
-fn label_hash(unit: &str) -> Option<&str> {
+fn label_hash(unit: &str) -> Option<String> {
     let name = Path::new(unit).file_name()?.to_str()?;
-    cargo_hive_core::fingerprint::unit_hash(name)
+    cargo_hive_core::fingerprint::unit_hash(name).map(|h| h.to_string())
 }
 
 fn embedded_hashes(name: &str) -> impl Iterator<Item = &str> {
@@ -2623,8 +2623,9 @@ fn cloned_unit_hashes(hive: &Hive, lane: &Path) -> Vec<String> {
             let Some(hash) = cargo_hive_core::fingerprint::unit_hash(dir_name) else {
                 continue;
             };
-            if !hashes.iter().any(|seen| seen == hash) {
-                hashes.push(hash.to_string());
+            let text = hash.to_string();
+            if !hashes.iter().any(|seen| seen == &text) {
+                hashes.push(text);
             }
         }
     }

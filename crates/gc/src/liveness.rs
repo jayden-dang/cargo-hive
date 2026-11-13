@@ -3,7 +3,7 @@
 //! runs no process and writes nothing.
 
 use cargo_hive_core::caps::DEPS_CAP;
-use cargo_hive_core::fingerprint::{self, DepEdge, Format, Unit, le_hex};
+use cargo_hive_core::fingerprint::{self, DepEdge, Format, Unit, UnitHash, le_hex};
 use cargo_hive_core::liveness::{
     DeadUnit, Liveness, Uncertain, UnitRef, embedded_hashes, unit_timestamp,
 };
@@ -124,7 +124,7 @@ type ProfileUnit<'a> = (&'a Path, &'a Unit);
 type Collected<'a> = (
     Vec<ProfileUnit<'a>>,
     Vec<NotCurrentNode<'a>>,
-    Vec<(&'a Path, &'a str)>,
+    Vec<(&'a Path, UnitHash)>,
 );
 
 /// Walks every profile: reports unsupported profiles and never-compiled units, and gathers the
@@ -139,7 +139,7 @@ fn collect_units<'a>(
 ) -> Collected<'a> {
     let mut units: Vec<ProfileUnit> = Vec::new();
     let mut nodes: Vec<NotCurrentNode> = Vec::new();
-    let mut not_current_hashes: Vec<(&Path, &str)> = Vec::new();
+    let mut not_current_hashes: Vec<(&Path, UnitHash)> = Vec::new();
     for profile in &target.profiles {
         if let Format::Unsupported(why) = &profile.format {
             reasons.push(Uncertain::ProfileUnsupported {
@@ -184,14 +184,14 @@ fn collect_units<'a>(
 }
 
 /// Indexes units by their report hash, and reports dirs without a unit hash or sharing one.
-fn index_units<'a>(
-    units: &[ProfileUnit<'a>],
+fn index_units(
+    units: &[ProfileUnit<'_>],
     reasons: &mut Vec<Uncertain>,
-) -> HashMap<&'a str, Vec<usize>> {
-    let mut index: HashMap<&str, Vec<usize>> = HashMap::new();
-    let mut by_unit_hash: HashMap<(&Path, &str), usize> = HashMap::new();
+) -> HashMap<UnitHash, Vec<usize>> {
+    let mut index: HashMap<UnitHash, Vec<usize>> = HashMap::new();
+    let mut by_unit_hash: HashMap<(&Path, UnitHash), usize> = HashMap::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
-        index.entry(unit.hash_hex.as_str()).or_default().push(i);
+        index.entry(unit.hash).or_default().push(i);
         let dir = fingerprint_dir(profile, &unit.dir_name);
         match fingerprint::unit_hash(&unit.dir_name) {
             None => reasons.push(Uncertain::NoUnitHash { dir }),
@@ -235,7 +235,7 @@ fn package_name(dir_name: &str) -> Option<String> {
 fn learn_packages(
     units: &[ProfileUnit],
     nodes: &[NotCurrentNode],
-    index: &HashMap<&str, Vec<usize>>,
+    index: &HashMap<UnitHash, Vec<usize>>,
 ) -> BTreeMap<u64, BTreeSet<String>> {
     let mut learned: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
     let edges = units
@@ -243,11 +243,8 @@ fn learn_packages(
         .flat_map(|(_, unit)| unit.deps.iter())
         .chain(nodes.iter().flat_map(|node| node.deps.iter()));
     for edge in edges {
-        for &hit in index
-            .get(le_hex(edge.fingerprint).as_str())
-            .into_iter()
-            .flatten()
-        {
+        let key = UnitHash::parse(&le_hex(edge.fingerprint)).expect("le_hex is 16 lowercase hex");
+        for &hit in index.get(&key).into_iter().flatten() {
             if let Some(name) = package_name(&units[hit].1.dir_name) {
                 learned.entry(edge.package).or_default().insert(name);
             }
@@ -271,7 +268,7 @@ fn mark_live(
     fs: &dyn Fs,
     units: &[ProfileUnit],
     nodes: &[NotCurrentNode],
-    index: &HashMap<&str, Vec<usize>>,
+    index: &HashMap<UnitHash, Vec<usize>>,
     now: SystemTime,
     window: Duration,
     reasons: &mut Vec<Uncertain>,
@@ -326,7 +323,9 @@ fn mark_live(
             ),
         };
         for &dep in deps {
-            if let Some(hits) = index.get(le_hex(dep.fingerprint).as_str()) {
+            let key =
+                UnitHash::parse(&le_hex(dep.fingerprint)).expect("le_hex is 16 lowercase hex");
+            if let Some(hits) = index.get(&key) {
                 for &hit in hits {
                     enqueue(&mut live, &mut queue, hit, Walk::Unit(hit));
                 }
@@ -415,13 +414,13 @@ fn list_dead_files<'a>(
 /// Builds the decided result: the live units, and per dead unit the files only it owns.
 fn assemble(
     units: &[ProfileUnit],
-    not_current_hashes: &[(&Path, &str)],
+    not_current_hashes: &[(&Path, UnitHash)],
     live_units: BTreeSet<UnitRef>,
     dead_idx: &[usize],
     listings: &BTreeMap<&Path, Vec<(String, PathBuf)>>,
 ) -> Liveness {
     let dead_set: HashSet<usize> = dead_idx.iter().copied().collect();
-    let mut kept_hashes: HashMap<&Path, HashSet<&str>> = HashMap::new();
+    let mut kept_hashes: HashMap<&Path, HashSet<UnitHash>> = HashMap::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
         if !dead_set.contains(&i)
             && let Some(hash) = fingerprint::unit_hash(&unit.dir_name)
@@ -430,10 +429,10 @@ fn assemble(
         }
     }
     for (profile, hash) in not_current_hashes {
-        kept_hashes.entry(profile).or_default().insert(hash);
+        kept_hashes.entry(profile).or_default().insert(*hash);
     }
 
-    let mut dead_by_hash: HashMap<&Path, HashMap<&str, Vec<usize>>> = HashMap::new();
+    let mut dead_by_hash: HashMap<&Path, HashMap<UnitHash, Vec<usize>>> = HashMap::new();
     for &i in dead_idx {
         let (profile, unit) = units[i];
         if let Some(hash) = fingerprint::unit_hash(&unit.dir_name) {
@@ -480,13 +479,20 @@ fn assemble(
 
 /// The dead units a file name belongs to: none when the name carries a kept unit's hash, else
 /// each dead unit whose hash it carries, once and in ascending index order.
-fn claimants(name: &str, kept: &HashSet<&str>, dead: &HashMap<&str, Vec<usize>>) -> Vec<usize> {
+fn claimants(
+    name: &str,
+    kept: &HashSet<UnitHash>,
+    dead: &HashMap<UnitHash, Vec<usize>>,
+) -> Vec<usize> {
     let mut owners: Vec<usize> = Vec::new();
     for hash in embedded_hashes(name) {
-        if kept.contains(hash) {
+        let Some(parsed) = UnitHash::parse(hash) else {
+            continue;
+        };
+        if kept.contains(&parsed) {
             return Vec::new();
         }
-        if let Some(units) = dead.get(hash) {
+        if let Some(units) = dead.get(&parsed) {
             owners.extend(units);
         }
     }

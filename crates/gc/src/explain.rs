@@ -6,7 +6,7 @@
 
 use cargo_hive_core::caps::DEPS_CAP;
 use cargo_hive_core::fingerprint::{
-    Format, NotCurrentUnit, Unit, error_code, is_summary_line, kind_of, read_capped,
+    Format, NotCurrentUnit, Unit, UnitHash, error_code, is_summary_line, kind_of, read_capped,
 };
 use cargo_hive_core::receipt::{Finding, Measured};
 use cargo_hive_core::target::TargetDir;
@@ -221,7 +221,7 @@ fn analyse(inputs: &[ProfileInput], limits: Limits, failed: &FailedUnits) -> Exp
 fn groups_in<'a>(input: &'a ProfileInput, index: Option<&'a ModeIndex>) -> Vec<Group<'a>> {
     let mut buckets: BTreeMap<(&str, &str, u64, u64), Vec<&Unit>> = BTreeMap::new();
     for unit in &input.units {
-        let dir_crate = directory_crate(&unit.dir_name, &unit.hash_hex);
+        let dir_crate = directory_crate(&unit.dir_name, &unit.hash);
         buckets
             .entry((dir_crate, unit.stem.as_str(), unit.target, unit.path))
             .or_default()
@@ -248,7 +248,7 @@ fn divergent_modes(group: &Group<'_>) -> Vec<(Mode, usize)> {
     let mut features_by_mode: BTreeMap<Mode, BTreeSet<&str>> = BTreeMap::new();
     for unit in &group.units {
         features_by_mode
-            .entry(unit_mode(&unit.dir_name, &unit.hash_hex, deps))
+            .entry(unit_mode(&unit.dir_name, &unit.hash, deps))
             .or_default()
             .insert(unit.features.as_ref());
     }
@@ -295,15 +295,16 @@ fn rank_groups(left: &Group<'_>, right: &Group<'_>) -> std::cmp::Ordering {
         .then_with(|| left.stem.cmp(&right.stem))
 }
 
-fn directory_crate<'a>(dir_name: &'a str, hash_hex: &str) -> &'a str {
+fn directory_crate<'a>(dir_name: &'a str, hash: &UnitHash) -> &'a str {
+    let hash_hex = hash.to_string();
     if let Some(head) = dir_name
-        .strip_suffix(hash_hex)
+        .strip_suffix(hash_hex.as_str())
         .and_then(|head| head.strip_suffix('-'))
     {
         return head;
     }
     match cargo_hive_core::fingerprint::unit_hash(dir_name) {
-        Some(suffix) => &dir_name[..dir_name.len() - suffix.len() - 1],
+        Some(suffix) => &dir_name[..dir_name.len() - suffix.to_string().len() - 1],
         None => dir_name,
     }
 }
@@ -319,9 +320,11 @@ fn crate_and_kind(stem: &str) -> (String, String) {
     (crate_name, kind)
 }
 
-fn unit_mode(dir_name: &str, hash_hex: &str, deps: &ModeIndex) -> Mode {
-    let hash = cargo_hive_core::fingerprint::unit_hash(dir_name).unwrap_or(hash_hex);
-    match deps.get(hash) {
+fn unit_mode(dir_name: &str, hash: &UnitHash, deps: &ModeIndex) -> Mode {
+    let text = cargo_hive_core::fingerprint::unit_hash(dir_name)
+        .unwrap_or(*hash)
+        .to_string();
+    match deps.get(&text) {
         Some(&(true, _)) => Mode::Build,
         Some(&(false, true)) => Mode::Check,
         _ => Mode::Unknown,
@@ -377,7 +380,7 @@ fn group_finding(
         let mut check = 0_u64;
         let mut unknown = 0_u64;
         for unit in &group.units {
-            match unit_mode(&unit.dir_name, &unit.hash_hex, deps) {
+            match unit_mode(&unit.dir_name, &unit.hash, deps) {
                 Mode::Build => build += 1,
                 Mode::Check => check += 1,
                 Mode::Unknown => unknown += 1,
@@ -443,7 +446,7 @@ fn feature_rows<'a>(group: &'a Group<'a>) -> Vec<FeatureRow<'a>> {
     for unit in &group.units {
         let mode = group
             .deps
-            .map(|deps| unit_mode(&unit.dir_name, &unit.hash_hex, deps));
+            .map(|deps| unit_mode(&unit.dir_name, &unit.hash, deps));
         let rank = mode.map(Mode::rank).unwrap_or(3);
         buckets
             .entry((rank, unit.features.as_ref()))
@@ -601,7 +604,7 @@ fn failed_crate(item: &NotCurrentInput) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     match cargo_hive_core::fingerprint::unit_hash(&name) {
-        Some(hash) => name[..name.len() - hash.len() - 1].to_string(),
+        Some(hash) => name[..name.len() - hash.to_string().len() - 1].to_string(),
         None => name,
     }
 }
@@ -814,7 +817,7 @@ fn measured_count(finding: &Finding, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{DIVERGENCE_DETAIL, FailedUnits, Limits, NotCurrentInput, ProfileInput, analyse};
-    use cargo_hive_core::fingerprint::{Coverage, NotCurrentUnit, kind_of};
+    use cargo_hive_core::fingerprint::{Coverage, NotCurrentUnit, UnitHash, kind_of};
     use cargo_hive_core::receipt::{Finding, Measured};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -833,7 +836,7 @@ mod tests {
         cargo_hive_core::fingerprint::Unit {
             dir_name: format!("{dir_crate}-{hash}"),
             kind: kind_of(stem),
-            hash_hex: hash.to_string(),
+            hash: UnitHash::parse(hash).unwrap(),
             deps: Vec::new(),
             stem: stem.to_string(),
             features: Arc::from(features),

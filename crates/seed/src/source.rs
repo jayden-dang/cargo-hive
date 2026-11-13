@@ -127,7 +127,7 @@ pub fn unit_key(unit: &Unit) -> StoreKey {
         variant: 0,
         toolchain_value: unit.toolchain_value,
         name_meta: unit.dir_name.clone(),
-        fingerprint_hash: unit.hash_hex.clone(),
+        fingerprint_hash: unit.hash.to_string(),
     }
 }
 
@@ -441,7 +441,9 @@ pub fn unit_files(
             &mut files,
         )?;
     }
-    let meta = fingerprint::unit_hash(&unit.dir_name).unwrap_or("");
+    let meta = fingerprint::unit_hash(&unit.dir_name)
+        .map(|h| h.to_string())
+        .unwrap_or_default();
     let mut names: Vec<&str> = deps_listing
         .iter()
         .filter(|(name, _)| {
@@ -511,14 +513,15 @@ fn dep_class(
     let Some(meta) = fingerprint::unit_hash(dir_name) else {
         return Ok(DepClass::Absent);
     };
-    let dep_name = format!("{}-{meta}.d", dep_info_crate(stem));
+    let meta_text = meta.to_string();
+    let dep_name = format!("{}-{meta_text}.d", dep_info_crate(stem));
     let path = if deps_listing
         .iter()
         .any(|(name, kind)| name == &dep_name && *kind == EntryKind::File)
     {
         Some(profile.join("deps").join(dep_name))
     } else {
-        build_dep_info(fs, profile, dir_name, meta)?
+        build_dep_info(fs, profile, dir_name, &meta_text)?
     };
     let Some(path) = path else {
         return Ok(DepClass::Absent);
@@ -1269,14 +1272,14 @@ mod tests {
 
     #[test]
     fn a_unit_key_carries_the_toolchain_value_directory_name_and_fingerprint() {
-        use cargo_hive_core::fingerprint::{Coverage, Unit};
+        use cargo_hive_core::fingerprint::{Coverage, Unit, UnitHash};
         use std::sync::Arc;
 
         let fingerprint = 0x0102_0304_0506_0708u64;
         let unit = Unit {
             dir_name: format!("serde-{}", le_hex(fingerprint)),
             kind: "lib".into(),
-            hash_hex: le_hex(fingerprint),
+            hash: UnitHash::parse(&le_hex(fingerprint)).unwrap(),
             deps: Vec::new(),
             stem: "lib-serde".into(),
             features: Arc::from(""),

@@ -1000,7 +1000,9 @@ fn epoch_secs(now: SystemTime) -> u64 {
 mod tests {
     use super::rustc_info_version;
     use cargo_hive_cargo::toolchain::resolve_toolchain;
-    use cargo_hive_core::fingerprint::{Coverage, Format, ProfileReport, Unit, UnitGraph};
+    use cargo_hive_core::fingerprint::{
+        Coverage, Format, ProfileReport, Unit, UnitGraph, UnitHash,
+    };
     use cargo_hive_core::target::{Owner, TargetDir};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -1071,7 +1073,7 @@ mod tests {
         Unit {
             dir_name: "dep-0000000000000001".to_string(),
             kind: "lib".to_string(),
-            hash_hex: "0123456789abcdef".to_string(),
+            hash: UnitHash::parse("0123456789abcdef").unwrap(),
             deps: Vec::new(),
             stem: "lib-dep".to_string(),
             features: Arc::<str>::from(""),

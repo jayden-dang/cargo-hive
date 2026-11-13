@@ -611,11 +611,12 @@ fn parse_entry_key(toolchain_value: u64, name: &str) -> Option<StoreKey> {
         None => (name, 0),
     };
     let hash = fingerprint::unit_hash(base)?;
-    let name_meta = base[..base.len() - hash.len() - 1].to_string();
+    let hash_text = hash.to_string();
+    let name_meta = base[..base.len() - hash_text.len() - 1].to_string();
     Some(StoreKey {
         toolchain_value,
         name_meta,
-        fingerprint_hash: hash.to_string(),
+        fingerprint_hash: hash_text,
         variant,
     })
 }
