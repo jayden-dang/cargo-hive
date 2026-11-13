@@ -1,7 +1,5 @@
 //! Platform layer: the OS gate, `Fs`, lock try and hold, bounded listing, and volume info.
 
-use std::process::Command;
-
 pub const MACOS_ONLY_MESSAGE: &str = "cargo-hive supports macOS only";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,10 +19,9 @@ pub fn ensure_supported() -> Result<(), NotMacOs> {
 
 /// `sw_vers -productVersion`, trimmed; `None` when it cannot be run.
 pub fn os_version() -> Option<String> {
-    let out = Command::new("sw_vers")
-        .arg("-productVersion")
-        .output()
-        .ok()?;
+    let mut spec = proc::Spec::new("sw_vers");
+    spec.args.push("-productVersion".into());
+    let out = proc::output(&spec).ok()?;
     let v = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (out.status.success() && !v.is_empty()).then_some(v)
 }
@@ -39,6 +36,7 @@ use std::time::SystemTime;
 
 #[cfg(target_os = "macos")]
 pub mod apfs;
+pub mod proc;
 
 /// A directory this process created. Dropping it removes the directory and everything in it.
 #[derive(Debug)]

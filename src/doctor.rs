@@ -11,9 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
+
+use crate::platform::proc::{self, ChildOutputError, Spec};
 
 pub const CAPABILITIES_FILE: &str = "capabilities.json";
 pub const MACOS_FLOOR: u32 = 27;
@@ -359,10 +360,10 @@ pub fn floor_note(report: &DoctorReport) -> Option<String> {
 /// `rust-toolchain.toml`, and with the variable removed rustup picks the default
 /// anyway wherever no override applies. Without a source (rustup before 1.29.0,
 /// `rustup run`) the origin is unknown, so it is dropped too.
-pub(crate) fn drop_directory_toolchain(cmd: &mut Command) {
+pub(crate) fn drop_directory_toolchain(spec: &mut Spec) {
     if !caller_toolchain_kept() {
-        cmd.env_remove("RUSTUP_TOOLCHAIN")
-            .env_remove("RUSTUP_TOOLCHAIN_SOURCE");
+        spec.env_remove.push("RUSTUP_TOOLCHAIN".into());
+        spec.env_remove.push("RUSTUP_TOOLCHAIN_SOURCE".into());
     }
 }
 
@@ -380,13 +381,13 @@ fn rustup_is_missing(msg: &str) -> bool {
     msg.contains("(os error 2)")
 }
 
-fn tool_error(tool: &str, err: crate::cargo_target::ChildOutputError) -> String {
+fn tool_error(tool: &str, err: ChildOutputError) -> String {
     match err {
-        crate::cargo_target::ChildOutputError::TimedOut => {
+        ChildOutputError::TimedOut => {
             format!("{tool} exceeded its deadline")
         }
-        crate::cargo_target::ChildOutputError::Cancelled => format!("{tool} was cancelled"),
-        crate::cargo_target::ChildOutputError::Failed(msg) => {
+        ChildOutputError::Cancelled => format!("{tool} was cancelled"),
+        ChildOutputError::Failed(msg) => {
             format!("could not run {tool}: {msg}")
         }
     }
@@ -408,12 +409,12 @@ enum ResolveEnv {
     OwnDirectory,
 }
 
-fn apply_resolve_env(cmd: &mut Command, env: ResolveEnv) {
+fn apply_resolve_env(spec: &mut Spec, env: ResolveEnv) {
     match env {
-        ResolveEnv::DropDirectoryToolchain => drop_directory_toolchain(cmd),
+        ResolveEnv::DropDirectoryToolchain => drop_directory_toolchain(spec),
         ResolveEnv::OwnDirectory => {
-            cmd.env_remove("RUSTUP_TOOLCHAIN")
-                .env_remove("RUSTUP_TOOLCHAIN_SOURCE");
+            spec.env_remove.push("RUSTUP_TOOLCHAIN".into());
+            spec.env_remove.push("RUSTUP_TOOLCHAIN_SOURCE".into());
         }
     }
 }
@@ -425,16 +426,15 @@ fn rustup_which(
     env: ResolveEnv,
     cancel: impl Fn() -> bool + Copy,
 ) -> Result<Option<PathBuf>, String> {
-    let mut cmd = Command::new(rustup);
-    cmd.args(["which", tool])
-        .current_dir(cwd)
-        .env("RUSTUP_AUTO_INSTALL", "0")
-        .stdin(Stdio::null());
-    apply_resolve_env(&mut cmd, env);
-    match child_output(&mut cmd, cancel) {
-        Err(crate::cargo_target::ChildOutputError::Failed(msg)) if rustup_is_missing(&msg) => {
-            Ok(None)
-        }
+    let mut spec = Spec::new(rustup);
+    spec.args = vec!["which".into(), tool.into()];
+    spec.cwd = Some(cwd.to_path_buf());
+    spec.env_set
+        .push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
+    spec.stdin_null = true;
+    apply_resolve_env(&mut spec, env);
+    match child_output(&spec, cancel) {
+        Err(ChildOutputError::Failed(msg)) if rustup_is_missing(&msg) => Ok(None),
         Err(err) => Err(tool_error("rustup", err)),
         Ok(out) if out.status.success() => Ok(Some(PathBuf::from(
             String::from_utf8_lossy(&out.stdout).trim(),
@@ -447,10 +447,10 @@ fn rustup_which(
 }
 
 fn child_output(
-    cmd: &mut Command,
+    spec: &Spec,
     cancel: impl FnMut() -> bool,
-) -> Result<std::process::Output, crate::cargo_target::ChildOutputError> {
-    crate::cargo_target::output_with_deadline(cmd, crate::cargo_target::METADATA_DEADLINE, cancel)
+) -> Result<std::process::Output, ChildOutputError> {
+    proc::output_with_deadline(spec, crate::cargo_target::METADATA_DEADLINE, cancel)
 }
 
 /// The process cancel flag that `install_signal_handlers` sets.
@@ -511,15 +511,16 @@ fn resolve_toolchain_with(
         .filter(|dir| dir.parent().is_some_and(|p| p.ends_with("toolchains")))
         .and_then(Path::file_name)
         .map(|n| n.to_string_lossy().to_string());
-    let mut cmd = Command::new(&rustc);
-    cmd.arg("-vV")
-        .current_dir(cwd)
-        .env("RUSTUP_AUTO_INSTALL", "0")
-        .stdin(Stdio::null());
+    let mut spec = Spec::new(&rustc);
+    spec.args.push("-vV".into());
+    spec.cwd = Some(cwd.to_path_buf());
+    spec.env_set
+        .push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
+    spec.stdin_null = true;
     if matches!(env, ResolveEnv::OwnDirectory) {
-        apply_resolve_env(&mut cmd, env);
+        apply_resolve_env(&mut spec, env);
     }
-    let out = child_output(&mut cmd, cancel).map_err(|err| tool_error("rustc", err))?;
+    let out = child_output(&spec, cancel).map_err(|err| tool_error("rustc", err))?;
     if !out.status.success() {
         return Err(format!(
             "{} -vV failed: {}",
@@ -744,26 +745,32 @@ pub const PROBE_CRATE: [(&str, &str); 5] = [
 ];
 
 /// The allowlisted environment for the probe build (Decision 7); nothing else is inherited.
-fn probe_command(tc: &Toolchain, krate: &Path, target: &Path, cargo_home: &Path) -> Command {
-    let mut cmd = Command::new(&tc.cargo);
-    cmd.args(["build", "--offline", "--all-targets", "--quiet"])
-        .current_dir(krate)
-        .env_clear();
+fn probe_command(tc: &Toolchain, krate: &Path, target: &Path, cargo_home: &Path) -> Spec {
+    let mut spec = Spec::new(&tc.cargo);
+    spec.args = ["build", "--offline", "--all-targets", "--quiet"]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    spec.cwd = Some(krate.to_path_buf());
+    spec.env_clear = true;
     for key in ["PATH", "HOME", "TMPDIR", "RUSTUP_HOME"] {
         if let Some(value) = std::env::var_os(key) {
-            cmd.env(key, value);
+            spec.env_set.push((key.into(), value));
         }
     }
     if let Some(name) = &tc.name {
-        cmd.env("RUSTUP_TOOLCHAIN", name);
+        spec.env_set.push(("RUSTUP_TOOLCHAIN".into(), name.into()));
     }
-    cmd.env("RUSTUP_AUTO_INSTALL", "0")
-        .env("CARGO_HOME", cargo_home)
-        .env("CARGO_TARGET_DIR", target)
-        .env("RUSTC", &tc.rustc)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null());
-    cmd
+    spec.env_set
+        .push(("RUSTUP_AUTO_INSTALL".into(), "0".into()));
+    spec.env_set
+        .push(("CARGO_HOME".into(), cargo_home.as_os_str().into()));
+    spec.env_set
+        .push(("CARGO_TARGET_DIR".into(), target.as_os_str().into()));
+    spec.env_set
+        .push(("RUSTC".into(), tc.rustc.as_os_str().into()));
+    spec.stdin_null = true;
+    spec
 }
 
 fn tail(text: &str, max: usize) -> String {
@@ -803,23 +810,22 @@ fn check_format(
             fs.write_file(&path, body.as_bytes())?;
         }
         std::fs::create_dir_all(&cargo_home)?;
-        let mut cmd = probe_command(tc, &krate, &target, &cargo_home);
-        let output =
-            match crate::cargo_target::output_with_deadline(&mut cmd, PROBE_DEADLINE, cancel) {
-                Err(crate::cargo_target::ChildOutputError::Cancelled) => {
-                    return Ok(Err(DoctorError::Cancelled));
-                }
-                Err(crate::cargo_target::ChildOutputError::TimedOut) => {
-                    return Ok(Ok(failed(
-                        CheckId::F,
-                        "the probe build exceeded its deadline",
-                    )));
-                }
-                Err(crate::cargo_target::ChildOutputError::Failed(message)) => {
-                    return Ok(Ok(failed(CheckId::F, message)));
-                }
-                Ok(output) => output,
-            };
+        let cmd = probe_command(tc, &krate, &target, &cargo_home);
+        let output = match proc::output_with_deadline(&cmd, PROBE_DEADLINE, cancel) {
+            Err(ChildOutputError::Cancelled) => {
+                return Ok(Err(DoctorError::Cancelled));
+            }
+            Err(ChildOutputError::TimedOut) => {
+                return Ok(Ok(failed(
+                    CheckId::F,
+                    "the probe build exceeded its deadline",
+                )));
+            }
+            Err(ChildOutputError::Failed(message)) => {
+                return Ok(Ok(failed(CheckId::F, message)));
+            }
+            Ok(output) => output,
+        };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(Ok(Check {
@@ -966,15 +972,15 @@ fn check_failed_marker(
     if let Err(e) = write_failing_probe(fs, &krate, &cargo_home) {
         return Ok(unavailable_g(e));
     }
-    let mut cmd = probe_command(tc, &krate, &target, &cargo_home);
-    let output = match crate::cargo_target::output_with_deadline(&mut cmd, PROBE_DEADLINE, cancel) {
-        Err(crate::cargo_target::ChildOutputError::Cancelled) => {
+    let cmd = probe_command(tc, &krate, &target, &cargo_home);
+    let output = match proc::output_with_deadline(&cmd, PROBE_DEADLINE, cancel) {
+        Err(ChildOutputError::Cancelled) => {
             return Err(DoctorError::Cancelled);
         }
-        Err(crate::cargo_target::ChildOutputError::TimedOut) => {
+        Err(ChildOutputError::TimedOut) => {
             return Ok(unavailable_g("the probe build exceeded its deadline"));
         }
-        Err(crate::cargo_target::ChildOutputError::Failed(message)) => {
+        Err(ChildOutputError::Failed(message)) => {
             return Ok(unavailable_g(message));
         }
         Ok(output) => output,
@@ -1044,6 +1050,7 @@ mod tests {
     };
     use std::collections::HashMap;
     use std::os::unix::fs::MetadataExt;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
@@ -1670,19 +1677,16 @@ mod tests {
 
     #[test]
     fn a_cancel_that_is_already_true_returns_cancelled_without_the_deadline() {
-        let mut cmd = Command::new("sleep");
-        cmd.arg("90");
+        let mut spec = Spec::new("sleep");
+        spec.args.push("90".into());
         let started = std::time::Instant::now();
-        let err = child_output(&mut cmd, || true).unwrap_err();
+        let err = child_output(&spec, || true).unwrap_err();
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "still waiting after {:?}",
             started.elapsed()
         );
-        assert!(
-            matches!(err, crate::cargo_target::ChildOutputError::Cancelled),
-            "{err:?}"
-        );
+        assert!(matches!(err, ChildOutputError::Cancelled), "{err:?}");
     }
 
     #[test]

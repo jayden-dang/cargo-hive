@@ -9,11 +9,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::cargo_target::{run_bounded, Capture, ChildOutputError};
 use crate::discover::{self, Checkout, Snapshot};
 use crate::doctor::Toolchain;
 use crate::gc;
 use crate::plan_tier::Ctx;
+use crate::platform::proc::{self, Capture, ChildOutputError};
 use crate::receipt::{Finding, Measured, ReceiptBuilder};
 use crate::registry::Repo;
 use crate::seed::{self, record, Fill};
@@ -427,11 +427,11 @@ pub fn run(
             }
         }
 
-        let mut cmd = plan
+        let cmd = plan
             .env
             .command(&plan.toolchain, &checkout.path, &plan.build);
-        let build_ms = match run_bounded(
-            &mut cmd,
+        let build_ms = match proc::run_bounded(
+            &cmd,
             limits.build_deadline,
             Capture {
                 stdout_cap: 0,

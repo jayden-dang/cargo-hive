@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
-use std::process::Command;
 use std::str::FromStr;
 
 use crate::cargo_target::TARGET_VARS;
 use crate::doctor::Toolchain;
+use crate::platform::proc::Spec;
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum BuildCmd {
@@ -138,13 +138,17 @@ impl EnvMap {
         &self.vars
     }
 
-    pub fn command(&self, tc: &Toolchain, dir: &Path, build: &BuildCmd) -> Command {
-        let mut cmd = Command::new(&tc.cargo);
-        cmd.env_clear()
-            .envs(&self.vars)
-            .current_dir(dir)
-            .args(build.args());
-        cmd
+    pub fn command(&self, tc: &Toolchain, dir: &Path, build: &BuildCmd) -> Spec {
+        let mut spec = Spec::new(&tc.cargo);
+        spec.env_clear = true;
+        spec.env_set = self
+            .vars
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        spec.cwd = Some(dir.to_path_buf());
+        spec.args = build.args().into_iter().map(Into::into).collect();
+        spec
     }
 
     pub fn findings(&self) -> Vec<(&'static str, String)> {
@@ -299,11 +303,12 @@ mod tests {
             &tc(None),
         );
         let cmd = env.command(&tc(None), Path::new("/lane"), &BuildCmd::Build);
-        assert_eq!(cmd.get_program(), "/tc/bin/cargo");
-        assert_eq!(cmd.get_current_dir(), Some(Path::new("/lane")));
+        assert_eq!(cmd.program, OsString::from("/tc/bin/cargo"));
+        assert_eq!(cmd.cwd.as_deref(), Some(Path::new("/lane")));
         assert_eq!(
-            cmd.get_args().collect::<Vec<_>>(),
-            ["build", "--offline", "--locked"]
+            cmd.args,
+            ["build", "--offline", "--locked"].map(OsString::from)
         );
+        assert!(cmd.env_clear);
     }
 }

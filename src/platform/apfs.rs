@@ -15,7 +15,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
@@ -169,14 +169,14 @@ impl Fs for Apfs {
     }
 
     fn hold_lock(&self, kind: LockKind, path: &Path) -> io::Result<LockHolder> {
-        let mut child = Command::new(&self.holder)
-            .arg("__hold-lock")
-            .arg(kind.as_arg())
-            .arg(path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let mut spec = super::proc::Spec::new(&self.holder);
+        spec.args = vec![
+            "__hold-lock".into(),
+            kind.as_arg().into(),
+            path.as_os_str().into(),
+        ];
+        spec.stdin_null = true;
+        let mut child = super::proc::spawn(&spec, Stdio::piped(), Stdio::null())?;
         let line = first_line_within(&mut child, CHILD_DEADLINE);
         if !matches!(&line, Ok(l) if l.trim() == "held") {
             let _ = child.kill();
@@ -235,14 +235,14 @@ impl Fs for Apfs {
     }
 
     fn try_lock_elsewhere(&self, kind: LockKind, path: &Path) -> io::Result<LockState> {
-        let mut child = Command::new(&self.holder)
-            .arg("__try-lock")
-            .arg(kind.as_arg())
-            .arg(path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let mut spec = super::proc::Spec::new(&self.holder);
+        spec.args = vec![
+            "__try-lock".into(),
+            kind.as_arg().into(),
+            path.as_os_str().into(),
+        ];
+        spec.stdin_null = true;
+        let mut child = super::proc::spawn(&spec, Stdio::piped(), Stdio::null())?;
         let line = first_line_within(&mut child, CHILD_DEADLINE);
         let _ = child.kill();
         let _ = child.wait();

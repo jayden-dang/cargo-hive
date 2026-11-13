@@ -4,9 +4,9 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use crate::cargo_target::{run_bounded, Capture, ChildOutputError, Ran, METADATA_DEADLINE};
+use crate::cargo_target::METADATA_DEADLINE;
+use crate::platform::proc::{self, Capture, ChildOutputError, Ran, Spec};
 
 #[derive(Debug)]
 pub enum GitError {
@@ -51,36 +51,37 @@ impl Git {
         }
     }
 
-    fn command(&self) -> Command {
+    fn command(&self) -> Spec {
         self.git_cmd(&[])
     }
 
-    fn read_only(&self) -> Command {
+    fn read_only(&self) -> Spec {
         // Plain `git status` refreshes mtimes into .git/index; --no-optional-locks does not.
         self.git_cmd(&["--no-optional-locks"])
     }
 
-    fn git_cmd(&self, leading: &[&str]) -> Command {
-        let mut cmd = Command::new("git");
+    fn git_cmd(&self, leading: &[&str]) -> Spec {
+        let mut spec = Spec::new("git");
         // A user's `core.fsmonitor=true` would start a daemon that writes a socket into the
         // checkout's .git; hive only reads.
-        cmd.args(leading)
-            .args(["-c", "core.fsmonitor=false"])
-            .arg("-C")
-            .arg(&self.dir);
+        spec.args.extend(leading.iter().map(|s| (*s).into()));
+        spec.args
+            .extend(["-c".into(), "core.fsmonitor=false".into()]);
+        spec.args.push("-C".into());
+        spec.args.push(self.dir.as_os_str().into());
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("GIT_") {
-                cmd.env_remove(&key);
+                spec.env_remove.push(key);
             }
         }
-        cmd
+        spec
     }
 
     fn run_read_only(&self, args: &[&str]) -> Result<Ran, GitError> {
-        let mut cmd = self.read_only();
-        cmd.args(args);
-        match run_bounded(
-            &mut cmd,
+        let mut spec = self.read_only();
+        spec.args.extend(args.iter().map(|s| (*s).into()));
+        match proc::run_bounded(
+            &spec,
             METADATA_DEADLINE,
             Capture {
                 stdout_cap: 64 * 1024,
@@ -109,11 +110,9 @@ impl Git {
     }
 
     fn run(&self, args: &[&str]) -> Result<std::process::Output, GitError> {
-        let out = self
-            .command()
-            .args(args)
-            .output()
-            .map_err(GitError::Spawn)?;
+        let mut spec = self.command();
+        spec.args.extend(args.iter().map(|s| (*s).into()));
+        let out = proc::output(&spec).map_err(GitError::Spawn)?;
         if out.status.success() {
             return Ok(out);
         }
@@ -170,11 +169,13 @@ impl Git {
     /// `Ok(false)` only when git quietly reports a missing HEAD. Any diagnostic
     /// on stderr is a failed probe, not an empty repository.
     pub fn has_commits(&self) -> Result<bool, GitError> {
-        let out = self
-            .command()
-            .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-            .output()
-            .map_err(GitError::Spawn)?;
+        let mut spec = self.command();
+        spec.args.extend(
+            ["rev-parse", "--verify", "--quiet", "HEAD"]
+                .into_iter()
+                .map(Into::into),
+        );
+        let out = proc::output(&spec).map_err(GitError::Spawn)?;
         if out.status.success() {
             return Ok(true);
         }
@@ -198,7 +199,6 @@ impl Git {
             .filter(|l| !l.is_empty())
             .collect())
     }
-
     pub fn is_shallow(&self) -> Result<bool, GitError> {
         Ok(self.line(&["rev-parse", "--is-shallow-repository"])? == "true")
     }
