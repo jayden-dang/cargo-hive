@@ -25,7 +25,8 @@ use cargo_hive_core::target::{self, Owner, TargetDir};
 use cargo_hive_platform::Fs;
 use cargo_hive_state::StateError;
 
-pub(crate) fn cross_check_notes(
+#[doc(hidden)]
+pub fn cross_check_notes(
     before: &std::collections::BTreeMap<String, (std::path::PathBuf, u64)>,
     after: &std::collections::BTreeMap<String, (std::path::PathBuf, u64)>,
     touched: &std::collections::BTreeSet<String>,
@@ -363,7 +364,8 @@ fn note_counted(
     *unmeasured_more = unmeasured_more.saturating_add(counted.unmeasured_more);
 }
 
-pub(crate) fn exit_code(applied: &Applied) -> i32 {
+#[doc(hidden)]
+pub fn exit_code(applied: &Applied) -> i32 {
     if applied.reason.as_deref() == Some("cancelled") {
         return 130;
     }
@@ -826,7 +828,7 @@ fn dead_paths(
         size: None,
         unreadable: None,
     };
-    match crate::gc::liveness::liveness(ctx.fs, &dir, now, window) {
+    match crate::liveness::liveness(ctx.fs, &dir, now, window) {
         Liveness::Decided { dead, .. } => Ok(dead
             .iter()
             .flat_map(|unit| unit.files.iter().cloned())

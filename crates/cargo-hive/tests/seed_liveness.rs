@@ -71,7 +71,7 @@ impl Env {
             account_bytes: false,
             repos: &[],
             mains: &[],
-            liveness: cargo_hive::gc::liveness::liveness,
+            liveness: cargo_hive_gc::liveness::liveness,
         }
     }
 }
@@ -473,7 +473,7 @@ fn an_undecided_target_holds_every_graph_unit_key_and_not_current_name_meta() {
         std::slice::from_ref(&target),
         env.now,
         6 * HOUR,
-        cargo_hive::gc::liveness::liveness,
+        cargo_hive_gc::liveness::liveness,
     );
     assert!(got.whole_store.is_empty(), "{got:?}");
     let graph_key = unit_key(
@@ -529,7 +529,7 @@ fn an_unsupported_profile_with_fingerprint_holds_each_directory_name() {
         &[target],
         env.now,
         6 * HOUR,
-        cargo_hive::gc::liveness::liveness,
+        cargo_hive_gc::liveness::liveness,
     );
     assert!(got.whole_store.is_empty(), "{got:?}");
     assert!(got.keys.is_empty(), "{got:?}");
@@ -557,7 +557,7 @@ fn an_unsupported_profile_without_fingerprint_holds_nothing() {
         &[target],
         env.now,
         6 * HOUR,
-        cargo_hive::gc::liveness::liveness,
+        cargo_hive_gc::liveness::liveness,
     );
     assert!(got.whole_store.is_empty(), "{got:?}");
     assert!(got.keys.is_empty(), "{got:?}");
@@ -575,7 +575,7 @@ fn an_unreadable_target_holds_the_whole_store() {
         &[target.clone()],
         env.now,
         6 * HOUR,
-        cargo_hive::gc::liveness::liveness,
+        cargo_hive_gc::liveness::liveness,
     );
     assert_eq!(got.whole_store.len(), 1, "{got:?}");
     assert_eq!(got.whole_store[0].kind, "store.target_unreadable");
@@ -607,7 +607,7 @@ fn a_failed_fingerprint_deps_or_examples_listing_holds_the_whole_store() {
             &[target],
             env.now,
             6 * HOUR,
-            cargo_hive::gc::liveness::liveness,
+            cargo_hive_gc::liveness::liveness,
         );
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!got.whole_store.is_empty(), "fingerprint: {got:?}");
@@ -645,7 +645,7 @@ fn a_failed_fingerprint_deps_or_examples_listing_holds_the_whole_store() {
             &[target],
             env.now,
             6 * HOUR,
-            cargo_hive::gc::liveness::liveness,
+            cargo_hive_gc::liveness::liveness,
         );
         fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
@@ -705,7 +705,7 @@ fn a_lock_that_cannot_be_read_is_skipped_and_fills_nothing() {
         account_bytes: true,
         repos: &repos,
         mains: &mains,
-        liveness: cargo_hive::gc::liveness::liveness,
+        liveness: cargo_hive_gc::liveness::liveness,
     };
     let target = TargetDir {
         path: target_path.clone(),

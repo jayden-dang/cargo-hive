@@ -2184,7 +2184,7 @@ fn lib_ctx<'a>(lib: &'a LibCtx, repos: &'a [Repo]) -> Ctx<'a> {
         account_bytes: true,
         repos,
         mains: &lib.mains,
-        liveness: cargo_hive::gc::liveness::liveness,
+        liveness: cargo_hive_gc::liveness::liveness,
     }
 }
 

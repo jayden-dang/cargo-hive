@@ -2,6 +2,3 @@
 
 pub mod bench;
 pub mod cli;
-pub mod explain;
-pub mod gc;
-pub mod plan_tier;

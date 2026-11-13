@@ -6,9 +6,9 @@
 
 use cargo_hive::bench::command::BuildCmd;
 use cargo_hive::cli::Cli;
-use cargo_hive::plan_tier::build::class_label;
-use cargo_hive::plan_tier::record::PlanClass;
 use cargo_hive_core::receipt::{Outcome, PlanTierBody, Receipt, Scope};
+use cargo_hive_gc::plan_tier::build::class_label;
+use cargo_hive_gc::plan_tier::record::PlanClass;
 use clap::CommandFactory;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

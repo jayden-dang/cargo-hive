@@ -97,7 +97,7 @@ pub fn class_of_target(owner: &Owner, checkouts: &[Checkout]) -> TargetClass {
 }
 
 pub fn plan_for_target(ctx: &Ctx, target: &TargetDir, window: Duration) -> TargetPlan {
-    let dead = match crate::gc::liveness::liveness(ctx.fs, target, ctx.now, window) {
+    let dead = match crate::liveness::liveness(ctx.fs, target, ctx.now, window) {
         Liveness::Undecided { reasons } => return TargetPlan::Undecided(reasons),
         Liveness::Decided { dead, .. } => dead,
     };
@@ -793,7 +793,7 @@ mod tests {
             account_bytes: false,
             repos: &[],
             mains: &[],
-            liveness: crate::gc::liveness::liveness,
+            liveness: crate::liveness::liveness,
         };
         plan_for_target(&ctx, target, Duration::from_secs(7 * 86_400))
     }

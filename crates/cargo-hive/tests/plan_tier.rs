@@ -4,9 +4,9 @@
 mod common;
 use std::os::unix::fs::PermissionsExt;
 
-use cargo_hive::plan_tier::apply::apply;
 use cargo_hive_core::locks::{Acquired, Reason, acquire};
 use cargo_hive_core::receipt::Outcome;
+use cargo_hive_gc::plan_tier::apply::apply;
 use common::plan_fixture::Planned;
 use common::recording_fs::Recording;
 
@@ -311,11 +311,12 @@ fn a_closure_plan_copies_each_unmeasured_path_and_counts_only_measured_bytes() {
     let target = p.worktree_target();
     let hash = p.dead_unit_hash(&target);
     let artifact = rlib_of(&target, &hash);
-    let full = cargo_hive::plan_tier::build::make(&p.library_ctx().ctx(), &[], &|| false).unwrap();
+    let full =
+        cargo_hive_gc::plan_tier::build::make(&p.library_ctx().ctx(), &[], &|| false).unwrap();
     let full_freed = secondary_freed(&full);
     let rec = Recording::over_real().fail_sharing(&artifact);
     let made =
-        cargo_hive::plan_tier::build::make(&p.library_ctx_with(rec.fs()).ctx(), &[], &|| false)
+        cargo_hive_gc::plan_tier::build::make(&p.library_ctx_with(rec.fs()).ctx(), &[], &|| false)
             .unwrap();
     let freed = secondary_freed(&made);
     assert!(freed > 0, "measured files were dropped from the byte total");
@@ -337,11 +338,12 @@ fn an_orphan_plan_copies_each_unmeasured_path_and_counts_only_measured_bytes() {
     let (p, orphan) = Planned::with_orphan("measure-gap-orphan");
     let hash = p.dead_unit_hash(&orphan);
     let artifact = rlib_of(&orphan, &hash);
-    let full = cargo_hive::plan_tier::build::make(&p.library_ctx().ctx(), &[], &|| false).unwrap();
+    let full =
+        cargo_hive_gc::plan_tier::build::make(&p.library_ctx().ctx(), &[], &|| false).unwrap();
     let full_freed = orphan_accounted(&full);
     let rec = Recording::over_real().fail_sharing(&artifact);
     let made =
-        cargo_hive::plan_tier::build::make(&p.library_ctx_with(rec.fs()).ctx(), &[], &|| false)
+        cargo_hive_gc::plan_tier::build::make(&p.library_ctx_with(rec.fs()).ctx(), &[], &|| false)
             .unwrap();
     let freed = orphan_accounted(&made);
     assert!(freed > 0, "measured files were dropped from the byte total");
@@ -367,19 +369,19 @@ fn rlib_of(target: &std::path::Path, hash: &str) -> std::path::PathBuf {
     panic!("no rlib for {hash} in {}", deps.display());
 }
 
-fn secondary_freed(made: &cargo_hive::plan_tier::build::Made) -> u64 {
+fn secondary_freed(made: &cargo_hive_gc::plan_tier::build::Made) -> u64 {
     made.plans
         .iter()
-        .find(|plan| plan.class == cargo_hive::plan_tier::record::PlanClass::Secondary)
+        .find(|plan| plan.class == cargo_hive_gc::plan_tier::record::PlanClass::Secondary)
         .and_then(|plan| plan.planned)
         .map(|bytes| bytes.freed)
         .unwrap_or(0)
 }
 
-fn orphan_accounted(made: &cargo_hive::plan_tier::build::Made) -> u64 {
+fn orphan_accounted(made: &cargo_hive_gc::plan_tier::build::Made) -> u64 {
     made.plans
         .iter()
-        .find(|plan| plan.class == cargo_hive::plan_tier::record::PlanClass::Orphan)
+        .find(|plan| plan.class == cargo_hive_gc::plan_tier::record::PlanClass::Orphan)
         .and_then(|plan| plan.planned)
         .map(|bytes| bytes.freed.saturating_add(bytes.still_shared))
         .unwrap_or(0)
@@ -402,7 +404,7 @@ fn a_dead_path_whose_stat_fails_stores_no_plan_and_names_the_path() {
     let artifact = artifact.expect("the dead unit has an rlib");
     let rec = Recording::over_real().fail_stat(&artifact);
     let lib = p.library_ctx_with(rec.fs());
-    let made = cargo_hive::plan_tier::build::make(&lib.ctx(), &[], &|| false).unwrap();
+    let made = cargo_hive_gc::plan_tier::build::make(&lib.ctx(), &[], &|| false).unwrap();
     assert!(
         made.plans.is_empty(),
         "a plan was returned though a path could not be stat'd"
@@ -422,7 +424,7 @@ fn a_dead_path_whose_stat_fails_stores_no_plan_and_names_the_path() {
         "the unreadable target was reported as nothing to do: {:?}",
         made.nothing_to_do
     );
-    assert_eq!(cargo_hive::plan_tier::build::command_code(&made), 1);
+    assert_eq!(cargo_hive_gc::plan_tier::build::command_code(&made), 1);
     assert!(
         !p.hive.home.path.join("plans.json").exists(),
         "gc --plan stored a plan"
@@ -431,7 +433,7 @@ fn a_dead_path_whose_stat_fails_stores_no_plan_and_names_the_path() {
 
 #[test]
 fn a_cancel_between_two_apply_deletions_is_partial_consumed_and_replanned() {
-    use cargo_hive::plan_tier::record::{self, Lookup};
+    use cargo_hive_gc::plan_tier::record::{self, Lookup};
     let p = Planned::with_dead_units("apply-cancel-two", 2);
     let id = Planned::id_of(&p.plan(), "secondary");
     let lib = p.library_ctx();
@@ -500,13 +502,13 @@ fn a_cancel_between_two_apply_deletions_is_partial_consumed_and_replanned() {
 #[test]
 fn a_cancel_between_units_keeps_the_first_unit_gone_and_the_second_intact_and_the_rest_can_be_planned_again()
  {
-    use cargo_hive::plan_tier::apply::{ResolvedTarget, execute};
-    use cargo_hive::plan_tier::record::PlanClass;
+    use cargo_hive_gc::plan_tier::apply::{ResolvedTarget, execute};
+    use cargo_hive_gc::plan_tier::record::PlanClass;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let p = Planned::with_dead_units("cancel-between", 2);
     let lib = p.library_ctx();
     let ctx = lib.ctx();
-    let made = cargo_hive::plan_tier::build::make(&ctx, &[], &|| false).unwrap();
+    let made = cargo_hive_gc::plan_tier::build::make(&ctx, &[], &|| false).unwrap();
     let plan = made
         .plans
         .into_iter()
@@ -546,7 +548,7 @@ fn a_cancel_between_units_keeps_the_first_unit_gone_and_the_second_intact_and_th
         })
         .collect();
     assert_eq!(hashes.len(), 1, "exactly the first unit is gone: {gone:?}");
-    let again = cargo_hive::plan_tier::build::make(&ctx, &[], &|| false).unwrap();
+    let again = cargo_hive_gc::plan_tier::build::make(&ctx, &[], &|| false).unwrap();
     assert!(
         again.plans.iter().any(|x| x.class == PlanClass::Secondary),
         "the second unit can be planned again"

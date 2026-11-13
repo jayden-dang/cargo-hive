@@ -95,6 +95,7 @@ dependencies = [
  "cargo-hive-cargo",
  "cargo-hive-core",
  "cargo-hive-doctor",
+ "cargo-hive-gc",
  "cargo-hive-platform",
  "cargo-hive-seed",
  "cargo-hive-state",
@@ -131,6 +132,18 @@ dependencies = [
  "cargo-hive-cargo",
  "cargo-hive-core",
  "cargo-hive-platform",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "cargo-hive-gc"
+version = "0.1.0"
+dependencies = [
+ "cargo-hive-cargo",
+ "cargo-hive-core",
+ "cargo-hive-platform",
+ "cargo-hive-state",
  "serde",
  "serde_json",
 ]

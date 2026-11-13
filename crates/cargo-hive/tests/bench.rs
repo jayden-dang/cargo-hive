@@ -76,7 +76,7 @@ fn run_bench_cfg(
         account_bytes: true,
         repos: &repos,
         mains: &lib.mains,
-        liveness: cargo_hive::gc::liveness::liveness,
+        liveness: cargo_hive_gc::liveness::liveness,
     };
     run(&ctx, plan, limits, cancel)
 }
@@ -94,7 +94,7 @@ fn prime_store(hive: &Hive, plan: &Plan) {
         account_bytes: true,
         repos: &repos,
         mains: &lib.mains,
-        liveness: cargo_hive::gc::liveness::liveness,
+        liveness: cargo_hive_gc::liveness::liveness,
     };
     let fill = seed::run_fill(&ctx, &repos[0], &|| false).expect("prime fill");
     match fill {

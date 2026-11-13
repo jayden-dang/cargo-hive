@@ -11,17 +11,17 @@
 //! reports lies inside its clone (a build script writing elsewhere is not detected); every limit
 //! (deadline, output, walk, config size) is an error when hit, and nothing is silently skipped.
 
-use cargo_hive::gc::liveness::liveness;
-use cargo_hive::plan_tier::apply::{self, ResolvedTarget};
-use cargo_hive::plan_tier::build::{self, TargetPlan};
-use cargo_hive::plan_tier::guard::{Deleted, Expect, delete_checked};
-use cargo_hive::plan_tier::record::{Plan, PlanClass, PlannedEntry, PlannedTarget, kind_name};
 use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_core::fingerprint;
 use cargo_hive_core::ledger::{Footprint, measure};
 use cargo_hive_core::liveness::{Liveness, unit_timestamp};
 use cargo_hive_core::receipt::Outcome;
 use cargo_hive_core::target::{self, Owner, TargetDir};
+use cargo_hive_gc::liveness::liveness;
+use cargo_hive_gc::plan_tier::apply::{self, ResolvedTarget};
+use cargo_hive_gc::plan_tier::build::{self, TargetPlan};
+use cargo_hive_gc::plan_tier::guard::{Deleted, Expect, delete_checked};
+use cargo_hive_gc::plan_tier::record::{Plan, PlanClass, PlannedEntry, PlannedTarget, kind_name};
 use cargo_hive_platform::{self as platform, EntryKind, Fs, TryLock};
 use cargo_hive_state::State;
 use std::collections::{BTreeMap, BTreeSet};
@@ -936,7 +936,7 @@ pub fn trial_through_execute(fx: &super::cargo_fixture::Fixture) -> Result<Execu
         account_bytes: false,
         repos: &repos,
         mains: &mains,
-        liveness: cargo_hive::gc::liveness::liveness,
+        liveness: cargo_hive_gc::liveness::liveness,
     };
     let verdict = liveness(fs, &target, now, window);
     let (live, has_dead_file) = match &verdict {
@@ -1164,7 +1164,7 @@ fn delete_window_through_execute(
         account_bytes: false,
         repos: &repos,
         mains: &mains,
-        liveness: cargo_hive::gc::liveness::liveness,
+        liveness: cargo_hive_gc::liveness::liveness,
     };
     let resolved = [ResolvedTarget {
         path: clone.to_path_buf(),

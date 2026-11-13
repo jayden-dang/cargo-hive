@@ -25,6 +25,7 @@ cargo-hive-state = { workspace = true }
 cargo-hive-cargo = { workspace = true }
 cargo-hive-doctor = { workspace = true }
 cargo-hive-seed = { workspace = true }
+cargo-hive-gc = { workspace = true }
 
 [dev-dependencies]
 libc = { workspace = true }
