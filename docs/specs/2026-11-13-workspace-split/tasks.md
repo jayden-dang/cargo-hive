@@ -673,7 +673,7 @@ _Requirements: SPLIT-1.1, SPLIT-3.3, SPLIT-3.4, SPLIT-3.5, SPLIT-3.6, SPLIT-5.1,
 
 **Depends-on:** Task 14
 
-- [ ] **Step 1: Failing test.** Write `os_boundary.rs` with three tests over every member except
+- [x] **Step 1: Failing test.** Write `os_boundary.rs` with three tests over every member except
   `cargo-hive-platform`. Each fails with `"{RULE}: {member} …"`:
   - `no_member_but_platform_depends_on_libc`: `libc` in normal deps (kind null);
   - `no_member_but_platform_has_non_test_cfg_target_os`: run over every `src/**/*.rs`;
@@ -688,7 +688,7 @@ _Requirements: SPLIT-1.1, SPLIT-3.3, SPLIT-3.4, SPLIT-3.5, SPLIT-3.6, SPLIT-5.1,
   - `#[cfg(target_os = "macos")]\nfn f(){}` → `[1]`.
 
   Run `cargo test --test os_boundary`. Expect: the forbid test fails for `cargo-hive`.
-- [ ] **Step 2: Implement.** Create the crate and move the files. Its `Cargo.toml` depends on `libc` and on
+- [x] **Step 2: Implement.** Create the crate and move the files. Its `Cargo.toml` depends on `libc` and on
   `applesauce` for macOS, with its own `[lints.clippy] disallowed_types = "allow"`,
   `disallowed_methods = "allow"` and no `[lints] workspace = true`. Cargo does not allow a member to combine
   inherited and local lints.
@@ -700,16 +700,16 @@ _Requirements: SPLIT-1.1, SPLIT-3.3, SPLIT-3.4, SPLIT-3.5, SPLIT-3.6, SPLIT-5.1,
     (tests/common/mod.rs:466) as separate test crates.
   - Add the forbid attribute to `crates/cargo-hive/src/lib.rs` and `main.rs`.
   - Add the allows to test modules and test files. `libc` becomes a dev-dependency of `cargo-hive`.
-- [ ] **Step 3: Prove it fails with the rule's name (manual, temp copy).** Copy the workspace to
+- [x] **Step 3: Prove it fails with the rule's name (manual, temp copy).** Copy the workspace to
   `/private/tmp/hive-split/bad`:
   - add `pub fn f() { unsafe {} }` to `crates/cargo-hive/src/size.rs`, run `cargo build`, and expect an error
     containing the rule;
   - revert it, add `let _ = std::process::Command::new("true");` and run `cargo clippy -- -D warnings`; expect an
     error with `note: only the platform crate may touch the OS`.
-- [ ] **Step 4: Run.** The full gate at the root, `cargo test --test os_boundary`, the capture comparison, and
+- [x] **Step 4: Run.** The full gate at the root, `cargo test --test os_boundary`, the capture comparison, and
   `cargo check --workspace --target x86_64-unknown-linux-gnu` all pass. On non-macOS the stub still returns
   `Err(NotMacOs)`.
-- [ ] **Step 5: Commit.** `git commit -m "build: extract the platform crate and enforce the OS boundary"`
+- [x] **Step 5: Commit.** `git commit -m "build: extract the platform crate and enforce the OS boundary"`
 
 _Requirements: SPLIT-1.2, SPLIT-2.1, SPLIT-2.2, SPLIT-2.3, SPLIT-2.4, SPLIT-3.7, SPLIT-3.8_
 
