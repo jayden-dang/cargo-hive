@@ -50,8 +50,8 @@ Labels used below:
 
 **Story:** As an agent, I want an OS call I add to the seed crate to fail the gate with a message naming the rule, so that I learn the boundary without reading the architecture doc.
 
-- **SPLIT-2.1** THE SYSTEM SHALL confine `unsafe` code, the `libc` dependency, `cfg(target_os = …)` outside test
-  code, and `std::process::Command` to the platform crate; `std::fs` stays allowed in every member
+- **SPLIT-2.1** THE SYSTEM SHALL confine `unsafe` code, `libc` as a normal (non-dev) dependency,
+  `cfg(target_os = …)` and `std::process::Command`, each outside test code, to the platform crate; `std::fs` stays allowed in every member
   (agent-decided reach of "touch the OS").
 - **SPLIT-2.2** IF a non-platform member contains an `unsafe` block THEN `cargo build` SHALL fail with an error
   whose text contains "only the platform crate may touch the OS" (agent-decided mechanism: a crate-root
@@ -60,15 +60,15 @@ Labels used below:
   -- -D warnings` SHALL fail with an error whose text contains "only the platform crate may touch the OS",
   except inside test code that carries a test-scoped allow (agent-decided mechanism: clippy
   `disallowed-types` / `disallowed-methods` with a `reason`).
-- **SPLIT-2.4** IF a non-platform member declares a `libc` dependency, contains `cfg(target_os = …)` outside test
+- **SPLIT-2.4** IF a non-platform member declares `libc` as a normal dependency, contains `cfg(target_os = …)` outside test
   code, or lacks the crate-root forbid attribute of SPLIT-2.2, THEN `cargo test` SHALL fail with a message that
   contains "only the platform crate may touch the OS" and names the member (agent-decided mechanism: a guard
   test).
 - **SPLIT-2.5** THE SYSTEM SHALL spawn every child process through the platform crate's spawn functions, each
   site keeping its 0.1.0 deadline, pipe drain and process-group kill or the lack of them (git's `run` and
-  `has_commits`, src/git.rs:115, :176, have no deadline in 0.1.0), and SHALL build the environment of every child `cargo` and `git`
-  through one helper above the platform crate (agent-decided placement), with each child's environment as
-  SPLIT-2.6 keeps it.
+  `has_commits`, src/git.rs:115, :176, have no deadline in 0.1.0), and SHALL build the environment of every child process
+  (`cargo`, `git`, `rustup`) through one module above the platform crate (agent-decided placement), with each
+  child's environment as SPLIT-2.6 keeps it.
 - **SPLIT-2.6** (guard) WHEN hive spawns a child process, THE SYSTEM SHALL CONTINUE TO give it the environment
   0.1.0 gives it (ARCH-13): `cargo metadata` without `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`,
   `CARGO_BUILD_BUILD_DIR` and every `GIT_*` variable (src/cargo_target.rs:565-573); `git` without every `GIT_*`

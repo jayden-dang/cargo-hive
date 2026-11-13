@@ -53,8 +53,9 @@ the unchanged suite plus the SPLIT-4.1 liveness comparison prove the results equ
    guard test. Probes: research-build-rule.md.
 3. **Spawning**: platform owns the mechanism. It keeps today's bounded runner (deadline, pipe drain,
    process-group kill) and a plain unbounded `output`, because git's `run`/`has_commits` (git.rs:115, :176) have
-   no deadline in 0.1.0 and must keep that. The cargo adapter owns the ARCH-13 environment policy in one module
-   (W1 amendment).
+   no deadline in 0.1.0 and must keep that. The cargo adapter owns every child's environment rule in one module,
+   `env`. That covers `cargo metadata`, `git`, `rustup which`, doctor's probe build and bench's timed build, so
+   ARCH-13 has one owner (W1 amendment). Each rule keeps the 0.1.0 environment exactly.
 4. **Liveness inversion** (agent-decided, forced by L2): `Liveness`, `UnitRef`, `DeadUnit`, `Uncertain`, and
    `LivenessFn = fn(&dyn Fs, &TargetDir, SystemTime, Duration) -> Liveness`, live in core. The algorithm
    `liveness()` lives in `cargo-hive-gc`. seed's context carries a `LivenessFn`, which the binary fills with
@@ -65,11 +66,22 @@ the unchanged suite plus the SPLIT-4.1 liveness comparison prove the results equ
 6. **Integration tests stay in `cargo-hive`** (agent-decided test layout): `tests/common/mod.rs:98` and `:413`
    use `env!("CARGO_BIN_EXE_cargo-hive")`, and `common::prove` imports plan_tier and gc (design-scan.md §4).
    Moving the few liveness-only test files would split `tests/common` for little gain. Unit tests move with
-   their modules, so `cargo test -p <member>` runs a member's unit tests (SPLIT-1.5).
+   their modules, so `cargo test -p <member>` runs a member's unit tests (SPLIT-1.5). The exception: seed unit
+   tests that need the real liveness algorithm (the six `holds` calls and four `Ctx` builds in seed/source.rs's
+   test module) move to `crates/cargo-hive/tests/seed_liveness.rs`. seed therefore has no dev-dependency on gc,
+   and `cargo test -p cargo-hive-seed` never builds gc.
+   The unsafe test helpers in seed (`set_var`/`remove_var` at seed/source.rs:829, :837; `libc::openat`,
+   `unlinkat` and `flock` at seed/store.rs:1215-1237, :1534) move into `platform::testing`, because a crate-root
+   `forbid(unsafe_code)` also covers `cfg(test)` code. Integration-test files in `crates/cargo-hive/tests/` are
+   separate crates with no forbid attribute. Each carries a file-level
+   `#![allow(clippy::disallowed_types, clippy::disallowed_methods, reason = "test fixtures drive real cargo and git")]`
+   (89 `Command::new` sites in 20 files), and they use `libc` as a dev-dependency of `cargo-hive`.
 7. **Versions** (L7 + agent-decided pin): one `[workspace.package] version`. Inter-member deps are
    `{ path = "../<role>", version = "=X.Y.Z" }` through `[workspace.dependencies]`. The first release after the
    split is a 0.x minor bump (0.2.0), because the `cargo_hive::<module>` library paths change (out of scope to
-   keep, requirements Out of Scope). The bump is flagged for the operator.
+   keep, requirements Out of Scope). The bump is flagged for the operator. If the operator wants the old paths
+   kept, the fallback is a re-export in `crates/cargo-hive/src/lib.rs` (`pub use cargo_hive_seed as seed;` and so on
+   for every 0.1.0 module). That changes no other section.
 8. **Publishing** (research-publish-workspace.md): `CARGO_TARGET_DIR=target/package-verify cargo publish
    --workspace --dry-run`, then the same command without `--dry-run`. Cargo 1.97.1 verifies each member against a
    temporary local registry and uploads in dependency order. A single-member dry-run fails while its deps are
@@ -82,8 +94,10 @@ the unchanged suite plus the SPLIT-4.1 liveness comparison prove the results equ
    - a CSR graph (`offsets: Vec<u32>`, `targets: Vec<UnitId>`) with a bitset closure, in place of
      `Vec<(usize, usize)>` and `HashMap<&str, Vec<usize>>`.
 
-   Every serde shape stays byte-equal through hand-written `Serialize` where the field type changes. This work
-   happens last, inside core and gc, after the extractions.
+   `UnitGraph` is never serialized to output (`ProfileReport.graph` is `#[serde(skip)]`, fingerprint.rs:130-131).
+   `Unit`'s serialized fields keep their 0.1.0 form through `serialize_with`/`Display` on the new types. The
+   shape test against captured 0.1.0 JSON covers every printed or persisted shape. This work happens last, inside
+   core and gc, after the extractions.
 10. **Edition 2024**: `cargo fix --edition` on the single crate before the workspace exists. A scan of every
     named lock site found no guard created in an `if let` scrutinee or a tail expression (design-scan.md §6), so
     the SPLIT-5.2 guard is held by inspection plus the existing lock tests.
@@ -123,7 +137,7 @@ Locality: extract — the root manifest splits into nine manifests. No source mo
 
 ### `cargo-hive-platform`
 
-Satisfies: SPLIT-2.1 (owner of the barred constructs), SPLIT-3.7, SPLIT-3.8, SPLIT-2.7
+Satisfies: SPLIT-2.1 (owner of the barred constructs), SPLIT-3.8, SPLIT-2.7
 Reuse: rung 2 — src/platform/{mod,apfs}.rs stay as they are (`Fs` trait mod.rs:295, `Apfs` apfs.rs:47, lock
 self-exec apfs.rs:172-245, `current()` mod.rs:444-455). These items move in unchanged:
 - the spawn runner `output_with_deadline`, `run_bounded`, `Capture`, `Ran`, `ChildOutputError`, `kill_pgid`
@@ -144,17 +158,25 @@ Surface:
 - doctor/cli callers of `install_signal_handlers`, `CANCEL`, `process_cancel`: replace (path change only).
 - state's three lock methods: replace. They call `platform::flock::{exclusive_or_cancelled, shared_or_cancelled,
   try_exclusive}`.
-- receipt.rs:5/:128 `utc_timestamp`: replace with `platform::clock::utc_timestamp`.
+- receipt.rs:5/:128 and explain.rs:17/:551 `utc_timestamp`: replace with `platform::clock::utc_timestamp`.
 - tests/platform_locks.rs, gc_disk_image.rs, seed_fill.rs, store_gc.rs (`Apfs::new(env!("CARGO_BIN_EXE_cargo-hive")
   .into())`): replace (path only). The binary stays the holder (SPLIT-3.8).
 Interface:
 - `Fs`, `Apfs`, `Platform`, `current()`, `ensure_supported()`, `MACOS_ONLY_MESSAGE`;
 - `proc::{Spec, output_with_deadline, run_bounded, output, Capture, Ran, ChildOutputError}`, where `Spec` is
-  program, args, cwd, `env_set`, `env_remove`, `stdin_null`;
+  program, args, cwd, `env_clear: bool`, `env_set`, `env_remove`, `stdin_null`, `own_process_group`. Doctor's
+  probe build (doctor.rs:751) and bench's timed build (bench/command.rs:143) use `env_clear` plus an allowlist;
 - `signals::{install, cancelled}`, `alive(pid)`;
-- `flock::{exclusive_or_cancelled, shared_or_cancelled, try_exclusive}`, returning a guard that unlocks on drop;
+- `flock::{exclusive_or_cancelled(&File, cancel) -> Result<FlockGuard, FlockError>,
+  shared_or_cancelled(…) -> Result<FlockGuard, FlockError>, try_exclusive(&File) -> io::Result<Option<FlockGuard>>}`,
+  where `FlockError` is `Cancelled | Io(io::Error)` and `FlockGuard` unlocks on drop. This keeps `LOCK_NB`, the
+  poll and the cancel semantics of state.rs:164-215;
+- `testing` (`#[doc(hidden)]`): `Hooked`, `set_env`/`remove_env`, and the raw `openat`/`unlinkat`/`flock`
+  helpers that seed's store tests need;
 - `clock::{utc_timestamp, utc_date}`, `os_version()`, `host_fs()`.
-Depth: n/a — extends src/platform.
+Depth: `proc::Spec` is new (rung 7). Deletion test: callers would still need only "program, args, cwd and which
+variables to clear, set or remove", which is the struct itself. That is small, and it hides `Command`, the
+process group, the deadline thread and the pipe drain. The rest extends src/platform.
 Locality: extend — platform gains five small modules. state, doctor, cargo_target, explain and seed lose their OS
 code.
 
@@ -165,11 +187,11 @@ A seed unit test checks that a non-EXDEV clone error still takes the non-EXDEV b
 
 ### `cargo-hive-core`
 
-Satisfies: SPLIT-4.3, SPLIT-4.4, SPLIT-4.5, SPLIT-4.6, SPLIT-3.2 (receipt shapes)
+Satisfies: SPLIT-4.3, SPLIT-4.4, SPLIT-4.5, SPLIT-4.6
 Reuse: rung 2 — these move whole:
 - fingerprint.rs, classify.rs, size.rs, receipt.rs;
 - the target-dir types and identification from cargo_target.rs (`TAG_LINE` :17, `Layout` :26, `identify` :120,
-  `identify_bounded` :129, `realpath_lossy` :189, `Owner` :626, `TargetDir` :639);
+  `identify_bounded` :129, `realpath_lossy` :189 (made `pub`), `Owner` :626, `TargetDir` :639);
 - the liveness *result types* (liveness.rs:31-60), `embedded_hashes`, `unit_timestamp`;
 - gc accounting: gc/ledger.rs, gc/account.rs, and `Scanned`, `Footprint`, `measure`, `record`, `scan`,
   `CRATE_DIR_CAP`, `DEPS_CAP` from gc/run.rs:20-456;
@@ -192,10 +214,17 @@ Interface:
 - `target::{identify, identify_bounded, TargetDir, Owner, Layout}`;
 - `liveness::{Liveness, UnitRef, DeadUnit, Uncertain, LivenessFn, embedded_hashes, unit_timestamp}`;
 - `ledger::{Ledger, Tally, measure, Footprint, remove_counted, RemoveFailed}`, `caps::{CRATE_DIR_CAP, DEPS_CAP}`;
-- `receipt::*`, `classify::*`, `size::*`, `locks::*`.
-Depth: n/a — extends existing modules. The new types (`UnitId`, `UnitHash`, `UnitKind`, CSR graph) are small value
-types: callers keep knowing "an id, a hash that prints as 16 hex, a kind that prints as one of nine names, and
-`successors(id)`".
+- `receipt::{Receipt, Scope, Measured, CheckRecord, Finding, Unmeasured, Outcome, PlanRecord, ReasonRecord,
+  UndecidedRecord, SCHEMA}`; `classify::{classify, Class, CheckoutKind}`; `size::{tree_size, MAX_DEPTH}`;
+  `locks::{try_lock_target, Acquired, Locked}`.
+Depth: the moved modules extend existing code. These new parts are rung 7:
+- `UnitId`, `UnitHash`, `UnitKind`: small value types. Callers keep knowing "an id, a hash that prints as 16 hex,
+  a kind that prints as one of nine names".
+- the CSR graph: callers keep `successors(id)` and `closure(roots) -> BitSet`.
+- `LivenessFn`: callers keep one function signature.
+
+Each interface is a line long and hides parsing, layout or the walk. Editing `embedded_hashes` or
+`unit_timestamp` (fingerprint file naming, not the dead-unit decision) rebuilds seed, which L2 allows.
 Locality: extract — the moves out of cargo_target.rs, liveness.rs and gc/run.rs split those files. fingerprint.rs
 changes in place for the rework (Decision 9).
 
@@ -204,7 +233,7 @@ changes in place for the rework (Decision 9).
 Satisfies: SPLIT-4.2
 Reuse: rung 2 — src/state.rs moves whole, minus its `flock` loops and `utc_*` functions (now in platform).
 Respects: ARCH-16 (metadata files only through state, atomically, under its one lock)
-Surface: every `State`/`Tx`/`StoreLock` caller (registry, discover, doctor, plan_tier/record, seed, cli): replace
+Surface: every `State`/`Tx`/`StoreLock` caller (registry, discover, plan_tier/record, seed, cli): replace
 (path change only). The state files are frozen: no name, layout or meaning changes (ROAD-14 owns that). The
 discharge is to build around them, held by SPLIT-4.2/4.3 tests against a 0.1.0-written state root.
 Interface: `State::{open, locked, locked_or_cancelled, store_shared_or_cancelled, try_store_exclusive}`, `Tx`,
@@ -217,27 +246,35 @@ Locality: extract — one file. The lock primitive is delegated to platform.
 Satisfies: SPLIT-2.5 (environment policy), SPLIT-2.6
 Reuse: rung 2 — these move whole:
 - git.rs, registry.rs, discover.rs;
-- `resolve`, `caller_overrides`, `TARGET_VARS`, `METADATA_DEADLINE` from cargo_target.rs (:553-620);
+- `Resolved` (cargo_target.rs:208), `resolve`, `caller_overrides`, `TARGET_VARS`, `METADATA_DEADLINE` from
+  cargo_target.rs (:208, :553-620);
 - the toolchain family from doctor.rs (`Toolchain`, `resolve_toolchain*`, `drop_directory_toolchain`,
   `caller_toolchain_kept*`, :355-397 and helpers);
 - `Ctx`, `checkout_walk`, `split_checkout_faults`, `faults_that_can_hide_an_owner` from plan_tier/mod.rs:18-68.
 
-New: `env::for_cargo(&mut Spec)` and `env::for_git(&mut Spec)`, which hold today's three env-scrub blocks in one
-module (rung 7, the minimum that gives ARCH-13 one owner).
+New: the `env` module (rung 7, the minimum that gives ARCH-13 one owner), holding every child's environment rule
+as it is in 0.1.0:
+- `env::metadata(&mut Spec)`: cargo_target.rs:564-574;
+- `env::git(&mut Spec)`: git.rs:70-74;
+- `env::rustup_which(&mut Spec, ResolveEnv)`: doctor.rs:428, :514;
+- `env::probe_build(&mut Spec, …)`: doctor.rs:748-760;
+- `env::timed_build(&mut Spec, &Toolchain)`: bench/command.rs:84-143.
 Respects: ARCH-13, ARCH-17 (ownership only from `cargo metadata --no-deps --locked --offline`, flags unchanged)
 Surface:
 - cargo_target.rs:565-574 (metadata env) and git.rs:70-74 (git env): replace. Both call `env::for_cargo` /
   `env::for_git`, and the resulting environment is equal (SPLIT-2.6), held by a test that diffs the `Spec` env
   against 0.1.0's list.
-- doctor.rs:428, :514, :748 and bench/command.rs:113-114, :142 keep their own env sets (design-scan.md §2.1):
-  replace, call form only (`Spec`). Their filtering is unchanged.
+- doctor.rs:428, :514, :748 and bench/command.rs:113-114, :142: replace. They call the matching `env::*` function,
+  and the resulting environment is unchanged (design-scan.md §2.1). The same env-diff test covers each.
 - seed/evict.rs:12, :572 and seed/fill.rs:868 (`doctor::resolve_toolchain*`): replace with the adapter paths.
   This removes the seed → doctor edge.
 - seed and gc callers of `plan_tier::Ctx` / walk fns: replace (path).
 Interface: `discover::{discover, Scope, Checkout, …}`, `registry::*`, `git::Git`, `metadata::resolve`,
-`toolchain::{Toolchain, resolve_toolchain_until, …}`, `Ctx`, `env::{for_cargo, for_git}`.
-Depth (for `env`): if it vanished, callers would need only the rule "remove target-dir vars and `GIT_*`; drop a
-directory-selected `RUSTUP_TOOLCHAIN`", one sentence. Its interface is two functions.
+`toolchain::{Toolchain, resolve_toolchain_until, …}`, `Ctx`, `env::{metadata, git, rustup_which, probe_build,
+timed_build}`.
+Depth (for `env`): if it vanished, each caller would need to know which variables its kind of child must not
+inherit and which it must be given. Today that is five scattered rule sets, two of them allowlists. The interface
+is "name the kind of child", which is small, and it hides every variable list.
 Locality: extract — cargo_target.rs and doctor.rs split. The {cargo_target, doctor} cycle disappears, because
 `resolve` and `drop_directory_toolchain` land in the same crate.
 
@@ -259,11 +296,17 @@ Reuse: rung 2 — src/seed/* moves whole. Its edges are rewired downward: livene
 locks come from core; toolchain, `Ctx` and the walk fns from the adapter.
 Respects: ARCH-5, ARCH-19
 Surface:
-- seed/source.rs:183, :327 (`liveness::liveness(...)`): replace with `(ctx.liveness)(fs, target, now, window)`.
+- seed/source.rs:183, :327 (`liveness::liveness(...)`): replace with a call through a `LivenessFn`. `holds()`
+  (seed/source.rs:163, `pub(crate)`, called from seed/evict.rs:67) gains a `liveness: LivenessFn` parameter, and
+  `EvictCtx` (seed/evict.rs:24) gains a `liveness` field.
+- `EvictCtx` construction sites (cli.rs:1050, tests/store_gc.rs four sites): replace, passing
+  `cargo_hive_gc::liveness`.
+- seed/source.rs's test module (six `holds` calls, four `Ctx` builds that need the real algorithm): move to
+  `crates/cargo-hive/tests/seed_liveness.rs` unchanged in assertions; `holds` becomes `#[doc(hidden)] pub`.
 - `Ctx` construction sites (cli.rs, bench/mod.rs, test helpers seed/source.rs:786, fill.rs:1232, tests/seed*.rs):
   replace. Each passes `liveness: cargo_hive_gc::liveness`.
-Interface: unchanged seed entry points (`seed`, `fill`, `evict`, `status counts`). `Ctx` gains one field,
-`liveness: LivenessFn`.
+Interface: unchanged seed entry points (`seed`, `fill`, `evict`, `status counts`). `Ctx` and `EvictCtx` each gain
+one field, `liveness: LivenessFn`.
 Depth: n/a — extends src/seed.
 Locality: extract — seed moves whole. One field is added to `Ctx` (in the adapter). The edge to gc disappears.
 
@@ -302,21 +345,23 @@ re-run after steps 1, 4 and 5 (W5a).
 
 ### `cargo-hive` (binary)
 
-Satisfies: SPLIT-3.1, SPLIT-3.5, SPLIT-3.9
+Satisfies: SPLIT-3.1, SPLIT-3.2, SPLIT-3.5, SPLIT-3.7, SPLIT-3.9
 Reuse: rung 2 — cli.rs (minus `cross_check_notes`), bench/*, main.rs; `locate_checkout` and `Refusal` stay
 (cli.rs:1579, :1586, used by cli and bench in this crate). lib.rs keeps `pub mod cli; pub mod bench;` for its own
 tests (tests/skill.rs:434, tests/skill/names.rs:7-11).
 Respects: ARCH-8, ARCH-14
 Surface:
-- `cargo_hive::<module>` paths outside `cli`/`bench`, read by external library users of 0.1.0: frozen. 0.1.0 stays
-  on crates.io unchanged, and the new paths ship only in 0.2.0, a semver-breaking minor for 0.x. That is gated
-  on the operator's sheet review (D6).
+- `cargo_hive::<module>` paths outside `cli`/`bench`, read by external library users of 0.1.0: frozen, discharged
+  by a gate. Dropping them ships only if the operator agrees at the sheet (D6). 0.1.0 stays on crates.io
+  unchanged, and 0.2.0 is a semver-breaking minor for 0.x. If the operator declines, the fallback re-export of
+  Decision 7 keeps every path.
 - tests/*.rs using `cargo_hive::{seed,plan_tier,platform,state,…}` (scan.md §4: 57 + 28 + 20 + … refs): replace.
   They import from the member crates, which `crates/cargo-hive/Cargo.toml` lists as `[dev-dependencies]` where not
   already normal deps.
 - `hive_version` (receipt.rs:124, `env!("CARGO_PKG_VERSION")` evaluated in core) and `--version` (cli.rs:15,
   evaluated in cargo-hive): replace, value equal. Both read the one workspace version, held by SPLIT-3.5's test.
-Interface: the installed `cargo-hive` command tree (cli.rs:12-130) including hidden `__hold-lock`/`__try-lock`.
+Interface: the installed `cargo-hive` command tree (cli.rs:12-130) including hidden `__hold-lock`/`__try-lock`,
+and the macOS-only exit (cli.rs:147-149).
 The binary wires `cargo_hive_gc::liveness` into seed's `Ctx`.
 Depth: n/a — extends cli.rs.
 Locality: extract — the package moves to `crates/cargo-hive/`, taking tests/ with it.
@@ -332,14 +377,24 @@ Satisfies: SPLIT-2.2, SPLIT-2.3, SPLIT-2.4
 Reuse: rung 4 — rustc `forbid(unsafe_code, reason)`, clippy `disallowed-types`/`disallowed-methods` with
 `reason`, and Cargo `[lints]` (probed, research-build-rule.md). The guard test reuses `cargo metadata` and a
 plain source scan, the same shape as tests/guards.rs:436-440.
-Surface: test-only `Command` sites (cargo_target.rs:788/803/816, doctor.rs:1673/1797/1800, git.rs:269,
-cli.rs:1948, seed/source.rs:996, seed/store.rs:940/1251, fingerprint.rs:917): replace. Each test module carries
-`#[allow(clippy::disallowed_types, clippy::disallowed_methods, reason = "test fixture")]`.
+Surface:
+- test-only `Command` sites in src (cargo_target.rs:788/803/816, doctor.rs:1673/1797/1800, git.rs:269,
+  cli.rs:1948, seed/source.rs:996, seed/store.rs:940/1251, fingerprint.rs:917): replace. Each test module carries
+  `#[allow(clippy::disallowed_types, clippy::disallowed_methods, reason = "test fixture")]`.
+- the 89 `Command::new` sites in 20 files under tests/: replace. Each file gets a file-level allow (Decision 6).
+- unsafe test helpers in seed: move to `platform::testing` (Decision 6).
 Interface:
 - every non-platform `lib.rs` opens with the forbid attribute;
 - root `clippy.toml` lists `std::process::Command` with reason "only the platform crate may touch the OS";
-- `crates/cargo-hive/tests/os_boundary.rs` fails with that text and the member's name when a non-platform member
-  has a `libc` dependency, a non-test `cfg(target_os`, or a missing forbid attribute.
+- `crates/cargo-hive/tests/os_boundary.rs` fails with that text and the member's name when a non-platform member:
+  - has `libc` in its normal `[dependencies]` (dev-dependencies are test code);
+  - has a `cfg(target_os` that is not test code;
+  - is missing the forbid attribute.
+
+  "Test code" means an attribute whose own predicate contains `test` (`cfg(all(test, target_os = …))`,
+  plan_tier/guard.rs:92, gc/account.rs:156), or any line inside a `#[cfg(test)]` module or item. The scan tracks
+  brace depth from the `#[cfg(test)]` line, which also covers a separate `#[cfg(target_os)]` under
+  `#[cfg(test)]` (liveness.rs:655-656). Files under `tests/` are test code.
 Depth: n/a — configuration plus one test.
 Locality: leave — no production module changes beyond the attribute line.
 
@@ -407,6 +462,7 @@ Locality: leave.
 | existing integration suite through `CARGO_BIN_EXE_cargo-hive` (tests/common/mod.rs:98) | integration | SPLIT-3.2, 3.7, 3.8, 4.2, 5.2 |
 | clap tree dump vs v0.1.0 capture (`Cli::command()`) | unit | SPLIT-3.1 |
 | receipt version test (`hive_version` == `--version`) | integration | SPLIT-3.5 |
+| `crates/cargo-hive/tests/seed_liveness.rs` (seed `holds`/`Ctx` tests with the real `cargo_hive_gc::liveness`, moved from seed/source.rs) | integration | SPLIT-1.4 (seed keeps working through `LivenessFn`) |
 | `crates/gc/tests/liveness_report.rs` (`#[ignore]`, klynt) vs v0.1.0 export | integration (manual, proof machine) | SPLIT-4.1 |
 | core shape tests vs captured 0.1.0 JSON (`Unit`, `UnitGraph`, receipts, state files) | unit | SPLIT-4.3, 4.4, 4.5, 4.6 |
 | `cargo package --workspace --list`, `cargo publish --workspace --dry-run`, `fresh-probe.sh` | manual (release steps) | SPLIT-6.1, 6.2, 6.3, 6.4 |
@@ -418,13 +474,13 @@ Locality: leave.
 
 Each ID appears in exactly one Satisfies line:
 - workspace 1.1, 1.2, 1.3, 1.5, 3.3, 3.4, 3.6, 5.1;
-- platform 2.1, 2.7, 3.7, 3.8;
-- core 3.2, 4.3, 4.4, 4.5, 4.6;
+- platform 2.1, 2.7, 3.8;
+- core 4.3, 4.4, 4.5, 4.6;
 - state 4.2;
 - adapter 2.5, 2.6;
 - seed 1.4;
 - gc 4.1;
-- binary 3.1, 3.5, 3.9;
+- binary 3.1, 3.2, 3.5, 3.7, 3.9;
 - OS-boundary guard 2.2, 2.3, 2.4;
 - edition 5.2 (5.1 is under workspace);
 - release/docs 6.1–6.4, 7.1, 7.2, 7.4, 7.5;
@@ -438,4 +494,6 @@ Requirements sync-back in this design (re-surfaced with it):
 - SPLIT-6.2's library-member `Cargo.lock` branch resolves to "yes";
 - SPLIT-4.1 names the fixed `now` and window;
 - SPLIT-2.5 no longer says every child is spawned through the *bounded* runner, because git's two calls have no
-  deadline in 0.1.0.
+  deadline in 0.1.0. It now names one adapter module for every child's environment;
+- SPLIT-2.1 and SPLIT-2.4 say the `libc` rule applies to normal dependencies, since dev-dependencies are test code
+  (design review #12, #13).
