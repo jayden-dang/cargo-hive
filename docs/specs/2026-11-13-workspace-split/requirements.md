@@ -64,8 +64,9 @@ Labels used below:
   code, or lacks the crate-root forbid attribute of SPLIT-2.2, THEN `cargo test` SHALL fail with a message that
   contains "only the platform crate may touch the OS" and names the member (agent-decided mechanism: a guard
   test).
-- **SPLIT-2.5** THE SYSTEM SHALL spawn every child process through the platform crate's bounded runner
-  (deadline, pipe drain, process-group kill), and SHALL build the environment of every child `cargo` and `git`
+- **SPLIT-2.5** THE SYSTEM SHALL spawn every child process through the platform crate's spawn functions, each
+  site keeping its 0.1.0 deadline, pipe drain and process-group kill or the lack of them (git's `run` and
+  `has_commits`, src/git.rs:115, :176, have no deadline in 0.1.0), and SHALL build the environment of every child `cargo` and `git`
   through one helper above the platform crate (agent-decided placement), with each child's environment as
   SPLIT-2.6 keeps it.
 - **SPLIT-2.6** (guard) WHEN hive spawns a child process, THE SYSTEM SHALL CONTINUE TO give it the environment
@@ -117,8 +118,8 @@ Labels used below:
 
 - **SPLIT-4.1** WHEN the read-only liveness report runs on klynt's main target with `HIVE_HOME` under
   `/private/tmp`, THE SYSTEM SHALL report the same set of live units and the same set of dead units as 0.1.0
-  reports when the two run back to back on that target with no build in between, and neither run SHALL write
-  anything inside klynt (ROAD-15.md:14;
+  reports when the two run back to back on that target with no build in between and are given the same `now` and
+  GC window, and neither run SHALL write anything inside klynt (ROAD-15.md:14;
   which command serves as the report is agent-decided in design).
 - **SPLIT-4.2** (guard) WHEN hive opens a state root written by 0.1.0, THE SYSTEM SHALL CONTINUE TO read
   `registry.json`, `snapshot.json`, `capabilities.json` (which also holds the toolchain data), `config.json`,
@@ -159,8 +160,8 @@ Labels used below:
 - **SPLIT-6.2** WHEN `cargo package --list` runs for a member, THE SYSTEM SHALL list only that member's `src/`
   files, its `Cargo.toml`, a README and the two license files, plus `Cargo.lock` for `cargo-hive` (as 0.1.0's
   package has it, Cargo.toml:8, so `cargo install --locked cargo-hive` keeps a pinned dependency set), and no file
-  under `tests/`; a library member's package carries `Cargo.lock` only if `cargo package` adds it by default
-  (agent-decided; design confirms what Cargo 1.97 does).
+  under `tests/`; a library member's package also carries `Cargo.lock`, which Cargo 1.97.1 adds by default even
+  under an `include` list that omits it (probe: .skills/_pending-workspace-split/auto/research-publish-workspace.md).
 - **SPLIT-6.3** (guard) WHEN a release step has packaged a member, THE SYSTEM SHALL CONTINUE TO recompile
   that member when a file under its `src/` changes, as `scripts/fresh-probe.sh` checks for every member by
   printing `GREEN` (extends FIX-1.2).
@@ -252,6 +253,6 @@ Every file under `src/` and `tests/` moves into a member crate (ROAD-15 surfaces
 ## Open Questions
 
 - Crate names (SPLIT-1.1 working names) — operator — before the first publish — forbid-guess.
-- How a member's `cargo publish --dry-run` verifies while the members it depends on are not yet on crates.io
-  (`cargo publish --workspace` is present in Cargo 1.97.1) — design-solution, via `research` — 2026-11-13 —
-  forbid-guess.
+- ~~How a member's `cargo publish --dry-run` verifies while the members it depends on are not yet on crates.io~~
+  — resolved in design (Decision 8): `cargo publish --workspace --dry-run` verifies every member against a
+  temporary local registry and uploads in dependency order (probe, research-publish-workspace.md).
