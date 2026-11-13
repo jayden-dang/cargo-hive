@@ -234,22 +234,22 @@ _Requirements: SPLIT-3.2, SPLIT-4.2, SPLIT-4.3_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the test.** `#[test] #[ignore] fn report()` builds `TargetDir { path, owner:
+- [x] **Step 1: Write the test.** `#[test] #[ignore] fn report()` builds `TargetDir { path, owner:
   Owner::Unresolved { reason: "report".into() }, profiles: <read_profile of each profile dir from identify>,
   size: None, unreadable: None }`, calls `liveness(&*cargo_hive::platform::current().unwrap().fs, &target, now,
   window)`, and writes the JSON. It asserts `HIVE_REPORT_OUT` starts with `/private/tmp/`.
   Run: `cargo test --test liveness_report -- --ignored` without the env vars. Expect: a panic naming
   `HIVE_REPORT_TARGET`.
-- [ ] **Step 2: Baseline on klynt (manual, proof machine).** Copy the file into `/private/tmp/hive-0.1.0/tests/`
+- [x] **Step 2: Baseline on klynt (manual, proof machine).** Copy the file into `/private/tmp/hive-0.1.0/tests/`
   and run it there with `HIVE_REPORT_TARGET=~/Developer/klynt/klynt/target`, a fixed `HIVE_REPORT_NOW` and
   `HIVE_REPORT_WINDOW_DAYS=7`, writing `/private/tmp/hive-split/live-0.1.0.json`. Then run it on this branch
   with the same values, writing `/private/tmp/hive-split/live-step0.json`. Expect `cmp` of the two files to print
   nothing.
   Record both commands and the `now` value in `.skills/_pending-workspace-split/auto/evidence.md`.
-- [ ] **Step 3: Build-time baseline (manual, same session).** In `/private/tmp/hive-0.1.0`, append one comment
+- [x] **Step 3: Build-time baseline (manual, same session).** In `/private/tmp/hive-0.1.0`, append one comment
   line to `src/gc/run.rs` (the file Task 28 edits is the same code at `crates/gc/src/gc/run.rs`), run `cargo build --offline` and time it. Do this 5 times, restoring the line each time,
   and record the median in the same evidence file.
-- [ ] **Step 4: Commit.** `git commit -m "test: read-only liveness report for comparing releases"`
+- [x] **Step 4: Commit.** `git commit -m "test: read-only liveness report for comparing releases"`
 
 _Requirements: SPLIT-4.1_
 
