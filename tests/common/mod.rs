@@ -95,7 +95,11 @@ impl Hive {
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cargo-hive"));
+        self.command_with(Path::new(env!("CARGO_BIN_EXE_cargo-hive")), args)
+    }
+
+    pub fn command_with(&self, bin: &Path, args: &[&str]) -> Command {
+        let mut cmd = Command::new(bin);
         cmd.args(args)
             .env("HIVE_HOME", &self.home.path)
             .env("CARGO_HOME", &self.cargo_home.path)
