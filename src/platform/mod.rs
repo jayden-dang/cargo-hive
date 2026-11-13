@@ -36,7 +36,18 @@ use std::time::SystemTime;
 
 #[cfg(target_os = "macos")]
 pub mod apfs;
+pub mod clock;
+pub mod flock;
 pub mod proc;
+pub mod signals;
+
+/// Whether `pid` still names a live process (`kill(pid, 0)`).
+pub fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 delivers nothing; it only asks whether `pid` exists.
+    let gone = unsafe { libc::kill(pid, 0) } == -1
+        && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    !gone
+}
 
 /// A directory this process created. Dropping it removes the directory and everything in it.
 #[derive(Debug)]

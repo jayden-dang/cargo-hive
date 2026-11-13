@@ -2,7 +2,7 @@
 //! holds integer milliseconds; there is no float or duration slot.
 //! Plan and apply receipts are version 3. Every other command writes version 2.
 
-use crate::state::utc_timestamp;
+use crate::platform::clock::utc_timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;

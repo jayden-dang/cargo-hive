@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::platform::proc::{self, ChildOutputError, Spec};
@@ -176,29 +175,6 @@ impl fmt::Display for DoctorError {
     }
 }
 
-/// Set by SIGINT/SIGTERM; doctor polls it between steps and while check f builds.
-pub static CANCEL: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn on_signal(_signal: libc::c_int) {
-    CANCEL.store(true, Ordering::SeqCst);
-}
-
-pub fn install_signal_handlers() -> io::Result<()> {
-    for signal in [libc::SIGINT, libc::SIGTERM] {
-        // SAFETY: an all-zero sigaction is valid; the handler only stores to an atomic,
-        // which is async-signal-safe.
-        unsafe {
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
-            libc::sigemptyset(&mut action.sa_mask);
-            if libc::sigaction(signal, &action, std::ptr::null_mut()) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
-    }
-    Ok(())
-}
-
 fn checkpoint(cancel: fn() -> bool) -> Result<(), DoctorError> {
     if cancel() {
         Err(DoctorError::Cancelled)
@@ -229,10 +205,7 @@ pub fn sweep_stale(parent: &Path) -> u64 {
         {
             continue;
         }
-        // SAFETY: signal 0 delivers nothing; it only asks whether `pid` exists.
-        let gone = unsafe { libc::kill(pid, 0) } == -1
-            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-        if gone && std::fs::remove_dir_all(entry.path()).is_ok() {
+        if !crate::platform::alive(pid) && std::fs::remove_dir_all(entry.path()).is_ok() {
             removed += 1;
         }
     }
@@ -416,9 +389,9 @@ fn child_output(
     proc::output_with_deadline(spec, crate::cargo_target::METADATA_DEADLINE, cancel)
 }
 
-/// The process cancel flag that `install_signal_handlers` sets.
+/// The process cancel flag that `platform::signals::install` sets.
 pub fn process_cancel() -> bool {
-    CANCEL.load(Ordering::SeqCst)
+    crate::platform::signals::cancelled()
 }
 
 /// The toolchain a build started in `cwd` would use: rustup's real binaries, or the
@@ -1750,7 +1723,7 @@ mod tests {
         let result = run(&FakeFs::new(Knobs::default()), &cancelled);
         assert!(matches!(result, Err(DoctorError::Cancelled)));
         assert!(
-            !CANCEL.load(Ordering::SeqCst),
+            !crate::platform::signals::cancelled(),
             "the test cancels through its own env, not the process flag"
         );
         assert_eq!(leftovers(&parent), Vec::<String>::new());

@@ -9,12 +9,12 @@ use crate::fingerprint::{
     error_code, is_summary_line, kind_of, read_capped, Format, NotCurrentUnit, Unit,
 };
 use crate::gc::DEPS_CAP;
+use crate::platform::clock::utc_timestamp;
 use crate::platform::{
     CompressOutcome, EntryKind, EntryStat, Fs, LockHolder, LockKind, LockState, Sharing, TempDir,
     TryLock, VolumeInfo,
 };
 use crate::receipt::{Finding, Measured};
-use crate::state::utc_timestamp;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};

@@ -259,7 +259,7 @@ fn try_lock(kind: &str, path: &std::path::Path) -> i32 {
 /// Logs the receipt, prints it (`--json`) or the human text, and returns `code`.
 pub fn emit(state: &State, out: OutputArgs, receipt: Receipt, human: &str, code: i32) -> i32 {
     let line = serde_json::to_string(&receipt).expect("receipts always serialize");
-    let cancelled = || crate::doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let cancelled = || platform::signals::cancelled();
     let logged = match state
         .locked_or_cancelled(cancelled, |tx| tx.append_receipt_line(&line).map(|_| ()))
     {
@@ -436,7 +436,7 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
         toolchain: doctor::resolve_toolchain(state.root()),
         cancel: doctor::process_cancel,
     };
-    if let Err(e) = doctor::install_signal_handlers() {
+    if let Err(e) = platform::signals::install() {
         return emit_failure(
             state,
             out,
@@ -702,7 +702,7 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
         .count("protected", protected)
         .count("secondary", secondary)
         .count("missing", missing);
-    if let Err(e) = doctor::install_signal_handlers() {
+    if let Err(e) = platform::signals::install() {
         return emit_failure(
             state,
             out,
@@ -711,7 +711,7 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
             1,
         );
     }
-    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let cancelled = || platform::signals::cancelled();
     let mut scan = discover::targets(&all_checkouts, &cfg, all_repos, &mut snapshot, cancelled);
     if cancelled() {
         b.finding("error", None, "status was cancelled");
@@ -943,7 +943,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
     const CAP_BYTES: u64 = 40_000_000_000;
     const MAX_AGE_SECS: u64 = 30 * 86_400;
     let command = if dry_run { "gc --dry-run" } else { "gc" };
-    if let Err(e) = doctor::install_signal_handlers() {
+    if let Err(e) = platform::signals::install() {
         return emit_failure(
             state,
             out,
@@ -952,7 +952,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
             1,
         );
     }
-    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let cancelled = || platform::signals::cancelled();
     let loaded = (|| -> Result<_, StateError> {
         Ok((
             state.read::<Registry>(registry::FILE)?,
@@ -1154,7 +1154,7 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
     use crate::plan_tier::build;
     use crate::plan_tier::Ctx;
     use crate::receipt::Outcome;
-    if let Err(e) = doctor::install_signal_handlers() {
+    if let Err(e) = platform::signals::install() {
         return emit_failure(
             state,
             out,
@@ -1163,7 +1163,7 @@ fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
             1,
         );
     }
-    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let cancelled = || platform::signals::cancelled();
     let loaded = (|| -> Result<_, StateError> {
         Ok((
             state.read::<Registry>(registry::FILE)?,
@@ -1264,7 +1264,7 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
     use std::collections::BTreeMap;
     use std::time::SystemTime;
     const ID_ATTEMPTS: u32 = 4;
-    if let Err(e) = doctor::install_signal_handlers() {
+    if let Err(e) = platform::signals::install() {
         return emit_failure(
             state,
             out,
@@ -1273,7 +1273,7 @@ fn plan_cmd(state: &State, args: &[std::path::PathBuf], out: OutputArgs) -> i32 
             1,
         );
     }
-    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let cancelled = || platform::signals::cancelled();
     let loaded = (|| -> Result<_, StateError> {
         Ok((
             state.read::<Registry>(registry::FILE)?,
@@ -1463,7 +1463,7 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
     }
     let selection = select(&reg, args, &mut b);
     let code = i32::from(selection.refused);
-    if let Err(e) = doctor::install_signal_handlers() {
+    if let Err(e) = platform::signals::install() {
         return emit_failure(
             state,
             out,
@@ -1472,7 +1472,7 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
             1,
         );
     }
-    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let cancelled = || platform::signals::cancelled();
     let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
     let (checkouts, _) = live_checkouts(&selection.repos, &registered_mains, &cfg, &mut b);
     let scan = discover::targets(
@@ -1706,7 +1706,7 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
         b.finding("refusal", None, err.to_string());
         return emit(state, out, b.finish(), &format!("refused: {err}\n"), 1);
     }
-    if let Err(e) = doctor::install_signal_handlers() {
+    if let Err(e) = platform::signals::install() {
         return emit_failure(
             state,
             out,
@@ -1715,7 +1715,7 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
             1,
         );
     }
-    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let cancelled = || platform::signals::cancelled();
     let (repo, row, toolchain) = match locate_checkout(&reg, &cfg, &caps, checkout) {
         Ok(v) => v,
         Err(r) => {
@@ -1807,7 +1807,7 @@ fn bench_cmd(
         b.finding("refusal", None, err.to_string());
         return emit(state, out, b.finish(), &format!("refused: {err}\n"), 1);
     }
-    if let Err(e) = doctor::install_signal_handlers() {
+    if let Err(e) = platform::signals::install() {
         return emit_failure(
             state,
             out,
@@ -1816,7 +1816,7 @@ fn bench_cmd(
             1,
         );
     }
-    let cancelled = || doctor::CANCEL.load(std::sync::atomic::Ordering::SeqCst);
+    let cancelled = || platform::signals::cancelled();
     let Ok(platform) = platform::current() else {
         eprintln!("{MACOS_ONLY_MESSAGE}");
         return 2;

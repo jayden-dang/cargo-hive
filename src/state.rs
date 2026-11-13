@@ -2,13 +2,14 @@
 //! the only code that writes hive's files; every write is a whole-file atomic
 //! replace taken under one `flock`, so a kill never leaves a half-written file.
 
+use crate::platform::clock::utc_date;
+use crate::platform::flock::{self, FlockError, FlockGuard};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 #[derive(Debug)]
 pub enum StateError {
@@ -67,9 +68,6 @@ impl fmt::Display for StateError {
 }
 
 impl std::error::Error for StateError {}
-
-/// How often a waiter retries the state lock while another process holds it.
-const LOCK_POLL: Duration = Duration::from_millis(10);
 
 fn io_err(path: &Path, source: io::Error) -> StateError {
     StateError::Io {
@@ -150,7 +148,7 @@ impl State {
     /// after cancellation, so a cancelled command can still log its receipt.
     pub fn locked_or_cancelled<T>(
         &self,
-        mut cancel: impl FnMut() -> bool,
+        cancel: impl FnMut() -> bool,
         body: impl FnOnce(&Tx<'_>) -> Result<T, StateError>,
     ) -> Result<T, StateError> {
         let path = self.root.join(".lock");
@@ -161,45 +159,29 @@ impl State {
             .truncate(false)
             .open(&path)
             .map_err(|e| io_err(&path, e))?;
-        loop {
-            // SAFETY: `file` owns a valid descriptor for the whole call.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                break;
-            }
-            let err = io::Error::last_os_error();
-            match err.kind() {
-                io::ErrorKind::Interrupted => continue,
-                io::ErrorKind::WouldBlock if cancel() => return Err(StateError::Cancelled),
-                io::ErrorKind::WouldBlock => std::thread::sleep(LOCK_POLL),
-                _ => return Err(io_err(&path, err)),
-            }
-        }
-        let result = body(&Tx { root: &self.root });
-        drop(file); // closing the descriptor releases the lock
-        result
+        let _guard = flock::exclusive_or_cancelled(&file, cancel).map_err(|e| match e {
+            FlockError::Cancelled => StateError::Cancelled,
+            FlockError::Io(err) => io_err(&path, err),
+        })?;
+        body(&Tx { root: &self.root })
     }
 
     /// Takes a shared flock on `$root/store.lock`, polling `cancel` while another
     /// process holds it exclusive. Creates the file when absent. Releases on drop.
     pub fn store_shared_or_cancelled(
         &self,
-        mut cancel: impl FnMut() -> bool,
+        cancel: impl FnMut() -> bool,
     ) -> Result<StoreLock, StateError> {
         let path = self.root.join("store.lock");
         let file = self.open_store_lock_file(&path)?;
-        loop {
-            // SAFETY: `file` owns a valid descriptor for the whole call.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
-                return Ok(StoreLock { _file: file });
-            }
-            let err = io::Error::last_os_error();
-            match err.kind() {
-                io::ErrorKind::Interrupted => continue,
-                io::ErrorKind::WouldBlock if cancel() => return Err(StateError::Cancelled),
-                io::ErrorKind::WouldBlock => std::thread::sleep(LOCK_POLL),
-                _ => return Err(io_err(&path, err)),
-            }
-        }
+        let guard = flock::shared_or_cancelled(&file, cancel).map_err(|e| match e {
+            FlockError::Cancelled => StateError::Cancelled,
+            FlockError::Io(err) => io_err(&path, err),
+        })?;
+        Ok(StoreLock {
+            _guard: guard,
+            _file: file,
+        })
     }
 
     /// Tries an exclusive flock on `$root/store.lock` once. Creates the file when
@@ -207,17 +189,12 @@ impl State {
     pub fn try_store_exclusive(&self) -> Result<Option<StoreLock>, StateError> {
         let path = self.root.join("store.lock");
         let file = self.open_store_lock_file(&path)?;
-        loop {
-            // SAFETY: `file` owns a valid descriptor for the whole call.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                return Ok(Some(StoreLock { _file: file }));
-            }
-            let err = io::Error::last_os_error();
-            match err.kind() {
-                io::ErrorKind::Interrupted => continue,
-                io::ErrorKind::WouldBlock => return Ok(None),
-                _ => return Err(io_err(&path, err)),
-            }
+        match flock::try_exclusive(&file).map_err(|e| io_err(&path, e))? {
+            Some(guard) => Ok(Some(StoreLock {
+                _guard: guard,
+                _file: file,
+            })),
+            None => Ok(None),
         }
     }
 
@@ -232,9 +209,10 @@ impl State {
     }
 }
 
-/// A held flock on `$root/store.lock`. Closing the descriptor releases it.
+/// A held flock on `$root/store.lock`. Guard is declared first so it unlocks before the file closes.
 #[derive(Debug)]
 pub struct StoreLock {
+    _guard: FlockGuard,
     _file: fs::File,
 }
 
@@ -446,48 +424,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
     result.map_err(|e| io_err(path, e))
 }
 
-/// `YYYY-MM-DD` in UTC.
-pub fn utc_date(t: SystemTime) -> String {
-    let (y, m, d, _, _, _) = civil(t);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-/// RFC 3339 in UTC with second precision.
-pub fn utc_timestamp(t: SystemTime) -> String {
-    let (y, m, d, hh, mm, ss) = civil(t);
-    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
-}
-
-fn civil(t: SystemTime) -> (i64, u32, u32, u32, u32, u32) {
-    let secs = t
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    // Inverse of Howard Hinnant's days_from_civil.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (
-        y,
-        m,
-        d,
-        (rem / 3_600) as u32,
-        ((rem % 3_600) / 60) as u32,
-        (rem % 60) as u32,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::clock::{utc_date, utc_timestamp};
     use serde::{Deserialize, Serialize};
     use std::time::{Duration, UNIX_EPOCH};
 
