@@ -85,8 +85,9 @@ the unchanged suite plus the SPLIT-4.1 liveness comparison prove the results equ
    (89 `Command::new` sites in 20 files), and they use `libc` as a dev-dependency of `cargo-hive`.
 7. **Versions** (L7 + agent-decided pin): one `[workspace.package] version`. Inter-member deps are
    `{ path = "../<role>", version = "=X.Y.Z" }` through `[workspace.dependencies]`. The first release after the
-   split is a 0.x minor bump, 0.2.0 (agent-decided), because the `cargo_hive::<module>` library paths change
-   (out of scope to keep, requirements Out of Scope). The bump is flagged for the operator. If the operator wants the old paths
+   split is proposed as 0.2.0, a 0.x minor bump, because the `cargo_hive::<module>` library paths change (out of
+   scope to keep, requirements Out of Scope). The number shows in `--version` and receipts, so both the number and
+   the path drop are the operator's (Ask me; requirements Open Questions). Nothing is built on the number. If the operator wants the old paths
    kept, the fallback is a re-export in `crates/cargo-hive/src/lib.rs` (`pub use cargo_hive_seed as seed;` and so on
    for every 0.1.0 module). That changes no other section.
 8. **Publishing** (research-publish-workspace.md): `CARGO_TARGET_DIR=target/package-verify cargo publish
@@ -327,7 +328,7 @@ Surface:
 - production `Ctx` construction sites (cli.rs, bench/mod.rs) and tests/seed*.rs: replace. Each passes
   `liveness: cargo_hive_gc::liveness`. Unit-test `Ctx` builds that stay in seed pass the panicking stub
   (Decision 6).
-Interface: unchanged seed entry points (`seed`, `fill`, `evict`, `status counts`). `Ctx` and `EvictCtx` each gain
+Interface (the `LivenessFn` seam is agent-decided, Decision 4, ADR-0003 Proposed): unchanged seed entry points (`seed`, `fill`, `evict`, `status counts`). `Ctx` and `EvictCtx` each gain
 one field, `liveness: LivenessFn`.
 Depth: n/a — extends src/seed.
 Locality: extract — seed moves whole. One field is added to `Ctx` (in the adapter). The edge to gc disappears.
@@ -385,7 +386,7 @@ Surface:
   evaluated in cargo-hive): replace, value equal. Both read the one workspace version, held by SPLIT-3.5's test.
 Interface: the installed `cargo-hive` command tree (cli.rs:12-130) including hidden `__hold-lock`/`__try-lock`,
 and the macOS-only exit (cli.rs:147-149).
-The binary wires `cargo_hive_gc::liveness` into seed's `Ctx`.
+The binary wires `cargo_hive_gc::liveness` into seed's `Ctx` (agent-decided, ADR-0003 Proposed).
 Depth: n/a — extends cli.rs.
 Locality: extract — the package moves to `crates/cargo-hive/`, taking tests/ with it.
 
@@ -395,6 +396,8 @@ line excluded. SPLIT-3.2's key/type check compares `--json` envelopes from the i
 0.1.0 capture.
 
 ### OS-boundary guard
+
+(agent-decided reach and mechanism: Decision 2, W1/W3)
 
 Satisfies: SPLIT-2.2, SPLIT-2.3, SPLIT-2.4
 Reuse: rung 4 — rustc `forbid(unsafe_code, reason)`, clippy `disallowed-types`/`disallowed-methods` with
@@ -434,7 +437,7 @@ Locality: leave — mechanical, in step 2 on the single crate.
 
 ### Release steps, fresh-probe and docs
 
-Satisfies: SPLIT-6.1, SPLIT-6.2, SPLIT-6.3, SPLIT-6.4, SPLIT-7.1, SPLIT-7.2, SPLIT-7.4, SPLIT-7.5
+Satisfies: SPLIT-6.1, SPLIT-6.2, SPLIT-6.3, SPLIT-6.4, SPLIT-6.5, SPLIT-6.6, SPLIT-7.1, SPLIT-7.2, SPLIT-7.4, SPLIT-7.5
 Reuse: rung 2 — the existing release steps (docs/agents/project.md:130-137), scripts/fresh-probe.sh,
 tests/skill.rs, tests/skill/names.rs, tests/liveness.rs:279-293.
 Surface:
@@ -463,7 +466,7 @@ Locality: extend.
 
 ### Build-time measurement (NFR)
 
-Satisfies: SPLIT-8.1, SPLIT-8.2
+Satisfies: SPLIT-8.2 (SPLIT-8.1 struck; the build-time medians are recorded as evidence only)
 Reuse: rung 2 — tests/guards.rs `#[ignore]` timing tests (:329, :375) move unchanged with the binary package.
 `bench/*.sh` is not reused (it times hive's own commands, not `cargo build`).
 Interface: a recorded procedure in `.skills/` evidence (code.md "Measured claims"):
@@ -499,7 +502,8 @@ Locality: leave.
 | `cargo package --workspace --list`, `cargo publish --workspace --dry-run`, `fresh-probe.sh` | manual (release steps) | SPLIT-6.1, 6.2, 6.3, 6.4 |
 | tests/skill.rs, tests/skill/names.rs, tests/liveness.rs manifest test | integration | SPLIT-7.4, 7.5, 6.2 |
 | running the docs' commands at the workspace root (task-close check) | manual | SPLIT-7.1, 7.2, 3.9 |
-| build-time procedure; tests/guards.rs `--ignored` | manual (proof machine) | SPLIT-8.1, 8.2 |
+| release step 5 name check (`cargo search` per member) and step 6 crates.io-install comparison | manual (release) | SPLIT-6.5, 6.6 |
+| build-time procedure (evidence only); tests/guards.rs `--ignored` | manual (proof machine) | SPLIT-8.1, 8.2 |
 
 ## Coverage check
 
@@ -514,8 +518,8 @@ Each ID appears in exactly one Satisfies line:
 - binary 3.1, 3.2, 3.5, 3.7, 3.9;
 - OS-boundary guard 2.2, 2.3, 2.4;
 - edition 5.2 (5.1 is under workspace);
-- release/docs 6.1–6.4, 7.1, 7.2, 7.4, 7.5;
-- NFR 8.1, 8.2.
+- release/docs 6.1–6.6, 7.1, 7.2, 7.4, 7.5;
+- NFR 8.2 (~~SPLIT-8.1~~ struck).
 
 SPLIT-2.5's mechanism half is built in platform but listed once, under the adapter. Doctor carries no Satisfies
 of its own (infrastructure). ~~SPLIT-7.3~~ is retired (moved to SPLIT-3.9). No ID is unmapped.

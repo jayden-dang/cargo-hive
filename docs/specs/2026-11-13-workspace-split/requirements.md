@@ -171,6 +171,14 @@ Labels used below:
 - **SPLIT-6.4** IF any member's crate name has not been approved by the operator, THEN THE SYSTEM's release
   steps SHALL stop before the first `cargo publish` run without `--dry-run`; the dry-run and every earlier step
   run on working names.
+- **SPLIT-6.5** WHEN the release steps reach the first `cargo publish` without `--dry-run`, THE SYSTEM's release
+  steps SHALL first check every member's name on crates.io and stop, naming the member, if a name is taken by a
+  crate this project does not own. A taken name would otherwise fail partway through a non-atomic publish, after
+  earlier members uploaded.
+- **SPLIT-6.6** WHEN the release's post-publish smoke step runs, THE SYSTEM's release steps SHALL install
+  `cargo-hive` from crates.io into a temp root and run the Task 2 comparison (command tree, `--json` keys, exit
+  codes, state files) with that binary against the 0.1.0 binary, and stop on any difference (ROAD-15.md:12,
+  example 3).
 
 ## 7. The documented commands work on the workspace
 
@@ -194,14 +202,9 @@ Labels used below:
 
 **Story:** As a stakeholder, I want measurable quality targets for this feature, so that how-well is not left implicit.
 
-- **Performance:** **SPLIT-8.1** WHEN a one-line edit is made to a gc-crate source file, THE SYSTEM SHALL finish
-  the following `cargo build` (dev profile, warm) with a median time no greater than the median for the same edit to the same
-  code in the 0.1.0 single crate, 5 runs each on the proof machine, recorded with dated evidence (docs/standards/code.md
-  "Measured claims") (agent-decided target: ROAD-15 promises building only what an edit touches, not a faster
-  build, and no standing product metric or SLO exists — docs/product/metrics.md and docs/ops/ are absent). The
-  0.1.0 baseline is captured in the same pre-step-1 session as the SPLIT-4.1 klynt baseline. IF the median is
-  greater, THEN the result goes to the operator as an open question with both medians; the target is not
-  relaxed silently.
+- **Performance:** ~~**SPLIT-8.1**~~ struck 2026-11-13 (conductor final review A3/S4): an agent-set build-time
+  target no Lock asks for. ROAD-15 promises building only what an edit touches (SPLIT-1.4, 1.5), not a faster
+  build. Task 28 still records the medians as dated evidence, with no pass/fail target.
   **SPLIT-8.2** (guard) WHEN `cargo hive status <repo> --no-sizes` runs on the proof machine against klynt, THE
   SYSTEM SHALL CONTINUE TO meet CORE-6.1 as written (median of 5 warm runs and one cold-cache run, each within
   2 s), and `explain` SHALL CONTINUE TO stay within two seconds of `status` (tests/guards.rs:375); both checked by
@@ -255,6 +258,12 @@ Every file under `src/` and `tests/` moves into a member crate (ROAD-15 surfaces
 - Speed work beyond SPLIT-4.4's rework set.
 
 ## Open Questions
+
+- The next release's version number and the library-path drop. `--version` and every receipt's `hive_version`
+  will print the new number, which Ask me covers ("any change a user can see in output or receipts",
+  ROAD-15.md:25). The proposal is 0.2.0, because the 0.1.0 `cargo_hive::<module>` library paths are dropped
+  (Out of Scope; a one-block re-export would keep them). The operator decides both before the release; nothing in
+  this plan's tasks depends on the number — operator — at the sheet — forbid-guess.
 
 - Whether the closure walk should also move onto a precomputed target-wide CSR. That is the part of the
   close-package D7 rework set this road does not deliver, because it would resolve edges of unreached units and add

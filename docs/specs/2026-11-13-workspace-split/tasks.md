@@ -172,6 +172,8 @@ _Requirements: SPLIT-3.1_
     - `filled_at`, `last_live_at`, `newest_at`, `stamp`, `identity`, `root_dev`, `root_ino`.
 
     `hive_version` is compared literally, since both binaries are 0.1.0 until a release bumps it.
+  - the new binary is `HIVE_NEW_BIN` when set (a crates.io-installed binary, release step 6), else
+    `env!("CARGO_BIN_EXE_cargo-hive")`;
   - `fn run_sequence(bin: &Path) -> Vec<(String, serde_json::Value, i32)>`. It first resets `work` and `home`
     (`rm -rf`, then `cp -cR golden work`) so both binaries see the same absolute paths. It writes
     `{"cache_roots": ["/private/tmp/hive-capture/home/no-cache"]}` with `Hive::config`. Then it runs, in order:
@@ -245,7 +247,7 @@ _Requirements: SPLIT-3.2, SPLIT-4.2, SPLIT-4.3_
   and record the median in the same evidence file.
 - [ ] **Step 4: Commit.** `git commit -m "test: read-only liveness report for comparing releases"`
 
-_Requirements: SPLIT-4.1, SPLIT-8.1_
+_Requirements: SPLIT-4.1_
 
 ---
 
@@ -1028,10 +1030,15 @@ requirement of its own; it keeps SPLIT-1.1's names in step with the operator's d
   - 2: set `[workspace.package] version` and the three plugin files;
   - 3: `cargo package --workspace --list`, then `CARGO_TARGET_DIR=target/package-verify cargo publish
     --workspace --dry-run`, then `scripts/fresh-probe.sh` with one pair per member;
-  - 5: stop unless the line `Crate names approved:` in docs/agents/project.md holds a date; then the same
+  - 5: stop unless the line `Crate names approved:` in docs/agents/project.md holds a date; then run
+    `cargo search <name> --limit 1` for every member and stop, naming the member, if an exact-name hit is a crate
+    this project does not own; then the same
     publish without `--dry-run`, and on a partial failure stop and report which members uploaded. Steps 1–4,
     including the dry-run, work on working names.
-  - 6: smoke as today.
+  - 6: smoke as today, plus `cargo install cargo-hive --version X.Y.Z --root /private/tmp/hive-release/inst` and
+    `HIVE_V010_BIN=/private/tmp/hive-0.1.0/target/debug/cargo-hive cargo test -p cargo-hive --test capture --
+    --ignored` run against that installed binary. The test takes the new binary from `HIVE_NEW_BIN` when set, else
+    `CARGO_BIN_EXE_cargo-hive`. Stop on any difference.
 
   The line `Crate names approved:` (no date) is added under `## release steps` in docs/agents/project.md, just
   above step 5.
@@ -1053,7 +1060,7 @@ requirement of its own; it keeps SPLIT-1.1's names in step with the operator's d
   --version` and `HIVE_V010_BIN=… cargo test --test capture -- --ignored` against that binary. Expect: pass.
 - [ ] **Step 4: Commit.** `git commit -m "docs(release): publish every workspace member"`
 
-_Requirements: SPLIT-6.1, SPLIT-6.2, SPLIT-6.3, SPLIT-6.4, SPLIT-3.9_
+_Requirements: SPLIT-6.1, SPLIT-6.2, SPLIT-6.3, SPLIT-6.4, SPLIT-6.5, SPLIT-6.6, SPLIT-3.9_
 
 ---
 
@@ -1104,11 +1111,11 @@ _Requirements: SPLIT-7.1, SPLIT-7.2_
 - [ ] **Step 1: Measure.** Append one comment line to `crates/gc/src/gc/run.rs`, run `cargo build --offline` (the
   same flags as Task 3) and time it. Do
   this 5 times, restoring the line each time, and record the median beside Task 3's 0.1.0 median. Re-run the 0.1.0 median in `/private/tmp/hive-0.1.0`
-  back to back as a second reading. If the new
-  median is greater, write both medians as an open question for the operator. Do not change the target.
+  back to back as a second reading. Record both medians as
+  evidence (no pass/fail target; SPLIT-8.1 is struck).
 - [ ] **Step 2: Status timing.** Run `cargo test -p cargo-hive --test guards -- --ignored` on the proof machine.
   Expect: both klynt timing tests pass (CORE-6.1: median of 5 warm runs and one cold run within 2 s; explain
   within 2 s of status).
 - [ ] **Step 3: Record.** Write both results, with the date, in the evidence file.
 
-_Requirements: SPLIT-8.1, SPLIT-8.2_
+_Requirements: SPLIT-8.2_
