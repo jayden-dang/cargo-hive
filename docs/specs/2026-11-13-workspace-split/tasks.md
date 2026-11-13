@@ -548,11 +548,11 @@ _Requirements: SPLIT-1.3, SPLIT-1.4_
 
 **Depends-on:** Task 11
 
-- [ ] **Step 1: Run the report.** Following Task 3's checkpoint rule, run the 0.1.0 report
+- [x] **Step 1: Run the report.** Following Task 3's checkpoint rule, run the 0.1.0 report
   (`live-0.1.0-step1.json`) and then this branch's (`live-step1.json`) back to back on klynt, with one fresh
   `now` and the same window. Run `cmp` on the two files. Expect: no output.
-- [ ] **Step 2: Run the capture comparison and the full gate.** Expect: all pass.
-- [ ] **Step 3: Record.** Write both results in the evidence file. A mismatch stops the plan: report it and do not
+- [x] **Step 2: Run the capture comparison and the full gate.** Expect: all pass.
+- [x] **Step 3: Record.** Write both results in the evidence file. A mismatch stops the plan: report it and do not
   start Task 13.
 
 _Requirements: SPLIT-4.1_
