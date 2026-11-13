@@ -99,7 +99,7 @@ Modified (then moved under `crates/<role>/src/` by Tasks 15–21 as pure moves):
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 //! The installed command tree stays as 0.1.0 shipped it.
@@ -140,12 +140,12 @@ fn the_command_tree_matches_0_1_0() {
 ```
 
 Run: `cargo test --test cli_tree`. Expect: it fails, because `cli-tree.txt` does not exist.
-- [ ] **Step 2: Capture the fixture from v0.1.0.** Run `git archive v0.1.0 | tar -x -C /private/tmp/hive-0.1.0`
+- [x] **Step 2: Capture the fixture from v0.1.0.** Run `git archive v0.1.0 | tar -x -C /private/tmp/hive-0.1.0`
   (create the dir first), copy `tests/cli_tree.rs` into `/private/tmp/hive-0.1.0/tests/`, then run
   `HIVE_WRITE_CLI_TREE=$PWD/tests/fixtures/v0.1.0/cli-tree.txt cargo test --offline --test cli_tree` inside
   `/private/tmp/hive-0.1.0`.
-- [ ] **Step 3: Run and pass.** `cargo test --test cli_tree` passes on this branch, which still equals 0.1.0's code.
-- [ ] **Step 4: Commit.** `git commit -m "test: pin the 0.1.0 command tree"`
+- [x] **Step 3: Run and pass.** `cargo test --test cli_tree` passes on this branch, which still equals 0.1.0's code.
+- [x] **Step 4: Commit.** `git commit -m "test: pin the 0.1.0 command tree"`
 
 _Requirements: SPLIT-3.1_
 
