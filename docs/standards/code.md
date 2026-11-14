@@ -12,7 +12,7 @@ How cargo-hive source and docs are written, beyond tests and error handling. The
 | Area | Rule |
 |---|---|
 | Bounds | Every directory walk, file read and child process has an explicit bound or deadline. Hitting a bound is an error, never a silent skip |
-| `unsafe` | Only at FFI sites, and each site carries a `// SAFETY:` comment |
+| `unsafe` | Only in the platform crate, at FFI sites, each with a `// SAFETY:` comment; no other crate uses `libc`, non-test `cfg(target_os)` or `std::process::Command` |
 | Dependencies | A new dependency needs the owner's approval |
 | Requirement IDs | Never in source code, comments or test names; they live in requirements, design and task footers |
 | Module comments | Each module opens with a `//!` comment giving its purpose and contract |

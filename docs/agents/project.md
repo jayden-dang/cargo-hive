@@ -78,21 +78,21 @@ Run in this order; all must pass before any completion claim.
 
 | Check | Command |
 |---|---|
-| Typecheck | `cargo check --all-targets` and `cargo check --target x86_64-unknown-linux-gnu` |
-| Lint | `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` |
-| Unit tests | `cargo test` |
-| E2E / smoke | none — the integration tests in `tests/` already drive the real binary |
+| Typecheck | `cargo check --workspace --all-targets` and `cargo check --workspace --target x86_64-unknown-linux-gnu` |
+| Lint | `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings` |
+| Unit tests | `cargo test --workspace` |
+| E2E / smoke | none — the integration tests in `crates/cargo-hive/tests/` already drive the real binary |
 
-`cargo check --target x86_64-unknown-linux-gnu` needs that rustup target installed. On a
+`cargo check --workspace --target x86_64-unknown-linux-gnu` needs that rustup target installed. On a
 machine without it, record "non-macOS compile check not run: target not installed"; never
 install it as a side effect.
 
-Single test file: `cargo test --test <file>` for `tests/<file>.rs`, or
-`cargo test --lib <module>::` for the unit tests in `src/<module>.rs`. Both build only
+Single test file: `cargo test -p <member> --test <file>` for a member's `tests/<file>.rs`, or
+`cargo test -p <member> --lib <module>::` for the unit tests in that member's `src/<module>.rs`. Both build only
 that test target.
 
-Task gate (tests of the changed units and the dependents that call what changed, plus a compile of every other dependent; `none` when the whole suite is fast):
-none — one crate, and the whole suite takes about a minute.
+Task gate (tests of the changed member and the members above it, then compile every other member):
+"Above" means members that depend on the changed member (later in the layer order), not a lower layer number. Layer order: platform 0, core 1, state 2, cargo 3, doctor/seed/gc 4, cargo-hive 5. State does not depend on core. Feature crates do not depend on each other. Example for a change in `cargo-hive-doctor`: `cargo test -p cargo-hive-doctor && cargo test -p cargo-hive && cargo check -p cargo-hive-platform --all-targets && cargo check -p cargo-hive-core --all-targets && cargo check -p cargo-hive-state --all-targets && cargo check -p cargo-hive-cargo --all-targets && cargo check -p cargo-hive-seed --all-targets && cargo check -p cargo-hive-gc --all-targets`.
 
 Wave gate (compile + lint every target after a parallel merge; `none` = typecheck + lint):
 none.
