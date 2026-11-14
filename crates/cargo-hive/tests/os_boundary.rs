@@ -10,6 +10,8 @@ use std::process::Command;
 const RULE: &str = "only the platform crate may touch the OS";
 const FORBID: &str =
     "#![forbid(unsafe_code, reason = \"only the platform crate may touch the OS (ARCH-15)\")]";
+const MAX_WALK_DEPTH: usize = 32;
+const MAX_WALK_ENTRIES: usize = 100_000;
 
 fn metadata() -> serde_json::Value {
     let out = Command::new("cargo")
@@ -113,18 +115,72 @@ fn leading_inner_block(src: &str) -> String {
     out
 }
 
-fn walk_src_rs(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            walk_src_rs(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            out.push(path);
+fn walk_src_rs(root: &Path, out: &mut Vec<PathBuf>) {
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut total = 0usize;
+    while let Some((dir, depth)) = stack.pop() {
+        assert!(
+            depth <= MAX_WALK_DEPTH,
+            "walk depth bound hit at {}",
+            dir.display()
+        );
+        let entries = fs::read_dir(&dir).unwrap_or_else(|e| {
+            panic!("read_dir {}: {e}", dir.display());
+        });
+        let mut seen = 0usize;
+        for entry in entries {
+            seen += 1;
+            assert!(
+                seen <= MAX_WALK_ENTRIES,
+                "walk entry bound hit in {}",
+                dir.display()
+            );
+            total += 1;
+            assert!(
+                total <= MAX_WALK_ENTRIES,
+                "walk entry bound hit under {}",
+                root.display()
+            );
+            let entry = entry.unwrap_or_else(|e| {
+                panic!("read_dir entry under {}: {e}", dir.display());
+            });
+            let path = entry.path();
+            let ft = entry.file_type().unwrap_or_else(|e| {
+                panic!("file_type {}: {e}", path.display());
+            });
+            if ft.is_dir() {
+                stack.push((path, depth + 1));
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
         }
+    }
+}
+
+#[test]
+#[should_panic(expected = "walk depth bound hit")]
+fn walk_src_rs_fails_past_depth_bound() {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = PathBuf::from(format!(
+        "/private/tmp/hive-it-walk-depth-{}-{nanos}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    let mut cur = root.clone();
+    for _ in 0..=MAX_WALK_DEPTH {
+        cur.push("d");
+    }
+    fs::create_dir_all(&cur).unwrap();
+    let mut out = Vec::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        walk_src_rs(&root, &mut out);
+    }));
+    let _ = fs::remove_dir_all(&root);
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
     }
 }
 

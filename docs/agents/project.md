@@ -97,7 +97,7 @@ Task gate (tests of the changed member and the members above it, then compile ev
 Wave gate (compile + lint every target after a parallel merge; `none` = typecheck + lint):
 none.
 
-Manual performance check, not part of the gate: `cargo test --test guards -- --ignored`
+Manual performance check, not part of the gate: `cargo test -p cargo-hive --test guards -- --ignored`
 runs CORE-6.1's timing test against klynt on the proof machine.
 
 The whole suite runs once, at close. Each task runs its task gate instead, escalating

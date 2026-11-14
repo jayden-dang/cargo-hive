@@ -1,5 +1,5 @@
 //! Seed unit tests that reach the liveness algorithm through `holds` or
-//! `live_registry_units`. They pass the real `gc::liveness::liveness`.
+//! `live_registry_units`. They pass the real `cargo_hive_gc::liveness::liveness`.
 
 #![allow(clippy::disallowed_types, clippy::disallowed_methods, reason = "test fixtures")]
 

@@ -1,6 +1,6 @@
 //! Complete registry units under `store/`, and the `store.db` rows that make an entry
 //! available. Store files are never compressed, so a clone into a checkout shares its
-//! blocks (SEED-2.28). A temp directory is renamed into place only after every file in it
+//! blocks. A temp directory is renamed into place only after every file in it
 //! is checked; `store.db` is merged under the state lock.
 
 use std::collections::BTreeMap;
@@ -28,7 +28,7 @@ pub struct StoreKey {
     pub name_meta: String,
     pub fingerprint_hash: String,
     /// Which copy of the key: copies from two source targets whose bytes differ (a crate
-    /// that embeds its `OUT_DIR` path) are two variants (SEED-2.30). 0 is the first.
+    /// that embeds its `OUT_DIR` path) are two variants. 0 is the first.
     pub variant: u32,
 }
 
@@ -57,8 +57,8 @@ pub struct SourceUnitRef {
     pub variant: u32,
 }
 
-/// What one source target held at its last fill (SEED-2.31). Seed clones the units of one
-/// such record, so every unit it places comes from one build (SEED-3.9).
+/// What one source target held at its last fill. Seed clones the units of one
+/// such record, so every unit it places comes from one build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceRecord {
     pub repo: PathBuf,
@@ -299,7 +299,7 @@ fn compared(rel: &Path) -> bool {
 }
 
 /// Whether the unit files `rels` under `src_root` have the same bytes as the entry at
-/// `entry`, and the entry has no other compared file (SEED-2.30). Two files that both
+/// `entry`, and the entry has no other compared file. Two files that both
 /// share all their blocks under one clone id are the same without reading them.
 pub(crate) fn same_unit_bytes(
     fs: &dyn Fs,
@@ -328,8 +328,8 @@ pub(crate) fn same_unit_bytes(
 }
 
 fn same_file(fs: &dyn Fs, a: &Path, b: &Path) -> io::Result<bool> {
-    // A file an older hive compressed would be expanded into a private copy when placed
-    // (SEED-1.5), so it never holds a unit: a plain variant is stored instead.
+    // A file an older hive compressed would be expanded into a private copy when placed,
+    // so it never holds a unit: a plain variant is stored instead.
     if fs.entry_stat(b)?.compressed {
         return Ok(false);
     }
@@ -382,7 +382,7 @@ pub fn merge(
 }
 
 /// `merge`, and when `source` is given, records what that source target holds in place of
-/// its earlier record (SEED-2.31). Records of targets that no longer exist are dropped.
+/// its earlier record. Records of targets that no longer exist are dropped.
 pub fn merge_with_source(
     state: &State,
     rows: Vec<Row>,

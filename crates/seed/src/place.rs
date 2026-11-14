@@ -295,7 +295,7 @@ pub fn place(
     finish(ctx, report, &mut added)
 }
 
-/// Gives every placed file the newest mtime among them (SEED-1.21). A unit held from an
+/// Gives every placed file the newest mtime among them. A unit held from an
 /// earlier build keeps that build's mtimes while one new in a later build is newer, and
 /// Cargo calls a unit stale when a dependency's output is newer than its own. With one
 /// mtime, no dependency is newer. The seed record's stamps take that mtime too.

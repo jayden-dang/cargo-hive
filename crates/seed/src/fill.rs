@@ -272,7 +272,7 @@ enum Holding {
 }
 
 /// The variant of the unit's key whose files have the unit's bytes, or the variant a new
-/// copy gets (SEED-2.30). Variants are probed on disk, so one stored earlier in this fill
+/// copy gets. Variants are probed on disk, so one stored earlier in this fill
 /// is seen too.
 fn holding_variant(
     ctx: &Ctx<'_>,

@@ -137,7 +137,7 @@ fn record_prime(
     }
 }
 
-/// Bench builds its samples with the wrappers set to the empty string (BENCH-5.2), and
+/// Bench builds its samples with the wrappers set to the empty string, and
 /// Cargo then writes no `.rustc_info.json`, so a later sample's fill learns no toolchain
 /// row from an earlier sample's target. That is expected, not a fault to repeat per sample.
 fn is_sample_row(plan: &Plan, kind: &str, path: Option<&Path>) -> bool {

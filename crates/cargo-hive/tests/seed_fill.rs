@@ -279,10 +279,7 @@ fn a_new_unit_is_cloned_under_the_locks_and_never_compressed() {
     let report = fill_in(&built.hive, &lib, &built.target, &|| false);
     between_locks(&recording.log());
     let seen = states.lock().expect("states");
-    assert!(
-        seen.is_empty(),
-        "the store compresses nothing (SEED-2.28): {seen:?}"
-    );
+    assert!(seen.is_empty(), "the store compresses nothing: {seen:?}");
     assert!(report.entries_added >= 1, "{report:?}");
     assert_eq!(report.targets_read, 1);
     assert!(!report.cancelled);
@@ -1497,8 +1494,8 @@ fn an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it() {
         PathBuf::from("CACHEDIR.TAG"),
         (std::fs::read(&tag).unwrap(), tag_meta.modified().unwrap()),
     );
-    // Same bytes as the store; every placed file carries the newest of their mtimes
-    // (SEED-1.21), so no dependency looks newer than its dependent.
+    // Same bytes as the store; every placed file carries the newest of their mtimes,
+    // so no dependency looks newer than its dependent.
     let placed = file_bodies(&target);
     let bytes = |m: &BTreeMap<PathBuf, (Vec<u8>, SystemTime)>| {
         m.iter()
@@ -1549,7 +1546,7 @@ fn an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it() {
                 assert_eq!(path, expected_path);
                 let _ = meta;
                 // The recorded stamp is the placed file's time, the one all placed files
-                // share (SEED-1.21).
+                // share.
                 let placed_ns = std::fs::symlink_metadata(target.join(&path))
                     .unwrap()
                     .modified()
@@ -2020,7 +2017,7 @@ fn units_outside_the_window_are_counted() {
         .find(|unit| unit.dir_name == row.name_meta)
         .unwrap();
     // The window is judged on the store's stamp; the placed stamp then takes the one
-    // mtime every placed file carries (SEED-1.21), and the record holds that.
+    // mtime every placed file carries, and the record holds that.
     let (rel, ns) = unit.stamp.clone().unwrap();
     assert!(ns > expected_ns, "{ns} {expected_ns}");
     let placed_ns = std::fs::symlink_metadata(work.join("target").join(rel))

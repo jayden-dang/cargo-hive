@@ -2,7 +2,7 @@
 //! The text is a toolchain-table key, not a release name. A missing key returns
 //! no units and the text's `release:` line, or an empty release when that line
 //! is absent. Units come from one source target's record only, at the variants
-//! that target holds, so every unit placed comes from one build (SEED-3.9).
+//! that target holds, so every unit placed comes from one build.
 //! This reads no disk and takes no lock.
 
 use std::collections::BTreeSet;
@@ -19,7 +19,7 @@ pub enum Choice {
     NoRow {
         release: String,
     },
-    /// No source target of this repo has a record for this toolchain (SEED-3.10).
+    /// No source target of this repo has a record for this toolchain.
     NoSource,
 }
 

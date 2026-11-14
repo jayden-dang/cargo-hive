@@ -101,7 +101,7 @@ fn a_lane_seeded_after_two_builds_of_a_path_dependent_crate_still_builds() {
         "{receipt}"
     );
     // depcrate embeds its OUT_DIR path, so the two builds are two variants; leafcrate's
-    // bytes are the same in both, so it is stored once (SEED-2.30, SEED-2.32).
+    // bytes are the same in both, so it is stored once.
     let stored: serde_json::Value =
         serde_json::from_slice(&fs::read(hive.home.path.join("store.db")).unwrap()).unwrap();
     let variants = |name: &str| {
@@ -1124,7 +1124,7 @@ fn a_plan_frees_the_bytes_the_clone_did_not_share_and_still_counts_shared_bytes(
     assert!(out.status.success(), "{planned}");
     let plan = plan_for(&planned, &target);
     assert!(plan["paths"].as_u64().unwrap() > 0, "{plan}");
-    // Every placed file shares its blocks with the store (SEED-2.28), so the plan may
+    // Every placed file shares its blocks with the store, so the plan may
     // claim as freed no more than the clone did not share, here nothing.
     let not_shared = receipt["counts"]["clone_bytes_not_shared"]
         .as_u64()
