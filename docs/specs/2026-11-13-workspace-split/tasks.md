@@ -1112,14 +1112,14 @@ _Requirements: SPLIT-7.1, SPLIT-7.2_
 
 **Depends-on:** Task 27
 
-- [ ] **Step 1: Measure.** Append one comment line to `crates/gc/src/gc/run.rs`, run `cargo build --offline` (the
+- [x] **Step 1: Measure.** Append one comment line to `crates/gc/src/gc/run.rs`, run `cargo build --offline` (the
   same flags as Task 3) and time it. Do
   this 5 times, restoring the line each time, and record the median beside Task 3's 0.1.0 median. Re-run the 0.1.0 median in `/private/tmp/hive-0.1.0`
   back to back as a second reading. Record both medians as
   evidence (no pass/fail target; SPLIT-8.1 is struck).
-- [ ] **Step 2: Status timing.** Run `cargo test -p cargo-hive --test guards -- --ignored` on the proof machine.
+- [x] **Step 2: Status timing.** Run `cargo test -p cargo-hive --test guards -- --ignored` on the proof machine.
   Expect: both klynt timing tests pass (CORE-6.1: median of 5 warm runs and one cold run within 2 s; explain
   within 2 s of status).
-- [ ] **Step 3: Record.** Write both results, with the date, in the evidence file.
+- [x] **Step 3: Record.** Write both results, with the date, in the evidence file.
 
 _Requirements: SPLIT-8.2_
