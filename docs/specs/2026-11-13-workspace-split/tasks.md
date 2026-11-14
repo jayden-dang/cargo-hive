@@ -1049,20 +1049,20 @@ requirement of its own; it keeps SPLIT-1.1's names in step with the operator's d
 
 **Depends-on:** Task 25
 
-- [ ] **Step 1: Failing test.** Change the manifest test to iterate every member's `Cargo.toml` and assert its
+- [x] **Step 1: Failing test.** Change the manifest test to iterate every member's `Cargo.toml` and assert its
   `include` holds `/src/**/*`, `/Cargo.toml`, `/README.md` and both license files, and no `tests` entry. Run
   `cargo test --test liveness the_package_ships_no_test_file`. Expect: it fails for a member missing an entry, if
   any.
-- [ ] **Step 2: Implement.** Write the steps, the README path `cargo install --path crates/cargo-hive`, and the
+- [x] **Step 2: Implement.** Write the steps, the README path `cargo install --path crates/cargo-hive`, and the
   includes.
-- [ ] **Step 3: Dry-run (manual).** Run `cargo package --workspace --list` and expect every member to list only
+- [x] **Step 3: Dry-run (manual).** Run `cargo package --workspace --list` and expect every member to list only
   `src/` files, `Cargo.toml`, `Cargo.toml.orig`, `.cargo_vcs_info.json`, `Cargo.lock`, `README.md` and the two
   license files. Run `CARGO_TARGET_DIR=target/package-verify
   cargo publish --workspace --dry-run` and expect "aborting upload due to dry run" for each member, in dependency
   order. `scripts/fresh-probe.sh` with every member pair prints `GREEN` for each. Run `cargo install --path
   crates/cargo-hive --root /private/tmp/hive-split/inst`, then `/private/tmp/hive-split/inst/bin/cargo-hive
   --version` and `HIVE_V010_BIN=… cargo test --test capture -- --ignored` against that binary. Expect: pass.
-- [ ] **Step 4: Commit.** `git commit -m "docs(release): publish every workspace member"`
+- [x] **Step 4: Commit.** `git commit -m "docs(release): publish every workspace member"`
 
 _Requirements: SPLIT-6.1, SPLIT-6.2, SPLIT-6.3, SPLIT-6.4, SPLIT-6.5, SPLIT-6.6, SPLIT-3.9_
 
