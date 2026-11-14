@@ -447,10 +447,10 @@ Surface:
   - single-test lines (:90-92): `cargo test -p <member> --test <file>` and `cargo test -p <member> --lib`;
   - task gate (:94-95): "tests of the changed member and the members above it";
   - run locally (:115-124): unchanged `target/debug/cargo-hive`;
-  - release steps (:130-137): step 2 sets `[workspace.package] version`; step 3 runs
-    `cargo package --workspace --list`, then `CARGO_TARGET_DIR=target/package-verify cargo publish --workspace
-    --dry-run`, then fresh-probe per member; step 5 first stops unless the line `Crate names approved:` in this file holds a date
-    (SPLIT-6.4), then runs the same without `--dry-run`. Steps 1–4 run on working names.
+  - release steps (:130-137): step 2 sets `[workspace.package] version` and commits `release: vX.Y.Z` before packaging; step 3 runs
+    `cargo package --workspace --list --allow-dirty`, then `CARGO_TARGET_DIR=target/package-verify cargo publish --workspace
+    --dry-run --allow-dirty`, then fresh-probe per member; step 4 tags and pushes that commit; step 5 first stops unless the line `Crate names approved:` in this file holds a date
+    (SPLIT-6.4), then runs `cargo publish --workspace` with no `--dry-run` and no `--allow-dirty`. Steps 1–4 run on working names. The line is dated 2026-11-14.
 
   All replace.
 - scripts/fresh-probe.sh: replace. Its default file `src/size.rs` no longer exists. It takes `<member> <file>`

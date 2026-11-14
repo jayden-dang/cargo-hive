@@ -211,6 +211,7 @@ Labels used below:
   SYSTEM SHALL CONTINUE TO meet CORE-6.1 as written (median of 5 warm runs and one cold-cache run, each within
   2 s), and `explain` SHALL CONTINUE TO stay within two seconds of `status` (tests/guards.rs:375); both checked by
   `cargo test --test guards -- --ignored` or its moved equivalent.
+  Operator 2026-11-14: allowed for this split. The branch warm median was about 3.04 s and the 0.1.0 binary about 2.78 s, so both miss 2 s. The ignored test stays as written.
 - **Security:** None — no new trust boundary: no network, credential or permission surface changes, and the OS
   boundary is a code-structure rule covered by story 2. No docs/security/ exists.
 - **Reliability:** None as a new target — the reliability promises this road touches are guards: locks released
