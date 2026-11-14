@@ -2,7 +2,7 @@
 name: hive
 description: Reclaim disk space from Rust build output safely, seed new worktrees or lanes before their first build, and time cold against seeded builds. Use when a target/ directory is large, a disk is filling up, you need to reclaim Rust build space, the same crate is built in many copies across checkouts and worktrees, or you start several lanes. Use this instead of cargo clean or deleting target/.
 metadata:
-  hive-version: "0.1.0"
+  hive-version: "0.1.1"
 ---
 
 ## Command form

@@ -21,7 +21,7 @@ export HIVE_HOME="$SCRATCH/home"; mkdir -p "$HIVE_HOME"
 
 `HIVE_HOME` keeps every drive away from the user's real `~/.hive`. Never point it there.
 
-Ready when: `"$HIVE" --version` prints `cargo-hive 0.1.0`.
+Ready when: `"$HIVE" --version` prints `cargo-hive 0.1.1`.
 Teardown: nothing keeps running; Cleanup removes `$SCRATCH`.
 
 ## Doctor

@@ -119,7 +119,7 @@ How to start the app for user-facing acceptance checks (read by `validate-featur
 
 | Surface | Start command | Ready signal |
 |---|---|---|
-| CLI | `cargo build`, then run `target/debug/cargo-hive <sub> --json` with `HIVE_HOME` set to a scratch dir under `/private/tmp` | `target/debug/cargo-hive --version` prints `cargo-hive 0.1.0` |
+| CLI | `cargo build`, then run `target/debug/cargo-hive <sub> --json` with `HIVE_HOME` set to a scratch dir under `/private/tmp` | `target/debug/cargo-hive --version` prints `cargo-hive 0.1.1` |
 
 There is no server and no web UI.
 

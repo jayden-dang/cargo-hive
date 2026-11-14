@@ -3,7 +3,7 @@ members = ["crates/platform", "crates/core", "crates/state", "crates/cargo", "cr
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Reclaim and reuse Rust build artifacts across Git worktrees on macOS: safe GC for target/ dirs, dependency seeding for new worktrees, measured receipts. Built for parallel coding agents."
 license = "MIT OR Apache-2.0"
@@ -15,13 +15,13 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 libc = "0.2.191"
 applesauce = "0.8.10"
-cargo-hive-platform = { path = "crates/platform", version = "=0.1.0" }
-cargo-hive-core = { path = "crates/core", version = "=0.1.0" }
-cargo-hive-state = { path = "crates/state", version = "=0.1.0" }
-cargo-hive-cargo = { path = "crates/cargo", version = "=0.1.0" }
-cargo-hive-doctor = { path = "crates/doctor", version = "=0.1.0" }
-cargo-hive-seed = { path = "crates/seed", version = "=0.1.0" }
-cargo-hive-gc = { path = "crates/gc", version = "=0.1.0" }
+cargo-hive-platform = { path = "crates/platform", version = "=0.1.1" }
+cargo-hive-core = { path = "crates/core", version = "=0.1.1" }
+cargo-hive-state = { path = "crates/state", version = "=0.1.1" }
+cargo-hive-cargo = { path = "crates/cargo", version = "=0.1.1" }
+cargo-hive-doctor = { path = "crates/doctor", version = "=0.1.1" }
+cargo-hive-seed = { path = "crates/seed", version = "=0.1.1" }
+cargo-hive-gc = { path = "crates/gc", version = "=0.1.1" }
 
 [workspace.lints.clippy]
 disallowed_types = "warn"
