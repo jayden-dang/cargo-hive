@@ -1,0 +1,34 @@
+[package]
+name = "cargo-hive"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+include = ["/src/**/*", "/Cargo.toml", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+
+[lib]
+name = "cargo_hive"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cargo-hive"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+cargo-hive-platform = { workspace = true }
+cargo-hive-core = { workspace = true }
+cargo-hive-state = { workspace = true }
+cargo-hive-cargo = { workspace = true }
+cargo-hive-doctor = { workspace = true }
+cargo-hive-seed = { workspace = true }
+cargo-hive-gc = { workspace = true }
+
+[dev-dependencies]
+libc = { workspace = true }
+
+[lints]
+workspace = true

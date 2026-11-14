@@ -1,28 +1,31 @@
-[package]
-name = "cargo-hive"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+members = ["crates/platform", "crates/core", "crates/state", "crates/cargo", "crates/doctor", "crates/seed", "crates/gc", "crates/cargo-hive"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.1"
+edition = "2024"
 description = "Reclaim and reuse Rust build artifacts across Git worktrees on macOS: safe GC for target/ dirs, dependency seeding for new worktrees, measured receipts. Built for parallel coding agents."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jayden-dang/cargo-hive"
-include = ["/src/**/*", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
 
-[lib]
-name = "cargo_hive"
-path = "src/lib.rs"
-
-[[bin]]
-name = "cargo-hive"
-path = "src/main.rs"
-
-[dependencies]
+[workspace.dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 libc = "0.2.191"
-
-[target.'cfg(target_os = "macos")'.dependencies]
 applesauce = "0.8.10"
+cargo-hive-platform = { path = "crates/platform", version = "=0.1.1" }
+cargo-hive-core = { path = "crates/core", version = "=0.1.1" }
+cargo-hive-state = { path = "crates/state", version = "=0.1.1" }
+cargo-hive-cargo = { path = "crates/cargo", version = "=0.1.1" }
+cargo-hive-doctor = { path = "crates/doctor", version = "=0.1.1" }
+cargo-hive-seed = { path = "crates/seed", version = "=0.1.1" }
+cargo-hive-gc = { path = "crates/gc", version = "=0.1.1" }
+
+[workspace.lints.clippy]
+disallowed_types = "warn"
+disallowed_methods = "warn"
 
 [profile.release]
 panic = "unwind"

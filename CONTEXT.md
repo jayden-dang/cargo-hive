@@ -33,6 +33,10 @@ _Avoid_: unmanaged mode
 **Slot mode**:
 Deferred: a fixed pool of worktree paths that would allow sharing workspace-crate incremental state.
 
+**Platform crate**:
+The one member crate allowed to touch the OS: `unsafe`, `libc`, `cfg(target_os)` outside tests, and child-process spawning. Every other crate reaches the OS only through it.
+_Avoid_: OS layer, sys crate
+
 **Cargo target dir**:
 A directory whose `CACHEDIR.TAG` says "created by cargo" and that holds a profile dir with fingerprints.
 _Avoid_: target folder, build folder

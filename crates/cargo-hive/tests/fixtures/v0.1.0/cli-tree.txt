@@ -1,0 +1,289 @@
+cmd cargo-hive hidden=false about=Some("Cargo build artifacts across worktrees, with measured receipts") long_about=None
+  long_help_render:
+Cargo build artifacts across worktrees, with measured receipts
+
+Usage: cargo hive <COMMAND>
+
+Commands:
+  repo     Manage registered repositories
+  status   Show checkouts and Cargo target dirs of registered repos
+  doctor   Check which hive capabilities work on this machine
+  gc       Delete superseded incremental sessions and leftover rustc temp dirs. A session with a lock file is deleted under that lock. With no repo argument, also evicts from the store
+  apply    Delete the dead units recorded in one stored plan
+  seed     Fill the store from one registered repository and clone registry units into a checkout
+  bench    Time cold and seeded first builds of fresh checkouts
+  explain  Report copies of one crate, feature splits, and units whose last compile failed
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help
+
+  -V, --version
+          Print version
+
+  cmd __hold-lock hidden=true about=Some("Hold a lock until killed (used by doctor's lock check)") long_about=None
+    arg kind long=None short=None hidden=false required=true defaults=[] help=None long_help=None
+    arg path long=None short=None hidden=false required=true defaults=[] help=None long_help=None
+    long_help_render:
+Hold a lock until killed (used by doctor's lock check)
+
+Usage: __hold-lock <KIND> <PATH>
+
+Arguments:
+  <KIND>
+          
+
+  <PATH>
+          
+
+Options:
+  -h, --help
+          Print help
+
+  cmd __try-lock hidden=true about=Some("Try a lock once without waiting and print `acquired` or `refused` (doctor's lock check)") long_about=None
+    arg kind long=None short=None hidden=false required=true defaults=[] help=None long_help=None
+    arg path long=None short=None hidden=false required=true defaults=[] help=None long_help=None
+    long_help_render:
+Try a lock once without waiting and print `acquired` or `refused` (doctor's lock check)
+
+Usage: __try-lock <KIND> <PATH>
+
+Arguments:
+  <KIND>
+          
+
+  <PATH>
+          
+
+Options:
+  -h, --help
+          Print help
+
+  cmd apply hidden=false about=Some("Delete the dead units recorded in one stored plan") long_about=None
+    arg id long=None short=None hidden=false required=true defaults=[] help=Some("Id of the plan to apply") long_help=None
+    arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON receipt on stdout (prose goes to stderr)") long_help=None
+    long_help_render:
+Delete the dead units recorded in one stored plan
+
+Usage: apply [OPTIONS] <ID>
+
+Arguments:
+  <ID>
+          Id of the plan to apply
+
+Options:
+      --json
+          Print exactly one JSON receipt on stdout (prose goes to stderr)
+
+  -h, --help
+          Print help
+
+  cmd bench hidden=false about=Some("Time cold and seeded first builds of fresh checkouts") long_about=None
+    arg build_cmd long=Some("build-cmd") short=None hidden=false required=false defaults=["build"] help=Some("Compile-only cargo shape for the timed build") long_help=None
+    arg cold long=Some("cold") short=None hidden=false required=true defaults=[] help=Some("Fresh checkouts measured without seeding") long_help=None
+    arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON receipt on stdout (prose goes to stderr)") long_help=None
+    arg seeded long=Some("seeded") short=None hidden=false required=true defaults=[] help=Some("Fresh checkouts measured after seeding from the store") long_help=None
+    long_help_render:
+Time cold and seeded first builds of fresh checkouts
+
+Usage: bench [OPTIONS] --cold <COLD>... --seeded <SEEDED>...
+
+Options:
+      --cold <COLD>...
+          Fresh checkouts measured without seeding
+
+      --seeded <SEEDED>...
+          Fresh checkouts measured after seeding from the store
+
+      --build-cmd <BUILD_CMD>
+          Compile-only cargo shape for the timed build
+          
+          [default: build]
+
+      --json
+          Print exactly one JSON receipt on stdout (prose goes to stderr)
+
+  -h, --help
+          Print help
+
+  cmd doctor hidden=false about=Some("Check which hive capabilities work on this machine") long_about=None
+    arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON receipt on stdout (prose goes to stderr)") long_help=None
+    long_help_render:
+Check which hive capabilities work on this machine
+
+Usage: doctor [OPTIONS]
+
+Options:
+      --json
+          Print exactly one JSON receipt on stdout (prose goes to stderr)
+
+  -h, --help
+          Print help
+
+  cmd explain hidden=false about=Some("Report copies of one crate, feature splits, and units whose last compile failed") long_about=None
+    arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON receipt on stdout (prose goes to stderr)") long_help=None
+    arg repos long=None short=None hidden=false required=false defaults=[] help=Some("Registered repos to explain; none means every registered repo") long_help=None
+    arg top long=Some("top") short=Some('n') hidden=false required=false defaults=["10"] help=Some("How many copy groups and divergences to show; 0 shows all") long_help=None
+    long_help_render:
+Report copies of one crate, feature splits, and units whose last compile failed
+
+Usage: explain [OPTIONS] [REPOS]...
+
+Arguments:
+  [REPOS]...
+          Registered repos to explain; none means every registered repo
+
+Options:
+  -n, --top <TOP>
+          How many copy groups and divergences to show; 0 shows all
+          
+          [default: 10]
+
+      --json
+          Print exactly one JSON receipt on stdout (prose goes to stderr)
+
+  -h, --help
+          Print help
+
+  cmd gc hidden=false about=Some("Delete superseded incremental sessions and leftover rustc temp dirs. A session with a lock file is deleted under that lock. With no repo argument, also evicts from the store") long_about=None
+    arg dry_run long=Some("dry-run") short=None hidden=false required=false defaults=[] help=Some("Report what would be deleted and freed, deleting nothing") long_help=None
+    arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON receipt on stdout (prose goes to stderr)") long_help=None
+    arg plan long=Some("plan") short=None hidden=false required=false defaults=[] help=Some("Store a plan of dead-unit paths and delete nothing") long_help=None
+    arg repos long=None short=None hidden=false required=false defaults=[] help=Some("Registered repos to clean; none means every target hive knows") long_help=None
+    long_help_render:
+Delete superseded incremental sessions and leftover rustc temp dirs. A session with a lock file is deleted under that lock. With no repo argument, also evicts from the store
+
+Usage: gc [OPTIONS] [REPOS]...
+
+Arguments:
+  [REPOS]...
+          Registered repos to clean; none means every target hive knows
+
+Options:
+      --dry-run
+          Report what would be deleted and freed, deleting nothing
+
+      --plan
+          Store a plan of dead-unit paths and delete nothing
+
+      --json
+          Print exactly one JSON receipt on stdout (prose goes to stderr)
+
+  -h, --help
+          Print help
+
+  cmd repo hidden=false about=Some("Manage registered repositories") long_about=None
+    long_help_render:
+Manage registered repositories
+
+Usage: repo <COMMAND>
+
+Commands:
+  add     Register a repository by its main checkout (any path inside it)
+  list    List registered repositories
+  remove  Unregister repositories (any path inside a main checkout, which may be gone)
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help
+
+    cmd add hidden=false about=Some("Register a repository by its main checkout (any path inside it)") long_about=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON receipt on stdout (prose goes to stderr)") long_help=None
+      arg path long=None short=None hidden=false required=true defaults=[] help=None long_help=None
+      long_help_render:
+Register a repository by its main checkout (any path inside it)
+
+Usage: add [OPTIONS] <PATH>
+
+Arguments:
+  <PATH>
+          
+
+Options:
+      --json
+          Print exactly one JSON receipt on stdout (prose goes to stderr)
+
+  -h, --help
+          Print help
+
+    cmd list hidden=false about=Some("List registered repositories") long_about=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON receipt on stdout (prose goes to stderr)") long_help=None
+      long_help_render:
+List registered repositories
+
+Usage: list [OPTIONS]
+
+Options:
+      --json
+          Print exactly one JSON receipt on stdout (prose goes to stderr)
+
+  -h, --help
+          Print help
+
+    cmd remove hidden=false about=Some("Unregister repositories (any path inside a main checkout, which may be gone)") long_about=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON receipt on stdout (prose goes to stderr)") long_help=None
+      arg missing long=Some("missing") short=None hidden=false required=false defaults=[] help=Some("Also remove every repository whose main checkout no longer exists") long_help=None
+      arg paths long=None short=None hidden=false required=false defaults=[] help=None long_help=None
+      long_help_render:
+Unregister repositories (any path inside a main checkout, which may be gone)
+
+Usage: remove [OPTIONS] [PATHS]...
+
+Arguments:
+  [PATHS]...
+          
+
+Options:
+      --missing
+          Also remove every repository whose main checkout no longer exists
+
+      --json
+          Print exactly one JSON receipt on stdout (prose goes to stderr)
+
+  -h, --help
+          Print help
+
+  cmd seed hidden=false about=Some("Fill the store from one registered repository and clone registry units into a checkout") long_about=None
+    arg checkout long=None short=None hidden=false required=true defaults=[] help=Some("Checkout to clone into. The caller's directory selects nothing") long_help=None
+    arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON receipt on stdout (prose goes to stderr)") long_help=None
+    long_help_render:
+Fill the store from one registered repository and clone registry units into a checkout
+
+Usage: seed [OPTIONS] <CHECKOUT>
+
+Arguments:
+  <CHECKOUT>
+          Checkout to clone into. The caller's directory selects nothing
+
+Options:
+      --json
+          Print exactly one JSON receipt on stdout (prose goes to stderr)
+
+  -h, --help
+          Print help
+
+  cmd status hidden=false about=Some("Show checkouts and Cargo target dirs of registered repos") long_about=None
+    arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON receipt on stdout (prose goes to stderr)") long_help=None
+    arg no_sizes long=Some("no-sizes") short=None hidden=false required=false defaults=[] help=Some("Skip size accounting (sizes are then reported as not measured)") long_help=None
+    arg repos long=None short=None hidden=false required=false defaults=[] help=Some("Registered repos to report; none means every registered repo") long_help=None
+    long_help_render:
+Show checkouts and Cargo target dirs of registered repos
+
+Usage: status [OPTIONS] [REPOS]...
+
+Arguments:
+  [REPOS]...
+          Registered repos to report; none means every registered repo
+
+Options:
+      --no-sizes
+          Skip size accounting (sizes are then reported as not measured)
+
+      --json
+          Print exactly one JSON receipt on stdout (prose goes to stderr)
+
+  -h, --help
+          Print help
+

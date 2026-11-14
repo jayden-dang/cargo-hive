@@ -15,7 +15,7 @@ clone registry dependencies that are already built into a fresh worktree before 
 worktree's first build. It installs no wrapper, shim, hook or Cargo config, so
 `cargo build` and rust-analyzer behave exactly as they would without it.
 
-> **Status:** early (`0.1.0`), macOS only, not yet published on crates.io. Every
+> **Status:** early (`0.1.1`), macOS only, not yet published on crates.io. Every
 > capability is gated on `cargo hive doctor` passing for your toolchain.
 
 ## Contents
@@ -110,7 +110,7 @@ Requirements:
 ```sh
 git clone https://github.com/jayden-dang/cargo-hive
 cd cargo-hive
-cargo install --path .
+cargo install --path crates/cargo-hive
 cargo hive doctor    # checks what works on this machine; run it again after a toolchain change
 ```
 

@@ -1,0 +1,2 @@
+disallowed-types = [{ path = "std::process::Command", reason = "only the platform crate may touch the OS" }]
+disallowed-methods = [{ path = "std::process::Command::new", reason = "only the platform crate may touch the OS" }]
