@@ -988,7 +988,7 @@ bitset types (design Decision 9).
 
 **Depends-on:** Task 24
 
-- [ ] **Step 1: Failing test.**
+- [x] **Step 1: Failing test.**
   - in `crates/gc/src/liveness.rs`'s test module, where the liveness fixtures live by now (`target_of`,
     moved by Task 11 from liveness.rs:744): for each fixture profile, `successors` of each unit equals the 0.1.0
     `edges` filtered by source, and `edge_count` equals `edges.len()`. Capture the 0.1.0 lists by keeping the old
@@ -997,12 +997,12 @@ bitset types (design Decision 9).
 
   Run `cargo test -p cargo-hive-gc liveness::` and `cargo test -p cargo-hive-core bitset::`. Expect: a compile
   error.
-- [ ] **Step 2: Implement.** Build the CSR, switch the index keys, and swap `mark_live`'s vectors for `BitSet`.
+- [x] **Step 2: Implement.** Build the CSR, switch the index keys, and swap `mark_live`'s vectors for `BitSet`.
   Delete the old builder.
-- [ ] **Step 3: Checkpoint.** The full gate (all liveness suites, tests/liveness_prove.rs) and the capture
+- [x] **Step 3: Checkpoint.** The full gate (all liveness suites, tests/liveness_prove.rs) and the capture
   comparison pass. Following Task 3's checkpoint rule, run the 0.1.0 report and this branch's (`live-step5.json`)
   back to back on klynt, `cmp` them and record the result. A mismatch stops the plan and goes to the operator.
-- [ ] **Step 4: Commit.** `git commit -m "refactor: CSR fingerprint graph and bitset liveness marks"`
+- [x] **Step 4: Commit.** `git commit -m "refactor: CSR fingerprint graph and bitset liveness marks"`
 
 _Requirements: SPLIT-4.4, SPLIT-4.1_
 
