@@ -3185,8 +3185,9 @@ mod tests {
                 ],
                 edges: None,
                 graph: Some(cargo_hive_core::fingerprint::UnitGraph {
+                    offsets: vec![0; units.len() + 1],
                     units,
-                    edges: Vec::new(),
+                    targets: Vec::new(),
                 }),
             }],
             size: None,

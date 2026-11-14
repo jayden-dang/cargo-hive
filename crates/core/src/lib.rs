@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code, reason = "only the platform crate may touch the OS (ARCH-15)")]
 
+pub mod bitset;
 pub mod caps;
 pub mod classify;
 pub mod fingerprint;

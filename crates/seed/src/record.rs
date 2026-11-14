@@ -782,8 +782,9 @@ mod tests {
                 not_current_units: Vec::new(),
                 edges: None,
                 graph: Some(UnitGraph {
+                    offsets: vec![0; graph_units.len() + 1],
                     units: graph_units,
-                    edges: Vec::new(),
+                    targets: Vec::new(),
                 }),
             }],
             size: None,

@@ -1102,7 +1102,8 @@ mod tests {
                 edges: None,
                 graph: Some(UnitGraph {
                     units: vec![sample_unit(value)],
-                    edges: Vec::new(),
+                    offsets: vec![0, 0],
+                    targets: Vec::new(),
                 }),
             }],
             size: None,

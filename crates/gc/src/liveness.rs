@@ -2,6 +2,7 @@
 //! Read-only: it reads fingerprint reports and invocation mtimes through `Fs`,
 //! runs no process and writes nothing.
 
+use cargo_hive_core::bitset::BitSet;
 use cargo_hive_core::caps::DEPS_CAP;
 use cargo_hive_core::fingerprint::{self, DepEdge, Format, Unit, UnitHash, UnitKind, le_hex};
 use cargo_hive_core::liveness::{
@@ -88,9 +89,9 @@ pub fn liveness(fs: &dyn Fs, target: &TargetDir, now: SystemTime, window: Durati
     let live = marked.units;
     let live_units: BTreeSet<UnitRef> = units
         .iter()
-        .zip(&live)
-        .filter(|&(_, &is_live)| is_live)
-        .map(|(entry, _)| unit_ref(entry))
+        .enumerate()
+        .filter(|(i, _)| live.contains(*i))
+        .map(|(_, entry)| unit_ref(entry))
         .chain(marked.live_nodes)
         .collect();
     let dead_idx = dead_indices(&units, &live);
@@ -205,7 +206,7 @@ fn index_units(
 
 /// Which units are live (by index), and which not-current nodes are.
 struct Marked {
-    units: Vec<bool>,
+    units: BitSet,
     live_nodes: Vec<UnitRef>,
 }
 
@@ -245,10 +246,9 @@ fn learn_packages(
     learned
 }
 
-/// Marks `flags[i]` and queues `walk`, unless `i` was already marked.
-fn enqueue(flags: &mut [bool], queue: &mut Vec<Walk>, i: usize, walk: Walk) {
-    if !flags[i] {
-        flags[i] = true;
+/// Marks bit `i` and queues `walk`, unless `i` was already marked.
+fn enqueue(flags: &mut BitSet, queue: &mut Vec<Walk>, i: usize, walk: Walk) {
+    if flags.insert(i) {
         queue.push(walk);
     }
 }
@@ -265,8 +265,8 @@ fn mark_live(
     window: Duration,
     reasons: &mut Vec<Uncertain>,
 ) -> Marked {
-    let mut live = vec![false; units.len()];
-    let mut node_live = vec![false; nodes.len()];
+    let mut live = BitSet::with_len(units.len());
+    let mut node_live = BitSet::with_len(nodes.len());
     let mut queue: Vec<Walk> = Vec::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
         let stamp = unit_timestamp(profile, &unit.dir_name, unit.kind);
@@ -349,9 +349,9 @@ fn mark_live(
     }
     let live_nodes = nodes
         .iter()
-        .zip(&node_live)
-        .filter(|&(_, &is_live)| is_live)
-        .map(|(node, _)| node.unit_ref())
+        .enumerate()
+        .filter(|(i, _)| node_live.contains(*i))
+        .map(|(_, node)| node.unit_ref())
         .collect();
     Marked {
         units: live,
@@ -360,10 +360,10 @@ fn mark_live(
 }
 
 /// Indices of units that are not live, are collectable and carry a unit hash.
-fn dead_indices(units: &[ProfileUnit], live: &[bool]) -> Vec<usize> {
+fn dead_indices(units: &[ProfileUnit], live: &BitSet) -> Vec<usize> {
     (0..units.len())
         .filter(|&i| {
-            !live[i]
+            !live.contains(i)
                 && !matches!(
                     units[i].1.kind,
                     UnitKind::BuildScript
@@ -519,7 +519,7 @@ fn make_unit_ref(profile: &Path, dir_name: &str) -> UnitRef {
 #[cfg(target_os = "macos")]
 mod tests {
     use super::*;
-    use cargo_hive_core::fingerprint::{le_hex, read_profile};
+    use cargo_hive_core::fingerprint::{UnitId, le_hex, read_profile};
     use cargo_hive_core::liveness::DEFAULT_WINDOW;
     use cargo_hive_core::target::Owner;
     use std::fs;
@@ -615,6 +615,75 @@ mod tests {
             profiles: profiles.iter().map(|p| read_profile(p)).collect(),
             size: None,
             unreadable: None,
+        }
+    }
+
+    fn expected_successors(units: &[Unit]) -> Vec<Vec<UnitId>> {
+        let mut index: HashMap<UnitHash, Vec<UnitId>> = HashMap::new();
+        for (i, u) in units.iter().enumerate() {
+            let id =
+                UnitId(u32::try_from(i).expect("fixture profiles stay within u32 unit counts"));
+            index.entry(u.hash).or_default().push(id);
+        }
+        let mut adj = vec![Vec::new(); units.len()];
+        for (i, u) in units.iter().enumerate() {
+            for dep in &u.deps {
+                let key =
+                    UnitHash::parse(&le_hex(dep.fingerprint)).expect("le_hex is 16 lowercase hex");
+                if let Some([j]) = index.get(&key).map(Vec::as_slice) {
+                    adj[i].push(*j);
+                }
+            }
+        }
+        adj
+    }
+
+    #[test]
+    fn each_profiles_successors_match_the_resolved_pair_list() {
+        let s = Scratch::new("csr");
+        let host = s.0.join("debug");
+        let cross = s.0.join("aarch64-apple-darwin").join("debug");
+        write_unit(
+            &host,
+            A,
+            "bin-a",
+            101,
+            &[("b", 102), ("missing", 999), ("dup", 200)],
+            Some(HOUR),
+        );
+        write_unit(&host, B, "lib-b", 102, &[], Some(30 * DAY));
+        write_unit(&host, C, "lib-c", 103, &[], Some(30 * DAY));
+        write_unit(
+            &host,
+            "dup-a-2000000000000200",
+            "lib-dup-a",
+            200,
+            &[],
+            Some(30 * DAY),
+        );
+        write_unit(
+            &host,
+            "dup-b-2000000000000200",
+            "lib-dup-b",
+            200,
+            &[],
+            Some(30 * DAY),
+        );
+        write_unit(&cross, D, "lib-d", 104, &[("a", 101)], Some(HOUR));
+        write_unit(&cross, A, "lib-a", 101, &[], Some(30 * DAY));
+        let target = target_of(&s.0, &[&host, &cross]);
+        for profile in &target.profiles {
+            let graph = profile
+                .graph
+                .as_ref()
+                .expect("fixture profiles are supported");
+            let want = expected_successors(&graph.units);
+            assert_eq!(graph.edge_count(), want.iter().map(Vec::len).sum::<usize>());
+            for (i, expected) in want.iter().enumerate() {
+                let id =
+                    UnitId(u32::try_from(i).expect("fixture profiles stay within u32 unit counts"));
+                assert_eq!(graph.successors(id), expected.as_slice(), "unit {i}");
+            }
         }
     }
 

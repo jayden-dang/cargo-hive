@@ -196,10 +196,27 @@ pub struct EdgeCounts {
     pub ambiguous: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct UnitId(pub u32);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UnitGraph {
     pub units: Vec<Unit>,
-    pub edges: Vec<(usize, usize)>,
+    pub offsets: Vec<u32>,
+    pub targets: Vec<UnitId>,
+}
+
+impl UnitGraph {
+    pub fn successors(&self, id: UnitId) -> &[UnitId] {
+        let i = id.0 as usize;
+        let start = self.offsets[i] as usize;
+        let end = self.offsets[i + 1] as usize;
+        &self.targets[start..end]
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.targets.len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -593,25 +610,29 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
     if let Some(reason) = problem {
         return unsupported(counted, reason);
     }
-    let mut index: HashMap<UnitHash, Vec<usize>> = HashMap::new();
+    let mut index: HashMap<UnitHash, Vec<UnitId>> = HashMap::new();
     for (i, u) in units.iter().enumerate() {
-        index.entry(u.hash).or_default().push(i);
+        let id = UnitId(u32::try_from(i).expect("profile cannot exceed u32::MAX units"));
+        index.entry(u.hash).or_default().push(id);
     }
     let mut counts = EdgeCounts::default();
-    let mut edges = Vec::new();
-    for (i, u) in units.iter().enumerate() {
+    let mut offsets = Vec::with_capacity(units.len() + 1);
+    let mut targets = Vec::new();
+    offsets.push(0);
+    for u in &units {
         for dep in &u.deps {
             let key =
                 UnitHash::parse(&le_hex(dep.fingerprint)).expect("le_hex is 16 lowercase hex");
             match index.get(&key).map(Vec::as_slice) {
                 Some([j]) => {
                     counts.resolved += 1;
-                    edges.push((i, *j));
+                    targets.push(*j);
                 }
                 Some(_) => counts.ambiguous += 1,
                 None => counts.unresolved += 1,
             }
         }
+        offsets.push(u32::try_from(targets.len()).expect("edge count fits u32"));
     }
     ProfileReport {
         path,
@@ -620,7 +641,11 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
         not_current: not_current_units.len(),
         not_current_units,
         edges: Some(counts),
-        graph: Some(UnitGraph { units, edges }),
+        graph: Some(UnitGraph {
+            units,
+            offsets,
+            targets,
+        }),
     }
 }
 
