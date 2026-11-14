@@ -86,9 +86,9 @@ the unchanged suite plus the SPLIT-4.1 liveness comparison prove the results equ
    (89 `Command::new` sites in 20 files), and they use `libc` as a dev-dependency of `cargo-hive`.
 7. **Versions** (L7 + agent-decided pin): one `[workspace.package] version`. Inter-member deps are
    `{ path = "../<role>", version = "=X.Y.Z" }` through `[workspace.dependencies]`. The first release after the
-   split is proposed as 0.2.0, a 0.x minor bump, because the `cargo_hive::<module>` library paths change (out of
-   scope to keep, requirements Out of Scope). The number shows in `--version` and receipts, so both the number and
-   the path drop are the operator's (Ask me; requirements Open Questions). Nothing is built on the number. If the operator wants the old paths
+   split is `0.1.1` (operator 2026-11-14, not the proposed `0.2.0`). The `cargo_hive::<module>` library paths change (out of
+   scope to keep, requirements Out of Scope) and stay dropped. The number shows in `--version` and receipts.
+   Nothing is built on the number. If the operator wants the old paths
    kept, the fallback is a re-export in `crates/cargo-hive/src/lib.rs` (`pub use cargo_hive_seed as seed;` and so on
    for every 0.1.0 module). That changes no other section.
 8. **Publishing** (research-publish-workspace.md): `CARGO_TARGET_DIR=target/package-verify cargo publish
@@ -378,8 +378,7 @@ tests (tests/skill.rs:434, tests/skill/names.rs:7-11).
 Respects: ARCH-8, ARCH-14
 Surface:
 - `cargo_hive::<module>` paths outside `cli`/`bench`, read by external library users of 0.1.0: replace. They are
-  removed in 0.2.0 (agent-decided, close-package D6), and 0.1.0 stays on crates.io unchanged. This is flagged for
-  the operator, with Decision 7's re-export as the fallback.
+  removed in 0.1.1 (operator 2026-11-14; close-package D6 had proposed 0.2.0), and 0.1.0 stays on crates.io unchanged. Decision 7's re-export remains the fallback if those paths are kept.
 - tests/*.rs using `cargo_hive::{seed,plan_tier,platform,state,…}` (scan.md §4: 57 + 28 + 20 + … refs): replace.
   They import from the member crates, which `crates/cargo-hive/Cargo.toml` lists as `[dev-dependencies]` where not
   already normal deps.
@@ -447,7 +446,7 @@ Surface:
   - single-test lines (:90-92): `cargo test -p <member> --test <file>` and `cargo test -p <member> --lib`;
   - task gate (:94-95): "tests of the changed member and the members above it";
   - run locally (:115-124): unchanged `target/debug/cargo-hive`;
-  - release steps (:130-137): step 2 sets `[workspace.package] version` and commits `release: vX.Y.Z` before packaging; step 3 runs
+  - release steps (:130-137): step 2 sets `[workspace.package] version` to `0.1.1` and commits `release: v0.1.1` before packaging; step 3 runs
     `cargo package --workspace --list --allow-dirty`, then `CARGO_TARGET_DIR=target/package-verify cargo publish --workspace
     --dry-run --allow-dirty`, then fresh-probe per member; step 4 tags and pushes that commit; step 5 first stops unless the line `Crate names approved:` in this file holds a date
     (SPLIT-6.4), then runs `cargo publish --workspace` with no `--dry-run` and no `--allow-dirty`. Steps 1–4 run on working names. The line is dated 2026-11-14.

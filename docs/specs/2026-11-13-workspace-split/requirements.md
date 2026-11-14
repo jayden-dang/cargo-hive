@@ -263,11 +263,10 @@ Every file under `src/` and `tests/` moves into a member crate (ROAD-15 surfaces
 
 ## Open Questions
 
-- The next release's version number and the library-path drop. `--version` and every receipt's `hive_version`
-  will print the new number, which Ask me covers ("any change a user can see in output or receipts",
-  ROAD-15.md:25). The proposal is 0.2.0, because the 0.1.0 `cargo_hive::<module>` library paths are dropped
-  (Out of Scope; a one-block re-export would keep them). The operator decides both before the release; nothing in
-  this plan's tasks depends on the number — operator — at the sheet — forbid-guess.
+- The next release's version number. Operator 2026-11-14: `0.1.1`, not `0.2.0`. `--version` and every receipt's
+  `hive_version` will print that number when the release commit sets it. The `cargo_hive::<module>` library paths
+  stay dropped, as already built. Nothing in this plan's tasks depends on the number. The crate version stays
+  `0.1.0` until that release commit.
 
 - Whether the closure walk should also move onto a precomputed target-wide CSR. That is the part of the
   close-package D7 rework set this road does not deliver, because it would resolve edges of unreached units and add

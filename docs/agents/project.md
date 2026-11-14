@@ -130,7 +130,7 @@ None — not deployed. hive is a local CLI with no hosted component.
 ## release steps
 
 1. Gate: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo check --workspace --target x86_64-unknown-linux-gnu`.
-2. Version: set `[workspace.package] version` to `X.Y.Z` (members inherit it; do not set a version inside each member), also set the same version in `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json` and `plugin/skills/hive/SKILL.md` `metadata.hive-version` (tests/skill.rs fails if they differ), then `cargo check` so `Cargo.lock` follows. Commit that bump before the package check: `git commit -am "release: vX.Y.Z"`.
+2. Version: the release after 0.1.0 is `0.1.1`. Set `[workspace.package] version` to that number (members inherit it; do not set a version inside each member), also set the same version in `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json` and `plugin/skills/hive/SKILL.md` `metadata.hive-version` (tests/skill.rs fails if they differ), then `cargo check` so `Cargo.lock` follows. Commit that bump before the package check: `git commit -am "release: v0.1.1"`.
 3. Package check: `cargo package --workspace --list --allow-dirty` shows, for every member, only `src/` files, `Cargo.toml`, `Cargo.toml.orig`, `.cargo_vcs_info.json`, `Cargo.lock`, `README.md` and the two license files (no `tests/` path). Then `CARGO_TARGET_DIR=target/package-verify cargo publish --workspace --dry-run --allow-dirty` and expect "aborting upload due to dry run" for each member in Cargo's dependency order: cargo-hive-platform, cargo-hive-core, cargo-hive-state, cargo-hive-cargo, cargo-hive-doctor, cargo-hive-gc, cargo-hive-seed, cargo-hive. Then probe every member:
 
    ```sh
@@ -146,12 +146,12 @@ None — not deployed. hive is a local CLI with no hosted component.
    ```
 
    Each pair must print `GREEN`. The verify build must never use the repo's own `target/` (FIX-1).
-4. Tag and push the release commit from step 2: `git tag vX.Y.Z`, `git push origin main vX.Y.Z`.
+4. Tag and push the release commit from step 2: `git tag v0.1.1`, `git push origin main v0.1.1`.
 
 Crate names approved: 2026-11-14
 
 5. Publish: stop unless the line `Crate names approved:` above holds a date. Then `cargo search <name> --limit 1` for every member and stop, naming the member, if an exact-name hit is a crate this project does not own. Then `CARGO_TARGET_DIR=target/package-verify cargo publish --workspace` (needs `cargo login`; a published version cannot be undone, only yanked). On a partial failure stop and report which members uploaded. Steps 1–4, including the dry-run, work on working names.
-6. Smoke: `cargo install cargo-hive --version X.Y.Z --root /private/tmp/hive-release/inst`; `/private/tmp/hive-release/inst/bin/cargo-hive --version` prints `X.Y.Z`; `HIVE_HOME=/private/tmp/hive-release/home /private/tmp/hive-release/inst/bin/cargo-hive doctor --json` exits 0; the same `scripts/fresh-probe.sh` member pairs as step 3 print `GREEN`; then
+6. Smoke: `cargo install cargo-hive --version 0.1.1 --root /private/tmp/hive-release/inst`; `/private/tmp/hive-release/inst/bin/cargo-hive --version` prints `0.1.1`; `HIVE_HOME=/private/tmp/hive-release/home /private/tmp/hive-release/inst/bin/cargo-hive doctor --json` exits 0; the same `scripts/fresh-probe.sh` member pairs as step 3 print `GREEN`; then
 
    ```sh
    HIVE_NEW_BIN=/private/tmp/hive-release/inst/bin/cargo-hive \
