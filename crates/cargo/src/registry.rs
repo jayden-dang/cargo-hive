@@ -1,4 +1,4 @@
-//! Registered repositories. Task 3 adds `register`.
+//! Registered repositories, read and written through the state transaction.
 
 use crate::git::{Git, GitError};
 use cargo_hive_state::{StateError, Tx};

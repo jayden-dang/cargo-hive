@@ -296,15 +296,16 @@ fn rank_groups(left: &Group<'_>, right: &Group<'_>) -> std::cmp::Ordering {
 }
 
 fn directory_crate<'a>(dir_name: &'a str, hash: &UnitHash) -> &'a str {
-    let hash_hex = hash.to_string();
+    let hex = hash.hex_digits();
+    let hex = std::str::from_utf8(&hex).expect("hex digits are utf-8");
     if let Some(head) = dir_name
-        .strip_suffix(hash_hex.as_str())
+        .strip_suffix(hex)
         .and_then(|head| head.strip_suffix('-'))
     {
         return head;
     }
     match cargo_hive_core::fingerprint::unit_hash(dir_name) {
-        Some(suffix) => &dir_name[..dir_name.len() - suffix.to_string().len() - 1],
+        Some(_) => &dir_name[..dir_name.len() - UnitHash::HEX_LEN - 1],
         None => dir_name,
     }
 }
@@ -604,7 +605,7 @@ fn failed_crate(item: &NotCurrentInput) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     match cargo_hive_core::fingerprint::unit_hash(&name) {
-        Some(hash) => name[..name.len() - hash.to_string().len() - 1].to_string(),
+        Some(_) => name[..name.len() - UnitHash::HEX_LEN - 1].to_string(),
         None => name,
     }
 }

@@ -137,11 +137,29 @@ pub struct DepEdge {
 pub struct UnitHash(u64);
 
 impl UnitHash {
+    pub const HEX_LEN: usize = 16;
+
+    /// The unit hash of a fingerprint integer. Equal to parsing `le_hex(value)`.
+    pub fn from_fingerprint(value: u64) -> UnitHash {
+        UnitHash(value.swap_bytes())
+    }
+
     pub fn parse(text: &str) -> Option<UnitHash> {
         if !is_hash(text.as_bytes()) {
             return None;
         }
         u64::from_str_radix(text, 16).ok().map(UnitHash)
+    }
+
+    pub fn hex_digits(self) -> [u8; 16] {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut buf = [0u8; 16];
+        let mut n = self.0;
+        for slot in buf.iter_mut().rev() {
+            *slot = HEX[(n & 0xf) as usize];
+            n >>= 4;
+        }
+        buf
     }
 }
 
@@ -153,7 +171,9 @@ impl fmt::Display for UnitHash {
 
 impl Serialize for UnitHash {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_string())
+        let buf = self.hex_digits();
+        let text = std::str::from_utf8(&buf).expect("hex digits are utf-8");
+        serializer.serialize_str(text)
     }
 }
 
@@ -621,8 +641,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
     offsets.push(0);
     for u in &units {
         for dep in &u.deps {
-            let key =
-                UnitHash::parse(&le_hex(dep.fingerprint)).expect("le_hex is 16 lowercase hex");
+            let key = UnitHash::from_fingerprint(dep.fingerprint);
             match index.get(&key).map(Vec::as_slice) {
                 Some([j]) => {
                     counts.resolved += 1;

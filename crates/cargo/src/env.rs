@@ -61,11 +61,7 @@ pub fn metadata(spec: &mut Spec, parent: &[(OsString, OsString)]) {
     for var in TARGET_VARS {
         spec.env_remove.push(var.into());
     }
-    for (key, _) in parent {
-        if key.to_string_lossy().starts_with("GIT_") {
-            spec.env_remove.push(key.clone());
-        }
-    }
+    git(spec, parent);
     drop_directory_toolchain(spec, parent);
 }
 

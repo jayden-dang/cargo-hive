@@ -236,7 +236,7 @@ fn learn_packages(
         .flat_map(|(_, unit)| unit.deps.iter())
         .chain(nodes.iter().flat_map(|node| node.deps.iter()));
     for edge in edges {
-        let key = UnitHash::parse(&le_hex(edge.fingerprint)).expect("le_hex is 16 lowercase hex");
+        let key = UnitHash::from_fingerprint(edge.fingerprint);
         for &hit in index.get(&key).into_iter().flatten() {
             if let Some(name) = package_name(&units[hit].1.dir_name) {
                 learned.entry(edge.package).or_default().insert(name);
@@ -315,8 +315,7 @@ fn mark_live(
             ),
         };
         for &dep in deps {
-            let key =
-                UnitHash::parse(&le_hex(dep.fingerprint)).expect("le_hex is 16 lowercase hex");
+            let key = UnitHash::from_fingerprint(dep.fingerprint);
             if let Some(hits) = index.get(&key) {
                 for &hit in hits {
                     enqueue(&mut live, &mut queue, hit, Walk::Unit(hit));
