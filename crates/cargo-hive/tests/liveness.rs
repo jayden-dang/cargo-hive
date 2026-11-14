@@ -290,16 +290,25 @@ fn the_package_ships_no_test_file() {
         .collect();
     members.sort();
     assert!(!members.is_empty(), "no crates under {}", crates.display());
+    let required = [
+        "src/**/*",
+        "Cargo.toml",
+        "README.md",
+        "LICENSE-MIT",
+        "LICENSE-APACHE",
+    ];
     for member in members {
         let manifest_path = member.join("Cargo.toml");
         let manifest = fs::read_to_string(&manifest_path)
             .unwrap_or_else(|e| panic!("{}: {e}", manifest_path.display()));
         let includes = manifest_includes(&manifest);
-        assert!(
-            includes.iter().any(|e| e == "Cargo.toml"),
-            "{}: {includes:?}",
-            member.display()
-        );
+        for entry in required {
+            assert!(
+                includes.iter().any(|e| e == entry),
+                "{} missing {entry} in {includes:?}",
+                member.display()
+            );
+        }
         let tests: Vec<_> = includes.iter().filter(|e| e.starts_with("tests")).collect();
         assert!(
             tests.is_empty(),

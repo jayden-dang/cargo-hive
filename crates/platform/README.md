@@ -110,7 +110,7 @@ Requirements:
 ```sh
 git clone https://github.com/jayden-dang/cargo-hive
 cd cargo-hive
-cargo install --path .
+cargo install --path crates/cargo-hive
 cargo hive doctor    # checks what works on this machine; run it again after a toolchain change
 ```
 

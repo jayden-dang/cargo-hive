@@ -7,12 +7,12 @@
 # edits under src/ are ignored and builds report Fresh (docs/specs/fixes.md, FIX-1).
 #
 # usage: scripts/fresh-probe.sh [<source-file> <package>]...
-#        (default: crates/cargo-hive/src/size.rs cargo-hive)
+#        (default: crates/cargo-hive/src/lib.rs cargo-hive)
 # exit:  0 every pair recompiled (GREEN), 1 any reported Fresh (RED), 2 anything else
 set -euo pipefail
 
 if (($# == 0)); then
-  set -- crates/cargo-hive/src/size.rs cargo-hive
+  set -- crates/cargo-hive/src/lib.rs cargo-hive
 fi
 if (($# % 2 != 0)); then
   echo "usage: $0 [<source-file> <package>]..." >&2

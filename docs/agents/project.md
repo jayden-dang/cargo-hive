@@ -129,18 +129,43 @@ None — not deployed. hive is a local CLI with no hosted component.
 
 ## release steps
 
-1. Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo check --target x86_64-unknown-linux-gnu`.
-2. Version: set `version` in `Cargo.toml` to `X.Y.Z`, also set the same version in `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json` and `plugin/skills/hive/SKILL.md` `metadata.hive-version` (tests/skill.rs fails if they differ), then `cargo check` so `Cargo.lock` follows.
-3. Package check: `cargo package --list` shows only `src/`, `Cargo.toml`, `Cargo.lock`, `README.md` and license files; then `CARGO_TARGET_DIR=target/package-verify cargo publish --dry-run`, then `scripts/fresh-probe.sh` prints `GREEN`. The verify build must never use the repo's own `target/` (FIX-1).
-4. Commit and tag: `git commit -am "release: vX.Y.Z"`, `git tag vX.Y.Z`, `git push origin main vX.Y.Z`.
-5. Publish: `CARGO_TARGET_DIR=target/package-verify cargo publish` (needs `cargo login`; a published version cannot be undone, only yanked).
-6. Smoke: `cargo install cargo-hive --version X.Y.Z --root <tmp>`; `<tmp>/bin/cargo-hive --version` prints `X.Y.Z`; `HIVE_HOME=<tmp>/home <tmp>/bin/cargo-hive doctor --json` exits 0; `scripts/fresh-probe.sh` prints `GREEN`.
+1. Gate: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo check --workspace --target x86_64-unknown-linux-gnu`.
+2. Version: set `[workspace.package] version` to `X.Y.Z` (members inherit it; do not set a version inside each member), also set the same version in `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json` and `plugin/skills/hive/SKILL.md` `metadata.hive-version` (tests/skill.rs fails if they differ), then `cargo check` so `Cargo.lock` follows.
+3. Package check: `cargo package --workspace --list` shows, for every member, only `src/` files, `Cargo.toml`, `Cargo.toml.orig`, `.cargo_vcs_info.json`, `Cargo.lock`, `README.md` and the two license files (no `tests/` path). Then `CARGO_TARGET_DIR=target/package-verify cargo publish --workspace --dry-run` and expect "aborting upload due to dry run" for each member in Cargo's dependency order: cargo-hive-platform, cargo-hive-core, cargo-hive-state, cargo-hive-cargo, cargo-hive-doctor, cargo-hive-gc, cargo-hive-seed, cargo-hive. Then probe every member:
 
-`Cargo.toml` carries an `include` list (2026-10-30), so the package holds only `src/`,
-`Cargo.toml`, `Cargo.lock` and `README.md`; the plugin (`plugin/`, `.claude-plugin/`) and
-run records (`skills/`) never ship in the crate. Before the first release, add the two
-license files `LICENSE-MIT` and `LICENSE-APACHE` for the declared `MIT OR Apache-2.0`;
-the `include` list already names them.
+   ```sh
+   scripts/fresh-probe.sh \
+     crates/platform/src/lib.rs cargo-hive-platform \
+     crates/core/src/lib.rs cargo-hive-core \
+     crates/state/src/lib.rs cargo-hive-state \
+     crates/cargo/src/lib.rs cargo-hive-cargo \
+     crates/doctor/src/lib.rs cargo-hive-doctor \
+     crates/gc/src/lib.rs cargo-hive-gc \
+     crates/seed/src/lib.rs cargo-hive-seed \
+     crates/cargo-hive/src/lib.rs cargo-hive
+   ```
+
+   Each pair must print `GREEN`. The verify build must never use the repo's own `target/` (FIX-1).
+4. Commit and tag: `git commit -am "release: vX.Y.Z"`, `git tag vX.Y.Z`, `git push origin main vX.Y.Z`.
+
+Crate names approved:
+
+5. Publish: stop unless the line `Crate names approved:` above holds a date. Then `cargo search <name> --limit 1` for every member and stop, naming the member, if an exact-name hit is a crate this project does not own. Then `CARGO_TARGET_DIR=target/package-verify cargo publish --workspace` (needs `cargo login`; a published version cannot be undone, only yanked). On a partial failure stop and report which members uploaded. Steps 1–4, including the dry-run, work on working names.
+6. Smoke: `cargo install cargo-hive --version X.Y.Z --root /private/tmp/hive-release/inst`; `/private/tmp/hive-release/inst/bin/cargo-hive --version` prints `X.Y.Z`; `HIVE_HOME=/private/tmp/hive-release/home /private/tmp/hive-release/inst/bin/cargo-hive doctor --json` exits 0; the same `scripts/fresh-probe.sh` member pairs as step 3 print `GREEN`; then
+
+   ```sh
+   HIVE_NEW_BIN=/private/tmp/hive-release/inst/bin/cargo-hive \
+   HIVE_V010_BIN=/private/tmp/hive-0.1.0/target/debug/cargo-hive \
+     cargo test -p cargo-hive --test capture -- --ignored
+   ```
+
+   Stop on any difference. The capture test takes the new binary from `HIVE_NEW_BIN` when set, else `CARGO_BIN_EXE_cargo-hive`.
+
+Each member's `Cargo.toml` carries an `include` list so the package holds only `src/`,
+`Cargo.toml`, `README.md` and the two license files `LICENSE-MIT` and `LICENSE-APACHE`;
+Cargo also lists `Cargo.lock`, `Cargo.toml.orig` and `.cargo_vcs_info.json` even when
+`include` omits them. The plugin (`plugin/`, `.claude-plugin/`) and run records
+(`skills/`) never ship in any crate.
 
 ## Paths
 
