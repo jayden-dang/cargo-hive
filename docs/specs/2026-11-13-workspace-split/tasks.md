@@ -1088,12 +1088,12 @@ _Requirements: SPLIT-6.1, SPLIT-6.2, SPLIT-6.3, SPLIT-6.4, SPLIT-6.5, SPLIT-6.6,
 
 **Depends-on:** Task 26
 
-- [ ] **Step 1: Write the doc changes.**
-- [ ] **Step 2: Run each documented command as written** at the root on the green tree: the verify table, a
+- [x] **Step 1: Write the doc changes.**
+- [x] **Step 2: Run each documented command as written** at the root on the green tree: the verify table, a
   single-test example per member, the task gate example, `verify.md`'s cold start (`cargo build`, then
   `target/debug/cargo-hive --version` printing `cargo-hive 0.1.0`). Expect: each passes. Record any that fails and
   fix the doc, not the command's meaning.
-- [ ] **Step 3: Commit.** `git commit -m "docs: commands and standards for the workspace"`
+- [x] **Step 3: Commit.** `git commit -m "docs: commands and standards for the workspace"`
 
 _Requirements: SPLIT-7.1, SPLIT-7.2_
 
