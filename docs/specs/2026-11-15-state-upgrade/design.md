@@ -13,7 +13,7 @@ crate:
 - private `encode` (`to_vec_pretty` plus `\n`), `read_json`/`read_json_limited` (NotFound → `T::default()`) and
   `atomic_write` (crates/state/src/lib.rs:360-431).
 
-The files record no layout, and four of the six top-level types use `deny_unknown_fields` (registry, capabilities,
+The files record no layout, and three of the six top-level types use `deny_unknown_fields` (registry, capabilities,
 snapshot; config does too). No persisted shape changed from 0.1.0 to HEAD, so this release needs no converter.
 It needs a layout record that 0.1.0 files acquire on their next ordinary write. It also needs three code paths
 changed:
@@ -44,39 +44,66 @@ lock) and ARCH-2 (writes stay inside the state root).
 ## Decisions
 
 1. **The layout record is a first field on each type.** Each of `Registry`, `Capabilities`, `Snapshot`,
-   `PlansFile`, `StoreFile` and `SeedsFile` gets a first field `#[serde(default)] pub layout:
-   cargo_hive_state::Layout`. `Layout`'s `Default` is layout 1, so a 0.1.0 file without the key reads as 1, and
-   the derived `Default` of each type writes 1 on a first run. ADR-0004.
-2. **Peek, then parse.** `read_json` and `read_json_limited` first parse the bytes into a private
+   `PlansFile`, `StoreFile` and `SeedsFile` gets a first field `#[serde(default = "Layout::absent")] pub layout:
+   cargo_hive_state::Layout`. The field has two defaults:
+   - `Layout::absent()` is frozen at layout 1 forever. It is what a file without the key reads as (UPGRADE-1.2),
+     whatever `NEWEST` later becomes.
+   - `Layout`'s `Default` is `Layout::NEWEST`. The derived `Default` of each type therefore writes the newest layout
+     on a first run.
+
+   `Layout` has a hand-written `Deserialize` that refuses 0. ADR-0004.
+2. **Peek, then parse.** For the six state files, `read_json` and `read_json_limited` first parse the bytes into
+   a private
    `Peek { #[serde(default)] layout: Option<u64> }`, which ignores every other key. If the peek parses and
    `layout` is above `Layout::NEWEST` (1), the read returns a new `StateError::NewerLayout { file, found, newest }`
    and never parses `T`.
    - A peek that does not parse falls through to the normal parse, which reports `Malformed` as today.
-   - `layout: 0` is `Malformed`.
-   - config.json passes through the same peek. A config carrying `layout` is still refused by its own
-     `deny_unknown_fields` (UPGRADE-7.2).
+   - `layout: 0` is `Malformed`, both in the peek and in `Layout`'s `Deserialize`.
+   - The peek is opt-in: the public `read`/`read_bounded` peek, and `State::config` (lib.rs:268) reads config.json
+     through an internal path with no peek. A config carrying any `layout` key is therefore refused as
+     `Malformed` by its own `deny_unknown_fields` (UPGRADE-1.4, UPGRADE-7.2).
+   - In `read_json_limited` the over-cap check runs first (lib.rs:392-397). An over-cap file is `Malformed`
+     whatever its layout.
+   - The peek uses `IgnoredAny` for every other value. Re-tokenizing a file of at most 32 MiB (store.db) is the
+     accepted cost.
 3. **One newest-layout constant for now.** `Layout::NEWEST` serves all six files in this release, since every
    file is at 1. The first release that moves one file to layout 2 splits it per file. *Reopen trigger:* any
    persisted type changes shape.
 4. **Refusals carry a fix.** `StateError::Malformed` gains `fix: Fix` (`ByHand` | `Run(&'static str)`), with
-   `ByHand` as the default. `ByHand` keeps today's text, "fix or remove it by hand". `doctor::load(state)` reads
+   `ByHand` as the default. `with_fix` changes only `Malformed`; `NewerLayout` and `Io` pass through
+   unchanged. `ByHand` keeps today's text, "fix or remove it by hand". `doctor::load(state)` reads
    capabilities.json and sets `Run("cargo hive doctor")`, so the text reads "…; run `cargo hive doctor` to rewrite
    it". Doctor gains a direct, downward dependency on `cargo-hive-state`.
+   - `cargo hive doctor` itself keeps writing capabilities.json without reading it (cli.rs:459-461), so it
+     rewrites a damaged or layout-2 file. UPGRADE-3.3 now says so *(agent-decided)*.
 5. **seed's record write propagates a parse error** (`record.rs` `write_capped`) instead of replacing the file.
    The existing `record.failed` finding carries it, and seed exits 0 (UPGRADE-3.4, agent-decided).
-6. **Bench fails on an unreadable store.db.** bench's nothing-to-seed check `match`es the store read. `Err` calls
-   `fail_run` with kind `bench.failed` (the kind bench already uses for prime failures), path `store.db`, and the
-   error as detail *(agent-decided: no new kind)*.
+   - `write_capped`'s return becomes `Result<(), StateError>`.
+   - The `replaced` helper and `record_placed`'s `Ok(Some)` arm (lib.rs:482) are deleted, since the replace note
+     was the only `Some`.
+6. **Bench fails on an unreadable store.db.** The nothing-to-seed check moves into a private
+   `fn store_lists_repo(state, repo) -> Result<bool, StateError>` in bench/mod.rs. On `Err`, `run` calls `fail_run`
+   with kind `bench.failed` (the kind bench already uses for prime failures), path `store.db`, and the error as
+   detail *(agent-decided: no new kind)*.
+   - The path is otherwise reached only when the prime did not read store.db (fill.rs:77-85). So it is tested at
+     the function, with a unit test on an unparseable store.db, plus the existing bench tests for the readable
+     case.
 7. **Eviction skips when store.db is missing.** `evict::run`, right after `inventory` (evict.rs:79), checks
-   whether `store.db` is absent while `inv.rowless` is non-empty. If so, it evicts nothing, counts every eviction
-   as 0 (same count names), and pushes one finding:
+   whether `store.db` is absent while `inv.rowless` is non-empty. An entry directory here is one whose name
+   parses as an entry key, `parse_entry_key`, the glossary's Entry. If so, it clears `inv.rowless`. With no rows
+   and no rowless entries there are no candidates, so the run takes the existing empty-candidates return
+   (evict.rs:248). Count names and values are then exactly those of an empty store: `store_entries_evicted_cap`
+   0, held counts 0, and `store_tmp_bytes` as computed today. It also pushes one finding:
    - kind `store.index_missing` *(agent-decided)*;
    - path `<root>/store.db`;
    - detail "… is missing while the store holds N entries, so no store entry was evicted; build a checkout of the
      repository with the current toolchain, then run `cargo hive seed` to rebuild it".
 
-   This covers bare gc and `--dry-run` alike. The check runs before the store lock (:333). If `store.db` appears
-   in between, eviction skips, which is the safe direction.
+   This covers bare gc and `--dry-run` alike, because both pass :79 before the dry-run branch (:255).
+   - The absence check is a stat after `inventory` read the file, before the store lock (:333).
+   - If store.db appears in between, eviction skips this run, which is the safe direction.
+   - If it vanishes after a successful inventory, `commit_eviction` re-reads it under the lock (store.rs:507-520)
+     as today.
 8. **Committed fixtures.** They live at `crates/cargo-hive/tests/fixtures/v<release>/` as `home/` (a whole state
    root) plus `PROVENANCE` (tag, commit, rustc -vV). An `#[ignore]` generator test, `write_fixture_home` in
    `capture.rs`, makes them. It runs a fixed scenario with the binary in `HIVE_FIXTURE_BIN` and copies the home
@@ -88,7 +115,12 @@ lock) and ARCH-2 (writes stay inside the state root).
    The release steps build that binary from the release tag (`git archive`) in a temporary directory.
 9. **The fixture suite is a new integration test file**, `crates/cargo-hive/tests/upgrade.rs`. It walks every
    `fixtures/v*/home/` and is the only new seam. capture.rs strips the top-level `layout` key of JSON state files
-   (never receipts) in its normalized comparison (UPGRADE-2.8).
+   (never receipts) in its normalized comparison. That comparison is of `Value`s, so it checks names, values and
+   forms, not key order. The byte-exact check is upgrade.rs's (UPGRADE-2.3, UPGRADE-2.8).
+   - `PlansFile`, `Plan` and the plans file constant become `pub` in crates/gc/src/plan_tier/record.rs (:12,
+     :112), so the suite parses plans.json with its own type.
+   - A write cap that a file sits within 14 bytes of could now refuse; the caps are 4 to 32 MiB, against a
+     14-byte line. Accepted.
 10. **SPLIT-4.3 is struck through as superseded by UPGRADE-2.8**, in the workspace-split requirements, with this
     feature's first task.
 
@@ -116,19 +148,21 @@ Surface:
   exhaustively.
 Interface:
 ```
-pub struct Layout(u32);            // serde transparent; Default = Layout::NEWEST
-impl Layout { pub const NEWEST: Layout = Layout(1); }
+pub struct Layout(u32);            // Serialize transparent; Deserialize refuses 0; Default = NEWEST
+impl Layout { pub const NEWEST: Layout = Layout(1); pub fn absent() -> Layout /* frozen: Layout(1) */ }
 pub enum Fix { ByHand, Run(&'static str) }
 StateError::Malformed { file, detail, fix: Fix }
 StateError::NewerLayout { file: PathBuf, found: u64, newest: u32 }
-impl StateError { pub fn with_fix(self, command: &'static str) -> StateError }
+impl StateError { pub fn with_fix(self, command: &'static str) -> StateError }  // Malformed only
 ```
 Depth: n/a, extends the state crate's read path.
 Locality: extend crates/state/src/lib.rs only. Neighbour crates leave.
 
 The `NewerLayout` display text is: "`<path>` records layout N, but this hive reads layouts up to 1; install a
 newer cargo-hive (`cargo install cargo-hive`) to read it". The file is never written on any refusal path, because
-read returns before a `Tx` writes (UPGRADE-3.3). No read writes a file (UPGRADE-2.2): the read functions only call
+read returns before a `Tx` writes (UPGRADE-3.3). Every read-modify-write path (registry register and unregister,
+snapshot merge, plans insert and consume, store `merge_with_source` and `commit_eviction`, seeds `write_capped`
+after §E) reads with `?` before its write. The one writer that does not read is doctor (§D). No read writes a file (UPGRADE-2.2): the read functions only call
 `fs::read` or `File::open`.
 
 ### B. The six persisted types carry the field
@@ -140,21 +174,24 @@ Reuse: rung 2, which extends each type in place:
 - `Snapshot` (crates/cargo/src/discover.rs:265);
 - `PlansFile` (crates/gc/src/plan_tier/record.rs:112);
 - `StoreFile` (crates/seed/src/store.rs:72);
-- `SeedsFile` (crates/seed/src/record.rs:35).
+- `SeedsFile` (crates/seed/src/record.rs:41).
 Respects: ARCH-16
 Surface:
 - Struct literals, all `replace` (add `layout: Layout::NEWEST`, or `..Default::default()`):
   - production: doctor/src/lib.rs:292 and discover.rs:745;
   - tests: cli.rs:1961, record.rs (gc):292, seed record.rs:472, store.rs:1319-1594 (8), choose.rs:202,
-    doctor lib.rs:1070-1345 (4), discover.rs:778-904 (7).
+    doctor lib.rs:1272-1345 (4), discover.rs:778-904 (8).
 - Persisted files on users' disks (0.1.0/0.1.1 homes): `frozen`. They are read as is (absent key → 1) and gain
   the key only on a write the command already makes.
 - 0.1.x binaries reading this release's files: `frozen`, worked around rather than changed. Downgrades are off
   limits. registry/capabilities/snapshot are refused by 0.1.x; plans/store.db/seeds are read and lose the key on
   0.1.x's next write.
 - capture.rs `assert_homes_equal` (capture.rs:350-362): `replace` (§I strips `layout`).
+- `PlansFile`, `Plan` and `PLANS_FILE` (gc record.rs:12, :112) go from private to `pub` (`replace`; this adds a
+  reader, upgrade.rs).
 Interface: each type gains one public field, `layout: Layout`. The file-name constants (`registry::FILE`,
-`doctor::CAPABILITIES_FILE`, `SNAPSHOT_FILE`, `record::FILE`, `store::STORE_FILE`, `SEEDS_FILE`) and the store
+`doctor::CAPABILITIES_FILE`, `discover::SNAPSHOT_FILE`, gc `PLANS_FILE` (now pub), `store::STORE_FILE`,
+`record::SEEDS_FILE`) and the store
 entry path functions (`entry_dir`, `entry_name`, store.rs:80-122) are unchanged.
 Depth: n/a, extends the six types.
 Locality: extend the six files, plus `crates/doctor/Cargo.toml` (adds `cargo-hive-state`). No module moves.
@@ -185,6 +222,8 @@ Surface: the 7 `state.read::<Capabilities>(doctor::CAPABILITIES_FILE)` calls at 
 :1429, :1680, :1782 become `doctor::load(state)` (`replace`). tests/bench.rs:121 keeps its direct read
 (`replace` not needed: a test helper).
 Interface: `pub fn load(state: &State) -> Result<Capabilities, StateError>` in `cargo-hive-doctor`.
+`cargo hive doctor` itself keeps writing capabilities.json without reading it (cli.rs:459-461), the exception
+UPGRADE-3.3 names.
 Depth: n/a, a one-line wrapper over `State::read` plus `with_fix`.
 Locality: extend crates/doctor/src/lib.rs and cli.rs call sites. emit_failure leaves.
 
@@ -198,12 +237,13 @@ Satisfies: UPGRADE-3.4, UPGRADE-3.5, UPGRADE-7.3
 Reuse: rung 2, which extends `record::write_capped` (crates/seed/src/record.rs:54-72). It reuses
 `record_placed`'s `record.failed` path (seed lib.rs:476-488) and status's existing note (cli.rs:753-758).
 Surface:
-- `write_capped`'s `Ok(Some(note))` replace-note case disappears. Readers:
-  - `record_placed` (lib.rs:482): `replace`, its `Ok(Some)` arm still compiles for the remaining notes, if any.
-    plan-tasks checks whether any note remains and deletes the arm and the `replaced` helper if none does.
+- `write_capped`/`write` return `Result<(), StateError>`, since the replace note was the only `Some`. Readers:
+  - `record_placed` (lib.rs:481-488): `replace`; its `Ok(Some)` arm and the `replaced` helper are deleted.
+  - Every other caller of `record::write`/`write_capped` (bench's seed path, tests): `replace` (drop the
+    `Option`).
   - The unit test at record.rs:~608-618, which asserts the replacement: `replace` with a test asserting refusal
     and unchanged bytes.
-Interface: unchanged signature, `Result<Option<String>, StateError>`. A parse error is now `Err`.
+Interface: `write_capped(...) -> Result<(), StateError>`. A parse error (or a newer layout) is `Err`.
 Depth: n/a, extends record.rs.
 Locality: extend record.rs (and possibly lib.rs). status leaves.
 
@@ -216,15 +256,16 @@ Reuse: rung 2, which extends bench/mod.rs:292-313 with the existing `fail_run` a
 Surface: bench's receipt on an unreadable `store.db` after the prime changes from `bench.nothing_to_seed` to
 `bench.failed` with a path (`replace`; the existing bench tests keep `nothing_to_seed` for a readable store that
 lists no unit, UPGRADE-7.5). The seeds.json unmeasured path (:190-195) leaves.
-Interface: none new.
+Interface: none new. A private `store_lists_repo(state, repo) -> Result<bool, StateError>` replaces the inline
+`.ok().is_some_and(...)`.
 Depth: n/a, extends bench.
 Locality: extend crates/cargo-hive/src/bench/mod.rs only.
 
 ### G. Store eviction leaves the store when store.db is missing
 
 Satisfies: UPGRADE-3.10, UPGRADE-4.1, UPGRADE-4.2, UPGRADE-4.3, UPGRADE-7.4
-Reuse: rung 2, which extends `evict::run` (crates/seed/src/evict.rs:79) with `inventory`'s own `rowless` list and
-the existing early-return-with-zero-counts shape (evict.rs:~245-253).
+Reuse: rung 2, which extends `evict::run` (crates/seed/src/evict.rs:79) with `inventory`'s own `rowless` list.
+Clearing that list sends the run down the existing empty-candidates return (evict.rs:248).
 Respects: ARCH-16
 Surface: bare `gc` and `gc --dry-run` receipts on a home with store.db missing and entries present gain the
 `store.index_missing` finding and report zero eviction counts (`replace`; there are no external readers of this
@@ -249,11 +290,22 @@ Interface:
   - write once through `State::write` into a scratch copy and compare bytes (2.3);
   - write again and compare (2.4).
 - A separate test appends a receipt line and checks the old bytes and the parse (2.5/2.6).
-- Refusal tests (5.4):
-  - each file unparseable, and each file at `"layout": 2`, driven through a command that reads it: `status`
-    for registry, capabilities and snapshot; `gc --plan` for plans; `seed` for store.db and seeds.json;
-  - each asserts exit, finding text and unchanged bytes;
-  - the store.db-missing case uses `common::store_fixture` with bare `gc` and `--dry-run`.
+- Non-vacuity: the suite first asserts that at least one `fixtures/v*/home/` exists, that each set holds all six
+  files and a `receipts/` file, and that plans.json has at least one plan and seeds.json at least one record.
+  Before comparing field values (2.1), it strips `layout` from the written side only.
+- Refusal tests (5.4): each file unparseable, and each file at `"layout": 2`, placed in a test home built by the
+  existing harness. Each asserts its file's own stop and unchanged bytes:
+
+  | File | Harness | Command | Stop |
+  |---|---|---|---|
+  | registry, capabilities, snapshot | `common::Hive` with a registered repo | `status` | exit 1, error finding names the file |
+  | plans.json | `common::Hive` | `gc --plan` | exit 1 |
+  | seeds.json | `RegistryRepo` + `seeded_store` (tests/seed.rs harness) | `seed` | exit 0, `record.failed` carrying the path, bytes unchanged |
+  | store.db | `common::store_fixture` | bare `gc` and `gc --dry-run` | store tier's `store.write_failed`, target tier runs |
+  | store.db missing, entries present | `common::store_fixture` | bare `gc` and `gc --dry-run` | `store.index_missing`, no eviction (4.1) |
+
+  The committed fixture home is not used for these, because `seed` needs a real registered checkout whose
+  toolchain matches the active one (cli.rs:1702).
 Depth: if `upgrade.rs` vanished, a rebuild needs only the fixture layout (`v*/home/` and the six file-name
 constants) and the three checks per file.
 Locality: new crates/cargo-hive/tests/upgrade.rs and fixtures/v0.1.0/; extend capture.rs with the generator.
@@ -289,8 +341,8 @@ asserts `fill_entries_added == 0` (UPGRADE-2.9/5.7).
 | `cargo-hive-state` unit tests (`read`/`write` on a scratch root) | unit | UPGRADE-1.2, 2.2, 2.4, 3.2, 3.3, 3.9, 6.1 |
 | Unit tests beside each persisted type (registry, doctor, discover, plan record, store, seed record) | unit | UPGRADE-1.1, 1.5, 7.1, 7.2 |
 | `crates/cargo-hive/tests/upgrade.rs`, new and the only new seam | integration | UPGRADE-1.3, 1.4, 2.1, 2.3, 2.5, 2.6, 2.7, 3.1, 3.8, 5.1, 5.2, 5.3, 5.4, 6.2 |
-| `crates/seed/src/record.rs` unit tests, and `tests/status_seed.rs` | unit / integration | UPGRADE-3.4, 3.5, 7.3 |
-| `tests/bench.rs` | integration | UPGRADE-3.6, 3.7, 7.5 |
+| `crates/seed/src/record.rs` unit tests (:606), `tests/seed.rs` and `tests/status_seed.rs` | unit / integration | UPGRADE-3.4, 3.5, 7.3 |
+| `tests/bench.rs`, plus a unit test of `store_lists_repo` in bench/mod.rs | integration / unit | UPGRADE-3.6, 3.7, 7.5 |
 | `tests/store_gc.rs` (with `common::store_fixture`) | integration | UPGRADE-3.10, 4.1, 4.2, 4.3, 7.4 |
 | `tests/receipts.rs` | integration | UPGRADE-7.6 |
 | `tests/capture.rs` (`#[ignore]`, release step 6) | integration | UPGRADE-2.8, 2.9, 5.7 |

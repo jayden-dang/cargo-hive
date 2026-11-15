@@ -4,8 +4,9 @@ Status: Proposed (2026-11-15, unattended ROAD-14 run; the operator decides at th
 
 Hive's JSON state files record no layout today, and ROAD-14 needs each to record one (ticket #13, UPGRADE-1.1).
 Each of the six persisted types (`Registry`, `Capabilities`, `Snapshot`, `PlansFile`, `StoreFile`, `SeedsFile`)
-therefore declares `layout: cargo_hive_state::Layout` as its first field. That field is `#[serde(default)]`, and
-its default is layout 1. The state module reads the key before the strict parse, so a file from a newer hive is
+therefore declares `layout: cargo_hive_state::Layout` as its first field. A file without the key reads as layout
+1, a value frozen forever (`#[serde(default = "Layout::absent")]`), while a new file is written at
+`Layout::NEWEST`. The state module reads the key before the strict parse, so a file from a newer hive is
 refused as such rather than as malformed.
 
 Rejected alternatives:

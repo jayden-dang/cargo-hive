@@ -72,12 +72,14 @@ repos, plans, store entries and seed records my old hive wrote, so that nothing 
   name and state-root path 0.1.0 used. No release renames or moves a state file without also reading it at
   the old name and path *(Weigh)*.
 - **UPGRADE-2.8** WHEN hive writes any state file or prints any `--json` shape from the same inputs as 0.1.0
-  THE SYSTEM SHALL produce bytes equal to 0.1.0's apart from:
+  THE SYSTEM SHALL produce output equal to 0.1.0's in field names, values and number and string forms, compared
+  as normalized JSON values (keys sorted, the normalized keys of capture.rs replaced), apart from:
   - the `hive_version` value;
   - values derived from the clock;
   - in state files only, the `layout` line of UPGRADE-2.3.
 
-  This is checked against output captured from 0.1.0. It supersedes SPLIT-4.3
+  This is checked against output captured from 0.1.0. The byte-exact claim for state files is UPGRADE-2.3's. It
+  supersedes SPLIT-4.3
   (docs/specs/2026-11-13-workspace-split/requirements.md:129-132) *(Weigh)*.
 - **UPGRADE-2.9** WHEN `seed` runs after an upgrade on a state root 0.1.0 wrote, for a checkout whose source
   target 0.1.0 filled and that is unchanged since that fill, THE SYSTEM SHALL clone the store's units for it and add no store entry. The seed
@@ -92,11 +94,14 @@ name that file, so that my repos, plans and store entries are not dropped behind
   end the command with exit 1 and one receipt whose finding names the file's full path and the parse error.
   The exceptions are the narrower, named stops in UPGRADE-3.4 to UPGRADE-3.7 and UPGRADE-3.10.
 - **UPGRADE-3.2** IF a JSON state file records a layout number above the newest this hive reads THEN THE SYSTEM
-  SHALL end the command with exit 1. Its receipt names the file's full path, the layout the file records and
-  the newest layout this hive reads *(agent-decided)*.
+  SHALL stop on it exactly where UPGRADE-3.1 stops on an unparseable file, including its narrower stops
+  (UPGRADE-3.4 to UPGRADE-3.7, UPGRADE-3.10). The message names the file's full path, the layout the file
+  records and the newest layout this hive reads *(agent-decided)*.
 - **UPGRADE-3.3** IF hive refuses or stops on a state file under UPGRADE-3.1, UPGRADE-3.2, UPGRADE-3.4, UPGRADE-3.7 or
-  UPGRADE-3.10 THEN THE SYSTEM
-  SHALL leave that file's bytes unchanged (ROAD-14.md:18).
+  UPGRADE-3.10 THEN THE SYSTEM SHALL leave that file's bytes unchanged (ROAD-14.md:18). The one writer that
+  never reads its file is outside this: `cargo hive doctor` SHALL CONTINUE TO rewrite `capabilities.json`
+  whatever it holds, since that is the fix UPGRADE-3.8 names (crates/cargo-hive/src/cli.rs:459-461)
+  *(agent-decided)*.
 - **UPGRADE-3.4** IF `seed` finds `seeds.json` present and unparseable when it writes its seed record THEN THE
   SYSTEM SHALL write no seed record and leave `seeds.json` untouched. It reports the existing `record.failed`
   finding, whose detail carries `seeds.json`'s full path and the parse error. Before this feature it replaced
@@ -114,7 +119,9 @@ name that file, so that my repos, plans and store entries are not dropped behind
   fail the run with a finding whose path is `store.db` and whose detail is the read error. Before this feature
   that failure counted as "no stored unit lists the repo" and reported `bench.nothing_to_seed` with its build
   advice (crates/cargo-hive/src/bench/mod.rs:292-313). An unparseable `store.db` met earlier, in bench's prime
-  fill, SHALL CONTINUE TO fail the run as it does today (bench/mod.rs:238; fill.rs:91) *(Weigh)*.
+  fill, SHALL CONTINUE TO fail the run as it does today (bench/mod.rs:238; fill.rs:91). The nothing-to-seed
+  read meets a bad `store.db` only when the prime fill did not read it (fill.rs:77-85) or it changed during
+  the run *(Weigh)*.
 - **UPGRADE-3.8** IF `capabilities.json` exists and cannot be parsed THEN THE SYSTEM SHALL name
   `cargo hive doctor` in the refusal as the command that rewrites it *(agent-decided)*.
 - **UPGRADE-3.9** (guard) WHEN a state file does not exist THE SYSTEM SHALL CONTINUE TO read it as empty. A
@@ -162,9 +169,14 @@ release wrote, so that a release that cannot read old state fails its gate befor
   UPGRADE-2.4 on each JSON state file of every committed fixture set.
 - **UPGRADE-5.3** WHEN `cargo test --workspace` runs THE SYSTEM SHALL check UPGRADE-2.5 and UPGRADE-2.6 on the
   receipts file of every committed fixture set, in a test apart from UPGRADE-5.2's *(Weigh)*.
-- **UPGRADE-5.4** WHEN `cargo test --workspace` runs THE SYSTEM SHALL check UPGRADE-3.1, UPGRADE-3.2 and
-  UPGRADE-3.3 on an unparseable copy and on a layout-2 copy of each JSON state file, and UPGRADE-4.1 on a
-  fixture store with `store.db` removed.
+- **UPGRADE-5.4** WHEN `cargo test --workspace` runs THE SYSTEM SHALL check UPGRADE-3.1 to UPGRADE-3.4 and
+  UPGRADE-3.10 on an unparseable copy and on a layout-2 copy of each JSON state file, placed in a test home.
+  Each copy is driven through a command that reads it and asserted with that command's own stop:
+  - exit 1 for the UPGRADE-3.1 cases;
+  - exit 0 with `record.failed` for `seeds.json` through `seed`;
+  - the store tier's finding for `store.db` through bare `gc`.
+
+  It SHALL also check UPGRADE-4.1 on a test store with `store.db` removed.
 - **UPGRADE-5.5** THE release steps in `docs/agents/project.md` SHALL include a step that does the following,
   and keeps every earlier fixture set:
   - build the release's binary from its tag;
