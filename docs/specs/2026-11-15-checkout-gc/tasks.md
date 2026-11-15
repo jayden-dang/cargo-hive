@@ -492,18 +492,23 @@ _Requirements: CHECKOUTGC-5.1, CHECKOUTGC-5.2, CHECKOUTGC-5.3, CHECKOUTGC-5.4_
 
 **Depends-on:** Task 10
 
-- [ ] **Step 1: Prepare a copy.**
-  - Clone (APFS `clonefile`) an aged klynt slot and its main into `/private/tmp`.
-  - Run `git worktree repair` in the copy, so the copy's worktree paths are its own.
-  - Set up a scratch `HIVE_HOME`, run `cargo hive doctor`, then register the copy's main.
-  - Check that `cargo metadata --no-deps --locked --offline` loads in **every** live checkout of the copy. If one fails, 3.5 blocks the run, so fix or remove that worktree in the copy first.
-- [ ] **Step 2: Measure before.** Record `ls -f backend/target/debug/deps | wc -l` and the edit's test build time.
-- [ ] **Step 3: Run** `cargo hive gc --checkout <slot copy> --json`.
+- [ ] **Step 1: Prepare two copies.**
+  - Clone an aged klynt slot and its main twice into `/private/tmp`, as a **control** copy and a **gc** copy. Use `cp -c -p -R` (APFS clone, mtimes kept), so the stamps the window reads are the originals'.
+  - **Never run `git worktree repair` or any other git command that follows the copied admin paths.** klynt's worktree admin paths are absolute, so a repair in a cloned main would rewrite the owner's real worktrees' `.git` files. Instead, rewrite only the copy's own admin files, with a text edit of each copied path:
+    - every `<copy main>/.git/worktrees/*/gitdir`;
+    - each copied worktree's `.git` file.
+  - Then run `git -C <copy main> worktree list --porcelain` and check that every path it prints lies under `/private/tmp`. Stop if any does not. Nothing else runs before this check passes.
+  - Set up a scratch `HIVE_HOME` per copy, run `cargo hive doctor`, then register the copy's main.
+  - Check that `cargo metadata --no-deps --locked --offline` loads in **every** live checkout of each copy. If one fails, 3.5 blocks the run, so fix or remove that worktree in the copy first.
+- [ ] **Step 2: Measure before.**
+  - In the gc copy, record `ls -f backend/target/debug/deps | wc -l` and the edit's test build time.
+  - Every proof cargo command runs with `--offline`.
+- [ ] **Step 3: Run** `cargo hive gc --checkout <gc copy slot> --json` in the gc copy only.
   - Record the wall time with a cold and a warm snapshot (15 s target). The time includes every `check_entry` and `remove_counted` call.
   - Record the receipt.
-  - Re-run the slot's last task's cargo commands, and count recompiles that come from the gc. Expect 0 for units compiled inside the window.
+  - Re-run the slot's last task's cargo commands, offline, in **both** copies. A unit counts as gc-caused only if it recompiles in the gc copy and not in the control. Expect 0 such units among units compiled inside the window.
 - [ ] **Step 4: Measure after.**
-  - Record the `deps/` count and the same test build's time. The evidence targets are about 4.2k files and about 28 s, from the Open Questions; these are not pass/fail.
+  - Record the `deps/` count and the same test build's time in the gc copy, against the control. The evidence targets are about 4.2k files and about 28 s, from the Open Questions; these are not pass/fail.
   - Record the share left by `incremental/`, which is the reopen check for the auto-tier exclusion.
   - If the 15 s ceiling is exceeded, profile first. The reopen path for the read is an on-demand read of each N_OSO string at its `n_strx`, with no cache.
 - [ ] **Step 5: Write the PLAN.md record** with dated numbers. No commit (git-ignored).
