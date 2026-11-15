@@ -1963,6 +1963,7 @@ mod tests {
                 main: main.clone(),
                 root_commits: roots,
             }],
+            ..Default::default()
         };
         let cfg = Config {
             secondary_roots: vec![],
