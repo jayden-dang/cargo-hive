@@ -1,8 +1,9 @@
 //! The seed record in `seeds.json`. One target keeps one record. A write drops
 //! records whose target is gone, then the oldest, until the file fits its cap.
-//! A file that cannot be read is replaced, and the note says so. `counts`
-//! reports what became of that record's units in the target as it stands now.
-//! A `deps/` listing that hits its bound or cannot be read is an error, not a count.
+//! A file that cannot be read is left untouched and the write returns the error.
+//! `counts` reports what became of that record's units in the target as it stands
+//! now. A `deps/` listing that hits its bound or cannot be read is an error, not
+//! a count.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
@@ -49,7 +50,7 @@ pub fn write(
     target: &Path,
     record: SeedRecord,
     cancel: &(dyn Fn() -> bool + Sync),
-) -> Result<Option<String>, StateError> {
+) -> Result<(), StateError> {
     write_capped(state, target, record, cancel, MAX_SEEDS_BYTES)
 }
 
@@ -59,17 +60,13 @@ pub fn write_capped(
     record: SeedRecord,
     cancel: &(dyn Fn() -> bool + Sync),
     cap: u64,
-) -> Result<Option<String>, StateError> {
+) -> Result<(), StateError> {
     state.locked_or_cancelled(cancel, |tx| {
-        let (mut file, note) = match tx.read_bounded(SEEDS_FILE, cap) {
-            Ok(file) => (file, None),
-            Err(err) => (SeedsFile::default(), Some(replaced(&err))),
-        };
+        let mut file: SeedsFile = tx.read_bounded(SEEDS_FILE, cap)?;
         file.targets.insert(target.to_path_buf(), record);
         file.targets.retain(|path, _| target_present(path));
         drop_oldest_until(&mut file, cap, target);
-        tx.write_bounded(SEEDS_FILE, &file, cap)?;
-        Ok(note)
+        tx.write_bounded(SEEDS_FILE, &file, cap)
     })
 }
 
@@ -353,10 +350,6 @@ fn reached_units(target: &TargetDir, record: &SeedRecord) -> BTreeSet<(PathBuf, 
     reached
 }
 
-fn replaced(err: &StateError) -> String {
-    format!("{err}; this seed replaced the record file")
-}
-
 fn target_present(path: &Path) -> bool {
     match fs::symlink_metadata(path) {
         Ok(_) => true,
@@ -492,21 +485,13 @@ mod tests {
     }
 
     #[test]
-    fn a_write_drops_records_whose_target_is_gone() {
+    fn a_readable_record_file_still_drops_gone_targets() {
         let (state, root) = scratch("gone");
         let gone = target(&root, "gone");
         let kept = target(&root, "kept");
-        assert!(
-            super::write(&state, &gone, record((1, 9), 100, 4), &|| false)
-                .unwrap()
-                .is_none()
-        );
+        super::write(&state, &gone, record((1, 9), 100, 4), &|| false).unwrap();
         fs::remove_dir_all(&gone).unwrap();
-        assert!(
-            super::write(&state, &kept, record((2, 8), 1, 4), &|| false)
-                .unwrap()
-                .is_none()
-        );
+        super::write(&state, &kept, record((2, 8), 1, 4), &|| false).unwrap();
         let file = read(&state).unwrap();
         assert!(!file.targets.contains_key(&gone), "{file:?}");
         let kept_record = file.targets.get(&kept).expect("the live target stays");
@@ -516,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn a_write_over_the_cap_drops_the_oldest_records_until_it_fits() {
+    fn a_readable_record_file_still_drops_oldest_to_fit() {
         let (state, root) = scratch("cap");
         let older = target(&root, "older");
         let middle = target(&root, "middle");
@@ -537,24 +522,12 @@ mod tests {
             }
             pad += 32;
         };
-        assert!(
-            write_capped(&state, &older, first, &|| false, cap)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            write_capped(&state, &middle, second, &|| false, cap)
-                .unwrap()
-                .is_none()
-        );
+        write_capped(&state, &older, first, &|| false, cap).unwrap();
+        write_capped(&state, &middle, second, &|| false, cap).unwrap();
         let before = read(&state).unwrap();
         assert!(before.targets.contains_key(&older), "{before:?}");
         assert!(before.targets.contains_key(&middle), "{before:?}");
-        assert!(
-            write_capped(&state, &newest, third.clone(), &|| false, cap)
-                .unwrap()
-                .is_none()
-        );
+        write_capped(&state, &newest, third.clone(), &|| false, cap).unwrap();
         let file = read(&state).unwrap();
         assert!(!file.targets.contains_key(&older), "{file:?}");
         assert!(!file.targets.contains_key(&middle), "{file:?}");
@@ -608,17 +581,16 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_seeds_file_is_replaced_and_the_note_names_it() {
+    fn an_unparseable_record_file_is_refused_and_left_untouched() {
         let (state, root) = scratch("unreadable");
         let kept = target(&root, "kept");
-        fs::write(state.root().join(SEEDS_FILE), b"{not json").unwrap();
-        let note = super::write(&state, &kept, record((7, 7), 7, 3), &|| false)
-            .unwrap()
-            .expect("an unreadable file is a note");
-        assert!(note.contains("seeds.json"), "{note}");
-        let file = read(&state).unwrap();
-        assert_eq!(file.targets.len(), 1, "{file:?}");
-        assert!(file.targets.contains_key(&kept), "{file:?}");
+        let path = state.root().join(SEEDS_FILE);
+        fs::write(&path, b"{not json").unwrap();
+        let before = fs::read(&path).unwrap();
+        let err = super::write(&state, &kept, record((7, 7), 7, 3), &|| false)
+            .expect_err("an unparseable record file is refused");
+        assert!(err.to_string().contains("seeds.json"), "{err}");
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[derive(Clone, Copy)]

@@ -479,8 +479,7 @@ fn record_placed(
         units: outcome.placed.clone(),
     };
     match record::write(ctx.state, &target, stored, cancel) {
-        Ok(Some(note)) => outcome.notes.push(note),
-        Ok(None) => {}
+        Ok(()) => {}
         Err(err) => outcome.findings.push((
             "record.failed".to_string(),
             Some(target),

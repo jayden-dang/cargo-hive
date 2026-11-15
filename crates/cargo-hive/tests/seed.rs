@@ -19,6 +19,7 @@ use common::cargo_fixture::backdate_all;
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
 use common::registry_fixture::{RegistryRepo, cargo_json};
+use common::store_fixture::seeded_store;
 use common::{CargoHomeGuard, Hive, env_lock, init_repo, register, wait_within};
 
 #[test]
@@ -1054,6 +1055,36 @@ fn a_seed_that_cloned_nothing_writes_no_record() {
     assert_eq!(receipt["counts"]["clone_units_cloned"], 0, "{receipt}");
     let path = hive.home.path.join(cargo_hive_seed::record::SEEDS_FILE);
     assert!(!path.exists(), "{}", path.display());
+}
+
+#[test]
+fn a_seed_with_an_unparseable_record_file_clones_reports_record_failed_and_exits_0() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let path = hive.home.path.join(cargo_hive_seed::record::SEEDS_FILE);
+    fs::write(&path, b"{not json").unwrap();
+    let before = fs::read(&path).unwrap();
+    let lane = repo.worktree("unparseable-record");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
+    assert!(
+        receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0,
+        "{receipt}"
+    );
+    let failed: Vec<_> = receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["kind"] == "record.failed")
+        .collect();
+    assert_eq!(failed.len(), 1, "{receipt}");
+    let detail = failed[0]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(&path.display().to_string()),
+        "{detail}; path={}",
+        path.display()
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
 }
 
 #[test]
