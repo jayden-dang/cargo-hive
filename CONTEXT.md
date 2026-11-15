@@ -165,7 +165,7 @@ A file hive writes under its state root through the `state` module: `registry.js
 _Avoid_: metadata file, cache file, database
 
 **Layout**:
-The shape a state file was written in, a whole number the file records as its first key, `layout`. A state file without the key is layout 1, the shape 0.1.0 wrote. A receipt line's `schema` plays this part for receipts, and `store.db`'s layout also covers the store's entry path scheme.
+The shape a state file was written in, a whole number the file records as its first key, `layout`. A state file without the key is layout 1, the shape 0.1.0 wrote. A receipt line's `schema` plays this part for receipts, and `store.db`'s layout also covers the store's entry path scheme. `cargo_hive_core::target::Layout` is the Cargo target-dir shape (Fingerprint / NewBuildDir), not this term.
 _Avoid_: version (that is hive's release), schema (that is the receipt's)
 
 **Bench sample**:
