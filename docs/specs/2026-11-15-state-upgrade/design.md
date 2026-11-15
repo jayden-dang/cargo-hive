@@ -76,6 +76,9 @@ lock) and ARCH-2 (writes stay inside the state root).
    UPGRADE-3.8 lists. Any other file name, config.json included, keeps today's "fix or remove it by hand"
    (UPGRADE-7.8).
    - `Malformed`'s `Display` ends with that text in place of the fixed "fix or remove it by hand".
+     Only read-side parse failures carry the recovery (`on_read: true`, lib.rs:371, :394, :399). `encode`'s
+     serialization failure (lib.rs:360-366) keeps "fix or remove it by hand", so a good file is never called
+     removable. An over-cap read (:394) gets the file's recovery (interpret note, 2026-11-15).
    - The precedent for naming CLI commands in the state crate is `DuplicatePlan`'s "run `cargo hive gc --plan`
      again" (lib.rs:66).
    - Every path that prints the error gets the recovery with no caller change: `emit_failure`, `record.failed`
@@ -162,7 +165,7 @@ Interface:
 ```
 pub struct Layout(u32);            // Serialize transparent; Deserialize refuses 0; Default = NEWEST
 impl Layout { pub const NEWEST: Layout = Layout(1); pub fn absent() -> Layout /* frozen: Layout(1) */ }
-StateError::Malformed { file, detail }              // unchanged fields; Display ends with recovery(file name)
+StateError::Malformed { file, detail, on_read: bool } // Display ends with recovery(file name) only when on_read
 StateError::NewerLayout { file: PathBuf, found: u64, newest: u32 }
 fn recovery(file_name: &str) -> &'static str          // private; six entries plus the by-hand default
 ```

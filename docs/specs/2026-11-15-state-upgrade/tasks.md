@@ -111,8 +111,10 @@ Every task inherits these:
     - `pub fn absent() -> Layout`, which returns `Layout(1)`, frozen.
   - A private `fn recovery(file_name: &str) -> &'static str`. It holds one entry per JSON state file, worded as
     the UPGRADE-3.8 table, and returns "fix or remove it by hand" for any other name, config.json included.
-  - `StateError::Malformed { file: PathBuf, detail: String }`, fields unchanged. `Display` is
-    "`<path>` is malformed (`<detail>`); `<recovery(file name)>`".
+  - `StateError::Malformed { file: PathBuf, detail: String, on_read: bool }`. `Display` is
+    "`<path>` is malformed (`<detail>`); `<recovery(file name)>`" when `on_read`, and "…; fix or remove it by
+    hand" otherwise. The read-side sites (lib.rs:371, :394, :399) set `on_read: true`; `encode` (:360-366) sets
+    `false`.
   - `StateError::NewerLayout { file: PathBuf, found: u64, newest: u32 }`. `Display`: "`<path>` records layout
     `<found>`, but this hive reads layouts up to `<newest>`; install a newer cargo-hive (`cargo install
     cargo-hive`) to read it".
@@ -132,6 +134,7 @@ Every task inherits these:
   - `reading_never_writes_the_file` (mtime and bytes unchanged)
   - `each_state_file_refusal_ends_with_its_own_recovery`: table-driven, one row per file in the UPGRADE-3.8
     table, plus config.json keeping "fix or remove it by hand"
+  - `an_encode_failure_never_suggests_removing_the_file`
   - grep the workspace tests for "fix or remove it by hand" and update any assertion on a state file's text
   - `a_missing_file_still_reads_as_default`
   - `an_unparseable_config_is_still_refused_as_malformed`
@@ -143,7 +146,7 @@ Every task inherits these:
     array never reaches serde's `visit_seq` and stays `Malformed`.
   - `> NEWEST` → `NewerLayout`; `Some(0)` → `Malformed`.
   - `State::config` reads through a private no-peek path.
-  - `Malformed`'s `Display` appends `recovery(file.file_name())`.
+  - `Malformed`'s `Display` appends `recovery(file.file_name())` only when `on_read`.
 
   Run `cargo test -p cargo-hive-state`; expect pass. Then run the project.md task gate for `cargo-hive-state`.
 - [ ] **Step 3: Commit.** `feat(state): record a layout and refuse files from a newer hive by name`
