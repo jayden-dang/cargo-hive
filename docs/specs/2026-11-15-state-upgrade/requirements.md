@@ -65,9 +65,9 @@ repos, plans, store entries and seed records my old hive wrote, so that nothing 
 - **UPGRADE-2.4** WHEN hive reads a JSON state file that records a layout and writes it back with no change to
   its content THE SYSTEM SHALL write identical bytes.
 - **UPGRADE-2.5** WHEN hive appends a receipt line to a `receipts/<date>.jsonl` file that 0.1.0 wrote THE
-  SYSTEM SHALL keep every earlier line byte-identical.
+  SYSTEM SHALL keep every earlier line byte-identical *(Weigh)*.
 - **UPGRADE-2.6** THE SYSTEM SHALL parse every receipt line 0.1.0 wrote as a receipt at the schema the line
-  records (2 or 3).
+  records (2 or 3) *(Weigh)*.
 - **UPGRADE-2.7** (guard) WHEN hive looks for a state file THE SYSTEM SHALL CONTINUE TO look under the file
   name and state-root path 0.1.0 used. No release renames or moves a state file without also reading it at
   the old name and path *(Weigh)*.
@@ -80,7 +80,7 @@ repos, plans, store entries and seed records my old hive wrote, so that nothing 
   This is checked against output captured from 0.1.0. It supersedes SPLIT-4.3
   (docs/specs/2026-11-13-workspace-split/requirements.md:129-132) *(Weigh)*.
 - **UPGRADE-2.9** WHEN `seed` runs after an upgrade on a state root 0.1.0 wrote, for a checkout whose source
-  target 0.1.0 filled, THE SYSTEM SHALL clone the store's units for it and add no store entry. The seed
+  target 0.1.0 filled and that is unchanged since that fill, THE SYSTEM SHALL clone the store's units for it and add no store entry. The seed
   receipt's `fill_entries_added` count is 0 (ROAD-14.md:8-9; the count is at crates/seed/src/lib.rs:515).
 
 ## 3. A state file that cannot be read stops hive instead of reading as empty
@@ -100,8 +100,10 @@ name that file, so that my repos, plans and store entries are not dropped behind
 - **UPGRADE-3.4** IF `seed` finds `seeds.json` present and unparseable when it writes its seed record THEN THE
   SYSTEM SHALL write no seed record and leave `seeds.json` untouched. It reports the existing `record.failed`
   finding, whose detail carries `seeds.json`'s full path and the parse error. Before this feature it replaced
-  the file (crates/seed/src/record.rs:62-65; the finding is at crates/seed/src/lib.rs:481-488)
-  *(agent-decided: this reuses the existing record-failure path)*.
+  the file (crates/seed/src/record.rs:62-65; the finding is at crates/seed/src/lib.rs:481-488). `seed` then
+  exits 0, as it does on `record.failed` today (crates/seed/src/lib.rs:140-146). *(agent-decided: ticket:13
+  "hive stops" is read as the record write stopping, not the command, because refusing before the clone would
+  block seed until a hand removal. The run's report names this reading.)*
 - **UPGRADE-3.5** (guard) WHEN `status` meets a `seeds.json` it cannot parse THE SYSTEM SHALL CONTINUE TO:
   - add a note carrying the file's full path and the error;
   - report none of the four seed counts (SEED-6.8);
@@ -134,7 +136,8 @@ name that file, so that my repos, plans and store entries are not dropped behind
 fill it again from scratch.
 
 - **UPGRADE-4.1** IF `store.db` does not exist while `store/<toolchain value>/` holds at least one entry
-  directory THEN bare `cargo hive gc` SHALL evict no store entry. It reports one finding whose path is `store.db`
+  directory THEN bare `cargo hive gc` and `gc --dry-run` SHALL evict, and preview as evicted, no store entry.
+  Each reports one finding whose path is `store.db`
   and whose detail says to build a checkout of the repository with the current toolchain and then run
   `cargo hive seed` *(Weigh)*.
 - **UPGRADE-4.2** (guard) WHEN UPGRADE-4.1 holds THE SYSTEM SHALL CONTINUE TO run bare `gc`'s target tier as
@@ -151,14 +154,14 @@ release wrote, so that a release that cannot read old state fails its gate befor
 - **UPGRADE-5.1** THE SYSTEM SHALL carry, under `crates/cargo-hive/tests/fixtures/v0.1.0/`, a state root
   written by a cargo-hive binary built from tag `v0.1.0` (commit fb8fabb) in an isolated `HIVE_HOME` under a
   temporary directory. It holds:
-  - each of the six JSON state files, with at least one plan and one seed record;
+  - each of the six JSON state files, with at least one plan and one seed record *(Weigh)*;
   - a `receipts/` day file;
-  - the `store/` tree `store.db` indexes;
-  - a file naming the tag and the commit it was built from.
+  - the `store/` tree `store.db` indexes *(Weigh)*;
+  - a file naming the tag and the commit it was built from *(Weigh)*.
 - **UPGRADE-5.2** WHEN `cargo test --workspace` runs THE SYSTEM SHALL check UPGRADE-2.1, UPGRADE-2.3 and
   UPGRADE-2.4 on each JSON state file of every committed fixture set.
 - **UPGRADE-5.3** WHEN `cargo test --workspace` runs THE SYSTEM SHALL check UPGRADE-2.5 and UPGRADE-2.6 on the
-  receipts file of every committed fixture set, in a test apart from UPGRADE-5.2's.
+  receipts file of every committed fixture set, in a test apart from UPGRADE-5.2's *(Weigh)*.
 - **UPGRADE-5.4** WHEN `cargo test --workspace` runs THE SYSTEM SHALL check UPGRADE-3.1, UPGRADE-3.2 and
   UPGRADE-3.3 on an unparseable copy and on a layout-2 copy of each JSON state file, and UPGRADE-4.1 on a
   fixture store with `store.db` removed.
@@ -168,7 +171,7 @@ release wrote, so that a release that cannot read old state fails its gate befor
   - write `crates/cargo-hive/tests/fixtures/v<release>/` with it, as UPGRADE-5.1 describes for 0.1.0;
   - commit it.
 - **UPGRADE-5.6** THE release step that runs the capture test SHALL take `HIVE_V010_BIN` from a binary built
-  from tag `v0.1.0`, not from `/private/tmp/hive-0.1.0`. Today that path is at docs/agents/project.md:158.
+  from tag `v0.1.0`, not from `/private/tmp/hive-0.1.0`. Today that path is at docs/agents/project.md:158 *(Weigh)*.
 - **UPGRADE-5.7** WHEN the capture test runs with a 0.1.0 binary THE SYSTEM SHALL also run `seed` with the new
   binary on a state root 0.1.0 wrote and filled, and check UPGRADE-2.9 on its receipt.
 
@@ -250,8 +253,8 @@ Guards:
   store-eviction case in UPGRADE-4.1.
 - A root manifest of state files, versioned file names, and converting files on open.
 - A command that repairs, rebuilds or deletes a state file. The only fix for an unparseable file is today's
-  "fix or remove it by hand"; deciding whether a user should ever be told to remove hive's state is the
-  operator's (ROAD-14.md:24).
+  "fix or remove it by hand". Whether a user should ever be told to remove hive's state is the operator's call
+  (ROAD-14.md:24); see Open Questions.
 - Refusing an older layout this hive no longer reads. No layout older than 1 exists. A later release that drops
   a layout owns that refusal and its fixing command (ticket:7).
 - State for ROAD-16 and ROAD-17.
@@ -260,4 +263,7 @@ Guards:
 
 ## Open Questions
 
-None.
+- Whether this release may ship "fix or remove it by hand" (crates/state/src/lib.rs:44-49) as the only fix in
+  the refusal for an unparseable registry.json, snapshot.json, plans.json, store.db or seeds.json. Telling a
+  user to remove a state file may fall under ROAD-14's Ask me (ROAD-14.md:24). — owner: operator — date: before
+  `Status: Approved` — forbid-guess (cấm đoán): the build keeps today's text unchanged and builds nothing on it.
