@@ -213,7 +213,9 @@ _Requirements: SPLIT-3.1_
   capture -- --ignored` passes on this branch.
 - [x] **Step 4: Commit.** `git commit -m "test: compare output and state with the 0.1.0 binary"`
 
-_Requirements: SPLIT-3.2, SPLIT-4.2, SPLIT-4.3_
+_Requirements: SPLIT-3.2, SPLIT-4.2_
+
+SPLIT-4.3 was delivered by this task, then superseded by UPGRADE-2.8 on 2026-11-15 (docs/specs/2026-11-15-state-upgrade/requirements.md).
 
 ---
 
@@ -740,7 +742,9 @@ _Requirements: SPLIT-1.2, SPLIT-2.1, SPLIT-2.2, SPLIT-2.3, SPLIT-2.4, SPLIT-3.7,
   capture comparison and `cli_tree` pass.
 - [x] **Step 4: Commit.** `git commit -m "build: extract the core crate"`
 
-_Requirements: SPLIT-1.1, SPLIT-1.2, SPLIT-4.3_
+_Requirements: SPLIT-1.1, SPLIT-1.2_
+
+SPLIT-4.3 was delivered by this task, then superseded by UPGRADE-2.8 on 2026-11-15 (docs/specs/2026-11-15-state-upgrade/requirements.md).
 
 ---
 
