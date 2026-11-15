@@ -251,14 +251,14 @@ _Requirements: UPGRADE-1.1, UPGRADE-3.1, UPGRADE-3.8, UPGRADE-7.2, UPGRADE-7.6_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing tests**:
+- [x] **Step 1: Write the failing tests**:
   - `plans_write_layout_first`;
   - `insert_and_consume_keep_every_other_field_as_before`;
   - `a_keyless_plans_file_reads_as_layout_one`.
 
   Run `cargo test -p cargo-hive-gc --lib plan_tier::record::`; expect a compile failure.
-- [ ] **Step 2: Implement.** Run the task gate for `cargo-hive-gc`; expect pass.
-- [ ] **Step 3: Commit.** `feat(gc): plans record their layout`
+- [x] **Step 2: Implement.** Run the task gate for `cargo-hive-gc`; expect pass.
+- [x] **Step 3: Commit.** `feat(gc): plans record their layout`
 
 _Requirements: UPGRADE-1.1, UPGRADE-7.1_
 
