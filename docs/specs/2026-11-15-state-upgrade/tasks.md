@@ -123,7 +123,7 @@ Every task inherits these:
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing unit tests** in the state crate's `mod tests`, each on a scratch root:
+- [x] **Step 1: Write the failing unit tests** in the state crate's `mod tests`, each on a scratch root:
   - `a_file_without_a_layout_key_reads_as_layout_one`
   - `a_newer_layout_is_refused_as_newer_and_left_untouched` (bytes before == after)
   - `a_newer_layout_with_unknown_fields_is_still_reported_as_newer`
@@ -141,7 +141,7 @@ Every task inherits these:
   - `an_unparseable_config_is_still_refused_as_malformed`
 
   Run `cargo test -p cargo-hive-state --lib`; expect a compile failure (no `Layout`, no `NewerLayout`).
-- [ ] **Step 2: Implement.**
+- [x] **Step 2: Implement.**
   - A private `Peek { #[serde(default)] layout: Option<u64> }` is parsed from the same bytes before `T`, in both
     readers, after the over-cap check. It runs only when the first non-whitespace byte is `{`, so a top-level
     array never reaches serde's `visit_seq` and stays `Malformed`.
@@ -150,7 +150,7 @@ Every task inherits these:
   - `Malformed`'s `Display` appends `recovery(file.file_name())` only when `on_read`.
 
   Run `cargo test -p cargo-hive-state`; expect pass. Then run the project.md task gate for `cargo-hive-state`.
-- [ ] **Step 3: Commit.** `feat(state): record a layout and refuse files from a newer hive by name`
+- [x] **Step 3: Commit.** `feat(state): record a layout and refuse files from a newer hive by name`
 
 _Requirements: UPGRADE-1.2, UPGRADE-2.2, UPGRADE-2.4, UPGRADE-3.2, UPGRADE-3.3, UPGRADE-3.8, UPGRADE-3.9, UPGRADE-6.1, UPGRADE-7.8_
 
