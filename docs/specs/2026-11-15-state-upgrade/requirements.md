@@ -80,7 +80,8 @@ repos, plans, store entries and seed records my old hive wrote, so that nothing 
 
   This is checked against output captured from 0.1.0. The byte-exact claim for state files is UPGRADE-2.3's. It
   supersedes SPLIT-4.3
-  (docs/specs/2026-11-13-workspace-split/requirements.md:129-132) *(Weigh)*.
+  (docs/specs/2026-11-13-workspace-split/requirements.md:129-132). It withdraws SPLIT-4.3's key-order claim for
+  the capture comparison, and the run's report names this *(agent-decided)*.
 - **UPGRADE-2.9** WHEN `seed` runs after an upgrade on a state root 0.1.0 wrote, for a checkout whose source
   target 0.1.0 filled and that is unchanged since that fill, THE SYSTEM SHALL clone the store's units for it and add no store entry. The seed
   receipt's `fill_entries_added` count is 0 (ROAD-14.md:8-9; the count is at crates/seed/src/lib.rs:515).

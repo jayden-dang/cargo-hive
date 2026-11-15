@@ -110,7 +110,9 @@ lock) and ARCH-2 (writes stay inside the state root).
    to `HIVE_FIXTURE_OUT`:
    - doctor, repo add, build, a backdated superseded unit so `gc --plan` stores a plan, a secondary worktree, and
      seed;
-   - all inside `/private/tmp/hive-it-*`.
+   - all inside `/private/tmp/hive-it-*`;
+   - with capture.rs's isolated `CARGO_HOME` (`/private/tmp/hive-capture/cargo-home`, capture.rs:18, :149-151),
+     never the user's `~/.cargo`.
 
    The release steps build that binary from the release tag (`git archive`) in a temporary directory.
 9. **The fixture suite is a new integration test file**, `crates/cargo-hive/tests/upgrade.rs`. It walks every
@@ -302,6 +304,7 @@ Interface:
   | plans.json | `common::Hive` | `gc --plan` | exit 1 |
   | seeds.json | `RegistryRepo` + `seeded_store` (tests/seed.rs harness) | `seed` | exit 0, `record.failed` carrying the path, bytes unchanged |
   | store.db | `common::store_fixture` | bare `gc` and `gc --dry-run` | store tier's `store.write_failed`, target tier runs |
+  | store.db | `RegistryRepo` + `seeded_store` | `seed` | exit 1, error finding names store.db, bytes unchanged (fill.rs:91, seed lib.rs:287; ROAD-14 example 4) |
   | store.db missing, entries present | `common::store_fixture` | bare `gc` and `gc --dry-run` | `store.index_missing`, no eviction (4.1) |
 
   The committed fixture home is not used for these, because `seed` needs a real registered checkout whose
@@ -313,7 +316,8 @@ Everything else leaves.
 
 The fixture home is copied into a `/private/tmp/hive-it-*` scratch dir before any command runs, so committed
 files are never written (UPGRADE-6.2; testing standard "Integration fixtures live in /private/tmp/hive-it-*").
-The generator takes its home only from such a dir and writes outside it only to `HIVE_FIXTURE_OUT`.
+The generator takes its home only from such a dir and writes outside it only to `HIVE_FIXTURE_OUT`. Its Cargo
+runs use capture.rs's isolated `CARGO_HOME` (capture.rs:18, :149-151).
 
 ### I. Capture test, release steps and the SPLIT amendment
 
@@ -325,7 +329,8 @@ Surface:
 - Release steps:
   - step 6's `HIVE_V010_BIN=/private/tmp/hive-0.1.0/...` becomes a tag-built path (`replace`, UPGRADE-5.6);
   - a new step 7, "Fixtures", builds the release binary from its tag (`git archive v<X>` into
-    `/private/tmp/hive-fixture-<X>/`) and runs `write_fixture_home` (UPGRADE-5.5).
+    `/private/tmp/hive-fixture-<X>/`) and runs `write_fixture_home` (UPGRADE-5.5). The step states that the run
+    uses capture.rs's isolated `CARGO_HOME`, never `~/.cargo`.
 - SPLIT-4.3 text: `replace` (struck through, pointing at UPGRADE-2.8).
 Interface: none new beyond the generator in §H.
 Depth: n/a, extends existing tests and docs.
