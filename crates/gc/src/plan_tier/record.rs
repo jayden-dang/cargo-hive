@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use cargo_hive_platform::EntryKind;
-use cargo_hive_state::{State, StateError, Tx};
+use cargo_hive_state::{Layout, State, StateError, Tx};
 
-const PLANS_FILE: &str = "plans.json";
+pub const PLANS_FILE: &str = "plans.json";
 pub const MAX_PLANS_BYTES: u64 = 4 * 1024 * 1024;
 const KEEP_FOR: u64 = 30 * 86_400;
 const MAX_TOMBSTONES: usize = 256;
@@ -109,8 +109,10 @@ pub enum Taken {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct PlansFile {
-    plans: Vec<Plan>,
+pub struct PlansFile {
+    #[serde(default = "Layout::absent")]
+    pub layout: Layout,
+    pub plans: Vec<Plan>,
 }
 
 pub fn insert(
@@ -290,6 +292,7 @@ mod tests {
 
     fn encoded(plans: &[Plan]) -> Vec<u8> {
         let mut bytes = serde_json::to_vec_pretty(&PlansFile {
+            layout: Layout::NEWEST,
             plans: plans.to_vec(),
         })
         .unwrap();
@@ -618,5 +621,72 @@ mod tests {
         for k in ["file", "dir", "symlink", "other"] {
             assert_eq!(kind_name(kind_of(k).unwrap()), k);
         }
+    }
+
+    #[test]
+    fn plans_write_layout_first() {
+        let s = state("record-layout-first");
+        insert(
+            &s,
+            &|| false,
+            vec![plan("aaaaaaaaaaaaaaaa", PlanClass::Secondary, 100)],
+            100,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(s.root().join(PLANS_FILE)).unwrap();
+        assert!(
+            text.starts_with("{\n  \"layout\": 1,\n"),
+            "layout must be the first key: {text}"
+        );
+    }
+
+    #[test]
+    fn insert_and_consume_keep_every_other_field_as_before() {
+        let s = state("record-keep-fields");
+        let original = plan("aaaaaaaaaaaaaaaa", PlanClass::Protected, 100);
+        insert(&s, &|| false, vec![original.clone()], 100).unwrap();
+        let live = match get(&s, &|| false, "aaaaaaaaaaaaaaaa").unwrap() {
+            Lookup::Live(p) => p,
+            other => panic!("expected live, got {other:?}"),
+        };
+        assert_eq!(live, original);
+
+        let taken = match consume(&s, &|| false, "aaaaaaaaaaaaaaaa", 101).unwrap() {
+            Taken::Plan(p) => p,
+            other => panic!("expected plan, got {other:?}"),
+        };
+        assert_eq!(taken, original);
+
+        let file = s
+            .locked(|tx| tx.read_bounded::<PlansFile>(PLANS_FILE, MAX_PLANS_BYTES))
+            .unwrap();
+        assert_eq!(file.layout, Layout::NEWEST);
+        assert_eq!(file.plans.len(), 1);
+        let tomb = &file.plans[0];
+        assert_eq!(tomb.id, original.id);
+        assert_eq!(tomb.class, original.class);
+        assert_eq!(tomb.window_days, original.window_days);
+        assert_eq!(tomb.made_at, original.made_at);
+        assert_eq!(tomb.scope_repos, original.scope_repos);
+        assert_eq!(tomb.planned, original.planned);
+        assert!(tomb.targets.is_empty());
+        assert_eq!(tomb.state, PlanState::Consumed { at: 101 });
+    }
+
+    #[test]
+    fn a_keyless_plans_file_reads_as_layout_one() {
+        let s = state("record-keyless-layout");
+        let path = s.root().join(PLANS_FILE);
+        std::fs::write(
+            &path,
+            br#"{"plans":[{"id":"aaaaaaaaaaaaaaaa","class":"secondary","window_days":7,"made_at":100,"scope_repos":[],"planned":null,"targets":[],"state":"live"}]}"#,
+        )
+        .unwrap();
+        let file = s
+            .locked(|tx| tx.read_bounded::<PlansFile>(PLANS_FILE, MAX_PLANS_BYTES))
+            .unwrap();
+        assert_eq!(file.layout, Layout::absent());
+        assert_eq!(file.plans.len(), 1);
+        assert_eq!(file.plans[0].id, "aaaaaaaaaaaaaaaa");
     }
 }
