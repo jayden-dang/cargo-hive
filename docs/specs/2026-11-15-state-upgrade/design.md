@@ -152,7 +152,9 @@ Reuse: rung 2, which extends `read_json` / `read_json_limited` / `StateError` in
 :369-403. The atomic write is unchanged.
 Respects: ARCH-16
 Surface:
-- `StateError::Malformed`'s `Display` ends with the file's recovery (Decision 4). Its fields are unchanged.
+- `StateError::Malformed` gains `on_read: bool`, and its `Display` ends with the file's recovery when `on_read`
+  (Decision 4). Its constructors are in the state crate only. The `matches!(err, StateError::Malformed { .. })`
+  sites (gc plan_tier/record.rs:345, :600; state lib.rs:501, :656) compile unchanged.
   - Its `Display` callers: every `e.to_string()` path into `emit_failure` (cli.rs:293), `record.failed` (seed
     lib.rs:481-488) and `store.write_failed` (evict.rs:78-84). Disposition `replace`: each now carries the
     recovery.
