@@ -38,6 +38,10 @@ _Avoid_: warm pool, reusable worktree
 An `*.rcgu.o` file in a profile dir's `deps/` that rustc leaves for a linked binary's debug map under macOS's unpacked split-debuginfo. It is *unreferenced* when no linked binary in that profile dir names it; deleting it rebuilds nothing.
 _Avoid_: object file, stale .o
 
+**Linked binary**:
+A Mach-O executable, dylib or bundle (thin or fat) in a profile dir, under `deps/`, `examples/`, `build/<dir>/` or the profile dir itself, relinked recently or not. Its debug map's N_OSO entries name the loose debug objects it references; an entry of the form `lib….rlib(member.o)` names an rlib member, not a loose file.
+_Avoid_: test binary (one kind of it), executable
+
 **Platform crate**:
 The one member crate allowed to touch the OS: `unsafe`, `libc`, `cfg(target_os)` outside tests, and child-process spawning. Every other crate reaches the OS only through it.
 _Avoid_: OS layer, sys crate
