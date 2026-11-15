@@ -200,6 +200,7 @@ mod tests {
 
     fn store(units: Vec<Row>, sources: Vec<(&str, SourceRecord)>) -> StoreFile {
         StoreFile {
+            layout: cargo_hive_state::Layout::NEWEST,
             units,
             toolchains: [("V1".to_string(), 1)].into_iter().collect(),
             sources: sources
