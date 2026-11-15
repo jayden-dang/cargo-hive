@@ -52,3 +52,29 @@ Every heading below is a REQUIRED slot — fill it or write `None`.
 **History:**
 - 2026-11-15 Pending
 - 2026-11-15 Accepted / Hold — "Accept, hold for release"
+
+## Assessment 2
+
+**Supersedes:** Assessment 1 — candidate revision changed (SPLIT stamped Implemented, #26 closed) and the operator now asks to close
+**Committed baseline:** 71120a10b9e041d72abcc2a3f3994ca29c962584
+**Candidate closing revision:** 58a182760a9996e654de5698b88c27821665d915
+**Roadmap revision assessed:** f086da731c2d64f926464df9d0403a7fb2cb5c74 (working tree: clean)
+**Assessed:** 2026-11-15
+
+### Agent assessment
+
+**Outcome verdict:** achieved
+**Evidence:** Both members are bound and Implemented (docs/specs/catalog/hive.md): ROAD-14 → UPGRADE (PR #28, 1770d2e) and ROAD-15 → SPLIT (PR #27, published as v0.1.1; stamped Implemented in 03d94b8 after its spec drifted). Every state file records its layout. v0.1.0 and v0.1.1 fixture homes read back with the values each release wrote. A damaged or newer file stops the command, names the file and its recovery, and is left untouched. Bare gc no longer empties the store when `store.db` is missing. The full verify gate passed on 03d94b8, whose tree equals this candidate's: check, Linux check, fmt, clippy `-D warnings`, `cargo test --workspace` with 877 passed and 0 failed.
+**Goal coverage:** GOAL-8 advanced — UPGRADE reads each earlier file or refuses it by name with its fixing command, and never treats an unreadable file as empty; SPLIT kept 0.1.0's behaviour and added the v0.1.1 fixture set.
+**Deferrals:** None
+**Plan accuracy:** +1 added · 0 moved out · 0 deferred · 2 days (ROAD-15 joined after the commitment)
+**Findings:** (1) No release carries UPGRADE yet, and neither spec reads Shipped: a closed MILE-4 raises R9 until the next release stamps UPGRADE and SPLIT Shipped → plan-milestones (closed by the operator knowing this; the release stamps clear it). (2) ADR-0003 (ROAD-15) and ADR-0004 (ROAD-14) are still Proposed → define-domain.
+**Rationale:** Each clause of the outcome maps to UPGRADE with tests behind it, as in Assessment 1; SPLIT's status drift is fixed and #26 closed. The outcome is delivered in code on main; users get it at the next release, which finding 1 records.
+
+### Human disposition
+
+**Current:** Accepted
+**Close decision:** Close
+**History:**
+- 2026-11-15 Pending
+- 2026-11-15 Accepted / Close — "đóng mile 4 đi"
