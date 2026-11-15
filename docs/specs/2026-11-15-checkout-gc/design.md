@@ -268,7 +268,7 @@ Flow:
 2. **Capabilities.** `doctor::require` for FingerprintReading and Deletion; a failure is a `refusal`, exit 1 (1.9).
 3. **Find the checkout.** `find_checkout(path)`; an `Err` is a `refusal` naming the path, exit 1. The detail depends on the path:
    - inside a registered repo but not a checkout root (`owning_repo` used only to word it): `"<path> is not a checkout of <main>; name the checkout's root directory"`;
-   - otherwise: `"not a registered repository; run cargo hive repo add first"` (3.3).
+   - otherwise: `find_checkout` keeps `locate_checkout`'s existing text (cli.rs:1612-1618), which names `cargo hive repo add` (3.3).
 
    A main is accepted (3.4).
 4. **Receipt scope.** `Receipt::new("gc --checkout", Scope { repos: [repo.main], checkouts: [checkout.path] })` (1.7).
@@ -301,7 +301,7 @@ Surface:
 - `README.md`: a `gc --checkout` subsection — **replace**. `readme_command_lines_and_names_match_the_binary` (skill.rs:1131) checks it.
 
 Interface: the skill text tells an agent working in a reused worktree what to do:
-- **When to count.** Before a test build, count the entries with `ls <target>/debug/deps | wc -l`, or the `deps/` of its profile dir.
+- **When to count.** Before a test build, count the entries with `ls -f <the checkout's real target dir>/debug/deps | wc -l`, or the `deps/` of its profile dir.
 - **When to run.** When the count is above 20,000, run `cargo hive gc --checkout <worktree> --json`.
 - **How to read the receipt.** `objects_deleted`, `units_deleted`, `freed_bytes` and `targets_skipped_held`, and the `gc.skipped`, `gc.shared_target`, `gc.outside_checkout`, `ownership.unresolved` and `gc.objects_undecided` findings, each with what to do.
 
