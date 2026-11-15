@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use cargo_hive_core::fingerprint::{self, DepEdge};
 use cargo_hive_core::liveness;
 use cargo_hive_core::target::TargetDir;
-use cargo_hive_state::{State, StateError};
+use cargo_hive_state::{Layout, State, StateError};
 
 pub const SEEDS_FILE: &str = "seeds.json";
 pub const MAX_SEEDS_BYTES: u64 = 16 * 1024 * 1024;
@@ -39,6 +39,8 @@ pub struct SeedRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SeedsFile {
+    #[serde(default = "Layout::absent")]
+    pub layout: Layout,
     pub targets: BTreeMap<PathBuf, SeedRecord>,
 }
 
@@ -469,7 +471,10 @@ mod tests {
         for (path, stored) in entries {
             targets.insert((*path).to_path_buf(), stored.clone());
         }
-        SeedsFile { targets }
+        SeedsFile {
+            layout: Layout::NEWEST,
+            targets,
+        }
     }
 
     fn encoded(file: &SeedsFile) -> Vec<u8> {
