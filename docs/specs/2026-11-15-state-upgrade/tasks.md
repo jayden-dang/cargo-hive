@@ -1,6 +1,6 @@
 # Tasks: State upgrade
 
-Delivered-by: PR #28 — https://github.com/jayden-dang/cargo-hive/pull/28 (merge pending)
+Delivered-by: PR #28, https://github.com/jayden-dang/cargo-hive/pull/28
 
 > **For agentic workers:** after plan approval, pick one execute skill —
 > `build-in-waves` (continuous dependency-aware scheduler), `build-by-story` (human-gated story review
