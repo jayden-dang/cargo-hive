@@ -403,13 +403,14 @@ fn run_on_home(bin: &Path, home: &Path, args: &[&str]) -> i32 {
 }
 
 fn bin_version(bin: &Path) -> String {
-    let out = Command::new(bin)
+    let child = Command::new(bin)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
         .unwrap();
+    let out = wait_within(child, COMMAND_DEADLINE);
     assert!(
         out.status.success(),
         "{} --version failed: {}",
@@ -683,13 +684,14 @@ fn assert_fixture_home(home: &Path) {
 fn write_provenance(out: &Path) {
     let tag = std::env::var("HIVE_FIXTURE_TAG").expect("HIVE_FIXTURE_TAG");
     let commit = std::env::var("HIVE_FIXTURE_COMMIT").expect("HIVE_FIXTURE_COMMIT");
-    let rustc = Command::new("rustc")
+    let child = Command::new("rustc")
         .arg("-vV")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
         .unwrap();
+    let rustc = wait_within(child, COMMAND_DEADLINE);
     assert!(
         rustc.status.success(),
         "rustc -vV failed: {}",
