@@ -411,3 +411,129 @@ fn config_json_is_read_without_a_layout_key_and_refused_with_one() {
         "expected Malformed, got {err}"
     );
 }
+
+#[derive(Clone, Copy)]
+enum FileDamage {
+    Unparseable,
+    LayoutTwo,
+}
+
+fn damaged_state_bytes(damage: FileDamage, existing: Option<&[u8]>, empty_shape: &str) -> Vec<u8> {
+    match damage {
+        FileDamage::Unparseable => b"{not json".to_vec(),
+        FileDamage::LayoutTwo => {
+            let base = match existing {
+                Some(bytes) => bytes.to_vec(),
+                None => empty_shape.as_bytes().to_vec(),
+            };
+            let mut value: Value = serde_json::from_slice(&base)
+                .unwrap_or_else(|_| serde_json::from_str(empty_shape).unwrap());
+            value
+                .as_object_mut()
+                .expect("state file is an object")
+                .insert("layout".into(), Value::from(2));
+            serde_json::to_vec(&value).unwrap()
+        }
+    }
+}
+
+fn error_detail(receipt: &Value) -> &str {
+    receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["kind"] == "error")
+        .expect("error finding")["detail"]
+        .as_str()
+        .unwrap()
+}
+
+#[test]
+fn status_stops_on_each_damaged_state_file_and_leaves_it_untouched() {
+    let cases = [
+        (
+            registry::FILE,
+            r#"{"repos":[]}"#,
+            "remove it, then run `cargo hive repo add <main>` again for each repository",
+        ),
+        (
+            CAPABILITIES_FILE,
+            r#"{"toolchain_release":"1.0.0","disabled":{},"lock_check":1,"failed_marker_check":1}"#,
+            "run `cargo hive doctor`, which rewrites it",
+        ),
+        (
+            SNAPSHOT_FILE,
+            r#"{"metadata":{},"unsupported_profiles":[]}"#,
+            "remove it; the next `cargo hive status` rebuilds it (it is a metadata cache)",
+        ),
+    ];
+    for (name, empty_shape, recovery) in cases {
+        for damage in [FileDamage::Unparseable, FileDamage::LayoutTwo] {
+            let hive = Hive::ready();
+            let scratch = Scratch::new(&format!("upgrade-status-{name}"));
+            let repo = init_repo(&scratch.path.join("app"), "");
+            hive.config(&format!(
+                r#"{{"secondary_roots":["{}"]}}"#,
+                scratch.path.display()
+            ));
+            register(&hive, &repo);
+
+            let path = hive.home.path.join(name);
+            let existing = fs::read(&path).ok();
+            let damaged = damaged_state_bytes(damage, existing.as_deref(), empty_shape);
+            fs::write(&path, &damaged).unwrap();
+
+            let (out, receipt) = hive.json(&["status"]);
+            assert_eq!(out.status.code(), Some(1), "{name} {receipt}");
+            let detail = error_detail(&receipt);
+            assert!(
+                detail.contains(path.to_str().unwrap()),
+                "{name}: detail missing path: {detail}"
+            );
+            match damage {
+                FileDamage::Unparseable => assert!(
+                    detail.contains(recovery),
+                    "{name}: detail missing recovery: {detail}"
+                ),
+                FileDamage::LayoutTwo => assert!(
+                    detail.contains("records layout 2")
+                        && detail.contains("cargo install cargo-hive"),
+                    "{name}: detail missing newer-layout text: {detail}"
+                ),
+            }
+            assert_eq!(fs::read(&path).unwrap(), damaged, "{name} bytes changed");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn gc_plan_stops_on_a_damaged_plans_file_and_leaves_it_untouched() {
+    let recovery =
+        "remove it; unapplied plans are lost, so make new ones with `cargo hive gc --plan`";
+    for damage in [FileDamage::Unparseable, FileDamage::LayoutTwo] {
+        let hive = Hive::ready();
+        let path = hive.home.path.join(PLANS_FILE);
+        let damaged = damaged_state_bytes(damage, None, r#"{"plans":[]}"#);
+        fs::write(&path, &damaged).unwrap();
+
+        let (out, receipt) = hive.json(&["gc", "--plan"]);
+        assert_eq!(out.status.code(), Some(1), "{receipt}");
+        let detail = error_detail(&receipt);
+        assert!(
+            detail.contains(path.to_str().unwrap()),
+            "detail missing path: {detail}"
+        );
+        match damage {
+            FileDamage::Unparseable => assert!(
+                detail.ends_with(recovery),
+                "detail missing plans recovery: {detail}"
+            ),
+            FileDamage::LayoutTwo => assert!(
+                detail.contains("records layout 2") && detail.contains("cargo install cargo-hive"),
+                "detail missing newer-layout text: {detail}"
+            ),
+        }
+        assert_eq!(fs::read(&path).unwrap(), damaged);
+    }
+}

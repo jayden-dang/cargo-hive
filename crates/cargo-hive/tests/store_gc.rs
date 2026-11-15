@@ -2634,3 +2634,76 @@ fn a_seed_after_store_db_was_lost_adopts_equal_entries_and_rewrites_store_db() {
     assert_eq!(rows(&hive).len(), before_n, "{:?}", rows(&hive));
     assert_eq!(entry_dirs(&hive), before_dirs);
 }
+
+#[derive(Clone, Copy)]
+enum FileDamage {
+    Unparseable,
+    LayoutTwo,
+}
+
+fn damaged_store_bytes(damage: FileDamage, existing: &[u8]) -> Vec<u8> {
+    match damage {
+        FileDamage::Unparseable => b"not-json".to_vec(),
+        FileDamage::LayoutTwo => {
+            let mut value: serde_json::Value = serde_json::from_slice(existing).unwrap();
+            value
+                .as_object_mut()
+                .expect("store.db is an object")
+                .insert("layout".into(), serde_json::Value::from(2));
+            serde_json::to_vec(&value).unwrap()
+        }
+    }
+}
+
+#[test]
+fn bare_gc_and_dry_run_keep_store_write_failed_on_a_damaged_store_db() {
+    let store_recovery = "remove it, build a checkout of the repository, then run `cargo hive seed`; store entries are kept and adopted";
+    for damage in [FileDamage::Unparseable, FileDamage::LayoutTwo] {
+        for args in [&["gc"][..], &["gc", "--dry-run"][..]] {
+            let hive = Hive::ready();
+            let repo = seeded_store(&hive);
+            let before_dirs = entry_dirs(&hive);
+            let db = hive.home.path.join(STORE_FILE);
+            let existing = fs::read(&db).unwrap();
+            let damaged = damaged_store_bytes(damage, &existing);
+            fs::write(&db, &damaged).unwrap();
+            let target = repo.main.join("target");
+            let krate = crate_dirs(&target)
+                .into_iter()
+                .next()
+                .expect("incremental crate dir");
+            let (session, _) = plant_session(&krate, 3600, "svh0", false);
+            assert!(krate.join(&session).is_dir());
+
+            let (out, receipt) = hive.json(args);
+            assert!(out.status.success(), "{args:?} {receipt}");
+            assert!(has_finding(&receipt, "store.write_failed"), "{receipt}");
+            assert!(!has_finding(&receipt, "store.index_missing"), "{receipt}");
+            let f = finding(&receipt, "store.write_failed");
+            assert_eq!(f["path"], serde_json::json!(db), "{receipt}");
+            let detail = f["detail"].as_str().unwrap();
+            match damage {
+                FileDamage::Unparseable => assert!(
+                    detail.contains(store_recovery),
+                    "missing store recovery: {detail}"
+                ),
+                FileDamage::LayoutTwo => assert!(
+                    detail.contains("records layout 2")
+                        && detail.contains("cargo install cargo-hive"),
+                    "missing newer-layout text: {detail}"
+                ),
+            }
+            assert_eq!(entry_dirs(&hive), before_dirs, "{receipt}");
+            assert_eq!(fs::read(&db).unwrap(), damaged);
+            assert!(
+                count(&receipt, "sessions_deleted") >= 1,
+                "target tier did not run: {receipt}"
+            );
+            if args == ["gc"] {
+                assert!(!krate.join(&session).exists(), "{receipt}");
+            } else {
+                assert!(krate.join(&session).exists(), "{receipt}");
+            }
+        }
+    }
+}
