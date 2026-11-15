@@ -58,6 +58,8 @@ lock) and ARCH-2 (writes stay inside the state root).
    `layout` is above `Layout::NEWEST` (1), the read returns a new `StateError::NewerLayout { file, found, newest }`
    and never parses `T`.
    - A peek that does not parse falls through to the normal parse, which reports `Malformed` as today.
+   - The peek runs only when the file's first non-whitespace byte is `{`. A top-level array such as `[2]` would
+     otherwise satisfy the struct through serde's `visit_seq` and report `NewerLayout` (plan review F7).
    - `layout: 0` is `Malformed`, both in the peek and in `Layout`'s `Deserialize`.
    - The peek is opt-in: the public `read`/`read_bounded` peek, and `State::config` (lib.rs:268) reads config.json
      through an internal path with no peek. A config carrying any `layout` key is therefore refused as
@@ -323,7 +325,7 @@ runs use capture.rs's isolated `CARGO_HOME` (capture.rs:18, :149-151).
 
 Satisfies: UPGRADE-2.8, UPGRADE-2.9, UPGRADE-5.5, UPGRADE-5.6, UPGRADE-5.7, UPGRADE-7.7
 Reuse: rung 2, which extends capture.rs (`read_normalized_file`, `state_written_by_0_1_0_reads_unchanged`) and
-the release steps in docs/agents/project.md:120-170.
+the release steps in docs/agents/project.md:130-168.
 Surface:
 - `read_normalized_file` gains the strip of a top-level `layout` key in JSON state files (`replace`).
 - Release steps:
