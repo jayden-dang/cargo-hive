@@ -11,7 +11,7 @@ refused as such rather than as malformed.
 
 Rejected alternatives:
 - **A generic `Layered<T>` wrapper with `#[serde(flatten)]`.** serde does not support `flatten` together with
-  `deny_unknown_fields` on either struct (serde.rs container-attrs and attr-flatten), and four of the types use
+  `deny_unknown_fields` on either struct (serde.rs container-attrs and attr-flatten), and three of the types use
   it.
 - **Splicing the key into the bytes in `encode`.** It is invisible to the types and fragile.
 - **A root manifest.** Its two files cannot be written atomically, and it adds a file to every home.
