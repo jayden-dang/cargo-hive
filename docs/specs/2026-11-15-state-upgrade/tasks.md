@@ -320,7 +320,7 @@ _Requirements: UPGRADE-1.1, UPGRADE-1.5, UPGRADE-7.1_
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - The unit test at record.rs:~606 becomes `an_unparseable_record_file_is_refused_and_left_untouched`.
   - Two unit tests guard the pruning on a readable file: `a_readable_record_file_still_drops_gone_targets` and
     `a_readable_record_file_still_drops_oldest_to_fit`.
@@ -330,9 +330,9 @@ _Requirements: UPGRADE-1.1, UPGRADE-1.5, UPGRADE-7.1_
   - An existing status test stays green, guarding the note.
 
   Run `cargo test -p cargo-hive-seed --lib record::` and `cargo test -p cargo-hive --test seed`; expect failure.
-- [ ] **Step 2: Implement.** On a read error, `write_capped` returns `Err(err)`. `record_placed` keeps only the
+- [x] **Step 2: Implement.** On a read error, `write_capped` returns `Err(err)`. `record_placed` keeps only the
   `Ok(())` and `Err` arms. Run the task gate for `cargo-hive-seed`; expect pass.
-- [ ] **Step 3: Commit.** `fix(seed): never replace an unreadable seed record`
+- [x] **Step 3: Commit.** `fix(seed): never replace an unreadable seed record`
 
 _Requirements: UPGRADE-3.4, UPGRADE-3.5, UPGRADE-7.3_
 
