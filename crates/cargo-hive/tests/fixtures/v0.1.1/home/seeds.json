@@ -1,0 +1,53 @@
+{
+  "targets": {
+    "/private/tmp/hive-capture/work/wt2/target": {
+      "identity": [
+        16777234,
+        504283852
+      ],
+      "written_at": 1794719253,
+      "units": [
+        {
+          "rel_profile": "debug",
+          "dir_name": "depcrate-0a9e38a1493f4d40",
+          "stamp": [
+            "debug/build/depcrate-0a9e38a1493f4d40/invoked.timestamp",
+            1794556363171676417
+          ],
+          "has_build": true,
+          "deps_files": 0
+        },
+        {
+          "rel_profile": "debug",
+          "dir_name": "depcrate-39f1739149608fb6",
+          "stamp": [
+            "debug/.fingerprint/depcrate-39f1739149608fb6/invoked.timestamp",
+            1794556363171676417
+          ],
+          "has_build": true,
+          "deps_files": 0
+        },
+        {
+          "rel_profile": "debug",
+          "dir_name": "depcrate-76d2cd855541a6ee",
+          "stamp": [
+            "debug/.fingerprint/depcrate-76d2cd855541a6ee/invoked.timestamp",
+            1794556363171676417
+          ],
+          "has_build": false,
+          "deps_files": 3
+        },
+        {
+          "rel_profile": "debug",
+          "dir_name": "leafcrate-14dd3a60c6bb7b36",
+          "stamp": [
+            "debug/.fingerprint/leafcrate-14dd3a60c6bb7b36/invoked.timestamp",
+            1794556363171676417
+          ],
+          "has_build": false,
+          "deps_files": 3
+        }
+      ]
+    }
+  }
+}
