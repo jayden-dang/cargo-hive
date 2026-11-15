@@ -160,6 +160,13 @@ _Avoid_: status code
 The deterministic counters a hive command returns. It never contains estimated time saved, and it contains durations only in `cargo hive bench`'s receipt, as integer milliseconds bench measured (ARCH-10).
 _Avoid_: report, summary
 
+**State file**:
+A file hive writes under its state root through the `state` module: `registry.json`, `capabilities.json`, `snapshot.json`, `plans.json`, `store.db` (JSON, despite the name), `seeds.json` and the `receipts/` day files. `config.json` is the user's, not a state file.
+_Avoid_: metadata file, cache file, database
+
+**Layout**:
+The shape a state file was written in, a whole number the file records as its first key, `layout`. A state file without the key is layout 1, the shape 0.1.0 wrote. A receipt line's `schema` plays this part for receipts, and `store.db`'s layout also covers the store's entry path scheme.
+_Avoid_: version (that is hive's release), schema (that is the receipt's)
 
 **Bench sample**:
 One timed first build that `cargo hive bench` runs in one fresh secondary checkout the caller made, with no target dir before it. It is either a cold sample or a seeded sample.
