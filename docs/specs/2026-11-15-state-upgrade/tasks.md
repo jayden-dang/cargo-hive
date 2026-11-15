@@ -180,16 +180,16 @@ _Requirements: UPGRADE-1.2, UPGRADE-2.2, UPGRADE-2.4, UPGRADE-3.2, UPGRADE-3.3, 
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing tests** (table-driven over both types where the shape is the same):
+- [x] **Step 1: Write the failing tests** (table-driven over both types where the shape is the same):
   - `writes_layout_as_the_first_key`
   - `a_keyless_0_1_0_file_reads_and_its_first_write_only_adds_the_layout_line`, using a hand-copied 0.1.0 body
   - `an_unknown_key_other_than_layout_is_still_refused`
 
   Run `cargo test -p cargo-hive-cargo --lib`; expect a compile failure.
-- [ ] **Step 2: Implement** the field and update every literal listed in Files.
+- [x] **Step 2: Implement** the field and update every literal listed in Files.
   `deny_unknown_fields` stays on `Registry`, `Repo`, `Snapshot`, `CachedMetadata` and `Resolved`. Run the
   project.md task gate for `cargo-hive-cargo`; expect pass.
-- [ ] **Step 3: Commit.** `feat(cargo): registry and snapshot record their layout`
+- [x] **Step 3: Commit.** `feat(cargo): registry and snapshot record their layout`
 
 _Requirements: UPGRADE-1.1, UPGRADE-7.2_
 
