@@ -39,15 +39,20 @@ Every `Reuse:` line below rests on the scan digest (`.skills/_pending-checkout-g
    - release.
 
    No auto tier and no store eviction (Fork 2 A).
-3. **Ownership from resolutions:** `discover::targets` gains a `workspaces` field carrying every per-workspace resolution result. A target belongs to the checkout when the checkout's own resolutions name it and no other live checkout's do. Any failed resolution in the repo blocks every deletion (CHECKOUTGC-3.5, agent-decided).
+3. **Ownership from resolutions:** `discover::targets` gains a `workspaces` field carrying every per-workspace resolution result. A target belongs to the checkout only when three things hold:
+   - the checkout's own resolutions name it;
+   - it lies inside the checkout's directory and not inside a checkout nested in it;
+   - no other live checkout's resolutions name it.
+
+   Any failed resolution in the repo blocks every deletion, with exit 1 (CHECKOUTGC-3.5 and 3.7, agent-decided).
 4. **The reader is pure and lives in `crates/gc`** (`gc::debug_map`), over bytes from a new `Fs::read_at`. No new crate, since a 9th member would add a publish, and no dependency.
-5. **Linked binaries are found by header, not by name, after a deny-list of names that are never linked:** `*.rcgu.o`, `*.o`, `*.d`, `*.rlib`, `*.rmeta`, `*.a`, `*.json`, `*.timestamp`. Every other regular file in the scanned directories gets an 8-byte header read. The deny-list only removes names Cargo uses for non-linked outputs, so a renamed binary is still read.
+5. **Linked binaries are found by header, not by name.** Every regular file, or symlink to one, in the scanned directories gets a 32-byte header read. The one exception is names ending in `.o`, which are objects Cargo never links; that skips the ~10^5 `*.rcgu.o` files, which dominate `deps/`. Dep-info, rlib, rmeta and stamp files cost one small read each, a few thousand per profile (design review F10).
 6. **Object matching is by file name** across every loose N_OSO entry of the profile dir's binaries. `<archive>(<member>)` entries are ignored (CHECKOUTGC-2.3, 2.4).
 7. **Fail closed per profile dir** for the object class (2.7–2.9), independent of liveness's verdict (2.6).
 8. **The CLI tree fixture:**
    - `tests/fixtures/v0.1.0/cli-tree.txt` stays as written.
    - A new `tests/fixtures/current/cli-tree.txt` holds today's tree.
-   - `cli_tree.rs` asserts the current tree equals it, and that its diff from v0.1.0 lies only inside the `gc` block (CHECKOUTGC-6.6, agent-decided).
+   - `cli_tree.rs` asserts the current tree equals it, and that its diff from v0.1.0 touches only the `gc` block and the root command list's `gc` line (fixture line 11), which carries gc's help text (CHECKOUTGC-6.6, agent-decided).
 9. **No ADR.** Every choice above can be reversed by a later release without migrating anything, since no state format changes. GOAL-9 already covers the new deletion class.
 
 ## Architecture
@@ -79,13 +84,17 @@ Satisfies: CHECKOUTGC-3.1, CHECKOUTGC-3.2, CHECKOUTGC-3.5
 Reuse: rung 2 — extends `discover::targets` (crates/cargo/src/discover.rs:530-660) and its private `resolve_workspaces` (:425), whose results it already computes and drops
 Respects: ARCH-8, ARCH-17 (ownership only from `cargo metadata --no-deps --locked --offline`, metadata.rs:25-36)
 Surface:
-- `TargetScan` gets a new `pub workspaces: Vec<WorkspaceResolution>` field, constructed only at discover.rs:652. Every caller reads fields by name, and none destructures the struct, so all 8 callers are **replace** (no edit needed; the existing fields keep their values). These are cli.rs `gc_cmd`, `status`, `explain`, `plan`, `seed`, `bench`, plus `plan_tier::build::make` and tests.
+- `TargetScan` gets a new `pub workspaces: Vec<WorkspaceResolution>` field, constructed only at discover.rs:652. Every caller reads fields by name, and none destructures the struct. So every caller, found by `rg 'targets\(' crates`, is **replace** (no edit needed; the existing fields keep their values):
+  - cli.rs `gc_cmd`, `status`, `seed` and `bench`;
+  - `plan_tier::build::make`, `plan_tier::orphan`, and `apply.rs:600`;
+  - `seed/source.rs`;
+  - the tests.
 - The existing `owner` and `failure` computations: **replace**, unchanged. CHECKOUTGC-6.1 guards them.
 Interface: `pub struct WorkspaceResolution { pub dir: PathBuf, pub checkout: PathBuf, pub result: Result<Resolved, String> }`. Beside it, `pub fn resolvers_of(scan: &TargetScan, target: &Path) -> Vec<PathBuf>` gives the distinct checkouts whose canonicalized `target_directory` or `build_directory` equals the canonicalized `target`. `pub fn failed_workspaces(scan: &TargetScan) -> Vec<(PathBuf, String)>` returns every failure, not only the first.
 Depth: n/a — extends `discover::targets`.
 Locality: extend `discover.rs`. Neighbor impact: leave `protected_owner`, `owner_checkout` and `Scope`.
 
-`checkout` is the deepest live checkout containing `dir` (the same rule as `owner_checkout`, :509). The comparison canonicalizes both sides, because `Resolved` paths are raw (:604-607). A cancel can truncate `resolve_workspaces`, so callers check `cancel()` right after `targets()` and trust nothing when it fired.
+`checkout` is the deepest live checkout containing `dir` (the same rule as `owner_checkout`, :509). `Resolved` paths are already realpaths (metadata.rs:80-86), so `/tmp` and `/private/tmp` spellings match. The target side is canonicalized too. A cancel can truncate `resolve_workspaces`, so callers check `cancel()` right after `targets()` and trust nothing when it fired.
 
 ### Ranged read on the platform `Fs`
 
@@ -99,8 +108,8 @@ Surface:
   - run.rs `Rec`, build.rs `FailStat`;
   - tests `Volumes`, `NamedShare`, `Recording`.
 
-  Delegating wrappers keep real behavior because the default calls their own delegating `read`. `Apfs` overrides with a positioned read. `Recording` (tests/common/recording_fs.rs:234) also overrides it, to log the call and offer a `fail_read_at(path)` hook.
-Interface: `read_at(path, offset, len)` returns up to `len` bytes from `offset`, fewer at end of file, an empty vector past it. It follows no symlink: it opens with `O_NOFOLLOW`, as `try_lock_exclusive` does (lib.rs:319-321).
+  Delegating wrappers return the same bytes because the default calls their own delegating `read`, at the cost of reading the whole file. Only `Apfs` (a positioned read) and `Recording` (tests/common/recording_fs.rs:234: logs the call and offers a `fail_read_at(path)` hook) override it. So "only tables are read" is shown on `Apfs` and through `Recording`, not through the other wrappers.
+Interface: `read_at(path, offset, len)` returns up to `len` bytes from `offset`, fewer at end of file, an empty vector past it. Like `read`, it follows a symlink. That is safe because it only reads: every deletion goes through `check_entry` (lstat).
 Depth: n/a — extends `Fs`.
 Locality: extend `crates/platform/src/lib.rs` (the trait) and `apfs.rs`. Neighbor impact: leave other methods.
 
@@ -111,19 +120,19 @@ Reuse: none — new code (rung 7). There is no Mach-O reader in the workspace or
 Respects: ARCH-15 (pure bytes; the read is the caller's `Fs`), ARCH-17
 Interface:
 ```
-pub enum Header { NotMachO, Object, Dsym, Linked }            // from the first 8 bytes
-pub fn sniff(first8: &[u8]) -> Header
 pub struct DebugMap { pub loose: BTreeSet<String>, pub archive_entries: u64 }
-pub fn read(fs: &dyn Fs, path: &Path) -> Result<DebugMap, MapError>
+/// Ok(None): not a linked binary (no Mach-O magic, an object file, or a dSYM).
+pub fn read(fs: &dyn Fs, path: &Path) -> Result<Option<DebugMap>, MapError>
 pub enum MapError { Read(io::Error), Truncated(&'static str), Bound(&'static str, u64), UnknownSlice(u32), Unsupported(&'static str) }
 ```
-Depth: if this module vanished, callers would still need to know only "give me the set of loose object file names this binary's debug map names, or why not". Everything else is hidden: header and fat-header layout, load-command walking, `nlist_64` decoding, string-table bounds and archive-entry classification.
+Depth: if this module vanished, callers would still need to know only "is this file a linked binary, and if so, which loose object file names does its debug map name, or why can't you tell". Everything else is hidden: header and fat-header layout, load-command walking, `nlist_64` decoding, string-table bounds and archive-entry classification.
 Locality: new file `crates/gc/src/debug_map.rs` with inline unit tests on hand-built byte images. Neighbor impact: leave.
 
 Rules, with each layout fact cited in the research note `.skills/research/2026-11-15-macho-n-oso.md` (main checkout; V = verified against Apple's `loader.h`, `nlist.h`, `stab.h`, `fat.h` and LLVM `MachO.h`):
-- **Thin 64-bit little-endian** (`0xfeedfacf`) is parsed.
-  - `filetype` `MH_OBJECT` → `Object`, `MH_DSYM` → `Dsym`.
-  - Every other file type → `Linked`. That covers executable, dylib and bundle, and keeps more for the rare kinds.
+- **Magic.** The first 4 bytes decide. A file shorter than 4 bytes, or with no Mach-O or fat magic, is `Ok(None)`. A file with a Mach-O magic but shorter than its 32-byte header is `Truncated`, so the profile fails closed.
+- **Thin 64-bit little-endian** (`0xfeedfacf`) is parsed; `filetype` is at offset 12.
+  - `filetype` `MH_OBJECT` or `MH_DSYM` → `Ok(None)`.
+  - Every other file type is a linked binary. That covers executable, dylib and bundle, and keeps more for the rare kinds.
   - A 32-bit or big-endian thin header is a Mach-O the reader cannot parse → `Unsupported`, so the profile fails closed.
 - **Fat** (`0xcafebabe` with 20-byte `fat_arch`, `0xcafebabf` with 32-byte `fat_arch_64`, big-endian) is parsed.
   - `nfat_arch` must lie in 1..=`FAT_ARCH_CAP` (8). Otherwise → `Unsupported`, which also covers a Java class file that shares the magic.
@@ -149,7 +158,7 @@ Rules, with each layout fact cited in the research note `.skills/research/2026-1
 ### Checkout GC run (`gc::checkout`)
 
 Satisfies:
-- CHECKOUTGC-1.1, 1.2, 1.4, 1.5, 1.6, 1.11 (library side);
+- CHECKOUTGC-1.1, 1.2, 1.4, 1.5, 1.6, 1.11 (library side), 3.7;
 - CHECKOUTGC-2.1, 2.2, 2.5, 2.6, 2.8, 2.9, 2.11;
 - CHECKOUTGC-4.1, 4.2, 4.3, 4.4;
 - CHECKOUTGC-7.2, 7.3.
@@ -166,14 +175,15 @@ Respects: ARCH-2, ARCH-3, ARCH-4, ARCH-9, ARCH-11, ARCH-18, ARCH-19
 Surface: `crates/gc/src/lib.rs` gets one `pub mod checkout; pub mod debug_map;` line. No existing reader changes, and plan, apply and auto tier are untouched (CHECKOUTGC-6.1).
 Interface:
 ```
-pub struct CheckoutInput<'a> { fs: &'a dyn Fs, scan: &'a TargetScan, checkout: &'a Path,
-    now: SystemTime, window: Duration, account_bytes: bool }
+pub struct CheckoutInput<'a> { pub fs: &'a dyn Fs, pub scan: &'a TargetScan, pub checkout: &'a Path,
+    pub nested: &'a [PathBuf], pub now: SystemTime, pub window: Duration, pub account_bytes: bool }
 pub fn run(input: &CheckoutInput, cancel: &dyn Fn() -> bool) -> CheckoutReport
-pub struct CheckoutReport { per_target: Vec<(PathBuf, Counts)>, totals: Counts,
-    findings: Vec<Finding>, unmeasured: Vec<(PathBuf, String)>, unmeasured_more: u64,
-    cancelled: bool, failed: bool }
-pub struct Counts { units_deleted, unit_files_deleted, objects_deleted, objects_referenced,
-    binaries_read: u64, bytes: Option<Bytes>, skips: BTreeMap<&'static str, u64> }
+pub struct CheckoutReport { pub per_target: Vec<(PathBuf, Counts)>, pub totals: Counts,
+    pub findings: Vec<Finding>, pub unmeasured: Vec<(PathBuf, String)>, pub unmeasured_more: u64,
+    pub cancelled: bool, pub failed: bool }
+pub struct Counts { pub units_deleted: u64, pub unit_files_deleted: u64, pub objects_deleted: u64,
+    pub objects_referenced: u64, pub binaries_read: u64, pub targets_shared: u64, pub targets_outside: u64,
+    pub bytes: Option<Bytes>, pub skips: BTreeMap<&'static str, u64> }
 ```
 Depth: if this module vanished, callers would still need to know only "run checkout gc over this scan for this checkout and get counts, findings and two flags". Hidden from them:
 - target selection;
@@ -183,13 +193,16 @@ Depth: if this module vanished, callers would still need to know only "run check
 - fail-closed rules;
 - byte accounting.
 
-Locality: new file `crates/gc/src/checkout.rs` with unit tests on a `Recording`-style fake. Neighbor impact: leave `plan_tier`, `gc::run` and `liveness`.
+Locality: new file `crates/gc/src/checkout.rs`. Its inline unit tests use a local fake `Fs`, like gc's `liveness.rs:1448` `FakeFs`. `Recording` lives in `crates/cargo-hive/tests/common`, so the Recording-based tests are library tests there (`LibCtx`, plan_fixture.rs:227). Neighbor impact: leave `plan_tier`, `gc::run` and `liveness`.
 
 Per run:
-1. **Select the targets.** Collect `failed_workspaces(scan)`. When any exists: one `ownership.unresolved` finding per dir, whose detail names how it clears (CHECKOUTGC-3.5), and no target is touched. Otherwise, for each target in `scan.targets` whose `resolvers_of` contains the checkout:
-   - when it also holds another checkout → a `gc.shared_target` finding (detail: the other checkouts), counted `targets_shared`, and nothing in it is touched;
-   - otherwise it is the checkout's own.
-2. **For each own target, in path order.**
+1. **Select the targets** (pure, before any lock).
+   - **Failed resolutions.** Collect `failed_workspaces(scan)`. When any exists, emit one `ownership.unresolved` finding per dir, whose detail says how it clears. Set `failed = true` (exit 1) and touch no target (3.5).
+   - **Otherwise,** look at each target in `scan.targets` whose `resolvers_of` contains the checkout:
+     - **another checkout also resolves to it** → a `gc.shared_target` finding (detail: the other checkouts), counted in `targets_shared`; nothing in it is touched (3.2);
+     - **it does not lie inside the checkout's directory, or lies inside a live checkout nested in it** (a main's `.worktrees/*`) → a `gc.outside_checkout` finding, counted in `targets_outside`; nothing is touched (3.7);
+     - **otherwise** it is the checkout's own.
+2. **For each own target, in path order.** Bind the whole `Locked` value to a local that lives until the target's last deletion. Destructuring it would drop the `HeldLock`s early (4.4).
    - **Acquire.** `locks::acquire(fs, path, true)`.
      - `Skipped(reason)` → a `gc.skipped` finding with the path and the reason text, plus `skips[reason.count_name()] += 1` (4.2).
      - `Failed(why)` → a `gc.target_failed` finding, and `failed = true` (4.3).
@@ -199,28 +212,41 @@ Per run:
      - Build a fresh `TargetDir`, with the owner taken from the scan.
    - **Units.** Run `liveness(fs, &fresh, now, window)`.
      - `Undecided` → one `gc.undecided` finding per reason: `"<reason> — clears when <clears_when>"` (1.5).
-     - `Decided` → for each dead unit, in unit order, stat each entry. Then `check_entry` with `Expect::Entry { kind, dev, ino }` right before `remove_counted(fs, ledger, path, entry, account_bytes, false)`.
-     - Only regular files, symlinks inside `deps/` or `examples/`, and the unit's fingerprint dir are accepted (7.2). `check_entry` refuses anything outside the target or of kind `Other`.
+     - `Decided` → group the dead units' entries by apply's rule (apply.rs:927-960):
+       - dep-info (`.d`) first, then the other hash-keyed entries, the fingerprint dir last;
+       - a unit with no `.d` puts its fingerprint dir first;
+       - a unit with only a fingerprint dir is skipped (ARCH-18).
+
+       That order keeps a stopped run from leaving a unit Cargo would call fresh with a file missing (7.3).
+     - Before a unit's first deletion, `entry_stat` every entry of the unit once. Each deletion is then `check_entry(fs, target, entry, Expect::Entry { kind, dev, ino })` from that stat, followed by `remove_counted(fs, ledger, target, entry, account_bytes, false)`, so an entry swapped after the stat is refused.
+     - Every kind but `Other` is accepted, as `apply::delete_entry` does. That covers files, symlinks, the fingerprint dir, and a `.dSYM` dir under packed split-debuginfo (7.2).
      - A failed entry stops that unit, gives a `gc.delete_failed` finding and sets `failed = true`.
      - `cancel()` is checked before each unit.
-   - **Objects.** For each profile dir in the Fingerprint layout (layout per `identify_bounded`; any other layout gives a `gc.objects_undecided` finding, 2.9), list these directories:
-     - `deps/` with `read_dir_bounded(…, DEPS_CAP)`;
-     - the profile dir itself, `examples/` (DEPS_CAP) and `build/` with each `build/<dir>/` (CRATE_DIR_CAP).
+   - **Objects**, for each profile dir:
+     - **Layout check.** Skip the profile with a `gc.objects_undecided` finding (2.6, 2.9; ARCH-9) when `identify_bounded` gives a layout other than Fingerprint, or its `ProfileReport.format` is `Unsupported`.
+     - **Listing.** List these directories:
+       - `deps/` with `read_dir_bounded(…, DEPS_CAP)`;
+       - the profile dir itself and `examples/` (DEPS_CAP);
+       - `build/` and each `build/<dir>/` (CRATE_DIR_CAP), direct children only.
 
-     A listing error gives a `gc.objects_undecided` finding (2.9). Then:
-     - **Sniff.** Read 8 bytes of every regular file whose name is not on the deny-list (Decision 5) and sniff it. `Linked` files get `debug_map::read`. A `MapError` gives a `gc.objects_undecided` finding naming the file (2.7).
+       A missing `examples/` or `build/` reads as empty; a missing `deps/` means nothing to do. Any other listing error gives a `gc.objects_undecided` finding (2.9). The listing also stats each `deps/*.rcgu.o` regular file once, recording `(dev, ino)`.
+     - **Read.** `debug_map::read` runs on every regular file, or symlink to one, whose name does not end in `.o` (Decision 5).
+       - `Ok(Some(map))` counts toward `binaries_read`.
+       - A `MapError` gives a `gc.objects_undecided` finding naming the file (2.7).
      - **No debug map.** Binaries ≥ 1, loose objects ≥ 1, and zero N_OSO entries in total → a `gc.objects_undecided` finding (2.8).
-     - **Delete.** Otherwise, each `deps/*.rcgu.o` regular file whose name is not in the union of `loose` is deleted with `check_entry` plus `remove_counted`. The others count `objects_referenced`. `cancel()` is checked before each deletion.
+     - **Delete.** Otherwise, each listed `deps/*.rcgu.o` whose name is not in the union of `loose` is deleted, with `check_entry(…, Expect::Entry { kind: File, dev, ino })` from the listing stat, then `remove_counted`. The others count `objects_referenced`. `cancel()` is checked before each deletion.
    - **Release.** Drop `Locked` after the last deletion in the target (4.4).
 3. **Finish.** `ledger.finish()` gives the per-target bytes. When `account_bytes` is false, `bytes` is `None`, and the CLI marks the two byte names unmeasured (1.10).
 
-A run killed part-way has stored nothing but the deletions themselves, so the next run re-derives everything (7.3).
+A stopped run stored nothing but the deletions themselves, and deleted in the order above, so the next run re-derives everything from disk (7.3). A file of a unit whose fingerprint dir already went is not listed again, the same limit the plan tier has.
+
+**Freed bytes.** A `deps/*.rcgu.o` is usually hardlinked (nlink 2) to its copy under `incremental/`, so the ledger counts most object bytes as `deleted_bytes_still_shared`, not `freed_bytes` (design review probe, cargo 1.97.1). The speed win comes from the entry count in `deps/`, not from the bytes, and the receipt says so through the two counts (ARCH-11).
 
 ### CLI mode, receipt and checkout lookup
 
 Satisfies: CHECKOUTGC-1.3, 1.7, 1.8, 1.9, 1.10, 1.12, 3.3, 3.4, 3.6
 Reuse: rung 2:
-- the `gc_cmd` flow (cli.rs:914-1130): signals, state open, `doctor::require`, `discover::targets`, volume cross-check notes (`apply::cross_check_notes`), `put_counts`, `merge_snapshot` under `locked_or_cancelled`, `emit`;
+- the `gc_cmd` flow (cli.rs:914-1130): signals, state open, `doctor::require`, `discover::targets`, volume cross-check notes (`apply::cross_check_notes`), the `ignored_vars` notes (cli.rs:886), `merge_snapshot` under `locked_or_cancelled`, `emit`. Counts are written by a new sibling `put_checkout_counts(b, suffix, &checkout::Counts)`, since `put_counts` takes the auto tier's `gc::Counts`;
 - `cargo_hive_state::window_days`, refused like `gc --plan` (build.rs:191);
 - the first half of `locate_checkout` (cli.rs:1569-1608), extracted.
 
@@ -246,10 +272,11 @@ Flow:
 
    A main is accepted (3.4).
 4. **Receipt scope.** `Receipt::new("gc --checkout", Scope { repos: [repo.main], checkouts: [checkout.path] })` (1.7).
-5. **Discover.** `discover::checkouts(repo)`, then `discover::targets(live checkouts of that repo only, cfg, false, snapshot, cancel)`. A cancel gives the `error` finding and exit 130 before any deletion. Walk faults become `walk.unreadable` findings.
+5. **Discover.** `discover::checkouts(repo)`, then `discover::targets(live checkouts of that repo only, cfg, false, snapshot, cancel)`. The live checkouts nested inside the named one are passed as `nested` (3.7). A cancel gives the `error` finding and exit 130 before any deletion. Walk faults become `walk.unreadable` findings.
 6. **Run.** `gc::checkout::run` brackets with the volume cross-check, as gc does. Then:
-   - `put_counts` for totals and `:<target>` keys;
-   - the five `targets_skipped_*` names, plus `targets_shared`;
+   - `put_checkout_counts` for totals and `:<target>` keys;
+   - the five `targets_skipped_*` names, plus `targets_shared` and `targets_outside`;
+   - an `ignored_vars` note for each ignored target variable, as gc_cmd does;
    - `freed_bytes` and `deleted_bytes_still_shared` marked unmeasured when EvictionAccounting is disabled (1.10);
    - findings copied in;
    - `snapshot.json` merged under the state lock (3.6).
@@ -276,7 +303,7 @@ Surface:
 Interface: the skill text tells an agent working in a reused worktree what to do:
 - **When to count.** Before a test build, count the entries with `ls <target>/debug/deps | wc -l`, or the `deps/` of its profile dir.
 - **When to run.** When the count is above 20,000, run `cargo hive gc --checkout <worktree> --json`.
-- **How to read the receipt.** `objects_deleted`, `units_deleted`, `freed_bytes` and `targets_skipped_held`, and the `gc.skipped`, `gc.shared_target`, `ownership.unresolved` and `gc.objects_undecided` findings, each with what to do.
+- **How to read the receipt.** `objects_deleted`, `units_deleted`, `freed_bytes` and `targets_skipped_held`, and the `gc.skipped`, `gc.shared_target`, `gc.outside_checkout`, `ownership.unresolved` and `gc.objects_undecided` findings, each with what to do.
 
 Depth: n/a — extends the shipped skill.
 Locality: extend `plugin/skills/hive/SKILL.md`, `skills/hive/{eval.json,TESTS.md}` and `README.md`. The text goes through the `author-skills` workflow, with Sonnet and Haiku evals, at build time. Neighbor impact: leave the other skill sections.
@@ -301,15 +328,15 @@ Locality: tests only. Neighbor impact: leave.
 
 | Seam | Kind | Covers |
 |---|---|---|
-| `gc::debug_map::{sniff, read}` over hand-built byte images, via a fake `Fs` that serves bytes | unit | CHECKOUTGC-2.3, 2.4, 2.7 (each bound at exact and one past) |
-| `gc::checkout::run` over a scratch target with `Recording` (fail_remove, symlink_after_stat, replace_after_lock, fail_read_at) | unit / library | CHECKOUTGC-1.1, 1.4, 1.5, 1.6, 2.1, 2.2, 2.5, 2.6, 2.8, 2.9, 4.1, 4.3, 4.4, 7.2, 7.3 |
-| `discover::{resolvers_of, failed_workspaces}` over a `TargetScan` from two checkouts sharing a `CARGO_TARGET_DIR`, one with a broken manifest | library | CHECKOUTGC-3.1, 3.2, 3.5 |
-| `Fs::read_at` on `Apfs` (offsets, EOF, symlink refused) | unit (platform) | CHECKOUTGC-2.10, 7.1 (only tables read) |
+| `gc::debug_map::read` over hand-built byte images (thin, fat, fat64, 32-bit, truncated at each table, every bound at exact and one past, archive and loose entries, a path with spaces), via a fake `Fs` that serves bytes | unit | CHECKOUTGC-2.3, 2.4, 2.7 |
+| `gc::checkout::run` through the library from `crates/cargo-hive/tests` with `Recording` (fail_remove, symlink_after_stat, replace_after_lock, fail_read_at, a stop after each position in a unit), plus inline unit tests with a local fake `Fs` | library / unit | CHECKOUTGC-1.1, 1.4, 1.5, 1.6, 2.1, 2.2, 2.5, 2.6, 2.8, 2.9, 4.1, 4.3, 4.4, 7.2, 7.3 |
+| `discover::{resolvers_of, failed_workspaces}` over a `TargetScan` from two checkouts sharing a target via `.cargo/config.toml` `build.target-dir` (hive scrubs `CARGO_TARGET_DIR`, env.rs:7-11), a main with a worktree nested under it, and one checkout with a broken manifest | library | CHECKOUTGC-3.1, 3.2, 3.5, 3.7 |
+| `Fs::read_at` on `Apfs` (offsets, EOF, past EOF) | unit (platform) | CHECKOUTGC-2.10, 7.1 (only tables read) |
 | `cargo hive gc --checkout` through the binary (`Hive::ready`, `RegistryRepo`, real `cargo test --no-run` builds, `hold_lock_child`, `backdate_all`) | integration | CHECKOUTGC-1.2, 1.3, 1.7, 1.8, 1.9, 1.10, 1.11, 1.12, 2.11, 3.3, 3.4, 3.6, 4.2 |
 | Rebuild proof: after `gc --checkout`, rerun the fixture's cargo commands and assert no unit compiled inside the window recompiles (the cargo JSON `fresh` flags) | integration | CHECKOUTGC-1.4 |
 | `tests/skill.rs` (+ eval.json / TESTS.md) | integration | CHECKOUTGC-5.1, 5.2, 5.3, 5.4 |
 | Existing suites listed under "Existing behavior guards", `tests/cli_tree.rs`, Linux `cargo check` | integration | CHECKOUTGC-6.1–6.7 |
-| klynt proof on a copy of an aged slot (scratch `HIVE_HOME`, `/private/tmp`), timed outside hive | manual proof | CHECKOUTGC-7.1; Open Questions (Example 1 figures, incremental share) |
+| klynt proof on a copy of an aged slot (scratch `HIVE_HOME`, `/private/tmp`), timed outside hive, with a cold and a warm discovery snapshot. `cargo metadata` calls are part of the 15 s, and the snapshot caches them (discover.rs:265) | manual proof | CHECKOUTGC-7.1; Open Questions (Example 1 figures, incremental share) |
 
 New seams: one, `gc::checkout::run`. The `debug_map` and `read_at` seams are the new modules' own public surface.
 
@@ -322,7 +349,7 @@ Every ID in requirements.md appears in exactly one `Satisfies:` line:
 | Ownership resolutions in discovery | 3.1, 3.2, 3.5 |
 | Ranged read | 2.10, 7.1 |
 | Debug-map reader | 2.3, 2.4, 2.7 |
-| Checkout GC run | 1.1, 1.2, 1.4, 1.5, 1.6, 1.11, 2.1, 2.2, 2.5, 2.6, 2.8, 2.9, 2.11, 4.1, 4.2, 4.3, 4.4, 7.2, 7.3 |
+| Checkout GC run | 1.1, 1.2, 1.4, 1.5, 1.6, 1.11, 2.1, 2.2, 2.5, 2.6, 2.8, 2.9, 2.11, 3.7, 4.1, 4.2, 4.3, 4.4, 7.2, 7.3 |
 | CLI mode | 1.3, 1.7, 1.8, 1.9, 1.10, 1.12, 3.3, 3.4, 3.6 |
 | Skill and README | 5.1, 5.2, 5.3, 5.4 |
 | Existing behavior guards | 6.1–6.7 |
