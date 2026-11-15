@@ -288,15 +288,15 @@ _Requirements: UPGRADE-1.1, UPGRADE-7.1_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing tests**:
+- [x] **Step 1: Write the failing tests**:
   - `store_and_seeds_write_layout_first`;
   - `a_keyless_store_db_reads_every_row_whose_entry_dir_exists` (the entry path scheme is unchanged);
   - `merge_and_eviction_commit_keep_every_other_field`.
 
   Run `cargo test -p cargo-hive-seed --lib`; expect a compile failure.
-- [ ] **Step 2: Implement** the fields, and update every literal in Files (and any further one the compiler
+- [x] **Step 2: Implement** the fields, and update every literal in Files (and any further one the compiler
   names in the seed crate). Run the task gate for `cargo-hive-seed`; expect pass.
-- [ ] **Step 3: Commit.** `feat(seed): the store index and seed record record their layout`
+- [x] **Step 3: Commit.** `feat(seed): the store index and seed record record their layout`
 
 _Requirements: UPGRADE-1.1, UPGRADE-1.5, UPGRADE-7.1_
 
