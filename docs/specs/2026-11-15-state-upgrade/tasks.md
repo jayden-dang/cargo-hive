@@ -619,23 +619,23 @@ the release steps in docs/agents/project.md:130-168.
 
 **Depends-on:** Task 9
 
-- [ ] **Step 1: Edit step 6.**
+- [x] **Step 1: Edit step 6.**
   - `HIVE_V010_BIN` comes from `/private/tmp/hive-fixture-0.1.0/target/debug/cargo-hive`, built by the Task 9
     Step 2 commands from tag `v0.1.0`.
   - The step says the build uses an isolated `CARGO_HOME` in that dir.
-- [ ] **Step 2: Add step 7, "Fixtures".**
+- [x] **Step 2: Add step 7, "Fixtures".**
   - Build the release binary from its own tag the same way, under `/private/tmp/hive-fixture-<release>/`.
   - Run `write_fixture_home` with the Task 9 Step 2 variables. `HIVE_FIXTURE_OUT` is the absolute
     `"$PWD/crates/cargo-hive/tests/fixtures/v<release>"`.
   - Run `cargo test -p cargo-hive --test upgrade`, then commit `test: v<release> state fixtures`.
   - Never delete an earlier `fixtures/v*`.
   - The step states that the generator uses capture.rs's isolated `CARGO_HOME`, never `~/.cargo`.
-- [ ] **Step 3: Add the release-notes line** to the tag step (step 4): the GitHub release notes for this release
+- [x] **Step 3: Add the release-notes line** to the tag step (step 4): the GitHub release notes for this release
   say that once it writes `registry.json`, `capabilities.json` or `snapshot.json` (snapshot is written by an
   ordinary `status` or `gc`), cargo-hive 0.1.x cannot read that file.
-- [ ] **Step 4: State the dev-build rule** in project.md's "Run locally" and verify sections, and in step 6:
+- [x] **Step 4: State the dev-build rule** in project.md's "Run locally" and verify sections, and in step 6:
   every run of a development build sets `HIVE_HOME` to a scratch dir under `/private/tmp`, never `~/.hive`.
-- [ ] **Step 5: Check.** Read the diff: steps 1–5 are unchanged except for step 4's release-notes line, and step 6
+- [x] **Step 5: Check.** Read the diff: steps 1–5 are unchanged except for step 4's release-notes line, and step 6
   differs only in the binary's source and the `HIVE_HOME` sentence.
   Commit `docs(release): build old binaries from tags and add each release's state fixtures`.
 
