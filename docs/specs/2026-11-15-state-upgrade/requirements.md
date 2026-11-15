@@ -266,4 +266,4 @@ Guards:
 - Whether this release may ship "fix or remove it by hand" (crates/state/src/lib.rs:44-49) as the only fix in
   the refusal for an unparseable registry.json, snapshot.json, plans.json, store.db or seeds.json. Telling a
   user to remove a state file may fall under ROAD-14's Ask me (ROAD-14.md:24). — owner: operator — date: before
-  `Status: Approved` — forbid-guess (cấm đoán): the build keeps today's text unchanged and builds nothing on it.
+  `Status: Approved` — forbid-guess: the build keeps today's text unchanged and builds nothing on it.
