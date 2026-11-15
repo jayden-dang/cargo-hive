@@ -580,7 +580,7 @@ the release steps in docs/agents/project.md:130-168.
 
 **Depends-on:** Task 2, Task 3, Task 4, Task 5, Task 9
 
-- [ ] **Step 1: Change the tests.**
+- [x] **Step 1: Change the tests.**
   - `read_normalized_file` strips a top-level `layout` key from JSON state files only, never from receipt lines.
   - A new helper `run_on_home_json(bin, home, args) -> (i32, Value)` returns the exit code and the parsed
     receipt.
@@ -594,11 +594,11 @@ the release steps in docs/agents/project.md:130-168.
 
   Run `HIVE_V010_BIN=/private/tmp/hive-fixture-0.1.0/target/debug/cargo-hive cargo test -p cargo-hive --test capture
   -- --ignored`; expect pass.
-- [ ] **Step 2: Strike SPLIT-4.3 whole**, `--json` clause included, as `~~**SPLIT-4.3**~~ superseded by UPGRADE-2.8
+- [x] **Step 2: Strike SPLIT-4.3 whole**, `--json` clause included, as `~~**SPLIT-4.3**~~ superseded by UPGRADE-2.8
   (docs/specs/2026-11-15-state-upgrade/requirements.md): state files and `--json` output are now compared by
   field names and values, not byte order (operator 2026-11-15)`. Keep its text struck through. Run `audit-trace`;
   expect no unknown citation.
-- [ ] **Step 3: Commit.** `test: the capture test reads 0.1.0 state after upgrade and seeds without refilling`
+- [x] **Step 3: Commit.** `test: the capture test reads 0.1.0 state after upgrade and seeds without refilling`
 
 _Requirements: UPGRADE-2.8, UPGRADE-2.9, UPGRADE-5.7_
 
