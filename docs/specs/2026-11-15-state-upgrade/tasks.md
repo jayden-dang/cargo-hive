@@ -398,14 +398,14 @@ _Requirements: UPGRADE-3.10, UPGRADE-4.1, UPGRADE-4.2, UPGRADE-4.3, UPGRADE-7.4_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing unit tests**:
+- [x] **Step 1: Write the failing unit tests**:
   - `store_lists_repo_reports_an_unparseable_store_db_as_an_error`;
   - `store_lists_repo_is_false_for_a_readable_store_without_the_repo`.
   - The existing `tests/bench.rs` nothing-to-seed and seeds-unmeasured tests stay green.
 
   Run `cargo test -p cargo-hive --lib bench::`; expect a compile failure.
-- [ ] **Step 2: Implement.** Run the task gate for `cargo-hive`; expect pass.
-- [ ] **Step 3: Commit.** `fix(bench): an unreadable store index fails the run by name`
+- [x] **Step 2: Implement.** Run the task gate for `cargo-hive`; expect pass.
+- [x] **Step 3: Commit.** `fix(bench): an unreadable store index fails the run by name`
 
 _Requirements: UPGRADE-3.6, UPGRADE-3.7, UPGRADE-7.5_
 
