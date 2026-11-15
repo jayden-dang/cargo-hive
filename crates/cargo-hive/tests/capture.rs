@@ -226,7 +226,9 @@ fn reset_work_and_home() {
 fn run_sequence(bin: &Path) -> Vec<(String, Value, i32)> {
     reset_work_and_home();
     let mut hive = capture_hive();
-    hive.config(r#"{"cache_roots": ["/private/tmp/hive-capture/home/no-cache"]}"#);
+    hive.config(
+        r#"{"cache_roots": ["/private/tmp/hive-capture/home/no-cache"], "secondary_roots": ["/private/tmp/hive-capture/work"]}"#,
+    );
 
     let steps: &[&[&str]] = &[
         &["doctor", "--json"],
@@ -304,7 +306,10 @@ fn read_normalized_file(path: &Path) -> Value {
             .collect();
         Value::Array(lines)
     } else {
-        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let mut v: Value = serde_json::from_slice(&bytes).unwrap();
+        if let Value::Object(map) = &mut v {
+            map.remove("layout");
+        }
         norm_for_compare(&v)
     }
 }
@@ -372,7 +377,7 @@ fn assert_homes_equal(a: &Path, b: &Path) {
     }
 }
 
-fn run_on_home(bin: &Path, home: &Path, args: &[&str]) -> i32 {
+fn run_on_home_json(bin: &Path, home: &Path, args: &[&str]) -> (i32, Value) {
     let mut hive = Hive::new();
     let _ = fs::remove_dir_all(&hive.home.path);
     let _ = fs::remove_dir_all(&hive.cargo_home.path);
@@ -387,9 +392,35 @@ fn run_on_home(bin: &Path, home: &Path, args: &[&str]) -> i32 {
         .unwrap();
     let output = wait_within(child, COMMAND_DEADLINE);
     let code = output.status.code().unwrap_or(-1);
+    let value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
     preserve_path(&mut hive.home);
     preserve_path(&mut hive.cargo_home);
-    code
+    (code, value)
+}
+
+fn run_on_home(bin: &Path, home: &Path, args: &[&str]) -> i32 {
+    run_on_home_json(bin, home, args).0
+}
+
+fn bin_version(bin: &Path) -> String {
+    let out = Command::new(bin)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{} --version failed: {}",
+        bin.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_else(|| panic!("no version word from {}", bin.display()))
+        .to_string()
 }
 
 #[test]
@@ -451,6 +482,42 @@ fn state_written_by_0_1_0_reads_unchanged() {
         0
     );
     assert_homes_equal(&home_a, &home_b);
+
+    let home_c = Path::new(CAPTURE).join("home-c");
+    let _ = fs::remove_dir_all(&home_c);
+    cp_cr(home, &home_c);
+    let (seed_code, seed_receipt) = run_on_home_json(
+        &new_bin,
+        &home_c,
+        &["seed", "/private/tmp/hive-capture/work/wt", "--json"],
+    );
+    assert_eq!(seed_code, 0, "seed after upgrade: {seed_receipt}");
+    assert_eq!(
+        seed_receipt["counts"]["fill_entries_added"], 0,
+        "seed after upgrade must not refill: {seed_receipt}"
+    );
+
+    let home_d = Path::new(CAPTURE).join("home-d");
+    let home_e = Path::new(CAPTURE).join("home-e");
+    let _ = fs::remove_dir_all(&home_d);
+    let _ = fs::remove_dir_all(&home_e);
+    cp_cr(home, &home_d);
+    cp_cr(home, &home_e);
+    let (new_gc_code, new_gc) = run_on_home_json(&new_bin, &home_d, &["gc", "--json"]);
+    let (old_gc_code, old_gc) = run_on_home_json(&old_bin, &home_e, &["gc", "--json"]);
+    assert_eq!(new_gc_code, 0, "new gc --json: {new_gc}");
+    assert_eq!(old_gc_code, 0, "old gc --json: {old_gc}");
+    assert_eq!(
+        normalized_when_versions_differ(&new_gc),
+        normalized_when_versions_differ(&old_gc),
+        "bare gc --json receipts differ after upgrade"
+    );
+    let new_version = bin_version(&new_bin);
+    assert_eq!(
+        new_gc["hive_version"].as_str(),
+        Some(new_version.as_str()),
+        "new gc receipt must carry the new binary version"
+    );
 }
 
 fn fixture_bin() -> PathBuf {
@@ -644,7 +711,9 @@ fn write_fixture_home() {
     ensure_golden();
     reset_work_and_home();
     let mut hive = capture_hive();
-    hive.config(r#"{"cache_roots": ["/private/tmp/hive-capture/home/no-cache"]}"#);
+    hive.config(
+        r#"{"cache_roots": ["/private/tmp/hive-capture/home/no-cache"], "secondary_roots": ["/private/tmp/hive-capture/work"]}"#,
+    );
 
     let main = Path::new(WORK).join("main");
     let main_str = main.to_str().unwrap();
