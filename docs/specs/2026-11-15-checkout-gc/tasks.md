@@ -500,15 +500,18 @@ _Requirements: CHECKOUTGC-5.1, CHECKOUTGC-5.2, CHECKOUTGC-5.3, CHECKOUTGC-5.4_
   - Then run `git -C <copy main> worktree list --porcelain` and check that every path it prints lies under `/private/tmp`. Stop if any does not. Nothing else runs before this check passes.
   - Set up a scratch `HIVE_HOME` per copy, run `cargo hive doctor`, then register the copy's main.
   - Check that `cargo metadata --no-deps --locked --offline` loads in **every** live checkout of each copy. If one fails, 3.5 blocks the run, so fix or remove that worktree in the copy first.
-- [ ] **Step 2: Measure before.**
-  - In the gc copy, record `ls -f backend/target/debug/deps | wc -l` and the edit's test build time.
-  - Every proof cargo command runs with `--offline`.
+- [ ] **Step 2: Count before** (count only, no build).
+  - In both copies, record `ls -f backend/target/debug/deps | wc -l`.
+  - Check a sample of copied `invoked.timestamp` mtimes against the originals; they must be equal.
+  - Every proof cargo command in this task runs with `--offline`.
 - [ ] **Step 3: Run** `cargo hive gc --checkout <gc copy slot> --json` in the gc copy only.
   - Record the wall time with a cold and a warm snapshot (15 s target). The time includes every `check_entry` and `remove_counted` call.
   - Record the receipt.
   - Re-run the slot's last task's cargo commands, offline, in **both** copies. A unit counts as gc-caused only if it recompiles in the gc copy and not in the control. Expect 0 such units among units compiled inside the window.
-- [ ] **Step 4: Measure after.**
-  - Record the `deps/` count and the same test build's time in the gc copy, against the control. The evidence targets are about 4.2k files and about 28 s, from the Open Questions; these are not pass/fail.
+- [ ] **Step 4: Measure the edit's test build.**
+  - After Step 3, apply the same source edit to the slot in both copies.
+  - Run the same offline test build in each. The control copy's time is "before" and the gc copy's is "after".
+  - Record the gc copy's `deps/` count. The evidence targets are about 4.2k files and about 28 s, from the Open Questions; these are not pass/fail.
   - Record the share left by `incremental/`, which is the reopen check for the auto-tier exclusion.
   - If the 15 s ceiling is exceeded, profile first. The reopen path for the read is an on-demand read of each N_OSO string at its `n_strx`, with no cache.
 - [ ] **Step 5: Write the PLAN.md record** with dated numbers. No commit (git-ignored).
