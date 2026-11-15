@@ -31,7 +31,12 @@ The only v1 mode: every checkout builds at its own path with stock Cargo, and on
 _Avoid_: unmanaged mode
 
 **Slot mode**:
-Deferred: a fixed pool of worktree paths that would allow sharing workspace-crate incremental state.
+A pool of worktrees kept at stable paths and switched between commits, so each keeps its workspace crates' incremental state warm (MILE-5; out of the non-goals since 2026-11-15).
+_Avoid_: warm pool, reusable worktree
+
+**Debug object**:
+An `*.rcgu.o` file in a profile dir's `deps/` that rustc leaves for a linked binary's debug map under macOS's unpacked split-debuginfo. It is *unreferenced* when no linked binary in that profile dir names it; deleting it rebuilds nothing.
+_Avoid_: object file, stale .o
 
 **Platform crate**:
 The one member crate allowed to touch the OS: `unsafe`, `libc`, `cfg(target_os)` outside tests, and child-process spawning. Every other crate reaches the OS only through it.

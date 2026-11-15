@@ -18,10 +18,9 @@ from that checkout only.
 `gc --plan` and `apply` behave as they do now.
 **Off limits:** hooks, wrappers, background processes, Cargo config; deleting anything outside
 the named checkout; Linux.
-**Decided:** an explicit command, ARCH-1 stays; it is proven on klynt first.
+**Decided:** an explicit command, ARCH-1 stays; it is proven on klynt first. One command deletes directly, with no plan step; it may target any registered checkout, secondary or protected. Dead units keep today's whole-day window; a tighter window waits for #20 and a measurement (2026-11-15).
 **Delegated:** how referenced debug objects are found and cached; the `deps/` size at which
 the skill calls gc.
 **Ask me:** anything that needs a hook, daemon or wrapper; deleting a file a live binary
-references; how units are judged dead without a whole-day window (a handoff-anchored window is
-unmeasured and would reverse the no-per-run-window rule).
+references.
 **UI:** none
