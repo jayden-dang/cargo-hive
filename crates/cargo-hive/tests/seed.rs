@@ -19,6 +19,7 @@ use common::cargo_fixture::backdate_all;
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
 use common::registry_fixture::{RegistryRepo, cargo_json};
+use common::store_fixture::seeded_store;
 use common::{CargoHomeGuard, Hive, env_lock, init_repo, register, wait_within};
 
 #[test]
@@ -1054,6 +1055,152 @@ fn a_seed_that_cloned_nothing_writes_no_record() {
     assert_eq!(receipt["counts"]["clone_units_cloned"], 0, "{receipt}");
     let path = hive.home.path.join(cargo_hive_seed::record::SEEDS_FILE);
     assert!(!path.exists(), "{}", path.display());
+}
+
+#[test]
+fn a_seed_with_an_unparseable_record_file_clones_reports_record_failed_and_exits_0() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let path = hive.home.path.join(cargo_hive_seed::record::SEEDS_FILE);
+    fs::write(&path, b"{not json").unwrap();
+    let before = fs::read(&path).unwrap();
+    let lane = repo.worktree("unparseable-record");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
+    assert!(
+        receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0,
+        "{receipt}"
+    );
+    let failed: Vec<_> = receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["kind"] == "record.failed")
+        .collect();
+    assert_eq!(failed.len(), 1, "{receipt}");
+    let detail = failed[0]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(&path.display().to_string()),
+        "{detail}; path={}",
+        path.display()
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[derive(Clone, Copy)]
+enum FileDamage {
+    Unparseable,
+    LayoutTwo,
+}
+
+fn damaged_state_bytes(damage: FileDamage, existing: Option<&[u8]>, empty_shape: &str) -> Vec<u8> {
+    match damage {
+        FileDamage::Unparseable => b"{not json".to_vec(),
+        FileDamage::LayoutTwo => {
+            let base = match existing {
+                Some(bytes) => bytes.to_vec(),
+                None => empty_shape.as_bytes().to_vec(),
+            };
+            let mut value: serde_json::Value = serde_json::from_slice(&base)
+                .unwrap_or_else(|_| serde_json::from_str(empty_shape).unwrap());
+            value
+                .as_object_mut()
+                .expect("state file is an object")
+                .insert("layout".into(), serde_json::Value::from(2));
+            serde_json::to_vec(&value).unwrap()
+        }
+    }
+}
+
+#[test]
+fn seed_stops_on_each_damaged_seeds_or_store_file_and_leaves_it_untouched() {
+    let seeds_recovery =
+        "remove it; seed counts are lost, and the next `cargo hive seed` writes it again";
+    let store_recovery = "remove it, build a checkout of the repository, then run `cargo hive seed`; store entries are kept and adopted";
+    for (case, damage) in [FileDamage::Unparseable, FileDamage::LayoutTwo]
+        .into_iter()
+        .enumerate()
+    {
+        {
+            let hive = Hive::ready();
+            let repo = seeded_store(&hive);
+            let path = hive.home.path.join(cargo_hive_seed::record::SEEDS_FILE);
+            let existing = fs::read(&path).ok();
+            let damaged = damaged_state_bytes(damage, existing.as_deref(), r#"{"targets":[]}"#);
+            fs::write(&path, &damaged).unwrap();
+            let lane = repo.worktree(&format!("seeds-{case}"));
+            let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+            assert_eq!(out.status.code(), Some(0), "{receipt}");
+            assert!(
+                receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0,
+                "{receipt}"
+            );
+            let failed: Vec<_> = receipt["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|finding| finding["kind"] == "record.failed")
+                .collect();
+            assert_eq!(failed.len(), 1, "{receipt}");
+            let detail = failed[0]["detail"].as_str().unwrap();
+            assert!(
+                detail.contains(&path.display().to_string()),
+                "{detail}; path={}",
+                path.display()
+            );
+            match damage {
+                FileDamage::Unparseable => assert!(
+                    detail.contains(seeds_recovery),
+                    "missing seeds recovery: {detail}"
+                ),
+                FileDamage::LayoutTwo => assert!(
+                    detail.contains("records layout 2")
+                        && detail.contains("cargo install cargo-hive"),
+                    "missing newer-layout text: {detail}"
+                ),
+            }
+            assert_eq!(fs::read(&path).unwrap(), damaged);
+        }
+        {
+            let hive = Hive::ready();
+            let repo = seeded_store(&hive);
+            let path = hive.home.path.join(cargo_hive_seed::store::STORE_FILE);
+            let existing = fs::read(&path).ok();
+            let damaged = damaged_state_bytes(
+                damage,
+                existing.as_deref(),
+                r#"{"units":[],"toolchains":[],"sources":[]}"#,
+            );
+            fs::write(&path, &damaged).unwrap();
+            let lane = repo.worktree(&format!("store-{case}"));
+            let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+            assert_eq!(out.status.code(), Some(1), "{receipt}");
+            let detail = receipt["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|finding| finding["kind"] == "error")
+                .expect("error finding")["detail"]
+                .as_str()
+                .unwrap();
+            assert!(
+                detail.contains(path.to_str().unwrap()),
+                "detail missing store.db path: {detail}"
+            );
+            match damage {
+                FileDamage::Unparseable => assert!(
+                    detail.contains(store_recovery),
+                    "missing store recovery: {detail}"
+                ),
+                FileDamage::LayoutTwo => assert!(
+                    detail.contains("records layout 2")
+                        && detail.contains("cargo install cargo-hive"),
+                    "missing newer-layout text: {detail}"
+                ),
+            }
+            assert_eq!(fs::read(&path).unwrap(), damaged);
+        }
+    }
 }
 
 #[test]

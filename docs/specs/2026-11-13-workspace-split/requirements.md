@@ -126,10 +126,12 @@ Labels used below:
   `registry.json`, `snapshot.json`, `capabilities.json` (which also holds the toolchain data), `config.json`,
   `plans.json`, `store.db`, `seeds.json`, `receipts/` and the `store/` unit directory, and use the `.lock` and
   `store.lock` lock files (src/state.rs:156, :188, :208), without refusing, resetting or rewriting any of them.
-- **SPLIT-4.3** (guard) WHEN hive writes any state file or prints any `--json` shape from the same inputs as
-  0.1.0, THE SYSTEM SHALL CONTINUE TO produce bytes equal to 0.1.0's (field names, order, number and string
-  forms) apart from the `hive_version` value and values derived from the clock, checked against output captured
-  from 0.1.0.
+- ~~**SPLIT-4.3**~~ superseded by UPGRADE-2.8 (docs/specs/2026-11-15-state-upgrade/requirements.md): state files
+  and `--json` output are now compared by field names and values, not byte order (operator 2026-11-15) — was:
+  ~~(guard) WHEN hive writes any state file or prints any `--json` shape from the same inputs as 0.1.0, THE
+  SYSTEM SHALL CONTINUE TO produce bytes equal to 0.1.0's (field names, order, number and string forms) apart
+  from the `hive_version` value and values derived from the clock, checked against output captured from
+  0.1.0.~~
 - **SPLIT-4.4** THE SYSTEM SHALL represent unit indexes and unit hashes as distinct newtypes, a unit's kind as
   an enum, each profile's fingerprint graph edges as a compressed adjacency (CSR) in place of
   `Vec<(usize, usize)>`, its hash index keyed by the unit-hash newtype in place of `HashMap<&str, Vec<usize>>`

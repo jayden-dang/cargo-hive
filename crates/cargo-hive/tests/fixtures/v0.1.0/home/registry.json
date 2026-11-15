@@ -1,0 +1,10 @@
+{
+  "repos": [
+    {
+      "main": "/private/tmp/hive-capture/work/main",
+      "root_commits": [
+        "afa1ad7d7e459a288ae5587ccb8ca9b09113bad2"
+      ]
+    }
+  ]
+}

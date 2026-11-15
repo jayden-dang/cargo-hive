@@ -1,0 +1,201 @@
+{
+  "units": [
+    {
+      "toolchain_value": 11722972603611519644,
+      "name_meta": "depcrate-0a9e38a1493f4d40",
+      "fingerprint_hash": "a6201b154bef425b",
+      "kind": "run-build-script",
+      "rel_profile": "debug",
+      "size": 20480,
+      "filled_at": 1794719015,
+      "last_live_at": 1794719015,
+      "repos": [
+        "/private/tmp/hive-capture/work/main"
+      ],
+      "registry_deps": [
+        "cf75b80f5fc65f27"
+      ],
+      "variant": 0
+    },
+    {
+      "toolchain_value": 11722972603611519644,
+      "name_meta": "depcrate-39f1739149608fb6",
+      "fingerprint_hash": "cf75b80f5fc65f27",
+      "kind": "build-script",
+      "rel_profile": "debug",
+      "size": 995328,
+      "filled_at": 1794719015,
+      "last_live_at": 1794719015,
+      "repos": [
+        "/private/tmp/hive-capture/work/main"
+      ],
+      "registry_deps": [],
+      "variant": 0
+    },
+    {
+      "toolchain_value": 11722972603611519644,
+      "name_meta": "depcrate-76d2cd855541a6ee",
+      "fingerprint_hash": "3d1f9406008735c4",
+      "kind": "lib",
+      "rel_profile": "debug",
+      "size": 32768,
+      "filled_at": 1794719015,
+      "last_live_at": 1794719015,
+      "repos": [
+        "/private/tmp/hive-capture/work/main"
+      ],
+      "registry_deps": [
+        "8c40823fcb8f6221",
+        "a6201b154bef425b"
+      ],
+      "variant": 0
+    },
+    {
+      "toolchain_value": 11722972603611519644,
+      "name_meta": "leafcrate-14dd3a60c6bb7b36",
+      "fingerprint_hash": "8c40823fcb8f6221",
+      "kind": "lib",
+      "rel_profile": "debug",
+      "size": 32768,
+      "filled_at": 1794719015,
+      "last_live_at": 1794719015,
+      "repos": [
+        "/private/tmp/hive-capture/work/main"
+      ],
+      "registry_deps": [],
+      "variant": 0
+    },
+    {
+      "toolchain_value": 11722972603611519644,
+      "name_meta": "depcrate-0a9e38a1493f4d40",
+      "fingerprint_hash": "9e737f938011773c",
+      "kind": "run-build-script",
+      "rel_profile": "debug",
+      "size": 20480,
+      "filled_at": 1794719015,
+      "last_live_at": 1794719015,
+      "repos": [
+        "/private/tmp/hive-capture/work/main"
+      ],
+      "registry_deps": [
+        "5e447dd6958ac1c6"
+      ],
+      "variant": 0
+    },
+    {
+      "toolchain_value": 11722972603611519644,
+      "name_meta": "depcrate-39f1739149608fb6",
+      "fingerprint_hash": "5e447dd6958ac1c6",
+      "kind": "build-script",
+      "rel_profile": "debug",
+      "size": 995328,
+      "filled_at": 1794719015,
+      "last_live_at": 1794719015,
+      "repos": [
+        "/private/tmp/hive-capture/work/main"
+      ],
+      "registry_deps": [],
+      "variant": 0
+    },
+    {
+      "toolchain_value": 11722972603611519644,
+      "name_meta": "depcrate-76d2cd855541a6ee",
+      "fingerprint_hash": "db4f262368b71c67",
+      "kind": "lib",
+      "rel_profile": "debug",
+      "size": 32768,
+      "filled_at": 1794719015,
+      "last_live_at": 1794719015,
+      "repos": [
+        "/private/tmp/hive-capture/work/main"
+      ],
+      "registry_deps": [
+        "e1625de6d1aa41b8",
+        "9e737f938011773c"
+      ],
+      "variant": 0
+    },
+    {
+      "toolchain_value": 11722972603611519644,
+      "name_meta": "leafcrate-14dd3a60c6bb7b36",
+      "fingerprint_hash": "e1625de6d1aa41b8",
+      "kind": "lib",
+      "rel_profile": "debug",
+      "size": 32768,
+      "filled_at": 1794719015,
+      "last_live_at": 1794719015,
+      "repos": [
+        "/private/tmp/hive-capture/work/main"
+      ],
+      "registry_deps": [],
+      "variant": 0
+    }
+  ],
+  "toolchains": {
+    "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: aarch64-apple-darwin\nrelease: 1.97.1\nLLVM version: 22.1.6\n": 11722972603611519644
+  },
+  "sources": {
+    "/private/tmp/hive-capture/work/main/target": {
+      "repo": "/private/tmp/hive-capture/work/main",
+      "checkout": "/private/tmp/hive-capture/work/main",
+      "newest_at": 1794718872039022761,
+      "units": [
+        {
+          "toolchain_value": 11722972603611519644,
+          "name_meta": "depcrate-0a9e38a1493f4d40",
+          "fingerprint_hash": "a6201b154bef425b",
+          "variant": 0
+        },
+        {
+          "toolchain_value": 11722972603611519644,
+          "name_meta": "depcrate-39f1739149608fb6",
+          "fingerprint_hash": "cf75b80f5fc65f27",
+          "variant": 0
+        },
+        {
+          "toolchain_value": 11722972603611519644,
+          "name_meta": "depcrate-76d2cd855541a6ee",
+          "fingerprint_hash": "3d1f9406008735c4",
+          "variant": 0
+        },
+        {
+          "toolchain_value": 11722972603611519644,
+          "name_meta": "leafcrate-14dd3a60c6bb7b36",
+          "fingerprint_hash": "8c40823fcb8f6221",
+          "variant": 0
+        }
+      ]
+    },
+    "/private/tmp/hive-capture/work/wt/target": {
+      "repo": "/private/tmp/hive-capture/work/main",
+      "checkout": "/private/tmp/hive-capture/work/wt",
+      "newest_at": 1794556363171628292,
+      "units": [
+        {
+          "toolchain_value": 11722972603611519644,
+          "name_meta": "depcrate-0a9e38a1493f4d40",
+          "fingerprint_hash": "9e737f938011773c",
+          "variant": 0
+        },
+        {
+          "toolchain_value": 11722972603611519644,
+          "name_meta": "depcrate-39f1739149608fb6",
+          "fingerprint_hash": "5e447dd6958ac1c6",
+          "variant": 0
+        },
+        {
+          "toolchain_value": 11722972603611519644,
+          "name_meta": "depcrate-76d2cd855541a6ee",
+          "fingerprint_hash": "db4f262368b71c67",
+          "variant": 0
+        },
+        {
+          "toolchain_value": 11722972603611519644,
+          "name_meta": "leafcrate-14dd3a60c6bb7b36",
+          "fingerprint_hash": "e1625de6d1aa41b8",
+          "variant": 0
+        }
+      ]
+    }
+  }
+}

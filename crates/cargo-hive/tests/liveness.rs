@@ -255,7 +255,11 @@ fn status_writes_a_snapshot_with_only_its_two_fields() {
     let keys: BTreeSet<_> = snapshot.as_object().unwrap().keys().cloned().collect();
     assert_eq!(
         keys,
-        BTreeSet::from(["metadata".to_string(), "unsupported_profiles".to_string()])
+        BTreeSet::from([
+            "layout".to_string(),
+            "metadata".to_string(),
+            "unsupported_profiles".to_string(),
+        ])
     );
 }
 

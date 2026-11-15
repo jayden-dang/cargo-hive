@@ -6,8 +6,8 @@ use crate::metadata::{self, Resolved};
 use crate::registry::Repo;
 use cargo_hive_core::classify::{CheckoutFacts, CheckoutKind, Class, classify};
 use cargo_hive_core::fingerprint::{self, Format};
-use cargo_hive_core::target::{self, Layout, Owner, TargetDir};
-use cargo_hive_state::Config;
+use cargo_hive_core::target::{self, Layout as TargetLayout, Owner, TargetDir};
+use cargo_hive_state::{Config, Layout};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -263,6 +263,8 @@ const TARGET_SKIP: [&str; 2] = ["node_modules", ".git"];
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
+    #[serde(default = "Layout::absent")]
+    pub layout: Layout,
     /// `cargo metadata` results by workspace dir; valid while every stamped file keeps its mtime.
     pub metadata: BTreeMap<PathBuf, CachedMetadata>,
     /// Profile dirs last seen with an unsupported fingerprint format, and why.
@@ -365,7 +367,7 @@ pub fn workspace_dirs(checkout: &Path, faults: &mut Vec<WalkFault>) -> Vec<(usiz
     out
 }
 
-type Found = (PathBuf, Result<Vec<(PathBuf, Layout)>, String>);
+type Found = (PathBuf, Result<Vec<(PathBuf, TargetLayout)>, String>);
 
 /// Cargo target dirs at most `depth` levels below `root`. A found target is not entered,
 /// and neither is `node_modules` or `.git`.
@@ -743,6 +745,7 @@ pub fn merge_snapshot(
         unsupported_profiles.remove(path);
     }
     Snapshot {
+        layout: Layout::NEWEST,
         metadata,
         unsupported_profiles,
     }
@@ -776,6 +779,7 @@ mod tests {
     #[test]
     fn a_dominating_disk_stamp_survives_and_a_cleared_profile_stays_gone() {
         let incoming = Snapshot {
+            layout: Layout::NEWEST,
             metadata: BTreeMap::from([
                 (PathBuf::from("/w/shared"), cached("/w/shared", Some(1))),
                 (PathBuf::from("/w/incoming"), cached("/w/incoming", Some(4))),
@@ -783,6 +787,7 @@ mod tests {
             unsupported_profiles: BTreeMap::from([(PathBuf::from("/p/shared"), "incoming".into())]),
         };
         let disk = Snapshot {
+            layout: Layout::NEWEST,
             metadata: BTreeMap::from([
                 (PathBuf::from("/w/shared"), cached("/w/shared", Some(9))),
                 (PathBuf::from("/w/disk"), cached("/w/disk", Some(2))),
@@ -831,6 +836,7 @@ mod tests {
         let lock = PathBuf::from("/w/a/Cargo.lock");
         let toml = PathBuf::from("/w/a/Cargo.toml");
         let incoming = Snapshot {
+            layout: Layout::NEWEST,
             metadata: BTreeMap::from([(
                 PathBuf::from("/w/a"),
                 cached_with(
@@ -841,6 +847,7 @@ mod tests {
             unsupported_profiles: BTreeMap::new(),
         };
         let disk = Snapshot {
+            layout: Layout::NEWEST,
             metadata: BTreeMap::from([(
                 PathBuf::from("/w/a"),
                 cached_with(
@@ -858,10 +865,12 @@ mod tests {
     #[test]
     fn equal_stamps_keep_the_disk_entry() {
         let incoming = Snapshot {
+            layout: Layout::NEWEST,
             metadata: BTreeMap::from([(PathBuf::from("/w/a"), cached("/w/a", Some(3)))]),
             unsupported_profiles: BTreeMap::new(),
         };
         let disk = Snapshot {
+            layout: Layout::NEWEST,
             metadata: BTreeMap::from([(
                 PathBuf::from("/w/a"),
                 CachedMetadata {
@@ -892,6 +901,7 @@ mod tests {
         let lock = PathBuf::from("/w/a/Cargo.lock");
         let toml = PathBuf::from("/w/a/Cargo.toml");
         let incoming = Snapshot {
+            layout: Layout::NEWEST,
             metadata: BTreeMap::from([(
                 PathBuf::from("/w/a"),
                 cached_with(
@@ -902,6 +912,7 @@ mod tests {
             unsupported_profiles: BTreeMap::new(),
         };
         let disk = Snapshot {
+            layout: Layout::NEWEST,
             metadata: BTreeMap::from([(
                 PathBuf::from("/w/a"),
                 cached_with(
@@ -976,5 +987,53 @@ mod tests {
         assert!(scope.contains(&owned_by_listed));
         assert!(scope.contains(&inside_but_owned_elsewhere));
         assert!(!scope.contains(&orphan_under_cache));
+    }
+
+    #[test]
+    fn writes_layout_as_the_first_key() {
+        let cases = [
+            Snapshot::default(),
+            Snapshot {
+                layout: Layout::NEWEST,
+                metadata: BTreeMap::from([(PathBuf::from("/w/a"), cached("/w/a", Some(1)))]),
+                unsupported_profiles: BTreeMap::new(),
+            },
+        ];
+        for value in cases {
+            let pretty = serde_json::to_string_pretty(&value).unwrap();
+            assert!(pretty.starts_with("{\n  \"layout\": 1,"), "{pretty}");
+        }
+    }
+
+    #[test]
+    fn a_keyless_0_1_0_file_reads_and_its_first_write_only_adds_the_layout_line() {
+        // Hand-copied 0.1.0 snapshot.json shape (empty maps).
+        let body = "{\n  \"metadata\": {},\n  \"unsupported_profiles\": {}\n}";
+        let parsed: Snapshot = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.layout, Layout::absent());
+        assert!(parsed.metadata.is_empty());
+        assert!(parsed.unsupported_profiles.is_empty());
+        let written = serde_json::to_string_pretty(&parsed).unwrap();
+        assert_eq!(
+            written,
+            "{\n  \"layout\": 1,\n  \"metadata\": {},\n  \"unsupported_profiles\": {}\n}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_other_than_layout_is_still_refused() {
+        let cases = [
+            r#"{"mystery":true,"metadata":{},"unsupported_profiles":{}}"#,
+            r#"{"layout":1,"mystery":true,"metadata":{},"unsupported_profiles":{}}"#,
+        ];
+        for body in cases {
+            assert!(serde_json::from_str::<Snapshot>(body).is_err(), "{body}");
+        }
+        assert!(
+            serde_json::from_str::<Snapshot>(
+                r#"{"layout":1,"metadata":{},"unsupported_profiles":{}}"#
+            )
+            .is_ok()
+        );
     }
 }

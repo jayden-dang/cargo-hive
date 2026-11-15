@@ -16,7 +16,7 @@ use cargo_hive_core::caps::CRATE_DIR_CAP;
 use cargo_hive_core::fingerprint;
 use cargo_hive_core::size::{MAX_DEPTH, SizeError, allocated_bytes};
 use cargo_hive_platform::{EntryKind, Fs};
-use cargo_hive_state::{State, StateError};
+use cargo_hive_state::{Layout, State, StateError};
 
 pub const STORE_FILE: &str = "store.db";
 pub const MAX_STORE_BYTES: u64 = 32 * 1024 * 1024;
@@ -70,6 +70,8 @@ pub struct SourceRecord {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreFile {
+    #[serde(default = "Layout::absent")]
+    pub layout: Layout,
     pub units: Vec<Row>,
     pub toolchains: BTreeMap<String, u64>,
     /// Keyed by the source target's path.
@@ -1317,6 +1319,7 @@ mod tests {
         write_store(
             &state,
             &StoreFile {
+                layout: Layout::NEWEST,
                 units: vec![row_for(&with_row, 10), row_for(&other_value, 11)],
                 toolchains,
                 sources: Default::default(),
@@ -1359,6 +1362,7 @@ mod tests {
         write_store(
             &state,
             &StoreFile {
+                layout: Layout::NEWEST,
                 units: vec![row_for(&drop_key, 100), row_for(&keep_key, 100)],
                 toolchains: BTreeMap::from([("rustc\n".into(), 3u64)]),
                 sources: Default::default(),
@@ -1397,6 +1401,7 @@ mod tests {
         write_store(
             &state,
             &StoreFile {
+                layout: Layout::NEWEST,
                 units: vec![row_for(&key, 200)],
                 toolchains: BTreeMap::new(),
                 sources: Default::default(),
@@ -1427,6 +1432,7 @@ mod tests {
         write_store(
             &state,
             &StoreFile {
+                layout: Layout::NEWEST,
                 units: vec![row_for(&key, 50)],
                 toolchains: BTreeMap::new(),
                 sources: Default::default(),
@@ -1461,6 +1467,7 @@ mod tests {
         write_store(
             &state,
             &StoreFile {
+                layout: Layout::NEWEST,
                 units: vec![
                     row_for(&alone, 10),
                     row_for(&sibling_drop, 10),
@@ -1503,6 +1510,7 @@ mod tests {
         write_store(
             &state,
             &StoreFile {
+                layout: Layout::NEWEST,
                 units: vec![row_for(&key, 10)],
                 toolchains: BTreeMap::new(),
                 sources: Default::default(),
@@ -1547,6 +1555,7 @@ mod tests {
         write_store(
             &state,
             &StoreFile {
+                layout: Layout::NEWEST,
                 units: vec![
                     row_for(&first, 10),
                     row_for(&second, 10),
@@ -1592,6 +1601,7 @@ mod tests {
         write_store(
             &state,
             &StoreFile {
+                layout: Layout::NEWEST,
                 units: vec![row_for(&key, 10)],
                 toolchains: BTreeMap::new(),
                 sources: Default::default(),
@@ -1616,6 +1626,261 @@ mod tests {
         );
         assert!(entry_path(&state, &key).is_dir());
         assert_eq!(read(&state).unwrap().units.len(), 1);
+        finish(&state);
+    }
+
+    #[test]
+    fn store_and_seeds_write_layout_first() {
+        use crate::record::{self, SeedRecord, SeededUnit, SeedsFile};
+        use cargo_hive_state::Layout;
+
+        let (state, _) = scratch_state("layout-first");
+        let store = StoreFile {
+            layout: Layout::NEWEST,
+            units: Vec::new(),
+            toolchains: BTreeMap::new(),
+            sources: BTreeMap::new(),
+        };
+        write_store(&state, &store);
+        let store_bytes = std::fs::read(state.root().join(STORE_FILE)).unwrap();
+        assert!(
+            store_bytes.starts_with(
+                br#"{
+  "layout": 1,
+"#
+            ),
+            "{}",
+            String::from_utf8_lossy(&store_bytes)
+        );
+
+        let seeds = SeedsFile {
+            layout: Layout::NEWEST,
+            targets: BTreeMap::from([(
+                PathBuf::from("/private/tmp/hive-it-seed-target"),
+                SeedRecord {
+                    identity: (1, 2),
+                    written_at: 3,
+                    units: vec![SeededUnit {
+                        rel_profile: PathBuf::from("debug"),
+                        dir_name: "u".into(),
+                        stamp: None,
+                        has_build: false,
+                        deps_files: 0,
+                    }],
+                },
+            )]),
+        };
+        state
+            .locked(|tx| tx.write_bounded(record::SEEDS_FILE, &seeds, record::MAX_SEEDS_BYTES))
+            .unwrap();
+        let seeds_bytes = std::fs::read(state.root().join(record::SEEDS_FILE)).unwrap();
+        assert!(
+            seeds_bytes.starts_with(
+                br#"{
+  "layout": 1,
+"#
+            ),
+            "{}",
+            String::from_utf8_lossy(&seeds_bytes)
+        );
+        finish(&state);
+    }
+
+    #[test]
+    fn a_keyless_store_db_reads_every_row_whose_entry_dir_exists() {
+        use cargo_hive_state::Layout;
+
+        let (state, _) = scratch_state("keyless-store");
+        let present = store_key(7, "keep", "0123456789abcdef");
+        let mut variant = store_key(7, "keep", "aaaaaaaaaaaaaaaa");
+        variant.variant = 1;
+        plant_entry(&state, &present);
+        plant_entry(&state, &variant);
+        assert_eq!(
+            entry_path(&state, &present),
+            store_dir(&state).join("7").join("keep-0123456789abcdef")
+        );
+        assert_eq!(
+            entry_path(&state, &variant),
+            store_dir(&state).join("7").join("keep-aaaaaaaaaaaaaaaa~1")
+        );
+
+        let body = r#"{
+  "units": [
+    {
+      "toolchain_value": 7,
+      "name_meta": "keep",
+      "fingerprint_hash": "0123456789abcdef",
+      "kind": "lib",
+      "rel_profile": "debug",
+      "size": 1,
+      "filled_at": 10,
+      "last_live_at": 10,
+      "repos": [],
+      "registry_deps": [],
+      "variant": 0
+    },
+    {
+      "toolchain_value": 7,
+      "name_meta": "gone",
+      "fingerprint_hash": "fedcba9876543210",
+      "kind": "lib",
+      "rel_profile": "debug",
+      "size": 1,
+      "filled_at": 11,
+      "last_live_at": 11,
+      "repos": [],
+      "registry_deps": [],
+      "variant": 0
+    },
+    {
+      "toolchain_value": 7,
+      "name_meta": "keep",
+      "fingerprint_hash": "aaaaaaaaaaaaaaaa",
+      "kind": "lib",
+      "rel_profile": "debug",
+      "size": 1,
+      "filled_at": 12,
+      "last_live_at": 12,
+      "repos": [],
+      "registry_deps": [],
+      "variant": 1
+    }
+  ],
+  "toolchains": {
+    "rustc 1.97.0\n": 7
+  },
+  "sources": {}
+}
+"#;
+        std::fs::write(state.root().join(STORE_FILE), body).unwrap();
+
+        let got = read(&state).unwrap();
+        assert_eq!(got.layout, Layout::absent());
+        assert_eq!(got.units.len(), 2);
+        assert!(got.units.iter().any(|r| {
+            r.name_meta == "keep" && r.fingerprint_hash == "0123456789abcdef" && r.variant == 0
+        }));
+        assert!(got.units.iter().any(|r| {
+            r.name_meta == "keep" && r.fingerprint_hash == "aaaaaaaaaaaaaaaa" && r.variant == 1
+        }));
+        assert!(!got.units.iter().any(|r| r.name_meta == "gone"));
+        assert_eq!(got.toolchains.get("rustc 1.97.0\n"), Some(&7));
+        finish(&state);
+    }
+
+    #[test]
+    fn merge_and_eviction_commit_keep_every_other_field() {
+        use cargo_hive_state::Layout;
+
+        let (state, _) = scratch_state("merge-evict-fields");
+        let keep = store_key(3, "live", "2222222222222222");
+        let drop = store_key(3, "old", "1111111111111111");
+        plant_entry(&state, &keep);
+        plant_entry(&state, &drop);
+
+        let source_target = state.root().join("src-target");
+        std::fs::create_dir_all(&source_target).unwrap();
+        let source = SourceRecord {
+            repo: PathBuf::from("/repos/a"),
+            checkout: PathBuf::from("/repos/a/checkout"),
+            newest_at: 40,
+            units: vec![SourceUnitRef {
+                toolchain_value: keep.toolchain_value,
+                name_meta: keep.name_meta.clone(),
+                fingerprint_hash: keep.fingerprint_hash.clone(),
+                variant: 0,
+            }],
+        };
+        write_store(
+            &state,
+            &StoreFile {
+                layout: Layout::NEWEST,
+                units: vec![row_for(&keep, 100), row_for(&drop, 100)],
+                toolchains: BTreeMap::from([("rustc\n".into(), 3u64)]),
+                sources: BTreeMap::from([(source_target.clone(), source.clone())]),
+            },
+        );
+
+        let mut again = row_for(&keep, 100);
+        again.repos = vec![PathBuf::from("/repos/b")];
+        again.last_live_at = 250;
+        again.filled_at = 1;
+        again.size = 9;
+        merge_with_source(
+            &state,
+            vec![again],
+            BTreeMap::from([("rustc\n".into(), 3u64), ("extra\n".into(), 9u64)]),
+            Some((
+                source_target.clone(),
+                SourceRecord {
+                    newest_at: 55,
+                    ..source.clone()
+                },
+            )),
+            &|| false,
+        )
+        .unwrap();
+
+        let after_merge = read(&state).unwrap();
+        assert_eq!(after_merge.layout, Layout::NEWEST);
+        assert_eq!(after_merge.units.len(), 2);
+        let live = after_merge
+            .units
+            .iter()
+            .find(|r| r.name_meta == "live")
+            .unwrap();
+        assert_eq!(live.repos, vec![PathBuf::from("/repos/b")]);
+        assert_eq!(live.last_live_at, 250);
+        assert_eq!(live.filled_at, 100);
+        assert_eq!(live.size, 1);
+        assert_eq!(live.kind, "lib");
+        assert_eq!(live.rel_profile, PathBuf::from("debug"));
+        assert_eq!(live.registry_deps, Vec::<String>::new());
+        assert_eq!(live.variant, 0);
+        assert_eq!(after_merge.toolchains.get("rustc\n"), Some(&3));
+        assert_eq!(after_merge.toolchains.get("extra\n"), Some(&9));
+        assert_eq!(
+            after_merge.sources.get(&source_target).map(|s| s.newest_at),
+            Some(55)
+        );
+        assert_eq!(
+            after_merge.sources.get(&source_target).map(|s| &s.repo),
+            Some(&PathBuf::from("/repos/a"))
+        );
+
+        let seq = AtomicUsize::new(0);
+        let plan = CommitPlan {
+            candidates: vec![(drop.clone(), Some(100))],
+            refreshed: vec![keep.clone()],
+            now: 500,
+        };
+        commit_eviction(&state, &plan, &|| false, rename_with_out(&state, &seq)).unwrap();
+
+        let got = read(&state).unwrap();
+        assert_eq!(got.layout, Layout::NEWEST);
+        assert_eq!(got.units.len(), 1);
+        assert_eq!(got.units[0].name_meta, "live");
+        assert_eq!(got.units[0].repos, vec![PathBuf::from("/repos/b")]);
+        assert_eq!(got.units[0].last_live_at, 500);
+        assert_eq!(got.units[0].filled_at, 100);
+        assert_eq!(got.units[0].size, 1);
+        assert_eq!(got.units[0].kind, "lib");
+        assert_eq!(got.units[0].rel_profile, PathBuf::from("debug"));
+        assert_eq!(got.units[0].registry_deps, Vec::<String>::new());
+        assert_eq!(got.units[0].variant, 0);
+        assert_eq!(got.toolchains.get("rustc\n"), Some(&3));
+        assert!(!got.toolchains.contains_key("extra\n"));
+        assert_eq!(
+            got.sources.get(&source_target).map(|s| s.newest_at),
+            Some(55)
+        );
+        assert_eq!(
+            got.sources.get(&source_target).map(|s| &s.repo),
+            Some(&PathBuf::from("/repos/a"))
+        );
+        assert!(!entry_path(&state, &drop).exists());
+        assert!(entry_path(&state, &keep).is_dir());
         finish(&state);
     }
 }

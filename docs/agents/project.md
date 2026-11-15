@@ -74,7 +74,8 @@ With the roster above the band is **Solo**.
 
 ## verify commands
 
-Run in this order; all must pass before any completion claim.
+Run in this order; all must pass before any completion claim. Every run of a development build
+sets `HIVE_HOME` to a scratch dir under `/private/tmp`, never `~/.hive`.
 
 | Check | Command |
 |---|---|
@@ -119,8 +120,9 @@ How to start the app for user-facing acceptance checks (read by `validate-featur
 
 | Surface | Start command | Ready signal |
 |---|---|---|
-| CLI | `cargo build`, then run `target/debug/cargo-hive <sub> --json` with `HIVE_HOME` set to a scratch dir under `/private/tmp` | `target/debug/cargo-hive --version` prints `cargo-hive 0.1.1` |
+| CLI | `cargo build`, then run `target/debug/cargo-hive <sub> --json` with `HIVE_HOME` set to a scratch dir under `/private/tmp`, never `~/.hive` | `target/debug/cargo-hive --version` prints `cargo-hive 0.1.1` |
 
+Every run of a development build sets `HIVE_HOME` to a scratch dir under `/private/tmp`, never `~/.hive`.
 There is no server and no web UI.
 
 ## Remote environments
@@ -146,7 +148,7 @@ None — not deployed. hive is a local CLI with no hosted component.
    ```
 
    Each pair must print `GREEN`. The verify build must never use the repo's own `target/` (FIX-1).
-4. Tag and push the release commit from step 2: `git tag v0.1.1`, `git push origin main v0.1.1`.
+4. Tag and push the release commit from step 2: `git tag v0.1.1`, `git push origin main v0.1.1`. The GitHub release notes for this release say that once it writes `registry.json`, `capabilities.json` or `snapshot.json` (snapshot is written by an ordinary `status` or `gc`), cargo-hive 0.1.x cannot read that file.
 
 Crate names approved: 2026-11-14
 
@@ -155,11 +157,22 @@ Crate names approved: 2026-11-14
 
    ```sh
    HIVE_NEW_BIN=/private/tmp/hive-release/inst/bin/cargo-hive \
-   HIVE_V010_BIN=/private/tmp/hive-0.1.0/target/debug/cargo-hive \
+   HIVE_V010_BIN=/private/tmp/hive-fixture-0.1.0/target/debug/cargo-hive \
      cargo test -p cargo-hive --test capture -- --ignored
    ```
 
-   Stop on any difference. The capture test takes the new binary from `HIVE_NEW_BIN` when set, else `CARGO_BIN_EXE_cargo-hive`.
+   Stop on any difference. The capture test takes the new binary from `HIVE_NEW_BIN` when set, else `CARGO_BIN_EXE_cargo-hive`. `HIVE_V010_BIN` is built from tag `v0.1.0` under `/private/tmp/hive-fixture-0.1.0/` with an isolated `CARGO_HOME` in that dir (`mkdir -p /private/tmp/hive-fixture-0.1.0/src && git archive v0.1.0 | tar -x -C /private/tmp/hive-fixture-0.1.0/src`, then `CARGO_HOME=/private/tmp/hive-fixture-0.1.0/cargo-home CARGO_TARGET_DIR=/private/tmp/hive-fixture-0.1.0/target cargo build --locked --manifest-path /private/tmp/hive-fixture-0.1.0/src/Cargo.toml`). Every run of a development build sets `HIVE_HOME` to a scratch dir under `/private/tmp`, never `~/.hive`.
+7. Fixtures: build this release's binary from its own tag the same way under `/private/tmp/hive-fixture-<release>/` (isolated `CARGO_HOME` in that dir; for a workspace tag use `cargo build --locked -p cargo-hive` with that tree's root `Cargo.toml`). Then run `write_fixture_home` with the generator's variables — the generator uses capture.rs's isolated `CARGO_HOME`, never `~/.cargo`:
+
+   ```sh
+   HIVE_FIXTURE_BIN=/private/tmp/hive-fixture-<release>/target/debug/cargo-hive \
+   HIVE_FIXTURE_OUT="$PWD/crates/cargo-hive/tests/fixtures/v<release>" \
+   HIVE_FIXTURE_TAG=v<release> \
+   HIVE_FIXTURE_COMMIT="$(git rev-parse 'v<release>^{commit}')" \
+     cargo test -p cargo-hive --test capture -- --ignored write_fixture_home
+   ```
+
+   Run `cargo test -p cargo-hive --test upgrade`, then commit `test: v<release> state fixtures`. Never delete an earlier `fixtures/v*`.
 
 Each member's `Cargo.toml` carries an `include` list so the package holds only `src/`,
 `Cargo.toml`, `README.md` and the two license files `LICENSE-MIT` and `LICENSE-APACHE`;

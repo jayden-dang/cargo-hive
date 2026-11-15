@@ -17,6 +17,7 @@ use cargo_hive_core::caps::DEPS_CAP;
 use cargo_hive_core::receipt::{Finding, Measured, ReceiptBuilder};
 use cargo_hive_platform::proc::{self, Capture, ChildOutputError};
 use cargo_hive_seed::{self as seed, Fill, record};
+use cargo_hive_state::{State, StateError};
 
 use self::command::{BuildCmd, EnvMap};
 use self::order::Arm;
@@ -104,6 +105,14 @@ fn fail_run(report: &mut Report, from_position: u64, sample_count: u64, finding:
         sample_count,
         "not run: an earlier step failed",
     );
+}
+
+fn store_lists_repo(state: &State, repo: &Path) -> Result<bool, StateError> {
+    let store = seed::store::read(state)?;
+    Ok(store
+        .units
+        .iter()
+        .any(|row| row.repos.iter().any(|p| p == repo)))
 }
 
 fn cancel_run(report: &mut Report, from_position: u64, sample_count: u64) {
@@ -289,12 +298,23 @@ pub fn run(
         }
     }
 
-    let store_lists_repo = seed::store::read(ctx.state).ok().is_some_and(|store| {
-        store
-            .units
-            .iter()
-            .any(|row| row.repos.iter().any(|p| p == &plan.repo.main))
-    });
+    let store_lists_repo = match store_lists_repo(ctx.state, &plan.repo.main) {
+        Ok(listed) => listed,
+        Err(err) => {
+            fail_run(
+                &mut report,
+                1,
+                sample_count,
+                Finding {
+                    kind: "bench.failed".into(),
+                    path: Some(ctx.state.root().join(seed::store::STORE_FILE)),
+                    detail: err.to_string(),
+                    measured: BTreeMap::new(),
+                },
+            );
+            return report;
+        }
+    };
     if !store_lists_repo {
         fail_run(
             &mut report,
@@ -584,4 +604,54 @@ pub fn run(
     }
 
     report
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+mod tests {
+    use super::*;
+    use cargo_hive_state::{State, StateError};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        PathBuf::from(format!(
+            "/private/tmp/hive-it-bench-{label}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn store_lists_repo_reports_an_unparseable_store_db_as_an_error() {
+        let root = scratch("unparseable-store");
+        let state = State::open_at(root.clone()).unwrap();
+        fs::write(root.join(seed::store::STORE_FILE), b"not json").unwrap();
+        let err = store_lists_repo(&state, Path::new("/private/tmp/hive-it-repo")).unwrap_err();
+        assert!(matches!(err, StateError::Malformed { .. }), "{err}");
+        assert!(
+            err.to_string().contains("store.db") && err.to_string().contains("malformed"),
+            "{err}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn store_lists_repo_is_false_for_a_readable_store_without_the_repo() {
+        let root = scratch("readable-store-no-repo");
+        let state = State::open_at(root.clone()).unwrap();
+        fs::write(
+            root.join(seed::store::STORE_FILE),
+            br#"{"units":[],"toolchains":{}}"#,
+        )
+        .unwrap();
+        let listed =
+            store_lists_repo(&state, Path::new("/private/tmp/hive-it-repo")).expect("readable");
+        assert!(!listed);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

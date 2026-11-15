@@ -6,12 +6,45 @@
 
 use cargo_hive_platform::clock::utc_date;
 use cargo_hive_platform::flock::{self, FlockError, FlockGuard};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Layout(u32);
+
+impl Layout {
+    pub const NEWEST: Layout = Layout(1);
+
+    pub fn absent() -> Layout {
+        Layout(1)
+    }
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Layout::NEWEST
+    }
+}
+
+impl Serialize for Layout {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Layout {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let n = u32::deserialize(deserializer)?;
+        if n == 0 {
+            return Err(serde::de::Error::custom("layout must be at least 1"));
+        }
+        Ok(Layout(n))
+    }
+}
 
 #[derive(Debug)]
 pub enum StateError {
@@ -22,6 +55,7 @@ pub enum StateError {
     Malformed {
         file: PathBuf,
         detail: String,
+        on_read: bool,
     },
     /// A write that was not stored because the encoded file would pass its cap.
     /// The file already on disk is unchanged.
@@ -35,18 +69,53 @@ pub enum StateError {
     DuplicatePlan {
         id: String,
     },
+    NewerLayout {
+        file: PathBuf,
+        found: u64,
+        newest: u32,
+    },
+}
+
+fn recovery(file_name: &str) -> &'static str {
+    match file_name {
+        "capabilities.json" => "run `cargo hive doctor`, which rewrites it",
+        "snapshot.json" => {
+            "remove it; the next `cargo hive status` rebuilds it (it is a metadata cache)"
+        }
+        "plans.json" => {
+            "remove it; unapplied plans are lost, so make new ones with `cargo hive gc --plan`"
+        }
+        "store.db" => {
+            "remove it, build a checkout of the repository, then run `cargo hive seed`; store entries are kept and adopted"
+        }
+        "seeds.json" => {
+            "remove it; seed counts are lost, and the next `cargo hive seed` writes it again"
+        }
+        "registry.json" => {
+            "remove it, then run `cargo hive repo add <main>` again for each repository"
+        }
+        _ => "fix or remove it by hand",
+    }
 }
 
 impl fmt::Display for StateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StateError::Io { path, source } => write!(f, "{}: {source}", path.display()),
-            StateError::Malformed { file, detail } => {
-                write!(
-                    f,
-                    "{} is malformed ({detail}); fix or remove it by hand",
-                    file.display()
-                )
+            StateError::Malformed {
+                file,
+                detail,
+                on_read,
+            } => {
+                let tip = if *on_read {
+                    file.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(recovery)
+                        .unwrap_or("fix or remove it by hand")
+                } else {
+                    "fix or remove it by hand"
+                };
+                write!(f, "{} is malformed ({detail}); {tip}", file.display())
             }
             StateError::Oversized { file, max } => {
                 write!(
@@ -65,6 +134,15 @@ impl fmt::Display for StateError {
             StateError::DuplicatePlan { id } => {
                 write!(f, "plan id {id} collided; run `cargo hive gc --plan` again")
             }
+            StateError::NewerLayout {
+                file,
+                found,
+                newest,
+            } => write!(
+                f,
+                "{path} records layout {found}, but this hive reads layouts up to {newest}; install a newer cargo-hive (`cargo install cargo-hive`) to read it",
+                path = file.display(),
+            ),
         }
     }
 }
@@ -266,7 +344,7 @@ pub fn window_days(raw: Option<u64>) -> Result<u64, WindowError> {
 
 impl State {
     pub fn config(&self) -> Result<Config, StateError> {
-        let file: ConfigFile = self.read(CONFIG_FILE)?;
+        let file: ConfigFile = read_json_no_peek(&state_file(&self.root, CONFIG_FILE)?)?;
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let normalize = |p: PathBuf| -> PathBuf {
             let p = match (p.strip_prefix("~"), &home) {
@@ -361,17 +439,62 @@ fn encode<T: Serialize>(path: &Path, value: &T) -> Result<Vec<u8>, StateError> {
     let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| StateError::Malformed {
         file: path.to_path_buf(),
         detail: e.to_string(),
+        on_read: false,
     })?;
     bytes.push(b'\n');
     Ok(bytes)
 }
 
+#[derive(Deserialize)]
+struct Peek {
+    #[serde(default)]
+    layout: Option<u64>,
+}
+
+fn check_layout(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
+    if bytes.iter().copied().find(|b| !b.is_ascii_whitespace()) != Some(b'{') {
+        return Ok(());
+    }
+    let Ok(peek) = serde_json::from_slice::<Peek>(bytes) else {
+        return Ok(());
+    };
+    match peek.layout {
+        Some(0) => Err(StateError::Malformed {
+            file: path.to_path_buf(),
+            detail: "layout must be at least 1".into(),
+            on_read: true,
+        }),
+        Some(found) if found > u64::from(Layout::NEWEST.0) => Err(StateError::NewerLayout {
+            file: path.to_path_buf(),
+            found,
+            newest: Layout::NEWEST.0,
+        }),
+        _ => Ok(()),
+    }
+}
+
+fn parse_json<T: DeserializeOwned>(path: &Path, bytes: &[u8]) -> Result<T, StateError> {
+    serde_json::from_slice(bytes).map_err(|e| StateError::Malformed {
+        file: path.to_path_buf(),
+        detail: e.to_string(),
+        on_read: true,
+    })
+}
+
 fn read_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T, StateError> {
     match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| StateError::Malformed {
-            file: path.to_path_buf(),
-            detail: e.to_string(),
-        }),
+        Ok(bytes) => {
+            check_layout(path, &bytes)?;
+            parse_json(path, &bytes)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(T::default()),
+        Err(e) => Err(io_err(path, e)),
+    }
+}
+
+fn read_json_no_peek<T: DeserializeOwned + Default>(path: &Path) -> Result<T, StateError> {
+    match fs::read(path) {
+        Ok(bytes) => parse_json(path, &bytes),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(io_err(path, e)),
     }
@@ -394,12 +517,11 @@ fn read_json_limited<T: DeserializeOwned + Default>(
         return Err(StateError::Malformed {
             file: path.to_path_buf(),
             detail: format!("larger than {max} bytes"),
+            on_read: true,
         });
     }
-    serde_json::from_slice(&bytes).map_err(|e| StateError::Malformed {
-        file: path.to_path_buf(),
-        detail: e.to_string(),
-    })
+    check_layout(path, &bytes)?;
+    parse_json(path, &bytes)
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
@@ -440,6 +562,22 @@ mod tests {
     #[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
     struct Counter {
         n: u64,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Record {
+        #[serde(default = "Layout::absent")]
+        layout: Layout,
+        n: u64,
+    }
+
+    impl Default for Record {
+        fn default() -> Self {
+            Self {
+                layout: Layout::NEWEST,
+                n: 0,
+            }
+        }
     }
 
     fn scratch(label: &str) -> PathBuf {
@@ -744,6 +882,246 @@ mod tests {
         drop(lock);
         let meta = fs::metadata(root.join("store.lock")).unwrap();
         assert_eq!(meta.len(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_without_a_layout_key_reads_as_layout_one() {
+        let root = scratch("layout-absent");
+        let state = State::open_at(root.clone()).unwrap();
+        fs::write(root.join("record.json"), br#"{"n":7}"#).unwrap();
+        let got: Record = state.read("record.json").unwrap();
+        assert_eq!(got.layout, Layout::absent());
+        assert_eq!(got.n, 7);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_newer_layout_is_refused_as_newer_and_left_untouched() {
+        let root = scratch("layout-newer");
+        let state = State::open_at(root.clone()).unwrap();
+        let path = root.join("record.json");
+        let before = br#"{"layout":2,"n":1}"#;
+        fs::write(&path, before).unwrap();
+        let err = state.read::<Record>("record.json").unwrap_err();
+        match &err {
+            StateError::NewerLayout {
+                file,
+                found,
+                newest,
+            } => {
+                assert_eq!(file, &path);
+                assert_eq!(*found, 2);
+                assert_eq!(*newest, Layout::NEWEST.0);
+            }
+            other => panic!("expected NewerLayout, got {other}"),
+        }
+        assert!(
+            err.to_string().contains("install a newer cargo-hive"),
+            "{err}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_newer_layout_with_unknown_fields_is_still_reported_as_newer() {
+        let root = scratch("layout-newer-unknown");
+        let state = State::open_at(root.clone()).unwrap();
+        let path = root.join("record.json");
+        let before = br#"{"layout":2,"mystery":true,"n":1}"#;
+        fs::write(&path, before).unwrap();
+        let err = state.read::<Record>("record.json").unwrap_err();
+        assert!(
+            matches!(err, StateError::NewerLayout { found: 2, .. }),
+            "{err}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn layout_zero_is_malformed() {
+        let root = scratch("layout-zero");
+        let state = State::open_at(root.clone()).unwrap();
+        let path = root.join("record.json");
+        fs::write(&path, br#"{"layout":0,"n":1}"#).unwrap();
+        let err = state.read::<Record>("record.json").unwrap_err();
+        assert!(matches!(err, StateError::Malformed { .. }), "{err}");
+        assert!(!matches!(err, StateError::NewerLayout { .. }), "{err}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_top_level_array_is_malformed_not_newer() {
+        let root = scratch("layout-array");
+        let state = State::open_at(root.clone()).unwrap();
+        let path = root.join("record.json");
+        fs::write(&path, b"[2]").unwrap();
+        let err = state.read::<Record>("record.json").unwrap_err();
+        assert!(matches!(err, StateError::Malformed { .. }), "{err}");
+        assert!(!matches!(err, StateError::NewerLayout { .. }), "{err}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_over_cap_file_is_malformed_whatever_its_layout() {
+        let root = scratch("layout-over-cap");
+        let state = State::open_at(root.clone()).unwrap();
+        let path = root.join("record.json");
+        let max = 16u64;
+        let mut bytes = br#"{"layout":2,"n":1}"#.to_vec();
+        bytes.resize((max as usize) + 1, b' ');
+        fs::write(&path, &bytes).unwrap();
+        let err = state
+            .read_bounded::<Record>("record.json", max)
+            .unwrap_err();
+        assert!(matches!(err, StateError::Malformed { .. }), "{err}");
+        assert!(!matches!(err, StateError::NewerLayout { .. }), "{err}");
+        assert!(err.to_string().contains("larger than 16 bytes"), "{err}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn config_with_a_layout_key_is_malformed_not_newer() {
+        let root = scratch("config-layout");
+        let state = State::open_at(root.clone()).unwrap();
+        fs::write(
+            root.join(CONFIG_FILE),
+            br#"{"layout":2,"gc_window_days":7}"#,
+        )
+        .unwrap();
+        let err = state.config().unwrap_err();
+        assert!(matches!(err, StateError::Malformed { .. }), "{err}");
+        assert!(!matches!(err, StateError::NewerLayout { .. }), "{err}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_current_layout_file_round_trips_to_identical_bytes() {
+        let root = scratch("layout-round-trip");
+        let state = State::open_at(root.clone()).unwrap();
+        let value = Record {
+            layout: Layout::NEWEST,
+            n: 9,
+        };
+        state.locked(|tx| tx.write("record.json", &value)).unwrap();
+        let path = root.join("record.json");
+        let before = fs::read(&path).unwrap();
+        let got: Record = state.read("record.json").unwrap();
+        assert_eq!(got, value);
+        state.locked(|tx| tx.write("record.json", &got)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reading_never_writes_the_file() {
+        let root = scratch("layout-read-only");
+        let state = State::open_at(root.clone()).unwrap();
+        let path = root.join("record.json");
+        let bytes = br#"{"layout":1,"n":3}"#;
+        fs::write(&path, bytes).unwrap();
+        let before_meta = fs::metadata(&path).unwrap();
+        let before_mtime = before_meta.modified().unwrap();
+        let got: Record = state.read("record.json").unwrap();
+        assert_eq!(got.n, 3);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        let after_meta = fs::metadata(&path).unwrap();
+        assert_eq!(after_meta.modified().unwrap(), before_mtime);
+        assert_eq!(after_meta.len(), before_meta.len());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_state_file_refusal_ends_with_its_own_recovery() {
+        let root = scratch("layout-recovery");
+        let state = State::open_at(root.clone()).unwrap();
+        let cases = [
+            (
+                "capabilities.json",
+                "run `cargo hive doctor`, which rewrites it",
+            ),
+            (
+                "snapshot.json",
+                "remove it; the next `cargo hive status` rebuilds it (it is a metadata cache)",
+            ),
+            (
+                "plans.json",
+                "remove it; unapplied plans are lost, so make new ones with `cargo hive gc --plan`",
+            ),
+            (
+                "store.db",
+                "remove it, build a checkout of the repository, then run `cargo hive seed`; store entries are kept and adopted",
+            ),
+            (
+                "seeds.json",
+                "remove it; seed counts are lost, and the next `cargo hive seed` writes it again",
+            ),
+            (
+                "registry.json",
+                "remove it, then run `cargo hive repo add <main>` again for each repository",
+            ),
+            ("config.json", "fix or remove it by hand"),
+        ];
+        for (name, recovery) in cases {
+            fs::write(root.join(name), b"not json").unwrap();
+            let err = state.read::<Counter>(name).unwrap_err();
+            let text = err.to_string();
+            assert!(
+                text.ends_with(recovery),
+                "{name}: expected end {recovery:?}, got {text}"
+            );
+            assert!(text.contains("is malformed"), "{name}: {text}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_encode_failure_never_suggests_removing_the_file() {
+        let root = scratch("layout-encode");
+        let state = State::open_at(root.clone()).unwrap();
+
+        #[derive(Debug)]
+        struct Boom;
+
+        impl Serialize for Boom {
+            fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("cannot encode"))
+            }
+        }
+
+        let err = state
+            .locked(|tx| tx.write("registry.json", &Boom))
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(text.ends_with("fix or remove it by hand"), "{text}");
+        assert!(!text.contains("run `cargo hive doctor`"), "{text}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_missing_file_still_reads_as_default() {
+        let root = scratch("layout-missing");
+        let state = State::open_at(root.clone()).unwrap();
+        assert_eq!(
+            state.read::<Record>("record.json").unwrap(),
+            Record::default()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unparseable_config_is_still_refused_as_malformed() {
+        let root = scratch("config-bad");
+        let state = State::open_at(root.clone()).unwrap();
+        fs::write(root.join(CONFIG_FILE), b"{").unwrap();
+        let err = state.config().unwrap_err();
+        assert!(matches!(err, StateError::Malformed { .. }), "{err}");
+        assert!(
+            err.to_string().ends_with("fix or remove it by hand"),
+            "{err}"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
