@@ -71,11 +71,17 @@ lock) and ARCH-2 (writes stay inside the state root).
 3. **One newest-layout constant for now.** `Layout::NEWEST` serves all six files in this release, since every
    file is at 1. The first release that moves one file to layout 2 splits it per file. *Reopen trigger:* any
    persisted type changes shape.
-4. **Refusals carry a fix.** `StateError::Malformed` gains `fix: Fix` (`ByHand` | `Run(&'static str)`), with
-   `ByHand` as the default. `with_fix` changes only `Malformed`; `NewerLayout` and `Io` pass through
-   unchanged. `ByHand` keeps today's text, "fix or remove it by hand". `doctor::load(state)` reads
-   capabilities.json and sets `Run("cargo hive doctor")`, so the text reads "…; run `cargo hive doctor` to rewrite
-   it". Doctor gains a direct, downward dependency on `cargo-hive-state`.
+4. **Each refusal names its file's own recovery** (UPGRADE-3.8, operator 2026-11-15). The state crate holds a
+   private table `fn recovery(file_name: &str) -> &'static str` with one entry per JSON state file, worded as
+   UPGRADE-3.8 lists. Any other file name, config.json included, keeps today's "fix or remove it by hand"
+   (UPGRADE-7.8).
+   - `Malformed`'s `Display` ends with that text in place of the fixed "fix or remove it by hand".
+   - The precedent for naming CLI commands in the state crate is `DuplicatePlan`'s "run `cargo hive gc --plan`
+     again" (lib.rs:66).
+   - Every path that prints the error gets the recovery with no caller change: `emit_failure`, `record.failed`
+     and `store.write_failed`.
+   - This replaces the earlier `Fix` / `with_fix` / `doctor::load` mechanism. Doctor needs `cargo-hive-state`
+     only for `Layout`.
    - `cargo hive doctor` itself keeps writing capabilities.json without reading it (cli.rs:459-461), so it
      rewrites a damaged or layout-2 file. UPGRADE-3.3 now says so *(agent-decided)*.
 5. **seed's record write propagates a parse error** (`record.rs` `write_capped`) instead of replacing the file.
@@ -143,12 +149,12 @@ Reuse: rung 2, which extends `read_json` / `read_json_limited` / `StateError` in
 :369-403. The atomic write is unchanged.
 Respects: ARCH-16
 Surface:
-- `StateError::Malformed` gains a field.
-  - Its `Display` callers: every `e.to_string()` path into `emit_failure` (cli.rs:293) and `record.failed`
-    (seed lib.rs:481-488). Disposition `replace`: the text is unchanged for `ByHand`.
-  - Its constructors are inside the state crate only (design-scan §4). Disposition `replace`.
-  - The pattern matches `matches!(err, StateError::Malformed { .. })` are at gc/plan_tier/record.rs:345, :600.
-    Disposition `replace`: they compile unchanged.
+- `StateError::Malformed`'s `Display` ends with the file's recovery (Decision 4). Its fields are unchanged.
+  - Its `Display` callers: every `e.to_string()` path into `emit_failure` (cli.rs:293), `record.failed` (seed
+    lib.rs:481-488) and `store.write_failed` (evict.rs:78-84). Disposition `replace`: each now carries the
+    recovery.
+  - Tests that assert today's "fix or remove it by hand" text for a state file: `replace` (Task 1 greps for
+    them).
 - `read`/`read_bounded` on both `State` and `Tx` now return `NewerLayout` for a layout above 1. Every caller
   propagates `StateError` with `?` or `to_string()` (design-scan §1). Disposition `replace`: no caller matches
   exhaustively.
@@ -156,10 +162,9 @@ Interface:
 ```
 pub struct Layout(u32);            // Serialize transparent; Deserialize refuses 0; Default = NEWEST
 impl Layout { pub const NEWEST: Layout = Layout(1); pub fn absent() -> Layout /* frozen: Layout(1) */ }
-pub enum Fix { ByHand, Run(&'static str) }
-StateError::Malformed { file, detail, fix: Fix }
+StateError::Malformed { file, detail }              // unchanged fields; Display ends with recovery(file name)
 StateError::NewerLayout { file: PathBuf, found: u64, newest: u32 }
-impl StateError { pub fn with_fix(self, command: &'static str) -> StateError }  // Malformed only
+fn recovery(file_name: &str) -> &'static str          // private; six entries plus the by-hand default
 ```
 Depth: n/a, extends the state crate's read path.
 Locality: extend crates/state/src/lib.rs only. Neighbour crates leave.
@@ -220,18 +225,16 @@ Locality: leave.
 This section exists so the four IDs are tested (§H, receipts test) rather than built. The existing
 `Receipt: Deserialize` (design-scan §2) parses 0.1.0 lines at schema 2 or 3 (UPGRADE-2.6).
 
-### D. Refusals reach the receipt; capabilities names doctor
+### D. Refusals reach the receipt with each file's recovery
 
 Satisfies: UPGRADE-3.1, UPGRADE-3.8, UPGRADE-7.6
-Reuse: rung 2, which reuses `emit_failure` (cli.rs:293) unchanged and adds `doctor::load`.
-Surface: the 7 `state.read::<Capabilities>(doctor::CAPABILITIES_FILE)` calls at cli.rs:632, :940, :1152, :1263,
-:1429, :1680, :1782 become `doctor::load(state)` (`replace`). tests/bench.rs:121 keeps its direct read
-(`replace` not needed: a test helper).
-Interface: `pub fn load(state: &State) -> Result<Capabilities, StateError>` in `cargo-hive-doctor`.
-`cargo hive doctor` itself keeps writing capabilities.json without reading it (cli.rs:459-461), the exception
+Reuse: rung 2, which reuses `emit_failure` (cli.rs:293) unchanged and the recovery table in §A.
+Surface: none beyond §A's `Display` change. The capabilities reads in cli.rs stay as they are.
+Interface: none new.
+`cargo hive doctor` keeps writing capabilities.json without reading it (cli.rs:459-461), the exception
 UPGRADE-3.3 names.
-Depth: n/a, a one-line wrapper over `State::read` plus `with_fix`.
-Locality: extend crates/doctor/src/lib.rs and cli.rs call sites. emit_failure leaves.
+Depth: n/a, no new module.
+Locality: leave. The change lands in crates/state/src/lib.rs (§A).
 
 An unparseable or newer-layout file ends every command that reads it through `?` into `emit_failure`. That gives
 exit 1 and an `error` finding whose detail is the full message, which contains the full path (UPGRADE-3.1/3.2).
@@ -277,6 +280,10 @@ Surface: bare `gc` and `gc --dry-run` receipts on a home with store.db missing a
 `store.index_missing` finding and report zero eviction counts (`replace`; there are no external readers of this
 case). The unparseable-store.db path (`store.write_failed`, evict.rs:78-84) leaves (UPGRADE-3.10). Fill
 (`merge_with_source`, store.rs:386) leaves (UPGRADE-4.3).
+- STOREGC-1.6's text (store-gc requirements.md:47): `replace`. It is amended in place with "except when store.db
+  does not exist and the store holds entry directories (UPGRADE-4.1)", operator 2026-11-15.
+- When no checkout can be seeded, entries stay until store.db is rebuilt. The first eviction after store.db
+  exists again runs as before.
 Interface: none new. The check is a private `fn index_missing(state, inv) -> bool` inside evict.rs.
 Depth: n/a, extends evict.
 Locality: extend crates/seed/src/evict.rs only. The target tier in cli.rs leaves (UPGRADE-4.2).
@@ -326,7 +333,7 @@ runs use capture.rs's isolated `CARGO_HOME` (capture.rs:18, :149-151).
 
 ### I. Capture test, release steps and the SPLIT amendment
 
-Satisfies: UPGRADE-2.8, UPGRADE-2.9, UPGRADE-5.5, UPGRADE-5.6, UPGRADE-5.7, UPGRADE-7.7
+Satisfies: UPGRADE-2.8, UPGRADE-2.9, UPGRADE-5.5, UPGRADE-5.6, UPGRADE-5.7, UPGRADE-5.8, UPGRADE-7.7
 Reuse: rung 2, which extends capture.rs (`read_normalized_file`, `state_written_by_0_1_0_reads_unchanged`) and
 the release steps in docs/agents/project.md:130-168.
 Surface:
@@ -336,7 +343,12 @@ Surface:
   - a new step 7, "Fixtures", builds the release binary from its tag (`git archive v<X>` into
     `/private/tmp/hive-fixture-<X>/`) and runs `write_fixture_home` (UPGRADE-5.5). The step states that the run
     uses capture.rs's isolated `CARGO_HOME`, never `~/.cargo`.
-- SPLIT-4.3 text: `replace` (struck through, pointing at UPGRADE-2.8).
+- The release notes step (UPGRADE-5.8) says 0.1.x cannot read registry, capabilities or snapshot once this
+  release writes them.
+- project.md (Run locally, verify, step 6): states that every dev-build run sets `HIVE_HOME` to a scratch dir
+  (UPGRADE-6.2, operator 2026-11-15).
+- SPLIT-4.3 text: `replace`. It is struck through whole, pointing at UPGRADE-2.8, with the reason that state
+  files and `--json` are now compared by field names and values, not byte order (operator 2026-11-15).
 Interface: none new beyond the generator in §H.
 Depth: n/a, extends existing tests and docs.
 Locality: extend capture.rs, project.md, workspace-split requirements.md. Steps 1–5 leave.
@@ -356,7 +368,7 @@ asserts `fill_entries_added == 0` (UPGRADE-2.9/5.7).
 | `tests/store_gc.rs` (with `common::store_fixture`) | integration | UPGRADE-3.10, 4.1, 4.2, 4.3, 7.4 |
 | `tests/receipts.rs` | integration | UPGRADE-7.6 |
 | `tests/capture.rs` (`#[ignore]`, release step 6) | integration | UPGRADE-2.8, 2.9, 5.7 |
-| `docs/agents/project.md` release steps, checked by reading the diff at review | document | UPGRADE-5.5, 5.6, 7.7 |
+| `docs/agents/project.md` release steps, checked by reading the diff at review | document | UPGRADE-5.5, 5.6, 5.8, 6.2, 7.7 |
 
 ## Coverage check
 
@@ -369,7 +381,7 @@ Every ID in requirements.md appears in exactly one `Satisfies:` line:
 - F: 3.6, 3.7, 7.5
 - G: 3.10, 4.1, 4.2, 4.3, 7.4
 - H: 5.1, 5.2, 5.3, 5.4, 6.2
-- I: 2.8, 2.9, 5.5, 5.6, 5.7, 7.7
+- I: 2.8, 2.9, 5.5, 5.6, 5.7, 5.8, 7.7
 
-That is 44 IDs, with none unmapped. There is no UI design section: hive is a headless CLI, and no Satisfies ID is
+That is 45 IDs, with none unmapped. There is no UI design section: hive is a headless CLI, and no Satisfies ID is
 delivered through a browser surface (Step 2b predicate false).

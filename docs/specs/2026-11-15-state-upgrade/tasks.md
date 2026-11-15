@@ -64,12 +64,12 @@ Every task inherits these:
 
 | Path | Responsibility in this plan |
 |---|---|
-| `crates/state/src/lib.rs` | `Layout`, `Fix`, `StateError::{Malformed.fix, NewerLayout}`, `with_fix`, the layout peek in `read_json`/`read_json_limited`, and a config read with no peek |
+| `crates/state/src/lib.rs` | `Layout`, `StateError::NewerLayout`, the per-file `recovery` table in `Malformed`'s `Display`, the layout peek in `read_json`/`read_json_limited`, and a config read with no peek |
 | `crates/cargo/src/registry.rs` | `Registry.layout` |
 | `crates/cargo/src/discover.rs` | `Snapshot.layout`, production literal :745 and test literals |
-| `crates/cargo-hive/src/cli.rs` | Registry test literal (:1961) and 7 capabilities reads → `doctor::load` |
+| `crates/cargo-hive/src/cli.rs` | Registry test literal (:1961) |
 | `crates/doctor/Cargo.toml` | add `cargo-hive-state` (workspace path dependency) |
-| `crates/doctor/src/lib.rs` | `Capabilities.layout`, `pub fn load`, literals :292 and tests |
+| `crates/doctor/src/lib.rs` | `Capabilities.layout`, literals :292 and tests |
 | `crates/gc/src/plan_tier/record.rs` | `PlansFile.layout`; `PlansFile`, `Plan` and `PLANS_FILE` made `pub` |
 | `crates/seed/src/store.rs` | `StoreFile.layout`, test literals |
 | `crates/seed/src/choose.rs` | `StoreFile` test literal (:202) |
@@ -84,8 +84,9 @@ Every task inherits these:
 | `crates/cargo-hive/tests/upgrade.rs` | fixture suite and refusal matrix (new) |
 | `crates/cargo-hive/tests/seed.rs` | seeds.json and store.db refusals through `seed` |
 | `crates/cargo-hive/tests/store_gc.rs` | store.db missing or unparseable through bare `gc` / `--dry-run` |
-| `docs/agents/project.md` | release step 6 binary source and new step 7 "Fixtures" |
-| `docs/specs/2026-11-13-workspace-split/requirements.md` | SPLIT-4.3 struck through, superseded by UPGRADE-2.8 |
+| `docs/agents/project.md` | release step 6 binary source, new step 7 "Fixtures", release-notes line (UPGRADE-5.8), and the dev-build `HIVE_HOME` rule (UPGRADE-6.2) |
+| `docs/specs/2026-11-13-workspace-split/requirements.md` | SPLIT-4.3 struck through whole, superseded by UPGRADE-2.8 |
+| `docs/specs/2026-11-09-store-gc/requirements.md` | STOREGC-1.6 amended with the UPGRADE-4.1 carve-out (operator 2026-11-15) |
 
 ---
 
@@ -108,13 +109,13 @@ Every task inherits these:
     - `Default` is `Layout::NEWEST`;
     - `pub const NEWEST: Layout = Layout(1)`;
     - `pub fn absent() -> Layout`, which returns `Layout(1)`, frozen.
-  - `#[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum Fix { ByHand, Run(&'static str) }`.
-  - `StateError::Malformed { file: PathBuf, detail: String, fix: Fix }`. `Display` for `ByHand` is unchanged.
-    For `Run(c)` it reads "`<path>` is malformed (`<detail>`); run `` `<c>` `` to rewrite it".
+  - A private `fn recovery(file_name: &str) -> &'static str`. It holds one entry per JSON state file, worded as
+    the UPGRADE-3.8 table, and returns "fix or remove it by hand" for any other name, config.json included.
+  - `StateError::Malformed { file: PathBuf, detail: String }`, fields unchanged. `Display` is
+    "`<path>` is malformed (`<detail>`); `<recovery(file name)>`".
   - `StateError::NewerLayout { file: PathBuf, found: u64, newest: u32 }`. `Display`: "`<path>` records layout
     `<found>`, but this hive reads layouts up to `<newest>`; install a newer cargo-hive (`cargo install
     cargo-hive`) to read it".
-  - `pub fn with_fix(self, command: &'static str) -> StateError`. It changes only `Malformed`.
   - `found` is `u64`, so a value above `u32::MAX` still reports `NewerLayout` (design review F4).
 
 **Depends-on:** none
@@ -129,7 +130,9 @@ Every task inherits these:
   - `config_with_a_layout_key_is_malformed_not_newer`
   - `a_current_layout_file_round_trips_to_identical_bytes`
   - `reading_never_writes_the_file` (mtime and bytes unchanged)
-  - `with_fix_names_the_command_and_leaves_other_errors_alone`
+  - `each_state_file_refusal_ends_with_its_own_recovery`: table-driven, one row per file in the UPGRADE-3.8
+    table, plus config.json keeping "fix or remove it by hand"
+  - grep the workspace tests for "fix or remove it by hand" and update any assertion on a state file's text
   - `a_missing_file_still_reads_as_default`
   - `an_unparseable_config_is_still_refused_as_malformed`
 
@@ -140,12 +143,12 @@ Every task inherits these:
     array never reaches serde's `visit_seq` and stays `Malformed`.
   - `> NEWEST` → `NewerLayout`; `Some(0)` → `Malformed`.
   - `State::config` reads through a private no-peek path.
-  - `Malformed` constructors set `fix: Fix::ByHand`.
+  - `Malformed`'s `Display` appends `recovery(file.file_name())`.
 
   Run `cargo test -p cargo-hive-state`; expect pass. Then run the project.md task gate for `cargo-hive-state`.
 - [ ] **Step 3: Commit.** `feat(state): record a layout and refuse files from a newer hive by name`
 
-_Requirements: UPGRADE-1.2, UPGRADE-2.2, UPGRADE-2.4, UPGRADE-3.2, UPGRADE-3.3, UPGRADE-3.9, UPGRADE-6.1, UPGRADE-7.8_
+_Requirements: UPGRADE-1.2, UPGRADE-2.2, UPGRADE-2.4, UPGRADE-3.2, UPGRADE-3.3, UPGRADE-3.8, UPGRADE-3.9, UPGRADE-6.1, UPGRADE-7.8_
 
 ---
 
@@ -194,22 +197,18 @@ _Requirements: UPGRADE-1.1, UPGRADE-7.2_
 - Modify: `crates/doctor/Cargo.toml` (add `cargo-hive-state = { workspace = true }`, as the other members declare
   it)
 - Modify: `crates/doctor/src/lib.rs` (struct at line 120; literals at 292 and the tests at 1272-1345)
-- Modify: `crates/cargo-hive/src/cli.rs`. These are the seven `state.read::<Capabilities>(doctor::CAPABILITIES_FILE)`
-  calls at 632, 940, 1152, 1263, 1429, 1680 and 1782.
 - Test: `crates/doctor/src/lib.rs` (unit tests); `crates/cargo-hive/tests/receipts.rs`
 
-**Reuse:** rung 2, which reuses `emit_failure` (cli.rs:293) unchanged and adds `doctor::load`.
+**Reuse:** rung 2, which reuses `emit_failure` (cli.rs:293) unchanged and the recovery table in §A.
 
 **Interfaces:**
-- Consumes: `Layout`, `StateError::with_fix` (Task 1)
-- Produces:
-  - `Capabilities.layout: Layout`, the first field, with `#[serde(default = "Layout::absent")]`;
-  - `pub fn load(state: &cargo_hive_state::State) -> Result<Capabilities, StateError>`.
+- Consumes: `Layout` and the recovery table (Task 1)
+- Produces: `Capabilities.layout: Layout`, the first field, with `#[serde(default = "Layout::absent")]`
 
-**Depends-on:** Task 1, Task 2 (both edit `crates/cargo-hive/src/cli.rs`)
+**Depends-on:** Task 1
 
 - [ ] **Step 1: Write the failing tests.**
-  - Doctor unit tests: `capabilities_write_layout_first`, and `load_names_doctor_when_capabilities_is_malformed`.
+  - Doctor unit test: `capabilities_write_layout_first`.
   - In `tests/receipts.rs`: `an_unparseable_capabilities_file_ends_status_with_a_refusal_naming_doctor`. It asserts
     exit 1, a receipt with an `error` finding whose detail holds the full path and `cargo hive doctor`, and the
     bytes unchanged.
@@ -217,8 +216,8 @@ _Requirements: UPGRADE-1.1, UPGRADE-7.2_
     that runs a real `doctor`, as tests/doctor.rs does.
 
   Run `cargo test -p cargo-hive-doctor --lib` and `cargo test -p cargo-hive --test receipts`; expect failure.
-- [ ] **Step 2: Implement** the field, `load` as `state.read(CAPABILITIES_FILE).map_err(|e| e.with_fix("cargo hive
-  doctor"))`, and the seven call sites. Run the task gate for `cargo-hive-doctor`; expect pass.
+- [ ] **Step 2: Implement** the field and update the literals. Run the task gate for `cargo-hive-doctor`; expect
+  pass.
 - [ ] **Step 3: Commit.** `feat(doctor): capabilities record their layout and a damaged file names doctor`
 
 _Requirements: UPGRADE-1.1, UPGRADE-3.1, UPGRADE-3.8, UPGRADE-7.2, UPGRADE-7.6_
@@ -339,6 +338,7 @@ _Requirements: UPGRADE-3.4, UPGRADE-3.5, UPGRADE-7.3_
 
 **Files:**
 - Modify: `crates/seed/src/evict.rs` (`run`, after `inventory` at line 79)
+- Modify: `docs/specs/2026-11-09-store-gc/requirements.md` (STOREGC-1.6 at line 47)
 - Test: `crates/cargo-hive/tests/store_gc.rs`
 
 **Reuse:** rung 2, which extends `evict::run` (crates/seed/src/evict.rs:79) with `inventory`'s own `rowless` list.
@@ -367,7 +367,11 @@ Clearing that list sends the run down the existing empty-candidates return (evic
   Run `cargo test -p cargo-hive --test store_gc`; expect the first two to fail.
 - [ ] **Step 2: Implement.** If `index_missing`, push the finding and clear `inv.rowless`. Run the task gate for
   `cargo-hive-seed`; expect pass.
-- [ ] **Step 3: Commit.** `fix(seed): bare gc no longer empties a store whose index is missing`
+- [ ] **Step 3: Amend STOREGC-1.6** in place. Append "except when store.db does not exist and the store holds
+  entry directories (UPGRADE-4.1)", then a note "(amended 2026-11-15 by operator decision; see
+  docs/specs/2026-11-15-state-upgrade/requirements.md)". The ID keeps its number. Run `audit-trace`; expect no
+  new finding.
+- [ ] **Step 4: Commit.** `fix(seed): bare gc no longer empties a store whose index is missing`
 
 _Requirements: UPGRADE-3.10, UPGRADE-4.1, UPGRADE-4.2, UPGRADE-4.3, UPGRADE-7.4_
 
@@ -542,10 +546,10 @@ _Requirements: UPGRADE-1.3, UPGRADE-1.4, UPGRADE-2.1, UPGRADE-2.3, UPGRADE-2.5, 
 
   | File | Harness | Command | Stop |
   |---|---|---|---|
-  | registry, capabilities, snapshot | `common::Hive` with a registered repo (upgrade.rs) | `status` | exit 1, error finding names the file |
-  | plans.json | `common::Hive::ready()` (upgrade.rs), so the capability gate passes | `gc --plan` | exit 1 |
+  | registry, capabilities, snapshot | `common::Hive` with a registered repo (upgrade.rs) | `status` | exit 1, error finding names the file and its UPGRADE-3.8 recovery |
+  | plans.json | `common::Hive::ready()` (upgrade.rs), so the capability gate passes | `gc --plan` | exit 1, detail ends with the plans recovery |
   | seeds.json | `seeded_store` (seed.rs), with a fresh worktree per case so the seed places units | `seed` | exit 0, `record.failed` carrying the path |
-  | store.db | `seeded_store` (seed.rs), with a fresh worktree per case | `seed` | exit 1, error names store.db |
+  | store.db | `seeded_store` (seed.rs), with a fresh worktree per case | `seed` | exit 1, error names store.db and its recovery |
   | store.db | `seeded_store` (store_gc.rs) | bare `gc` and `gc --dry-run` | `store.write_failed`, target tier runs |
 
   Run `cargo test -p cargo-hive --test upgrade --test seed --test store_gc`; expect pass.
@@ -586,8 +590,9 @@ the release steps in docs/agents/project.md:130-168.
 
   Run `HIVE_V010_BIN=/private/tmp/hive-fixture-0.1.0/target/debug/cargo-hive cargo test -p cargo-hive --test capture
   -- --ignored`; expect pass.
-- [ ] **Step 2: Strike SPLIT-4.3** as `~~**SPLIT-4.3**~~ superseded by UPGRADE-2.8
-  (docs/specs/2026-11-15-state-upgrade/requirements.md)`, keeping its text struck through. Run `audit-trace`;
+- [ ] **Step 2: Strike SPLIT-4.3 whole**, `--json` clause included, as `~~**SPLIT-4.3**~~ superseded by UPGRADE-2.8
+  (docs/specs/2026-11-15-state-upgrade/requirements.md): state files and `--json` output are now compared by
+  field names and values, not byte order (operator 2026-11-15)`. Keep its text struck through. Run `audit-trace`;
   expect no unknown citation.
 - [ ] **Step 3: Commit.** `test: the capture test reads 0.1.0 state after upgrade and seeds without refilling`
 
@@ -621,7 +626,13 @@ the release steps in docs/agents/project.md:130-168.
   - Run `cargo test -p cargo-hive --test upgrade`, then commit `test: v<release> state fixtures`.
   - Never delete an earlier `fixtures/v*`.
   - The step states that the generator uses capture.rs's isolated `CARGO_HOME`, never `~/.cargo`.
-- [ ] **Step 3: Check.** Read the diff: steps 1–5 are unchanged, and step 6 differs only in the binary's source.
+- [ ] **Step 3: Add the release-notes line** to the tag step (step 4): the GitHub release notes for this release
+  say that once it writes `registry.json`, `capabilities.json` or `snapshot.json` (snapshot is written by an
+  ordinary `status` or `gc`), cargo-hive 0.1.x cannot read that file.
+- [ ] **Step 4: State the dev-build rule** in project.md's "Run locally" and verify sections, and in step 6:
+  every run of a development build sets `HIVE_HOME` to a scratch dir under `/private/tmp`, never `~/.hive`.
+- [ ] **Step 5: Check.** Read the diff: steps 1–5 are unchanged except for step 4's release-notes line, and step 6
+  differs only in the binary's source and the `HIVE_HOME` sentence.
   Commit `docs(release): build old binaries from tags and add each release's state fixtures`.
 
-_Requirements: UPGRADE-5.5, UPGRADE-5.6, UPGRADE-7.7_
+_Requirements: UPGRADE-5.5, UPGRADE-5.6, UPGRADE-5.8, UPGRADE-6.2, UPGRADE-7.7_

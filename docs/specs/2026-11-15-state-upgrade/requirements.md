@@ -79,9 +79,9 @@ repos, plans, store entries and seed records my old hive wrote, so that nothing 
   - in state files only, the `layout` line of UPGRADE-2.3.
 
   This is checked against output captured from 0.1.0. The byte-exact claim for state files is UPGRADE-2.3's. It
-  supersedes SPLIT-4.3
-  (docs/specs/2026-11-13-workspace-split/requirements.md:129-132). It withdraws SPLIT-4.3's key-order claim for
-  the capture comparison, and the run's report names this *(agent-decided)*.
+  supersedes SPLIT-4.3 (docs/specs/2026-11-13-workspace-split/requirements.md:129-132) whole, `--json` clause
+  included. SPLIT-4.3's byte and key-order guarantee is dropped for state files and for `--json` output alike.
+  Both are now compared by field names and values, not by byte order *(operator 2026-11-15)*.
 - **UPGRADE-2.9** WHEN `seed` runs after an upgrade on a state root 0.1.0 wrote, for a checkout whose source
   target 0.1.0 filled and that is unchanged since that fill, THE SYSTEM SHALL clone the store's units for it and add no store entry. The seed
   receipt's `fill_entries_added` count is 0 (ROAD-14.md:8-9; the count is at crates/seed/src/lib.rs:515).
@@ -92,8 +92,9 @@ repos, plans, store entries and seed records my old hive wrote, so that nothing 
 name that file, so that my repos, plans and store entries are not dropped behind my back.
 
 - **UPGRADE-3.1** IF a command reads a JSON state file that exists and cannot be parsed THEN THE SYSTEM SHALL
-  end the command with exit 1 and one receipt whose finding names the file's full path and the parse error.
-  The exceptions are the narrower, named stops in UPGRADE-3.4 to UPGRADE-3.7 and UPGRADE-3.10.
+  end the command with exit 1 and one receipt whose finding names the file's full path, the parse error and that
+  file's own recovery (UPGRADE-3.8). The exceptions are the narrower, named stops in UPGRADE-3.4 to UPGRADE-3.7
+  and UPGRADE-3.10, which carry the same recovery text *(operator 2026-11-15)*.
 - **UPGRADE-3.2** IF a JSON state file records a layout number above the newest this hive reads THEN THE SYSTEM
   SHALL stop on it exactly where UPGRADE-3.1 stops on an unparseable file, including its narrower stops
   (UPGRADE-3.4 to UPGRADE-3.7, UPGRADE-3.10). The message names the file's full path, the layout the file
@@ -110,7 +111,9 @@ name that file, so that my repos, plans and store entries are not dropped behind
   the file (crates/seed/src/record.rs:62-65; the finding is at crates/seed/src/lib.rs:481-488). `seed` then
   exits 0, as it does on `record.failed` today (crates/seed/src/lib.rs:140-146). *(agent-decided: ticket:13
   "hive stops" is read as the record write stopping, not the command, because refusing before the clone would
-  block seed until a hand removal. The run's report names this reading.)*
+  block seed until a hand removal.)* Kept as is *(operator 2026-11-15)*: seeds.json is read only by reporting
+  (status, crates/cargo-hive/src/cli.rs:753; bench, crates/cargo-hive/src/bench/mod.rs:190). No deletion and no
+  liveness decision reads it.
 - **UPGRADE-3.5** (guard) WHEN `status` meets a `seeds.json` it cannot parse THE SYSTEM SHALL CONTINUE TO:
   - add a note carrying the file's full path and the error;
   - report none of the four seed counts (SEED-6.8);
@@ -124,8 +127,19 @@ name that file, so that my repos, plans and store entries are not dropped behind
   fill, SHALL CONTINUE TO fail the run as it does today (the prime `seed::run_fill` at bench/mod.rs:247, ended by `fail_run` at :277-284; fill.rs:91). The nothing-to-seed
   read meets a bad `store.db` only when the prime fill did not read it (fill.rs:77-85) or it changed during
   the run *(Weigh)*.
-- **UPGRADE-3.8** IF `capabilities.json` exists and cannot be parsed THEN THE SYSTEM SHALL name
-  `cargo hive doctor` in the refusal as the command that rewrites it *(agent-decided)*.
+- **UPGRADE-3.8** IF a JSON state file exists and cannot be parsed THEN THE SYSTEM SHALL end its refusal with that
+  file's own recovery *(operator 2026-11-15)*:
+
+  | File | Recovery the message gives |
+  |---|---|
+  | `capabilities.json` | run `cargo hive doctor`, which rewrites it |
+  | `snapshot.json` | remove it; the next `cargo hive status` rebuilds it (it is a metadata cache) |
+  | `plans.json` | remove it; unapplied plans are lost, so make new ones with `cargo hive gc --plan` |
+  | `store.db` | remove it, build a checkout of the repository, then run `cargo hive seed`; store entries are kept (UPGRADE-4.1) and adopted (UPGRADE-4.3) |
+  | `seeds.json` | remove it; seed counts are lost, and the next `cargo hive seed` writes it again |
+  | `registry.json` | remove it, then run `cargo hive repo add <main>` again for each repository |
+
+  The operator accepts that the registry recovery makes the user register repositories again.
 - **UPGRADE-3.9** (guard) WHEN a state file does not exist THE SYSTEM SHALL CONTINUE TO read it as empty. A
   first run with no hive state SHALL CONTINUE TO proceed with the built-in defaults and no configuration
   (CORE-2.6) *(Weigh)*.
@@ -148,7 +162,15 @@ fill it again from scratch.
   directory THEN bare `cargo hive gc` and `gc --dry-run` SHALL evict, and preview as evicted, no store entry.
   Each reports one finding whose path is `store.db`
   and whose detail says to build a checkout of the repository with the current toolchain and then run
-  `cargo hive seed` *(Weigh)*.
+  `cargo hive seed` *(operator 2026-11-15)*.
+
+  Scope: this goes beyond the Lock's "exists but cannot be read" (ticket:13). Its basis is that a user who
+  follows UPGRADE-3.8's "remove store.db" must not lose the store.
+
+  When no checkout can be seeded, the entries stay until `store.db` is rebuilt. Normal age, toolchain and cap
+  eviction (STOREGC-1.x) resumes once it exists. It supersedes part of STOREGC-1.6
+  (docs/specs/2026-11-09-store-gc/requirements.md:47), which is amended to say "except when store.db does not
+  exist and the store holds entry directories (UPGRADE-4.1)".
 - **UPGRADE-4.2** (guard) WHEN UPGRADE-4.1 holds THE SYSTEM SHALL CONTINUE TO run bare `gc`'s target tier as
   before.
 - **UPGRADE-4.3** (guard) WHEN `seed` fills a store whose `store.db` does not exist THE SYSTEM SHALL CONTINUE TO
@@ -187,6 +209,11 @@ release wrote, so that a release that cannot read old state fails its gate befor
   - build the release's binary from its tag;
   - write `crates/cargo-hive/tests/fixtures/v<release>/` with it, as UPGRADE-5.1 describes for 0.1.0;
   - commit it.
+- **UPGRADE-5.8** THE release steps SHALL include a step whose release notes say the following
+  *(operator 2026-11-15)*:
+  - once this release writes `registry.json`, `capabilities.json` or `snapshot.json`, cargo-hive 0.1.x cannot
+    read that file;
+  - `snapshot.json` is written by an ordinary `cargo hive status` or `gc` (crates/cargo-hive/src/cli.rs:765).
 - **UPGRADE-5.6** THE release step that runs the capture test SHALL take `HIVE_V010_BIN` from a binary built
   from tag `v0.1.0`, not from `/private/tmp/hive-0.1.0`. Today that path is at docs/agents/project.md:158 *(Weigh)*.
 - **UPGRADE-5.7** WHEN the capture test runs with a 0.1.0 binary THE SYSTEM SHALL also run `seed` with the new
@@ -206,9 +233,18 @@ release wrote, so that a release that cannot read old state fails its gate befor
   through the `state` module, atomically (temp file, fsync, rename, directory fsync) and under its one lock
   (ARCH-16 for the files it lists; SEED-9.4 for `seeds.json`). This is verified by the existing state-module tests and a crash-free read-back in UPGRADE-5.2.
   No docs/ops/reliability.md exists, so the target comes from the ARCH-16 lock.
-- **Reliability:** **UPGRADE-6.2** WHEN any test or release step makes a fixture THE SYSTEM SHALL
-  write only inside a temporary `HIVE_HOME` and the repository's fixture directory, never `~/.hive`. The source
-  is the run's charter hard stop; ARCH-2 bounds only the product's own writes. This is verified by the fixture generator taking its home only from a temporary directory.
+- **Reliability:** **UPGRADE-6.2** WHEN any test, fixture generation, release step or verification run uses a
+  development build THE SYSTEM SHALL run it with a temporary `HIVE_HOME`, never `~/.hive`. Fixture generation
+  writes outside that home only to the repository's fixture directory.
+
+  Why: one dev-build run against the real `~/.hive` would rewrite snapshot.json, and the installed 0.1.0 would
+  then fail on it in every session (UPGRADE-5.8) *(operator 2026-11-15)*.
+
+  This is verified two ways:
+  - the integration tests take their home from `tests/common` or capture.rs's scratch dirs, and the fixture
+    generator from capture.rs;
+  - `docs/agents/project.md` (Run locally, the verify commands, release step 6) says to set `HIVE_HOME` to a
+    scratch dir for every dev-build run.
 - **Accessibility:** None. Hive is a headless CLI, and its refusal text is plain text.
 
 ## 7. Touched files and the behavior at risk
@@ -235,10 +271,12 @@ Every file this feature changes, with the guard that protects it:
 - `crates/cargo-hive/tests/capture.rs`: gains the layout line in its comparison and a `seed` run (UPGRADE-5.7).
   no behavior to guard beyond UPGRADE-2.8.
 - `crates/cargo-hive/tests/fixtures/v0.1.0/`: new files. no behavior to guard.
-- `docs/agents/project.md` (release steps): gains UPGRADE-5.5 and UPGRADE-5.6. Steps 1–6 are guarded by
-  **UPGRADE-7.7**.
-- `docs/specs/2026-11-13-workspace-split/requirements.md`: SPLIT-4.3 is struck through as superseded by
+- `docs/agents/project.md` (release steps, Run locally, verify): gains UPGRADE-5.5, UPGRADE-5.6, UPGRADE-5.8 and
+  the UPGRADE-6.2 dev-build rule. Steps 1–6 are guarded by **UPGRADE-7.7**.
+- `docs/specs/2026-11-13-workspace-split/requirements.md`: SPLIT-4.3 is struck through whole as superseded by
   UPGRADE-2.8. no behavior to guard.
+- `docs/specs/2026-11-09-store-gc/requirements.md`: STOREGC-1.6 is amended with the UPGRADE-4.1 carve-out
+  (operator 2026-11-15). Its eviction otherwise is guarded by **UPGRADE-7.4**.
 
 Guards:
 
@@ -262,21 +300,26 @@ Guards:
   (crates/state/src/lib.rs:44-49, :268). config.json is the user's file, not a state file (CONTEXT.md), and it
   carries no layout (UPGRADE-1.4) *(agent-decided)*.
 - **UPGRADE-7.7** (guard) WHEN a release is cut THE SYSTEM SHALL CONTINUE TO run release steps 1–6 as written
-  (gate, version, package check, tag, publish, smoke). Step 6 changes only in where `HIVE_V010_BIN` comes from
-  (UPGRADE-5.6).
+  (gate, version, package check, tag, publish, smoke). Only three things change:
+  - step 4 gains the release-notes line (UPGRADE-5.8);
+  - step 6 changes where `HIVE_V010_BIN` comes from (UPGRADE-5.6);
+  - step 6 gains the dev-build `HIVE_HOME` sentence (UPGRADE-6.2).
 
 ## Out of Scope
 
 - Downgrading to an older hive. After this release writes `registry.json`, `capabilities.json` or
   `snapshot.json`, 0.1.x refuses it through `deny_unknown_fields`. 0.1.x still reads `plans.json`, `store.db`
-  and `seeds.json`, and drops `layout` on its next write. That is named in the run's report and not decided here (ticket:20).
+  and `seeds.json`, and drops `layout` on its next write.
+
+  This one-way step is accepted (operator 2026-11-15) on two conditions:
+  - the release notes say so (UPGRADE-5.8);
+  - dev builds never touch `~/.hive` (UPGRADE-6.2).
 - Cargo's and rustc's file formats, which `cargo hive doctor` gates (ticket:19).
 - Telling a file the user deleted apart from a first run. A missing file reads as empty, apart from the
   store-eviction case in UPGRADE-4.1.
 - A root manifest of state files, versioned file names, and converting files on open.
-- A command that repairs, rebuilds or deletes a state file. The only fix for an unparseable file is today's
-  "fix or remove it by hand". Whether a user should ever be told to remove hive's state is the operator's call
-  (ROAD-14.md:24); see Open Questions.
+- A command that repairs, rebuilds or deletes a state file. The refusal names each file's own recovery
+  (UPGRADE-3.8), and the user carries it out by hand.
 - Refusing an older layout this hive no longer reads. No layout older than 1 exists. A later release that drops
   a layout owns that refusal and its fixing command (ticket:7).
 - State for ROAD-16 and ROAD-17.
@@ -285,7 +328,5 @@ Guards:
 
 ## Open Questions
 
-- Whether this release may ship "fix or remove it by hand" (crates/state/src/lib.rs:44-49) as the only fix in
-  the refusal for an unparseable registry.json, snapshot.json, plans.json, store.db or seeds.json. Telling a
-  user to remove a state file may fall under ROAD-14's Ask me (ROAD-14.md:24). — owner: operator — date: before
-  `Status: Approved` — forbid-guess: the build keeps today's text unchanged and builds nothing on it.
+None. The Ask-me question on "fix or remove it by hand" was answered by the operator on 2026-11-15:
+UPGRADE-3.8 gives each file its own recovery.
