@@ -1,0 +1,66 @@
+{
+  "plans": [
+    {
+      "id": "d08fefad3dde5556",
+      "class": "protected",
+      "window_days": 7,
+      "made_at": 1794719168,
+      "scope_repos": [
+        "/private/tmp/hive-capture/work/main"
+      ],
+      "planned": {
+        "freed": 0,
+        "still_shared": 36864
+      },
+      "targets": [
+        {
+          "path": "/private/tmp/hive-capture/work/main/target",
+          "owner": "/private/tmp/hive-capture/work/main",
+          "planned": {
+            "freed": 0,
+            "still_shared": 36864
+          },
+          "entries": [
+            {
+              "path": "/private/tmp/hive-capture/work/main/target/debug/.fingerprint/app-90f278200a918606",
+              "unit": "debug/app-90f278200a918606",
+              "kind": "dir",
+              "dev": 16777234,
+              "ino": 504272827
+            },
+            {
+              "path": "/private/tmp/hive-capture/work/main/target/debug/deps/app-90f278200a918606.bf5xgrdwxnr1nulotjtra12u8.1gt8zbe.rcgu.o",
+              "unit": "debug/app-90f278200a918606",
+              "kind": "file",
+              "dev": 16777234,
+              "ino": 504272869
+            },
+            {
+              "path": "/private/tmp/hive-capture/work/main/target/debug/deps/app-90f278200a918606.d",
+              "unit": "debug/app-90f278200a918606",
+              "kind": "file",
+              "dev": 16777234,
+              "ino": 504272860
+            },
+            {
+              "path": "/private/tmp/hive-capture/work/main/target/debug/deps/libapp-90f278200a918606.rlib",
+              "unit": "debug/app-90f278200a918606",
+              "kind": "file",
+              "dev": 16777234,
+              "ino": 504272859
+            },
+            {
+              "path": "/private/tmp/hive-capture/work/main/target/debug/deps/libapp-90f278200a918606.rmeta",
+              "unit": "debug/app-90f278200a918606",
+              "kind": "file",
+              "dev": 16777234,
+              "ino": 504272864
+            }
+          ],
+          "orphan": null
+        }
+      ],
+      "state": "live"
+    }
+  ]
+}
