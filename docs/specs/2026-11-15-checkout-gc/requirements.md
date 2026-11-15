@@ -141,6 +141,7 @@ Files this change touches, and what each must not break:
 - The warm-slot pool and leases (ROAD-17, #18) and harness integration (ROAD-18, #19).
 - Any change to repo-wide `gc`, `gc --plan` or `apply`.
 - Packed or off split-debuginfo targets beyond reporting nothing to delete.
+- **Known limit** (CHECKOUTGC-7.3): a run killed inside a unit whose fingerprint dir goes first can leave that unit's other files orphaned, and later runs do not list them again, as in the plan tier. An orphaned linked binary keeps pinning the debug objects its debug map names.
 - **Known limit** (agent-decided, CHECKOUTGC-3.7): a checkout whose target dir is configured outside its own directory, for example by a `build.target-dir` in a Cargo config, gets nothing deleted there. A target shared with checkouts of other repos, or of unregistered repos, cannot be told apart from an unshared one outside the checkout.
 - **Known limit** (agent-decided, CHECKOUTGC-3.5): one live checkout of the repo whose manifest does not load, such as a stale worktree with a removed path dependency or a lane mid-edit of `Cargo.toml`, blocks the command on every checkout of that repo until it loads again or that worktree is removed. That is stricter than the plan tier, which keeps a target owned when a good workspace resolves it. It protects the rule that nothing outside the named checkout is deleted.
 
