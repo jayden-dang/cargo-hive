@@ -444,7 +444,7 @@ _Requirements: UPGRADE-3.6, UPGRADE-3.7, UPGRADE-7.5_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the generator.** It runs, with `HIVE_FIXTURE_BIN` and capture's isolated `CARGO_HOME`:
+- [x] **Step 1: Write the generator.** It runs, with `HIVE_FIXTURE_BIN` and capture's isolated `CARGO_HOME`:
   - `ensure_golden`, `reset_work_and_home`, `doctor --json` and `repo add <main>`;
   - `common::cargo_fixture::backdate_all` on main's target, which backdates the whole target out of the GC window;
   - a version bump of main's workspace crate, so the rebuild supersedes a unit, and a rebuild of main;
@@ -456,7 +456,7 @@ _Requirements: UPGRADE-3.6, UPGRADE-3.7, UPGRADE-7.5_
   contains the running user's home directory path (`$HOME`) or `/Users/<login>`. The login is matched only in
   path form, so a short login cannot false-positive inside binary store entries. The home is committed to a public
   repo. It then copies the home to `HIVE_FIXTURE_OUT`. Run `cargo test -p cargo-hive --test capture` (ignored, so not run); expect it to compile.
-- [ ] **Step 2: Build 0.1.0 from its tag in a temporary directory and run the generator.**
+- [x] **Step 2: Build 0.1.0 from its tag in a temporary directory and run the generator.**
   - `mkdir -p /private/tmp/hive-fixture-0.1.0/src && git archive v0.1.0 | tar -x -C /private/tmp/hive-fixture-0.1.0/src`
   - `CARGO_HOME=/private/tmp/hive-fixture-0.1.0/cargo-home CARGO_TARGET_DIR=/private/tmp/hive-fixture-0.1.0/target
     cargo build --locked --manifest-path /private/tmp/hive-fixture-0.1.0/src/Cargo.toml`. This needs network,
@@ -468,11 +468,11 @@ _Requirements: UPGRADE-3.6, UPGRADE-3.7, UPGRADE-7.5_
 
   Expect: pass. `PROVENANCE` names `v0.1.0` and `fb8fabb95ae4354314d8ed1e5878ee32864a0eb2`. `du -sh` of the home
   is about 1 MB.
-- [ ] **Step 3: Do the same for v0.1.1**, the release this one upgrades from *(agent-decided)*. Use
+- [x] **Step 3: Do the same for v0.1.1**, the release this one upgrades from *(agent-decided)*. Use
   `/private/tmp/hive-fixture-0.1.1/`. The build is `cargo build --locked -p cargo-hive` with that tree's root
   `Cargo.toml` (0.1.1 is a workspace), and the output is
   `HIVE_FIXTURE_OUT="$PWD/crates/cargo-hive/tests/fixtures/v0.1.1"` with `HIVE_FIXTURE_TAG=v0.1.1`. Expect: pass.
-- [ ] **Step 4: Commit.** `test: commit the state a 0.1.0 hive writes, and the generator that made it`
+- [x] **Step 4: Commit.** `test: commit the state a 0.1.0 hive writes, and the generator that made it`
 
 _Requirements: UPGRADE-5.1, UPGRADE-6.2_
 
