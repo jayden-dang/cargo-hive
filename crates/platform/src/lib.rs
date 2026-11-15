@@ -305,6 +305,18 @@ pub trait Fs {
     fn temp_dir(&self, parent: &Path, prefix: &str) -> io::Result<TempDir>;
     fn write_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+    /// Up to `len` bytes from `offset`; fewer at EOF, empty past it. Follows a symlink.
+    fn read_at(&self, path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        let bytes = self.read(path)?;
+        let Ok(start) = usize::try_from(offset) else {
+            return Ok(Vec::new());
+        };
+        if start >= bytes.len() {
+            return Ok(Vec::new());
+        }
+        let end = start.saturating_add(len).min(bytes.len());
+        Ok(bytes[start..end].to_vec())
+    }
     fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()>;
     fn set_mtime(&self, path: &Path, t: SystemTime) -> io::Result<()>;
     fn mtime(&self, path: &Path) -> io::Result<SystemTime>;

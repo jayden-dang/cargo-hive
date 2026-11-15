@@ -12,6 +12,7 @@ use std::time::SystemTime;
 use cargo_hive_platform::{self as platform, Fs, HeldLock, TryLock};
 
 type OnCompress = Arc<dyn Fn(&Path) + Send + Sync>;
+type OnRemove = Box<dyn Fn()>;
 
 #[derive(Default)]
 struct Opts {
@@ -22,6 +23,7 @@ struct Opts {
     /// After this many successful removes, later removes fail. `Some(0)` fails the first.
     fail_removes_after: Option<u64>,
     fail_remove: HashSet<PathBuf>,
+    fail_read_at: HashSet<PathBuf>,
     fail_sharing: HashSet<PathBuf>,
     fail_stat: HashSet<PathBuf>,
     fail_clone: HashMap<PathBuf, i32>,
@@ -29,6 +31,7 @@ struct Opts {
     /// After the first `entry_stat` of this path, replace the file with a symlink to the value.
     symlink_after_stat: HashMap<PathBuf, PathBuf>,
     on_compress: Option<OnCompress>,
+    on_remove: HashMap<PathBuf, OnRemove>,
     /// Create `child` just before the 1-based `nth` bounded listing of `parent`.
     create_before_listing: Vec<(PathBuf, PathBuf, u64)>,
 }
@@ -191,6 +194,28 @@ impl Recording {
         self
     }
 
+    /// The next `read_at` of `path` fails. Later calls of that path succeed.
+    pub fn fail_read_at(self, path: impl AsRef<Path>) -> Recording {
+        self.state
+            .opts
+            .lock()
+            .unwrap()
+            .fail_read_at
+            .insert(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Runs `hook` just before the `remove_file` of `path`.
+    pub fn on_remove(self, path: impl AsRef<Path>, hook: impl Fn() + 'static) -> Recording {
+        self.state
+            .opts
+            .lock()
+            .unwrap()
+            .on_remove
+            .insert(path.as_ref().to_path_buf(), Box::new(hook));
+        self
+    }
+
     fn refuse_remove(&self, path: &Path) -> bool {
         if self.state.opts.lock().unwrap().fail_remove.contains(path) {
             return true;
@@ -246,6 +271,18 @@ impl Fs for Recording {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         self.push(format!("read {}", path.display()));
         self.state.fs.read(path)
+    }
+
+    fn read_at(&self, path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.push(format!("read_at {} {offset} {len}", path.display()));
+        let fail = self.state.opts.lock().unwrap().fail_read_at.remove(path);
+        if fail {
+            return Err(io::Error::other(format!(
+                "injected read_at failure for {}",
+                path.display()
+            )));
+        }
+        self.state.fs.read_at(path, offset, len)
     }
 
     fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {
@@ -416,6 +453,10 @@ impl Fs for Recording {
         self.push(format!("remove {}", path.display()));
         if self.refuse_remove(path) {
             return Err(io::Error::other("simulated stop"));
+        }
+        let hook = self.state.opts.lock().unwrap().on_remove.remove(path);
+        if let Some(hook) = hook {
+            hook();
         }
         self.state.fs.remove_file(path)
     }

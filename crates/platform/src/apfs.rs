@@ -12,7 +12,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::macos::fs::MetadataExt as _;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -61,6 +61,20 @@ impl Fs for Apfs {
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         fs::read(path)
+    }
+
+    fn read_at(&self, path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        let file = fs::File::open(path)?;
+        let file_len = file.metadata()?.len();
+        if offset >= file_len {
+            return Ok(Vec::new());
+        }
+        let available = usize::try_from(file_len - offset).unwrap_or(usize::MAX);
+        let to_read = available.min(len);
+        let mut buf = vec![0u8; to_read];
+        let n = file.read_at(&mut buf, offset)?;
+        buf.truncate(n);
+        Ok(buf)
     }
 
     fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {
@@ -760,5 +774,87 @@ mod tests {
     fn the_load_average_reads_as_hundredths() {
         let first = apfs().load_average_hundredths().unwrap();
         assert!(first < 100_000, "{first}");
+    }
+
+    #[test]
+    fn read_at_returns_the_requested_range() {
+        let t = tmp("read-at-range");
+        let path = t.path().join("bytes");
+        let data: Vec<u8> = (0..64).collect();
+        apfs().write_file(&path, &data).unwrap();
+        let cases = [
+            (0u64, 0usize, &[][..]),
+            (0, 1, &data[0..1]),
+            (0, 8, &data[0..8]),
+            (7, 3, &data[7..10]),
+            (16, 16, &data[16..32]),
+            (63, 1, &data[63..64]),
+        ];
+        for (offset, len, want) in cases {
+            let got = apfs().read_at(&path, offset, len).unwrap();
+            assert_eq!(got, want, "offset={offset} len={len}");
+        }
+    }
+
+    #[test]
+    fn read_at_is_short_at_end_of_file() {
+        let t = tmp("read-at-eof");
+        let path = t.path().join("bytes");
+        let data: Vec<u8> = (0..16).collect();
+        apfs().write_file(&path, &data).unwrap();
+        let cases = [
+            (12u64, 8usize, &data[12..16]),
+            (0, 100, &data[..]),
+            (15, 10, &data[15..16]),
+        ];
+        for (offset, len, want) in cases {
+            let got = apfs().read_at(&path, offset, len).unwrap();
+            assert_eq!(got, want, "offset={offset} len={len}");
+        }
+    }
+
+    #[test]
+    fn read_at_past_end_of_file_is_empty() {
+        let t = tmp("read-at-past");
+        let path = t.path().join("bytes");
+        apfs().write_file(&path, b"abcdef").unwrap();
+        let cases = [(6u64, 1usize), (6, 0), (7, 4), (100, 8)];
+        for (offset, len) in cases {
+            let got = apfs().read_at(&path, offset, len).unwrap();
+            assert!(got.is_empty(), "offset={offset} len={len} got={got:?}");
+        }
+    }
+
+    #[test]
+    fn a_huge_len_on_a_small_file_allocates_only_the_file() {
+        let t = tmp("read-at-huge");
+        let path = t.path().join("bytes");
+        let data = b"small-file-contents";
+        apfs().write_file(&path, data).unwrap();
+        let got = apfs().read_at(&path, 0, usize::MAX).unwrap();
+        assert_eq!(got, data);
+        let mid = apfs().read_at(&path, 6, usize::MAX).unwrap();
+        assert_eq!(mid, &data[6..]);
+    }
+
+    #[test]
+    fn the_default_read_at_matches_apfs_on_the_same_file() {
+        let t = tmp("read-at-default");
+        let path = t.path().join("bytes");
+        let data: Vec<u8> = (0..32).collect();
+        apfs().write_file(&path, &data).unwrap();
+        let def = crate::testing::Hooked {
+            inner: Box::new(apfs()),
+            compress: None,
+            volume: None,
+            sharing: None,
+            entry_stat: None,
+        };
+        let cases = [(0u64, 8usize), (4, 4), (28, 16), (32, 1), (40, 8), (0, 0)];
+        for (offset, len) in cases {
+            let via_default = def.read_at(&path, offset, len).unwrap();
+            let via_apfs = apfs().read_at(&path, offset, len).unwrap();
+            assert_eq!(via_default, via_apfs, "offset={offset} len={len}");
+        }
     }
 }
