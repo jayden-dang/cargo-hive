@@ -1,7 +1,8 @@
 # Requirements: State upgrade (a newer hive reads, or clearly refuses, state an earlier release wrote)
 
 Feature code: UPGRADE
-Status: Draft
+Status: Approved
+Approved: 2026-11-15, by the operator (Jayden), reply relayed by the conductor: "approve", clarified "Apply recommendations, then approve" (.skills/_pending-state-upgrade/auto/operator-reply.md)
 Date: 2026-11-15
 
 <!--
