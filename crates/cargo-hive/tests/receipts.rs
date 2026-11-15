@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
-use common::{Hive, Scratch, init_repo};
+use common::{Hive, Scratch, init_repo, wait_within};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
@@ -202,4 +202,56 @@ fn human_mode_prints_text_not_json() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("no repositories registered"), "{text}");
     assert!(serde_json::from_str::<serde_json::Value>(&text).is_err());
+}
+
+#[test]
+fn an_unparseable_capabilities_file_ends_status_with_a_refusal_naming_doctor() {
+    let hive = Hive::new();
+    let path = hive.home.path.join("capabilities.json");
+    let damaged = b"{";
+    fs::write(&path, damaged).unwrap();
+    let (out, receipt) = hive.json(&["status"]);
+    assert_eq!(out.status.code(), Some(1));
+    let detail = receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["kind"] == "error")
+        .expect("error finding")["detail"]
+        .as_str()
+        .unwrap();
+    assert!(
+        detail.contains(path.to_str().unwrap()) && detail.contains("cargo hive doctor"),
+        "{detail}"
+    );
+    assert_eq!(fs::read(&path).unwrap(), damaged);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn doctor_rewrites_a_damaged_capabilities_file() {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    let hive = Hive::new();
+    let path = hive.home.path.join("capabilities.json");
+    let damaged = b"{";
+    fs::write(&path, damaged).unwrap();
+    let child = hive
+        .command(&["doctor", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = wait_within(child, Duration::from_secs(300));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = fs::read(&path).unwrap();
+    assert_ne!(bytes, damaged);
+    let caps: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(caps["toolchain_release"].as_str().is_some(), "{caps}");
 }

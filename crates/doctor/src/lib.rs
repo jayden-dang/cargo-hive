@@ -10,6 +10,7 @@ use cargo_hive_platform::proc::{self, ChildOutputError, Spec};
 use cargo_hive_platform::{
     Availability, CompressOutcome, EntryKind, Fs, LockHolder, LockKind, LockState, TryLock,
 };
+use cargo_hive_state::Layout;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -118,6 +119,8 @@ pub struct Check {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {
+    #[serde(default = "Layout::absent")]
+    pub layout: Layout,
     /// `None` until doctor has run.
     pub toolchain_release: Option<String>,
     pub disabled: BTreeMap<Capability, BTreeSet<CheckId>>,
@@ -290,6 +293,7 @@ pub fn capabilities_for(report: &DoctorReport) -> Capabilities {
         }
     }
     Capabilities {
+        layout: Layout::NEWEST,
         toolchain_release: report.toolchain_release.clone(),
         disabled,
         lock_check: LOCK_CHECK_VERSION,
@@ -1270,6 +1274,7 @@ mod tests {
             Err(CapabilityRefusal::RunDoctor(_))
         ));
         let other = Capabilities {
+            layout: Layout::NEWEST,
             toolchain_release: Some("1.96.1".into()),
             disabled: BTreeMap::new(),
             lock_check: 0,
@@ -1289,6 +1294,7 @@ mod tests {
         let disabled =
             BTreeMap::from([(Capability::FingerprintReading, BTreeSet::from([CheckId::F]))]);
         let off = Capabilities {
+            layout: Layout::NEWEST,
             toolchain_release: Some("1.97.1".into()),
             disabled,
             lock_check: 0,
@@ -1330,6 +1336,7 @@ mod tests {
     #[test]
     fn deletion_needs_results_from_the_current_lock_check() {
         let old = Capabilities {
+            layout: Layout::NEWEST,
             toolchain_release: Some("1.97.1".into()),
             disabled: BTreeMap::new(),
             lock_check: 0,
@@ -1358,6 +1365,13 @@ mod tests {
             serde_json::from_str(r#"{"toolchain_release":"1.97.1","disabled":{}}"#).unwrap();
         assert_eq!(caps.lock_check, 0);
         assert_eq!(LOCK_CHECK_VERSION, 1);
+    }
+
+    #[test]
+    fn capabilities_write_layout_first() {
+        let caps = capabilities_for(&report_with(vec![]));
+        let text = serde_json::to_string_pretty(&caps).unwrap();
+        assert!(text.starts_with("{\n  \"layout\": 1,\n"), "{text}");
     }
 
     fn report_with(checks: Vec<Check>) -> DoctorReport {
