@@ -7,7 +7,8 @@
 > for tracking.
 
 Feature code: CHECKOUTGC
-Status: Draft
+Status: Approved
+Approved: 2026-11-16, by the operator (Jayden), on the spec sheet at a16e5e0: "approve" (.skills/_pending-checkout-gc/auto/operator-reply.md)
 Date: 2026-11-15
 Execution-mode: unset
 Max-concurrency: auto
