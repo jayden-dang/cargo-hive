@@ -1,7 +1,7 @@
 //! Registered repositories, read and written through the state transaction.
 
 use crate::git::{Git, GitError};
-use cargo_hive_state::{StateError, Tx};
+use cargo_hive_state::{Layout, StateError, Tx};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -12,6 +12,8 @@ pub const FILE: &str = "registry.json";
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Registry {
+    #[serde(default = "Layout::absent")]
+    pub layout: Layout,
     pub repos: Vec<Repo>,
 }
 
@@ -226,4 +228,50 @@ fn owning_main(reg: &Registry, path: &Path) -> Option<PathBuf> {
         })
         .max_by_key(|main| main.components().count())
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_layout_as_the_first_key() {
+        let cases = [
+            Registry::default(),
+            Registry {
+                layout: Layout::NEWEST,
+                repos: vec![Repo {
+                    main: PathBuf::from("/repo"),
+                    root_commits: BTreeSet::from(["abc".into()]),
+                }],
+            },
+        ];
+        for value in cases {
+            let pretty = serde_json::to_string_pretty(&value).unwrap();
+            assert!(pretty.starts_with("{\n  \"layout\": 1,"), "{pretty}");
+        }
+    }
+
+    #[test]
+    fn a_keyless_0_1_0_file_reads_and_its_first_write_only_adds_the_layout_line() {
+        // Hand-copied 0.1.0 registry.json shape (empty repos).
+        let body = "{\n  \"repos\": []\n}";
+        let parsed: Registry = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed.layout, Layout::absent());
+        assert!(parsed.repos.is_empty());
+        let written = serde_json::to_string_pretty(&parsed).unwrap();
+        assert_eq!(written, "{\n  \"layout\": 1,\n  \"repos\": []\n}");
+    }
+
+    #[test]
+    fn an_unknown_key_other_than_layout_is_still_refused() {
+        let cases = [
+            r#"{"mystery":true,"repos":[]}"#,
+            r#"{"layout":1,"mystery":true,"repos":[]}"#,
+        ];
+        for body in cases {
+            assert!(serde_json::from_str::<Registry>(body).is_err(), "{body}");
+        }
+        assert!(serde_json::from_str::<Registry>(r#"{"layout":1,"repos":[]}"#).is_ok());
+    }
 }
