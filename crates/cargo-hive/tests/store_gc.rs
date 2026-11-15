@@ -2465,3 +2465,172 @@ fn entry_relative_files(entry: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+fn finding<'a>(receipt: &'a serde_json::Value, kind: &str) -> &'a serde_json::Value {
+    receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["kind"] == kind)
+        .unwrap_or_else(|| panic!("missing finding {kind}: {receipt}"))
+}
+
+#[test]
+fn bare_gc_with_store_db_missing_evicts_no_entry_and_names_it() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let before_dirs = entry_dirs(&hive);
+    assert!(!before_dirs.is_empty());
+    let n = before_dirs.len();
+    remove_all_targets(&repo);
+    let db = hive.home.path.join(STORE_FILE);
+    fs::remove_file(&db).unwrap();
+    assert!(!db.exists());
+
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(entry_dirs(&hive), before_dirs, "{receipt}");
+    assert!(has_finding(&receipt, "store.index_missing"), "{receipt}");
+    let f = finding(&receipt, "store.index_missing");
+    assert_eq!(f["path"], serde_json::json!(db), "{receipt}");
+    let detail = f["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(&format!(
+            "{} is missing while the store holds {n} entries, so no store entry was evicted",
+            db.display()
+        )),
+        "{detail}"
+    );
+    assert!(
+        detail.contains(
+            "build a checkout of the repository with the current toolchain, then run `cargo hive seed` to rebuild it"
+        ),
+        "{detail}"
+    );
+    assert_eq!(
+        count(&receipt, "store_entries_evicted_age")
+            + count(&receipt, "store_entries_evicted_rowless")
+            + count(&receipt, "store_entries_evicted_toolchain")
+            + count(&receipt, "store_entries_evicted_cap"),
+        0,
+        "{receipt}"
+    );
+
+    let empty = Hive::ready();
+    let (empty_out, empty_receipt) = empty.json(&["gc"]);
+    assert!(empty_out.status.success(), "{empty_receipt}");
+    assert_eq!(
+        store_counts(&receipt),
+        store_counts(&empty_receipt),
+        "missing={receipt}\nempty={empty_receipt}"
+    );
+}
+
+#[test]
+fn gc_dry_run_with_store_db_missing_previews_no_eviction() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let before_dirs = entry_dirs(&hive);
+    assert!(!before_dirs.is_empty());
+    let store = hive.home.path.join("store");
+    let snap_store = tree_files(&store);
+    remove_all_targets(&repo);
+    let db = hive.home.path.join(STORE_FILE);
+    fs::remove_file(&db).unwrap();
+
+    let (out, receipt) = hive.json(&["gc", "--dry-run"]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(has_finding(&receipt, "store.index_missing"), "{receipt}");
+    assert_eq!(entry_dirs(&hive), before_dirs, "{receipt}");
+    assert_eq!(tree_files(&store), snap_store, "{receipt}");
+    assert_eq!(
+        count(&receipt, "store_entries_evicted_age")
+            + count(&receipt, "store_entries_evicted_rowless")
+            + count(&receipt, "store_entries_evicted_toolchain")
+            + count(&receipt, "store_entries_evicted_cap"),
+        0,
+        "{receipt}"
+    );
+    assert!(!db.exists());
+}
+
+#[test]
+fn the_target_tier_still_runs_when_store_db_is_missing() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let target = repo.main.join("target");
+    let krate = crate_dirs(&target)
+        .into_iter()
+        .next()
+        .expect("incremental crate dir");
+    let (session, _) = plant_session(&krate, 3600, "svh0", false);
+    assert!(krate.join(&session).is_dir());
+    fs::remove_file(hive.home.path.join(STORE_FILE)).unwrap();
+
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        count(&receipt, "sessions_deleted") >= 1,
+        "sessions not deleted: {receipt}"
+    );
+    assert!(!krate.join(&session).exists(), "{receipt}");
+}
+
+#[test]
+fn bare_gc_with_an_unparseable_store_db_keeps_its_store_write_failed_stop() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let before_dirs = entry_dirs(&hive);
+    let db = hive.home.path.join(STORE_FILE);
+    let damaged = b"not-json";
+    fs::write(&db, damaged).unwrap();
+    let target = repo.main.join("target");
+    let krate = crate_dirs(&target)
+        .into_iter()
+        .next()
+        .expect("incremental crate dir");
+    let (session, _) = plant_session(&krate, 3600, "svh0", false);
+    assert!(krate.join(&session).is_dir());
+
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(has_finding(&receipt, "store.write_failed"), "{receipt}");
+    assert!(!has_finding(&receipt, "store.index_missing"), "{receipt}");
+    let f = finding(&receipt, "store.write_failed");
+    assert_eq!(f["path"], serde_json::json!(db), "{receipt}");
+    assert_eq!(entry_dirs(&hive), before_dirs, "{receipt}");
+    assert_eq!(fs::read(&db).unwrap(), damaged);
+    assert!(
+        count(&receipt, "sessions_deleted") >= 1,
+        "sessions not deleted: {receipt}"
+    );
+    assert!(!krate.join(&session).exists(), "{receipt}");
+}
+
+#[test]
+fn a_seed_after_store_db_was_lost_adopts_equal_entries_and_rewrites_store_db() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let before_dirs = entry_dirs(&hive);
+    let before_n = before_dirs.len();
+    assert!(before_n > 0);
+    let db = hive.home.path.join(STORE_FILE);
+    fs::remove_file(&db).unwrap();
+    assert!(!db.exists());
+
+    let lane = repo.worktree("adopt-after-lost");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(
+        receipt["counts"]["fill_entries_added"].as_u64().unwrap(),
+        0,
+        "{receipt}"
+    );
+    assert!(
+        receipt["counts"]["fill_entries_held"].as_u64().unwrap() >= before_n as u64,
+        "{receipt}"
+    );
+    assert!(db.is_file(), "store.db was not rewritten");
+    assert_eq!(rows(&hive).len(), before_n, "{:?}", rows(&hive));
+    assert_eq!(entry_dirs(&hive), before_dirs);
+}
