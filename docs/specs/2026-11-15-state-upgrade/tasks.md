@@ -358,7 +358,7 @@ Clearing that list sends the run down the existing empty-candidates return (evic
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1: Write the failing tests** in `tests/store_gc.rs`, using `common::store_fixture::seeded_store`, then
+- [x] **Step 1: Write the failing tests** in `tests/store_gc.rs`, using `common::store_fixture::seeded_store`, then
   removing `store.db`:
   - `bare_gc_with_store_db_missing_evicts_no_entry_and_names_it`, with every entry dir present after, and the
     count names equal to an empty-store run's;
@@ -369,13 +369,13 @@ Clearing that list sends the run down the existing empty-candidates return (evic
   - An existing store_gc age/toolchain/cap test stays green.
 
   Run `cargo test -p cargo-hive --test store_gc`; expect the first two to fail.
-- [ ] **Step 2: Implement.** If `index_missing`, push the finding and clear `inv.rowless`. Run the task gate for
+- [x] **Step 2: Implement.** If `index_missing`, push the finding and clear `inv.rowless`. Run the task gate for
   `cargo-hive-seed`; expect pass.
-- [ ] **Step 3: Amend STOREGC-1.6** in place. Append "except when store.db does not exist and the store holds
+- [x] **Step 3: Amend STOREGC-1.6** in place. Append "except when store.db does not exist and the store holds
   entry directories (UPGRADE-4.1)", then a note "(amended 2026-11-15 by operator decision; see
   docs/specs/2026-11-15-state-upgrade/requirements.md)". The ID keeps its number. Run `audit-trace`; expect no
   new finding.
-- [ ] **Step 4: Commit.** `fix(seed): bare gc no longer empties a store whose index is missing`
+- [x] **Step 4: Commit.** `fix(seed): bare gc no longer empties a store whose index is missing`
 
 _Requirements: UPGRADE-3.10, UPGRADE-4.1, UPGRADE-4.2, UPGRADE-4.3, UPGRADE-7.4_
 
