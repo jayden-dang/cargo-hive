@@ -444,7 +444,8 @@ _Requirements: UPGRADE-3.6, UPGRADE-3.7, UPGRADE-7.5_
     `wt2`, which writes seeds.json.
 
   It then asserts that every file listed in Produces exists and is non-empty, and that no file under the home
-  contains the running user's home directory path (`$HOME`) or login name. The home is committed to a public
+  contains the running user's home directory path (`$HOME`) or `/Users/<login>`. The login is matched only in
+  path form, so a short login cannot false-positive inside binary store entries. The home is committed to a public
   repo. It then copies the home to `HIVE_FIXTURE_OUT`. Run `cargo test -p cargo-hive --test capture` (ignored, so not run); expect it to compile.
 - [ ] **Step 2: Build 0.1.0 from its tag in a temporary directory and run the generator.**
   - `mkdir -p /private/tmp/hive-fixture-0.1.0/src && git archive v0.1.0 | tar -x -C /private/tmp/hive-fixture-0.1.0/src`

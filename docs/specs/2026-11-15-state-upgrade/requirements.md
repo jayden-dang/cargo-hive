@@ -168,7 +168,7 @@ release wrote, so that a release that cannot read old state fails its gate befor
   - a file naming the tag and the commit it was built from *(Weigh)*.
 
   It SHALL carry the same under `fixtures/v0.1.1/`, from a binary built from tag `v0.1.1`. No file in either set
-  holds the generating user's home path or login *(agent-decided)*.
+  holds the generating user's home path or `/Users/<login>` *(agent-decided)*.
 - **UPGRADE-5.2** WHEN `cargo test --workspace` runs THE SYSTEM SHALL check UPGRADE-2.1, UPGRADE-2.3 and
   UPGRADE-2.4 on each JSON state file of every committed fixture set.
 - **UPGRADE-5.3** WHEN `cargo test --workspace` runs THE SYSTEM SHALL check UPGRADE-2.5 and UPGRADE-2.6 on the
