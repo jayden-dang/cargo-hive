@@ -80,6 +80,7 @@ Every task inherits these:
 | `crates/cargo-hive/tests/capture.rs` | layout strip in `read_normalized_file`, the `write_fixture_home` generator, `run_on_home_json`, and seed after upgrade on a third clone |
 | `crates/cargo-hive/tests/fixtures/v0.1.0/home/` | committed 0.1.0 state root, store tree included (new) |
 | `crates/cargo-hive/tests/fixtures/v0.1.0/PROVENANCE` | tag, commit and `rustc -vV` of the generating build (new) |
+| `crates/cargo-hive/tests/fixtures/v0.1.1/` | the same for v0.1.1, the release this one upgrades from (new) |
 | `crates/cargo-hive/tests/upgrade.rs` | fixture suite and refusal matrix (new) |
 | `crates/cargo-hive/tests/seed.rs` | seeds.json and store.db refusals through `seed` |
 | `crates/cargo-hive/tests/store_gc.rs` | store.db missing or unparseable through bare `gc` / `--dry-run` |
@@ -410,6 +411,7 @@ _Requirements: UPGRADE-3.6, UPGRADE-3.7, UPGRADE-7.5_
   (seed lib.rs:462-464), and it makes no superseded unit.
 - Create: `crates/cargo-hive/tests/fixtures/v0.1.0/home/` (written by the generator) and
   `crates/cargo-hive/tests/fixtures/v0.1.0/PROVENANCE`
+- Create: `crates/cargo-hive/tests/fixtures/v0.1.1/home/` and `crates/cargo-hive/tests/fixtures/v0.1.1/PROVENANCE`
 - Test: `crates/cargo-hive/tests/capture.rs`
 
 **Reuse:**
@@ -441,8 +443,9 @@ _Requirements: UPGRADE-3.6, UPGRADE-3.7, UPGRADE-7.5_
   - a fresh secondary worktree `wt2` under the capture work dir (`repair_worktree`), and `seed --json` into
     `wt2`, which writes seeds.json.
 
-  It then asserts that every file listed in Produces exists and is non-empty, and copies the home to
-  `HIVE_FIXTURE_OUT`. Run `cargo test -p cargo-hive --test capture` (ignored, so not run); expect it to compile.
+  It then asserts that every file listed in Produces exists and is non-empty, and that no file under the home
+  contains the running user's home directory path (`$HOME`) or login name. The home is committed to a public
+  repo. It then copies the home to `HIVE_FIXTURE_OUT`. Run `cargo test -p cargo-hive --test capture` (ignored, so not run); expect it to compile.
 - [ ] **Step 2: Build 0.1.0 from its tag in a temporary directory and run the generator.**
   - `mkdir -p /private/tmp/hive-fixture-0.1.0/src && git archive v0.1.0 | tar -x -C /private/tmp/hive-fixture-0.1.0/src`
   - `CARGO_HOME=/private/tmp/hive-fixture-0.1.0/cargo-home CARGO_TARGET_DIR=/private/tmp/hive-fixture-0.1.0/target
@@ -455,7 +458,11 @@ _Requirements: UPGRADE-3.6, UPGRADE-3.7, UPGRADE-7.5_
 
   Expect: pass. `PROVENANCE` names `v0.1.0` and `fb8fabb95ae4354314d8ed1e5878ee32864a0eb2`. `du -sh` of the home
   is about 1 MB.
-- [ ] **Step 3: Commit.** `test: commit the state a 0.1.0 hive writes, and the generator that made it`
+- [ ] **Step 3: Do the same for v0.1.1**, the release this one upgrades from *(agent-decided)*. Use
+  `/private/tmp/hive-fixture-0.1.1/`. The build is `cargo build --locked -p cargo-hive` with that tree's root
+  `Cargo.toml` (0.1.1 is a workspace), and the output is
+  `HIVE_FIXTURE_OUT="$PWD/crates/cargo-hive/tests/fixtures/v0.1.1"` with `HIVE_FIXTURE_TAG=v0.1.1`. Expect: pass.
+- [ ] **Step 4: Commit.** `test: commit the state a 0.1.0 hive writes, and the generator that made it`
 
 _Requirements: UPGRADE-5.1, UPGRADE-6.2_
 
@@ -571,6 +578,9 @@ the release steps in docs/agents/project.md:130-168.
     comparison. It runs `seed --json` with the new binary there and asserts exit 0 and
     `counts.fill_entries_added == 0`. `assert_homes_equal` keeps comparing the first two homes, untouched by the
     seed.
+  - It also makes a fourth and a fifth clone. It runs bare `gc --json` with the new binary on one and with
+    `HIVE_V010_BIN` on the other, and asserts both receipts equal under `normalized_when_versions_differ`. The
+    new receipt's `hive_version` must be the new binary's version (ROAD-14 example 3).
 
   Run `HIVE_V010_BIN=/private/tmp/hive-fixture-0.1.0/target/debug/cargo-hive cargo test -p cargo-hive --test capture
   -- --ignored`; expect pass.
