@@ -1,7 +1,7 @@
 # Roadmap: cargo-hive
 
 Status: Approved
-Date: 2026-11-13
+Date: 2026-11-15
 
 <!--
 The program layer: milestone INTENT, above any single feature and below the product
@@ -76,8 +76,8 @@ ID rules:
 
 ## Focus
 
-**Now:** ROAD-15
-**Next:** ROAD-14
+**Now:** ROAD-14
+**Next:** ROAD-16
 
 | ID | Milestone | Outcome | Depends-on | Commitment |
 |---|---|---|---|---|
@@ -85,11 +85,12 @@ ID rules:
 | MILE-2 | Planned reclaim | A user or agent previews closure-based garbage and orphan target dirs as a plan, and an agent applies that plan itself on any checkout and on orphan target dirs, with no owner step, hive rechecking it under locks before it deletes. | MILE-1 | Closed |
 | MILE-3 | Warm worktrees from a shared store | A new secondary checkout (a build-in-waves lane, a native Claude worktree) is seeded from a compressed, hive-owned store, so its first build recompiles zero seeded registry units while the seeded copies add about zero private bytes, and `cargo hive bench` gives the measured cold-versus-seeded time. | MILE-2 | Planned |
 | MILE-4 | Upgrades keep hive's state | A user or agent who upgrades hive keeps every registered repo, plan, receipt and store entry an earlier release wrote, or is stopped with the file named and the command that fixes it, and hive never starts empty because it could not read what is there. | none | Committed |
+| MILE-5 | Warm agent worktrees stay fast | An agent that takes a task in a warm worktree at a stable path runs its first commands and every rebuild about as fast as in a freshly built one, however many tasks that worktree has served, with no wrapper, hook or Cargo config installed. | MILE-2 | Planned |
 
 ## MILE-1 — Safe automatic reclaim
 
 **Outcome:** On any Mac, a user installs cargo-hive from scratch, registers a repo, and reclaims superseded incremental sessions and leftover rustc temp entries across all its checkouts, from the CLI or from an agent driving that same CLI through the hive skill, with a receipt showing per-file bytes freed and zero units rebuilt because of a deletion.
-**Goals:** GOAL-4, GOAL-6, GOAL-7
+**Goals:** GOAL-4, GOAL-7, GOAL-9
 **Members:**
 - **ROAD-1** foundation-registry-discovery-receipts — After: none — Surfaces: None — the crate and module layout is set in design-solution. Expected components: repo registry, checkout discovery and C1 classification, Cargo target identification (`CACHEDIR.TAG` plus profile/.fingerprint), fingerprint reader with per-toolchain format check, receipt model, `doctor` capability checks, platform layer (`Fs`).
 - **ROAD-2** auto-tier-gc — After: ROAD-1 — Surfaces: None — the module layout is set in design-solution. Expected components: owner try-locks (Cargo build-dir lock, rustc session `.lock`), D6 session rule, `rustc*`/`rmeta*` temp sweep, per-file freed-byte accounting (D7).
@@ -105,7 +106,7 @@ ID rules:
 ## MILE-2 — Planned reclaim
 
 **Outcome:** A user or agent previews closure-based garbage and orphan target dirs as a plan, and an agent applies that plan itself on any checkout and on orphan target dirs, with no owner step, hive rechecking it under locks before it deletes.
-**Goals:** GOAL-6, GOAL-7
+**Goals:** GOAL-7, GOAL-9
 **Members:**
 - **ROAD-5** closure-liveness — After: MILE-1 — Surfaces: None — the module layout is set in design-solution. Expected components: `invoked.timestamp` window roots, fingerprint-graph closure (little-endian match), D5 deletion rule.
 - **ROAD-6** gc-plan-apply — After: ROAD-5 — Surfaces: None — the module layout is set in design-solution. Expected components: plan files, apply-time revalidation (liveness, try-locks, format), secondary-versus-protected scope (S2), orphan-target plans, CLI plan and apply whose JSON receipt carries each plan's outcome, for all three classes, the hive skill extended to cover them.
@@ -145,12 +146,26 @@ ID rules:
 **Deferred:** None
 **Blockers:** None
 
+## MILE-5 — Warm agent worktrees stay fast
+
+**Outcome:** An agent that takes a task in a warm worktree at a stable path runs its first commands and every rebuild about as fast as in a freshly built one, however many tasks that worktree has served, with no wrapper, hook or Cargo config installed.
+**Goals:** GOAL-7, GOAL-9
+**Members:**
+- **ROAD-16** checkout-gc-debug-objects — After: none — Surfaces: `crates/gc` (liveness window, new deletion class), `crates/cargo` or `crates/platform` (reading which debug objects a binary references), the `gc` command in `crates/cargo-hive`, `skills/hive/`. — Card: [ROAD-16](roads/ROAD-16.md)
+- **ROAD-17** warm-slot-pool — After: ROAD-16 — Surfaces: pool and lease state in `crates/state`, a new command in `crates/cargo-hive`, the handoff, `skills/hive/`; issue #18. — Card: [ROAD-17](roads/ROAD-17.md)
+**Depends-on:** MILE-2
+**Commitment:** Planned
+**Closed:** None
+**Deferred:**
+- **ROAD-18** harness-integration — deferred 2026-11-15: not measured yet, and it needs the "Claude Code hooks" non-goal reopened; revisit once ROAD-17 has numbers (issue #19).
+**Blockers:** None — the vision moved "Slot mode" out of its non-goals and GOAL-9 covers unreferenced debug objects (2026-11-15). — Notes: [MILE-5](milestones/MILE-5.notes.md)
+
 ## Goal dispositions
 
 Every live `GOAL-N` in `docs/product/vision.md` that no milestone cites belongs here, so
 that a goal is never silently dropped (S6).
 
-None. Every live goal, GOAL-2, GOAL-3, GOAL-4, GOAL-6, GOAL-7 and GOAL-8, is cited by at least one milestone.
+None. Every live goal, GOAL-2, GOAL-3, GOAL-4, GOAL-7, GOAL-8 and GOAL-9, is cited by at least one milestone. GOAL-6 was superseded by GOAL-9 on 2026-11-15, and the milestones that cited it now cite GOAL-9.
 
 | Goal | Disposition | Date | Reason |
 |---|---|---|---|
