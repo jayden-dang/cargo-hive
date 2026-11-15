@@ -85,7 +85,6 @@ Every task inherits these:
 | `crates/cargo-hive/tests/store_gc.rs` | store.db missing or unparseable through bare `gc` / `--dry-run` |
 | `docs/agents/project.md` | release step 6 binary source and new step 7 "Fixtures" |
 | `docs/specs/2026-11-13-workspace-split/requirements.md` | SPLIT-4.3 struck through, superseded by UPGRADE-2.8 |
-| `docs/specs/2026-11-15-state-upgrade/design.md` | Decision 8 and §H closing paragraph: the generator uses capture.rs's own scratch dirs, a recorded exception to testing.md's hive-it-* rule |
 
 ---
 
@@ -411,10 +410,6 @@ _Requirements: UPGRADE-3.6, UPGRADE-3.7, UPGRADE-7.5_
   (seed lib.rs:462-464), and it makes no superseded unit.
 - Create: `crates/cargo-hive/tests/fixtures/v0.1.0/home/` (written by the generator) and
   `crates/cargo-hive/tests/fixtures/v0.1.0/PROVENANCE`
-- Modify: `docs/specs/2026-11-15-state-upgrade/design.md`. In Decision 8 and in §H's closing paragraph, the
-  generator runs in capture.rs's `/private/tmp/hive-capture/*` dirs, not `/private/tmp/hive-it-*`. That is the
-  same standing exception capture.rs already has against testing.md's "Integration fixtures live in
-  /private/tmp/hive-it-*", and the edit records it.
 - Test: `crates/cargo-hive/tests/capture.rs`
 
 **Reuse:**
@@ -460,9 +455,7 @@ _Requirements: UPGRADE-3.6, UPGRADE-3.7, UPGRADE-7.5_
 
   Expect: pass. `PROVENANCE` names `v0.1.0` and `fb8fabb95ae4354314d8ed1e5878ee32864a0eb2`. `du -sh` of the home
   is about 1 MB.
-- [ ] **Step 3: Update design Decision 8 and §H's closing paragraph** to name the capture dirs and the recorded
-  exception.
-- [ ] **Step 4: Commit.** `test: commit the state a 0.1.0 hive writes, and the generator that made it`
+- [ ] **Step 3: Commit.** `test: commit the state a 0.1.0 hive writes, and the generator that made it`
 
 _Requirements: UPGRADE-5.1, UPGRADE-6.2_
 
@@ -504,7 +497,8 @@ _Requirements: UPGRADE-5.1, UPGRADE-6.2_
   - `appending_a_receipt_keeps_every_earlier_line_and_each_parses`. This is a separate test; schema is 2 or 3.
   - `command_json_output_carries_no_layout_key`: run `status --json` on a copy and assert that no object at any
     depth has a `layout` key. Exit 0 is not asserted, because the fixture's paths and pinned toolchain depend on
-    the machine.
+    the machine. It also runs `status --json` on a `common::Hive::ready()` home with a registered repo, which
+    exits 0, so the check cannot pass on a refusal receipt alone.
   - `config_json_is_read_without_a_layout_key_and_refused_with_one`.
 
   Run `cargo test -p cargo-hive --test upgrade`; expect pass, since Tasks 2–5 and 9 have landed. Then break the

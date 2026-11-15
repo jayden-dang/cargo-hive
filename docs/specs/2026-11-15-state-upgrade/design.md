@@ -112,7 +112,9 @@ lock) and ARCH-2 (writes stay inside the state root).
    to `HIVE_FIXTURE_OUT`:
    - doctor, repo add, build, a backdated superseded unit so `gc --plan` stores a plan, a secondary worktree, and
      seed;
-   - all inside `/private/tmp/hive-it-*`;
+   - all inside capture.rs's own `/private/tmp/hive-capture/*` dirs (capture.rs:14-19). That is the standing
+     exception capture.rs already holds against testing.md:34 ("Integration fixtures live in
+     /private/tmp/hive-it-*"), and it is recorded here *(agent-decided)*;
    - with capture.rs's isolated `CARGO_HOME` (`/private/tmp/hive-capture/cargo-home`, capture.rs:18, :149-151),
      never the user's `~/.cargo`.
 
@@ -318,7 +320,8 @@ Everything else leaves.
 
 The fixture home is copied into a `/private/tmp/hive-it-*` scratch dir before any command runs, so committed
 files are never written (UPGRADE-6.2; testing standard "Integration fixtures live in /private/tmp/hive-it-*").
-The generator takes its home only from such a dir and writes outside it only to `HIVE_FIXTURE_OUT`. Its Cargo
+The generator takes its home only from capture.rs's `/private/tmp/hive-capture/*` dirs (Decision 8, the recorded
+exception to testing.md:34, *agent-decided*) and writes outside them only to `HIVE_FIXTURE_OUT`. Its Cargo
 runs use capture.rs's isolated `CARGO_HOME` (capture.rs:18, :149-151).
 
 ### I. Capture test, release steps and the SPLIT amendment
