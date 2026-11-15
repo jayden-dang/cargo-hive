@@ -503,7 +503,7 @@ _Requirements: UPGRADE-5.1, UPGRADE-6.2_
 
 **Depends-on:** Task 2, Task 3, Task 4, Task 5, Task 9
 
-- [ ] **Step 1: Write the tests.**
+- [x] **Step 1: Write the tests.**
   - `every_fixture_set_is_present_and_complete`: at least one `fixtures/v*/home/`, all six files plus
     `receipts/`, at least one plan and at least one seed record.
   - `each_state_file_reads_the_values_its_release_wrote`: parse with its type, re-serialize, strip `layout` on the
@@ -520,7 +520,7 @@ _Requirements: UPGRADE-5.1, UPGRADE-6.2_
 
   Run `cargo test -p cargo-hive --test upgrade`; expect pass, since Tasks 2–5 and 9 have landed. Then break the
   absent-key default locally to confirm the suite fails, and revert.
-- [ ] **Step 2: Commit.** `test: the state a 0.1.0 hive wrote reads as before`
+- [x] **Step 2: Commit.** `test: the state a 0.1.0 hive wrote reads as before`
 
 _Requirements: UPGRADE-1.3, UPGRADE-1.4, UPGRADE-2.1, UPGRADE-2.3, UPGRADE-2.5, UPGRADE-2.6, UPGRADE-2.7, UPGRADE-5.2, UPGRADE-5.3_
 
