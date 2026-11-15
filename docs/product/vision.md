@@ -1,7 +1,7 @@
 # Product Vision: cargo-hive
 
 Status: Approved
-Date: 2026-11-13
+Date: 2026-11-15
 
 <!--
 The repo-level north star: WHAT this project is and for whom, above any single
@@ -34,9 +34,10 @@ Each goal holds on a machine where `cargo hive doctor` passes. None promises kly
 - **GOAL-3** Seeding k secondary checkouts adds about 0 private bytes to their registry part.
 - **GOAL-4** Every number hive reports, in receipts and in explain findings, is measured on this machine, never estimated; durations come only from `cargo hive bench`, as integer milliseconds.
 - ~~**GOAL-5** An agent reclaims and seeds secondary checkouts with no human in the loop; a plan-tier change on a protected checkout returns `needs-human` until the owner approves it.~~ Superseded by GOAL-7 (2026-11-02): a deletion from a target dir costs at most a rebuild and holds no sensitive data, and an agent can already delete a target by hand, so the owner step added work without adding protection (ADR-0002).
-- **GOAL-6** Hive deletes no file of a unit that is live when the deletion is decided (reachable over the fingerprint graph from a unit compiled inside the GC window), so no live unit rebuilds because of a deletion; a unit hive collected rebuilds when a command needs it again. Reported freed bytes never exceed what the volume regained.
+- ~~**GOAL-6** Hive deletes no file of a unit that is live when the deletion is decided (reachable over the fingerprint graph from a unit compiled inside the GC window), so no live unit rebuilds because of a deletion; a unit hive collected rebuilds when a command needs it again. Reported freed bytes never exceed what the volume regained.~~ Superseded by GOAL-9 (2026-11-15): on macOS a live unit's stale debug objects, which no linked binary references, pile up by about 10k per test build and slow every new test binary, and deleting them rebuilt nothing (`docs/product/pivot-ledger.md`, `docs/roadmap/milestones/MILE-5.notes.md`).
 - **GOAL-7** An agent reclaims on every checkout class and from orphan targets, and seeds secondary checkouts, with no human in the loop.
 - **GOAL-8** Upgrading hive keeps every piece of state an earlier release wrote (registered repos, plans, receipts, store entries): each file is read, or refused by name with the command that fixes it, and none is ever treated as empty because it could not be read.
+- **GOAL-9** Hive deletes no file a live unit still needs: no file of a unit that is live when the deletion is decided (reachable over the fingerprint graph from a unit compiled inside the GC window), and no debug object (`*.rcgu.o`) that a live linked binary's debug map references. No live unit rebuilds because of a deletion, and a unit hive collected rebuilds when a command needs it again. Reported freed bytes never exceed what the volume regained.
 
 Receipts are also the data Cargo lacks for a default target-dir GC policy (cargo#13136; `RESEARCH.md` §6).
 
@@ -47,7 +48,6 @@ Receipts are also the data Cargo lacks for a default target-dir GC policy (cargo
 - Distributed or remote caching.
 - CI and Linux.
 - A jobserver.
-- Slot mode.
 - Editing repo files.
 - Replacing artifacts in place.
 - Claude Code hooks.
@@ -58,10 +58,9 @@ Receipts are also the data Cargo lacks for a default target-dir GC policy (cargo
 
 ## Scope boundaries
 
-**Now.** MILE-1 and MILE-2 closed 2026-11-12 and shipped in v0.1.0; MILE-3 is planned; MILE-4, upgrades that keep hive's state, is committed (2026-11-13) (`docs/roadmap/INDEX.md`). ROAD-4, the MCP server, dropped 2026-10-29; ROAD-7, owner approval, dropped 2026-11-02.
+**Now.** MILE-1 and MILE-2 closed 2026-11-12 and shipped in v0.1.0; MILE-3 is planned; MILE-4, upgrades that keep hive's state, is committed (2026-11-13); MILE-5, warm agent worktrees at stable paths that stay fast, is planned (2026-11-15) (`docs/roadmap/INDEX.md`). Slot mode left the non-goals on 2026-11-15 (`docs/product/pivot-ledger.md`). ROAD-4, the MCP server, dropped 2026-10-29; ROAD-7, owner approval, dropped 2026-11-02.
 
 **Deferred.**
-- Slot mode, until `-p` and `--workspace` resolve the same feature set.
 - A per-checkout "protect" marker.
 - Cargo's new build-dir layout: reported, never acted on.
 
