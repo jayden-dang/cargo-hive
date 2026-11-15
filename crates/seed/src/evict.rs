@@ -76,7 +76,7 @@ pub fn run(
     );
     outcome.findings.extend(held.findings.iter().cloned());
 
-    let inv = match inventory(ctx.fs, ctx.state) {
+    let mut inv = match inventory(ctx.fs, ctx.state) {
         Ok(inv) => inv,
         Err(err) => {
             outcome.findings.push(Finding {
@@ -88,6 +88,20 @@ pub fn run(
             return outcome;
         }
     };
+    if index_missing(ctx.state, &inv) {
+        let path = ctx.state.root().join(store::STORE_FILE);
+        let n = inv.rowless.len();
+        outcome.findings.push(Finding {
+            kind: "store.index_missing".into(),
+            path: Some(path.clone()),
+            detail: format!(
+                "{path} is missing while the store holds {n} entries, so no store entry was evicted; build a checkout of the repository with the current toolchain, then run `cargo hive seed` to rebuild it",
+                path = path.display()
+            ),
+            measured: BTreeMap::new(),
+        });
+        inv.rowless.clear();
+    }
     push_count(&mut outcome, "store_tmp_bytes", inv.tmp_bytes);
 
     let now_secs = match ctx.now.duration_since(UNIX_EPOCH) {
@@ -517,6 +531,10 @@ pub fn run(
     apply_removal_ledger(&mut outcome, ledger, ctx.account_bytes);
     drop(store_lock);
     outcome
+}
+
+fn index_missing(state: &State, inv: &Inventory) -> bool {
+    !state.root().join(store::STORE_FILE).exists() && !inv.rowless.is_empty()
 }
 
 fn untouched_freeable(
