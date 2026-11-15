@@ -85,7 +85,7 @@ In this file:
 
 - **CHECKOUTGC-5.1** (agent-decided) THE SYSTEM SHALL ship a hive skill that tells an agent working in a reused worktree to run `cargo hive gc --checkout <that worktree> --json` before a test build whenever that checkout's profile `deps/` holds more than 20,000 entries. It SHALL say how the agent counts those entries.
 - **CHECKOUTGC-5.2** THE SYSTEM SHALL ship the README describing `gc --checkout` the same way, with every command line and receipt name it cites existing in the binary.
-- **CHECKOUTGC-5.3** THE SYSTEM SHALL ship a hive skill that names this mode's counts and findings, held-target skips included, and that states that `gc <path>` still covers the whole repo.
+- **CHECKOUTGC-5.3** THE SYSTEM SHALL ship a hive skill that names this mode's counts and findings, held-target skips included, with what the agent does for each. For `gc.outside_checkout`, that is: nothing was deleted there, and repo-wide `gc --plan` then `apply` can still collect that target's dead units. The skill SHALL also state that `gc <path>` still covers the whole repo.
 - **CHECKOUTGC-5.4** (guard) WHEN `tests/skill.rs` runs THE SYSTEM SHALL CONTINUE TO pass these checks: that every `cargo hive` line in the skill parses with the CLI, that every shipped command is documented, and that the "Free disk" section keeps its pinned phrases. The new command line is among the lines checked, and `parse()` tells it apart from bare `gc`.
 
 ## 6. Existing commands keep working
@@ -123,7 +123,7 @@ Files this change touches, and what each must not break:
 
 **Story:** As a stakeholder, I want measurable quality targets for this feature, so that how-well is not left implicit.
 
-- **Performance:** **CHECKOUTGC-7.1** (agent-decided) WHEN the command runs on a copy of an aged klynt slot THE SYSTEM SHALL finish within 15 s of wall time. Verified by timing the proof run outside hive, since hive reports no durations (ARCH-10). The spike's object gc, using a child process per binary, took 7–8 s per build (MILE-5.notes.md:15-16). No standing metric doc exists (`docs/product/metrics.md` absent).
+- **Performance:** **CHECKOUTGC-7.1** (agent-decided) WHEN the command runs on a copy of an aged klynt slot THE SYSTEM SHALL have its wall time recorded by the proof, against a target of 15 s. This is a measured target, not a pass/fail bound; a run past it reopens the read design. Verified by timing the proof run outside hive, since hive reports no durations (ARCH-10). The spike's object gc, using a child process per binary, took 7–8 s per build (MILE-5.notes.md:15-16). No standing metric doc exists (`docs/product/metrics.md` absent).
 - **Security:** **CHECKOUTGC-7.2** THE SYSTEM SHALL delete only entries `liveness()` lists and loose `*.rcgu.o` files whose paths lie inside one of its targets. Each one SHALL be re-checked by kind, device and inode immediately before it is deleted, and SHALL be followed out of a target by no symlink. Verified by tests with a symlink and a swapped entry. No threat model exists (`docs/security/` absent).
 - **Reliability:** **CHECKOUTGC-7.3** WHEN a run stops part-way through, cancelled or killed THE SYSTEM SHALL leave no state file to repair, and no unit that Cargo would treat as fresh while one of its files is missing. To that end, a unit's dep-info file goes first and its fingerprint dir last, or its fingerprint dir first when it has no dep-info file, as `apply` orders them. The next run SHALL apply the same rules to what remains. A file of a unit whose fingerprint dir is already gone is not listed again, as in the plan tier. Verified by tests that stop after each position in a unit and run again. No reliability doc exists (`docs/ops/` absent).
 - **Accessibility:** None. The command is a headless CLI with plain-text and `--json` output and no UI.
@@ -147,6 +147,10 @@ Files this change touches, and what each must not break:
 
 ## Open Questions
 
-- Example 1's figures (121k → 4.2k files in `deps/`; 60 s → 28 s for the next edit's test build) are the klynt proof's evidence target, not a requirement. Their source is not in the spike records. The proof records the measured values.
+- Example 1's figures (121k → 4.2k files in `deps/`; 60 s → 28 s for the next edit's test build) are the card's, and no spike record holds them. The recorded evidence (main checkout `.skills/verify/2026-11-14-pool-vs-wrapper/PLAN.md`) is:
+  - line 73: an aged slot's `deps/` held 104,749 `.o` files, of which 14,753 were referenced;
+  - lines 88-89: `deps/` at T6 held 72,896 files with gc at handoff and 338,539 with none, and the median edit wall was 42 s against 110 s.
+
+  The klynt proof records its own values against these. None of them is a requirement.
 - Unmeasured: the share of an aged slot's slowdown that comes from superseded incremental sessions. Reopen the exclusion of the auto tier if, after the command, the next build stays slower than fresh by more than the deleted objects and units explain. This is an open check for the proof, not a requirement.
-- 7.1's 15 s ceiling is unmeasured: the in-process parse has not been run, and the only figure is the spike's 7–8 s with a child process per binary. If the proof exceeds it, the fix belongs in design (the read bound). A persisted cache is a hard stop in this run.
+- 7.1's 15 s target is unmeasured: the in-process parse has not been run, and the only figure is the spike's 7–8 s with a child process per binary. If the proof exceeds it, the fix belongs in design (the read bound). A persisted cache is a hard stop in this run.

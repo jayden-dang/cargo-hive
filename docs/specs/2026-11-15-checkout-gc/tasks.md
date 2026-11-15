@@ -470,7 +470,7 @@ _Requirements: CHECKOUTGC-6.1, CHECKOUTGC-6.2, CHECKOUTGC-6.3, CHECKOUTGC-6.4, C
 
 **Depends-on:** Task 9
 
-- [ ] **Step 1: Write the failing tests.** Extend `parse()` and the three `Parsed::Gc` combos in `skill_documents_every_shipped_command` so that a `gc --checkout` line is told apart from bare `gc`. Add the eval entries: trigger "before a test build with deps/ over 20,000 entries", and reading "a `gc.skipped` or `gc.shared_target` receipt". Run `cargo test -p cargo-hive --test skill`; expect failure (the skill and README lack the line).
+- [ ] **Step 1: Write the failing tests.** Extend `parse()` and the three `Parsed::Gc` combos in `skill_documents_every_shipped_command` so that a `gc --checkout` line is told apart from bare `gc`. Add the eval entries: trigger "before a test build with deps/ over 20,000 entries", and reading "a `gc.skipped`, `gc.shared_target` or `gc.outside_checkout` receipt". The last must lead to repo-wide `gc --plan` then `apply`, not to silence. Run `cargo test -p cargo-hive --test skill`; expect failure (the skill and README lack the line).
 - [ ] **Step 2: Write the skill text through the `author-skills` workflow** (RED baseline, then GREEN, Sonnet and Haiku evals), staying within the 150-line budget (118 used). Also write the README subsection. Run `cargo test -p cargo-hive --test skill`; expect pass.
 - [ ] **Step 3: Commit.** `docs(skill): run gc --checkout before a test build in a bloated worktree`
 
@@ -501,18 +501,18 @@ _Requirements: CHECKOUTGC-5.1, CHECKOUTGC-5.2, CHECKOUTGC-5.3, CHECKOUTGC-5.4_
   - Set up a scratch `HIVE_HOME` per copy, run `cargo hive doctor`, then register the copy's main.
   - Check that `cargo metadata --no-deps --locked --offline` loads in **every** live checkout of each copy. If one fails, 3.5 blocks the run, so fix or remove that worktree in the copy first.
 - [ ] **Step 2: Count before** (count only, no build).
-  - In both copies, record `ls -f backend/target/debug/deps | wc -l`.
+  - In both copies, record `ls -f backend/target/debug/deps | wc -l`, plus the entry count and `du -sk` of `backend/target/debug/incremental`.
   - Check a sample of copied `invoked.timestamp` mtimes against the originals; they must be equal.
   - Every proof cargo command in this task runs with `--offline`.
 - [ ] **Step 3: Run** `cargo hive gc --checkout <gc copy slot> --json` in the gc copy only.
-  - Record the wall time with a cold and a warm snapshot (15 s target). The time includes every `check_entry` and `remove_counted` call.
+  - Record the wall time with a cold snapshot (15 s target, recorded, not a bound). The time includes every `check_entry` and `remove_counted` call. A warm-snapshot rerun on the cleaned copy is labelled discovery cost.
   - Record the receipt.
   - Re-run the slot's last task's cargo commands, offline, in **both** copies. A unit counts as gc-caused only if it recompiles in the gc copy and not in the control. Expect 0 such units among units compiled inside the window.
 - [ ] **Step 4: Measure the edit's test build.**
   - After Step 3, apply the same source edit to the slot in both copies.
   - Run the same offline test build in each. The control copy's time is "before" and the gc copy's is "after".
-  - Record the gc copy's `deps/` count. The evidence targets are about 4.2k files and about 28 s, from the Open Questions; these are not pass/fail.
-  - Record the share left by `incremental/`, which is the reopen check for the auto-tier exclusion.
+  - Record the gc copy's `deps/` count against the recorded evidence in Open Questions (104,749 → 14,753 referenced objects; 72,896 against 338,539 files; 42 s against 110 s edit wall). The card's 4.2k files and 28 s are named as the card's. None of these is pass/fail.
+  - Record the `incremental/` entry count and `du -sk` in both copies again. Its share is the reopen check for the auto-tier exclusion (Open Questions).
   - If the 15 s ceiling is exceeded, profile first. The reopen path for the read is an on-demand read of each N_OSO string at its `n_strx`, with no cache.
 - [ ] **Step 5: Write the PLAN.md record** with dated numbers. No commit (git-ignored).
 

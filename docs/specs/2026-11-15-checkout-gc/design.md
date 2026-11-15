@@ -303,7 +303,7 @@ Surface:
 Interface: the skill text tells an agent working in a reused worktree what to do:
 - **When to count.** Before a test build, count the entries with `ls -f <the checkout's real target dir>/debug/deps | wc -l`, or the `deps/` of its profile dir.
 - **When to run.** When the count is above 20,000, run `cargo hive gc --checkout <worktree> --json`.
-- **How to read the receipt.** `objects_deleted`, `units_deleted`, `freed_bytes` and `targets_skipped_held`, and the `gc.skipped`, `gc.shared_target`, `gc.outside_checkout`, `ownership.unresolved` and `gc.objects_undecided` findings, each with what to do.
+- **How to read the receipt.** `objects_deleted`, `units_deleted`, `freed_bytes` and `targets_skipped_held`, and the `gc.skipped`, `gc.shared_target`, `gc.outside_checkout`, `ownership.unresolved` and `gc.objects_undecided` findings, each with what to do. For `gc.outside_checkout`, the agent learns that nothing was deleted in that target, and that repo-wide `gc --plan` then `apply` can still collect its dead units, though not its debug objects.
 
 Depth: n/a — extends the shipped skill.
 Locality: extend `plugin/skills/hive/SKILL.md`, `skills/hive/{eval.json,TESTS.md}` and `README.md`. The text goes through the `author-skills` workflow, with Sonnet and Haiku evals, at build time. Neighbor impact: leave the other skill sections.
