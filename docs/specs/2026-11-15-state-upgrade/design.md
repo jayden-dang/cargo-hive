@@ -138,7 +138,7 @@ deep modules — an interface much simpler than what it hides.
 
 ### A. State crate: `Layout`, the layout check, and refusal text
 
-Satisfies: UPGRADE-1.2, UPGRADE-2.2, UPGRADE-2.4, UPGRADE-3.2, UPGRADE-3.3, UPGRADE-3.9, UPGRADE-6.1
+Satisfies: UPGRADE-1.2, UPGRADE-2.2, UPGRADE-2.4, UPGRADE-3.2, UPGRADE-3.3, UPGRADE-3.9, UPGRADE-6.1, UPGRADE-7.8
 Reuse: rung 2, which extends `read_json` / `read_json_limited` / `StateError` in crates/state/src/lib.rs:20-70,
 :369-403. The atomic write is unchanged.
 Respects: ARCH-16
@@ -348,7 +348,7 @@ asserts `fill_entries_added == 0` (UPGRADE-2.9/5.7).
 
 | Seam | Kind | Covers |
 |---|---|---|
-| `cargo-hive-state` unit tests (`read`/`write` on a scratch root) | unit | UPGRADE-1.2, 2.2, 2.4, 3.2, 3.3, 3.9, 6.1 |
+| `cargo-hive-state` unit tests (`read`/`write` on a scratch root) | unit | UPGRADE-1.2, 2.2, 2.4, 3.2, 3.3, 3.9, 6.1, 7.8 |
 | Unit tests beside each persisted type (registry, doctor, discover, plan record, store, seed record) | unit | UPGRADE-1.1, 1.5, 7.1, 7.2 |
 | `crates/cargo-hive/tests/upgrade.rs`, new and the only new seam | integration | UPGRADE-1.3, 1.4, 2.1, 2.3, 2.5, 2.6, 2.7, 3.1, 3.8, 5.1, 5.2, 5.3, 5.4, 6.2 |
 | `crates/seed/src/record.rs` unit tests (:606), `tests/seed.rs` and `tests/status_seed.rs` | unit / integration | UPGRADE-3.4, 3.5, 7.3 |
@@ -361,7 +361,7 @@ asserts `fill_entries_added == 0` (UPGRADE-2.9/5.7).
 ## Coverage check
 
 Every ID in requirements.md appears in exactly one `Satisfies:` line:
-- A: 1.2, 2.2, 2.4, 3.2, 3.3, 3.9, 6.1
+- A: 1.2, 2.2, 2.4, 3.2, 3.3, 3.9, 6.1, 7.8
 - B: 1.1, 1.5, 2.1, 2.3, 2.7, 7.1, 7.2
 - C: 1.3, 1.4, 2.5, 2.6
 - D: 3.1, 3.8, 7.6
@@ -371,5 +371,5 @@ Every ID in requirements.md appears in exactly one `Satisfies:` line:
 - H: 5.1, 5.2, 5.3, 5.4, 6.2
 - I: 2.8, 2.9, 5.5, 5.6, 5.7, 7.7
 
-That is 43 IDs, with none unmapped. There is no UI design section: hive is a headless CLI, and no Satisfies ID is
+That is 44 IDs, with none unmapped. There is no UI design section: hive is a headless CLI, and no Satisfies ID is
 delivered through a browser surface (Step 2b predicate false).

@@ -97,7 +97,8 @@ name that file, so that my repos, plans and store entries are not dropped behind
 - **UPGRADE-3.2** IF a JSON state file records a layout number above the newest this hive reads THEN THE SYSTEM
   SHALL stop on it exactly where UPGRADE-3.1 stops on an unparseable file, including its narrower stops
   (UPGRADE-3.4 to UPGRADE-3.7, UPGRADE-3.10). The message names the file's full path, the layout the file
-  records and the newest layout this hive reads *(agent-decided)*.
+  records, the newest layout this hive reads, and the command that installs a hive which reads it
+  (`cargo install cargo-hive`) *(agent-decided)*.
 - **UPGRADE-3.3** IF hive refuses or stops on a state file under UPGRADE-3.1, UPGRADE-3.2, UPGRADE-3.4, UPGRADE-3.7 or
   UPGRADE-3.10 THEN THE SYSTEM SHALL leave that file's bytes unchanged (ROAD-14.md:18). The one writer that
   never reads its file is outside this: `cargo hive doctor` SHALL CONTINUE TO rewrite `capabilities.json`
@@ -120,7 +121,7 @@ name that file, so that my repos, plans and store entries are not dropped behind
   fail the run with a finding whose path is `store.db` and whose detail is the read error. Before this feature
   that failure counted as "no stored unit lists the repo" and reported `bench.nothing_to_seed` with its build
   advice (crates/cargo-hive/src/bench/mod.rs:292-313). An unparseable `store.db` met earlier, in bench's prime
-  fill, SHALL CONTINUE TO fail the run as it does today (bench/mod.rs:238; fill.rs:91). The nothing-to-seed
+  fill, SHALL CONTINUE TO fail the run as it does today (the prime `seed::run_fill` at bench/mod.rs:247, ended by `fail_run` at :277-284; fill.rs:91). The nothing-to-seed
   read meets a bad `store.db` only when the prime fill did not read it (fill.rs:77-85) or it changed during
   the run *(Weigh)*.
 - **UPGRADE-3.8** IF `capabilities.json` exists and cannot be parsed THEN THE SYSTEM SHALL name
@@ -214,7 +215,8 @@ release wrote, so that a release that cannot read old state fails its gate befor
 
 Every file this feature changes, with the guard that protects it:
 
-- `crates/state/src/lib.rs`: the read path (layout key, missing → empty, refusal text) and the atomic write.
+- `crates/state/src/lib.rs`: the read path (layout key, missing → empty, refusal text, config's no-peek read) and
+  the atomic write. The config refusal is guarded by **UPGRADE-7.8**.
   Guarded by UPGRADE-3.9 and UPGRADE-6.1.
 - `crates/cargo/src/registry.rs`, `crates/doctor/src/lib.rs`, `crates/cargo/src/discover.rs`,
   `crates/gc/src/plan_tier/record.rs`, `crates/seed/src/store.rs`, `crates/seed/src/record.rs`: the persisted
@@ -255,6 +257,10 @@ Guards:
 - **UPGRADE-7.6** (guard) WHEN any command refuses THE SYSTEM SHALL CONTINUE TO exit 1 and still print and log
   one receipt with its `refusal` or `error` finding (CORE-5.x). Receipt `schema` values stay 2, and 3 for plan
   and apply (GCPLAN-6.1, GCPLAN-9.2).
+- **UPGRADE-7.8** (guard) IF `config.json` exists and cannot be parsed THEN THE SYSTEM SHALL CONTINUE TO refuse
+  it as malformed, naming the file, as every command that reads configuration does today
+  (crates/state/src/lib.rs:44-49, :268). config.json is the user's file, not a state file (CONTEXT.md), and it
+  carries no layout (UPGRADE-1.4) *(agent-decided)*.
 - **UPGRADE-7.7** (guard) WHEN a release is cut THE SYSTEM SHALL CONTINUE TO run release steps 1–6 as written
   (gate, version, package check, tag, publish, smoke). Step 6 changes only in where `HIVE_V010_BIN` comes from
   (UPGRADE-5.6).

@@ -131,6 +131,7 @@ Every task inherits these:
   - `reading_never_writes_the_file` (mtime and bytes unchanged)
   - `with_fix_names_the_command_and_leaves_other_errors_alone`
   - `a_missing_file_still_reads_as_default`
+  - `an_unparseable_config_is_still_refused_as_malformed`
 
   Run `cargo test -p cargo-hive-state --lib`; expect a compile failure (no `Layout`, no `NewerLayout`).
 - [ ] **Step 2: Implement.**
@@ -144,7 +145,7 @@ Every task inherits these:
   Run `cargo test -p cargo-hive-state`; expect pass. Then run the project.md task gate for `cargo-hive-state`.
 - [ ] **Step 3: Commit.** `feat(state): record a layout and refuse files from a newer hive by name`
 
-_Requirements: UPGRADE-1.2, UPGRADE-2.2, UPGRADE-2.4, UPGRADE-3.2, UPGRADE-3.3, UPGRADE-3.9, UPGRADE-6.1_
+_Requirements: UPGRADE-1.2, UPGRADE-2.2, UPGRADE-2.4, UPGRADE-3.2, UPGRADE-3.3, UPGRADE-3.9, UPGRADE-6.1, UPGRADE-7.8_
 
 ---
 
