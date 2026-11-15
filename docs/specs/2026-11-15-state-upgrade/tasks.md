@@ -545,7 +545,7 @@ _Requirements: UPGRADE-1.3, UPGRADE-1.4, UPGRADE-2.1, UPGRADE-2.3, UPGRADE-2.5, 
 
 **Depends-on:** Task 3, Task 6, Task 7, Task 10
 
-- [ ] **Step 1: Write one table-driven test per harness.** Each row covers an unparseable copy and a
+- [x] **Step 1: Write one table-driven test per harness.** Each row covers an unparseable copy and a
   `"layout": 2` copy, and asserts the stop below plus unchanged bytes:
 
   | File | Harness | Command | Stop |
@@ -557,7 +557,7 @@ _Requirements: UPGRADE-1.3, UPGRADE-1.4, UPGRADE-2.1, UPGRADE-2.3, UPGRADE-2.5, 
   | store.db | `seeded_store` (store_gc.rs) | bare `gc` and `gc --dry-run` | `store.write_failed`, target tier runs |
 
   Run `cargo test -p cargo-hive --test upgrade --test seed --test store_gc`; expect pass.
-- [ ] **Step 2: Commit.** `test: every state file refused by name and left untouched`
+- [x] **Step 2: Commit.** `test: every state file refused by name and left untouched`
 
 _Requirements: UPGRADE-5.4_
 
