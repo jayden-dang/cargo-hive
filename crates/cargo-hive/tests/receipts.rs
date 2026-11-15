@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
-use common::{Hive, Scratch, init_repo};
+use common::{Hive, Scratch, init_repo, wait_within};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
@@ -231,7 +231,7 @@ fn an_unparseable_capabilities_file_ends_status_with_a_refusal_naming_doctor() {
 #[test]
 fn doctor_rewrites_a_damaged_capabilities_file() {
     use std::process::Stdio;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let hive = Hive::new();
     let path = hive.home.path.join("capabilities.json");
@@ -244,16 +244,7 @@ fn doctor_rewrites_a_damaged_capabilities_file() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let started = Instant::now();
-    let mut child = child;
-    while child.try_wait().unwrap().is_none() {
-        assert!(
-            started.elapsed() <= Duration::from_secs(300),
-            "doctor did not finish within 300s"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let out = child.wait_with_output().unwrap();
+    let out = wait_within(child, Duration::from_secs(300));
     assert!(
         out.status.success(),
         "{}",
