@@ -211,7 +211,7 @@ _Requirements: UPGRADE-1.1, UPGRADE-7.2_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - Doctor unit test: `capabilities_write_layout_first`.
   - In `tests/receipts.rs`: `an_unparseable_capabilities_file_ends_status_with_a_refusal_naming_doctor`. It asserts
     exit 1, a receipt with an `error` finding whose detail holds the full path and `cargo hive doctor`, and the
@@ -220,9 +220,9 @@ _Requirements: UPGRADE-1.1, UPGRADE-7.2_
     that runs a real `doctor`, as tests/doctor.rs does.
 
   Run `cargo test -p cargo-hive-doctor --lib` and `cargo test -p cargo-hive --test receipts`; expect failure.
-- [ ] **Step 2: Implement** the field and update the literals. Run the task gate for `cargo-hive-doctor`; expect
+- [x] **Step 2: Implement** the field and update the literals. Run the task gate for `cargo-hive-doctor`; expect
   pass.
-- [ ] **Step 3: Commit.** `feat(doctor): capabilities record their layout and a damaged file names doctor`
+- [x] **Step 3: Commit.** `feat(doctor): capabilities record their layout and a damaged file names doctor`
 
 _Requirements: UPGRADE-1.1, UPGRADE-3.1, UPGRADE-3.8, UPGRADE-7.2, UPGRADE-7.6_
 
