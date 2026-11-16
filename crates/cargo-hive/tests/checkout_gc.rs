@@ -11,6 +11,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 #[test]
@@ -816,6 +817,295 @@ fn a_unit_changed_between_scan_and_lock_is_judged_on_the_fresh_read() {
         report.totals.units_deleted >= 1,
         "other dead units must still be collected on the fresh read: {report:?}"
     );
+}
+
+#[test]
+fn a_held_lock_skips_the_target_names_it_and_deletes_nothing() {
+    for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
+        let hive = Hive::ready();
+        let repo = aged_binaries(&hive);
+        let target = repo.main.join("target").canonicalize().unwrap();
+        let lock = target.join("debug").join(name);
+        assert!(lock.is_file(), "{name} missing in the fixture");
+        let before = tree(&target);
+        let mut holder = hive.hold_lock_child("flock", &lock);
+        let (out, r) = checkout_gc(&hive, &repo.main);
+        let _ = holder.kill();
+        let _ = holder.wait();
+        assert_eq!(out.status.code(), Some(0), "{name}: {r}");
+        assert_eq!(count(&r, "targets_skipped_held"), 1, "{name}: {r}");
+        assert!(
+            r["findings"].as_array().unwrap().iter().any(|f| {
+                f["kind"] == "gc.skipped"
+                    && f["path"] == serde_json::json!(target)
+                    && f["detail"] == "a Cargo lock is held"
+            }),
+            "{name}: {r}"
+        );
+        assert_eq!(
+            tree(&target),
+            before,
+            "{name} deleted under the held lock: {r}"
+        );
+    }
+}
+
+#[test]
+fn a_profile_with_fingerprints_and_no_lock_file_is_skipped_as_missing() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let target = repo.main.join("target").canonicalize().unwrap();
+    let before = fingerprint_dirs(&target);
+    for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
+        let _ = fs::remove_file(target.join("debug").join(name));
+    }
+    let (out, r) = checkout_gc(&hive, &repo.main);
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    assert_eq!(count(&r, "targets_skipped_lock_missing"), 1, "{r}");
+    assert_eq!(count(&r, "units_deleted"), 0, "{r}");
+    assert!(
+        r["findings"].as_array().unwrap().iter().any(|f| {
+            f["kind"] == "gc.skipped"
+                && f["path"] == serde_json::json!(target)
+                && f["detail"] == "a required Cargo lock is missing"
+        }),
+        "{r}"
+    );
+    assert_eq!(
+        fingerprint_dirs(&target),
+        before,
+        "missing-lock skip deleted fingerprint dirs: {r}"
+    );
+}
+
+#[test]
+fn an_unopenable_or_unlockable_lock_is_skipped_and_named() {
+    {
+        let hive = Hive::ready();
+        let repo = aged_binaries(&hive);
+        let target = repo.main.join("target").canonicalize().unwrap();
+        let lock = target.join("debug/.cargo-build-lock");
+        let before = tree(&target);
+        let rec = Recording::over_real().unlockable(&lock);
+        let fs = rec.fs();
+        let (scan, checkout, nested) = scan_only(&hive, &repo);
+        let report = run_library(fs.as_ref(), &scan, &checkout, &nested);
+        assert!(
+            !report.failed,
+            "unlockable should skip, not fail: {report:?}"
+        );
+        assert_eq!(
+            report
+                .totals
+                .skips
+                .get("targets_skipped_lock_unsupported")
+                .copied(),
+            Some(1),
+            "{report:?}"
+        );
+        assert!(
+            report.findings.iter().any(|f| {
+                f.kind == "gc.skipped"
+                    && f.path.as_deref() == Some(target.as_path())
+                    && f.detail == "a Cargo lock could not be locked"
+            }),
+            "{:?}",
+            report.findings
+        );
+        assert_eq!(tree(&target), before);
+    }
+    {
+        let hive = Hive::ready();
+        let repo = aged_binaries(&hive);
+        let target = repo.main.join("target").canonicalize().unwrap();
+        let lock = target.join("debug/.cargo-build-lock");
+        let before = tree(&target);
+        let rec = Recording::over_real().no_identity(&lock);
+        let fs = rec.fs();
+        let (scan, checkout, nested) = scan_only(&hive, &repo);
+        let report = run_library(fs.as_ref(), &scan, &checkout, &nested);
+        assert!(
+            !report.failed,
+            "no_identity should skip, not fail: {report:?}"
+        );
+        assert_eq!(
+            report
+                .totals
+                .skips
+                .get("targets_skipped_lock_missing")
+                .copied(),
+            Some(1),
+            "{report:?}"
+        );
+        assert!(
+            report.findings.iter().any(|f| {
+                f.kind == "gc.skipped"
+                    && f.path.as_deref() == Some(target.as_path())
+                    && f.detail == "a required Cargo lock is missing"
+            }),
+            "{:?}",
+            report.findings
+        );
+        assert_eq!(tree(&target), before);
+        assert!(common::wait_until_lock_free(&lock, Duration::from_secs(5)));
+    }
+}
+
+#[test]
+fn a_profile_appearing_while_locking_is_skipped_as_profile_set() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let target = repo.main.join("target").canonicalize().unwrap();
+    let before = tree(&target);
+    let planted = target.join("release/.fingerprint");
+    let rec = Recording::over_real().create_dir_after_lock(&planted);
+    let fs = rec.fs();
+    let (scan, checkout, nested) = scan_only(&hive, &repo);
+    let report = run_library(fs.as_ref(), &scan, &checkout, &nested);
+    assert_eq!(
+        report
+            .totals
+            .skips
+            .get("targets_skipped_profile_set")
+            .copied(),
+        Some(1),
+        "{report:?}"
+    );
+    assert!(
+        report.findings.iter().any(|f| {
+            f.kind == "gc.skipped"
+                && f.path.as_deref() == Some(target.as_path())
+                && f.detail == "the profile set changed while locking"
+        }),
+        "{:?}",
+        report.findings
+    );
+    let mut after = tree(&target);
+    after.retain(|path, _| !path.starts_with(target.join("release")));
+    assert_eq!(after, before, "profile-set skip deleted under the target");
+}
+
+#[test]
+fn a_target_whose_profile_listing_fails_while_locking_exits_1() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let target = repo.main.join("target").canonicalize().unwrap();
+    let profile = target.join("debug");
+    let before = tree(&target);
+    fs::set_permissions(&profile, fs::Permissions::from_mode(0o000)).unwrap();
+    let (out, r) = checkout_gc(&hive, &repo.main);
+    let _ = fs::set_permissions(&profile, fs::Permissions::from_mode(0o755));
+    assert_eq!(out.status.code(), Some(1), "{r}");
+    assert!(
+        r["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| { f["kind"] == "gc.target_failed" && f["path"] == serde_json::json!(target) }),
+        "{r}"
+    );
+    assert_eq!(count(&r, "units_deleted"), 0, "{r}");
+    assert_eq!(
+        tree(&target),
+        before,
+        "failed listing mutated the target: {r}"
+    );
+}
+
+#[test]
+fn every_lock_is_taken_before_the_first_read_of_the_target() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let target = repo.main.join("target").canonicalize().unwrap();
+    let rec = Recording::over_real();
+    let fs = rec.fs();
+    let (scan, checkout, nested) = scan_only(&hive, &repo);
+    let report = run_library(fs.as_ref(), &scan, &checkout, &nested);
+    assert!(!report.failed, "{report:?}");
+    assert!(report.totals.units_deleted >= 1, "{report:?}");
+    let log = rec.log();
+    let last_lock = log
+        .iter()
+        .rposition(|line| line.starts_with("lock "))
+        .expect("lock lines");
+    let first_deps_or_read_at = log.iter().position(|line| {
+        line.starts_with("read_at ") || (line.starts_with("read ") && line.contains("/deps"))
+    });
+    let Some(first) = first_deps_or_read_at else {
+        panic!("expected a deps listing or read_at in the log: {log:?}");
+    };
+    assert!(
+        last_lock < first,
+        "a deps/read_at happened before the last lock: last_lock={last_lock} first={first} log={log:?}"
+    );
+    let _ = target;
+}
+
+#[test]
+fn the_locks_stay_held_until_the_last_deletion() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let target = repo.main.join("target").canonicalize().unwrap();
+    let lock = target.join("debug/.cargo-build-lock");
+    let last_file = last_deleted_file(&target);
+    let seen = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&seen);
+    let lock_for_hook = lock.clone();
+    let rec = Recording::over_real().on_remove(last_file.clone(), move || {
+        let out = Command::new(env!("CARGO_BIN_EXE_cargo-hive"))
+            .args(["__try-lock", "flock", lock_for_hook.to_str().unwrap()])
+            .output()
+            .expect("spawn __try-lock");
+        *slot.lock().unwrap() = Some(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    });
+    let fs = rec.fs();
+    let (scan, checkout, nested) = scan_only(&hive, &repo);
+    let report = run_library(fs.as_ref(), &scan, &checkout, &nested);
+    assert!(!report.failed, "{report:?}");
+    assert!(report.totals.units_deleted >= 1, "{report:?}");
+    assert!(
+        !last_file.exists(),
+        "hooked path was not deleted: {}",
+        last_file.display()
+    );
+    let answer = seen.lock().unwrap().clone();
+    assert_eq!(
+        answer.as_deref(),
+        Some("refused"),
+        "lock was free at the last file deletion: {answer:?}"
+    );
+}
+
+fn run_library(
+    fs: &dyn cargo_hive_platform::Fs,
+    scan: &cargo_hive_cargo::discover::TargetScan,
+    checkout: &Path,
+    nested: &[PathBuf],
+) -> cargo_hive_gc::checkout::CheckoutReport {
+    let input = cargo_hive_gc::checkout::CheckoutInput {
+        fs,
+        scan,
+        checkout,
+        nested,
+        now: SystemTime::now(),
+        window: Duration::from_secs(7 * 86_400),
+        account_bytes: true,
+    };
+    cargo_hive_gc::checkout::run(&input, &|| false)
+}
+
+fn last_deleted_file(target: &Path) -> PathBuf {
+    let (_, dead) = decide(target);
+    let mut last = None;
+    for unit in &dead {
+        let ordered = cargo_hive_gc::checkout::unit_order(&unit.files);
+        for path in ordered {
+            if path.is_file() {
+                last = Some(path);
+            }
+        }
+    }
+    last.expect("a dead unit file that remove_file will delete")
 }
 
 /// Revive every dead unit but one, drop that unit's dep-info, and return its fingerprint-first order.
