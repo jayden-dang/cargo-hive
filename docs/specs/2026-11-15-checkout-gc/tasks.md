@@ -362,7 +362,7 @@ _Requirements: CHECKOUTGC-3.3, CHECKOUTGC-3.4, CHECKOUTGC-3.6_
 
 **Depends-on:** Task 6
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - `a_held_lock_skips_the_target_names_it_and_deletes_nothing`, a table over `.cargo-build-lock`, `.cargo-lock` and `.cargo-artifact-lock`, each asserted to exist in the fixture first.
   - The other skip reasons:
     - `a_profile_with_fingerprints_and_no_lock_file_is_skipped_as_missing`;
@@ -373,8 +373,8 @@ _Requirements: CHECKOUTGC-3.3, CHECKOUTGC-3.4, CHECKOUTGC-3.6_
   - `the_locks_stay_held_until_the_last_deletion`. An `on_remove` hook on the last deletion spawns `env!("CARGO_BIN_EXE_cargo-hive") __try-lock --kind flock --path <lock>` and expects held.
 
   Run `cargo test -p cargo-hive --test checkout_gc`; expect the new tests to fail.
-- [ ] **Step 2: Implement** the skip findings, the `Failed` finding with `failed = true`, and any lock-lifetime fix the probe shows. Run the project.md task gate for `cargo-hive-gc`, then `cargo-hive`; expect pass.
-- [ ] **Step 3: Commit.** `feat(gc): gc --checkout skips and names a target a build holds`
+- [x] **Step 2: Implement** the skip findings, the `Failed` finding with `failed = true`, and any lock-lifetime fix the probe shows. Run the project.md task gate for `cargo-hive-gc`, then `cargo-hive`; expect pass.
+- [x] **Step 3: Commit.** `feat(gc): gc --checkout skips and names a target a build holds`
 
 _Requirements: CHECKOUTGC-4.1, CHECKOUTGC-4.2, CHECKOUTGC-4.3, CHECKOUTGC-4.4_
 
