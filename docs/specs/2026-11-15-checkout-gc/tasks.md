@@ -509,7 +509,7 @@ _Requirements: CHECKOUTGC-5.1, CHECKOUTGC-5.2, CHECKOUTGC-5.3, CHECKOUTGC-5.4_
 
 **Depends-on:** Task 10
 
-- [ ] **Step 1: Prepare two copies.**
+- [x] **Step 1: Prepare two copies.**
   - Clone an aged klynt slot and its main twice into `/private/tmp`, as a **control** copy and a **gc** copy. Use `cp -c -p -R` (APFS clone, mtimes kept), so the stamps the window reads are the originals'.
   - **Never run `git worktree repair` or any other git command that follows the copied admin paths.** klynt's worktree admin paths are absolute, so a repair in a cloned main would rewrite the owner's real worktrees' `.git` files. Instead, rewrite only the copy's own admin files, with a text edit of each copied path:
     - every `<copy main>/.git/worktrees/*/gitdir`;
@@ -517,20 +517,22 @@ _Requirements: CHECKOUTGC-5.1, CHECKOUTGC-5.2, CHECKOUTGC-5.3, CHECKOUTGC-5.4_
   - Then run `git -C <copy main> worktree list --porcelain` and check that every path it prints lies under `/private/tmp`. Stop if any does not. Nothing else runs before this check passes.
   - Set up a scratch `HIVE_HOME` per copy, run `cargo hive doctor`, then register the copy's main.
   - Check that `cargo metadata --no-deps --locked --offline` loads in **every** live checkout of each copy. If one fails, 3.5 blocks the run, so fix or remove that worktree in the copy first.
-- [ ] **Step 2: Count before** (count only, no build).
+- [x] **Step 2: Count before** (count only, no build).
   - In both copies, record `ls -f backend/target/debug/deps | wc -l`, plus the entry count and `du -sk` of `backend/target/debug/incremental`.
   - Check a sample of copied `invoked.timestamp` mtimes against the originals; they must be equal.
   - Every proof cargo command in this task runs with `--offline`.
-- [ ] **Step 3: Run** `cargo hive gc --checkout <gc copy slot> --json` in the gc copy only.
+- [x] **Step 3: Run** `cargo hive gc --checkout <gc copy slot> --json` in the gc copy only.
   - Record the wall time with a cold snapshot (15 s target, recorded, not a bound). The time includes every `check_entry` and `remove_counted` call. A warm-snapshot rerun on the cleaned copy is labelled discovery cost.
   - Record the receipt.
   - Re-run the slot's last task's cargo commands, offline, in **both** copies. A unit counts as gc-caused only if it recompiles in the gc copy and not in the control. Expect 0 such units among units compiled inside the window.
-- [ ] **Step 4: Measure the edit's test build.**
+- [x] **Step 4: Measure the edit's test build.**
   - After Step 3, apply the same source edit to the slot in both copies.
   - Run the same offline test build in each. The control copy's time is "before" and the gc copy's is "after".
   - Record the gc copy's `deps/` count against the recorded evidence in Open Questions (104,749 → 14,753 referenced objects; 72,896 against 338,539 files; 42 s against 110 s edit wall). The card's 4.2k files and 28 s are named as the card's. None of these is pass/fail.
   - Record the `incremental/` entry count and `du -sk` in both copies again. Its share is the reopen check for the auto-tier exclusion (Open Questions).
   - If the 15 s ceiling is exceeded, profile first. The reopen path for the read is an on-demand read of each N_OSO string at its `n_strx`, with no cache.
-- [ ] **Step 5: Write the PLAN.md record** with dated numbers. No commit (git-ignored).
+- [x] **Step 5: Write the PLAN.md record** with dated numbers. No commit (git-ignored).
+
+Proof run 2026-11-16 on main 08de167, release build, copies of klynt `timing-lane1` (record: main checkout `.skills/verify/2026-11-15-checkout-gc/PLAN.md`, git-ignored). `deps/` went from 38,261 to 9,213 entries: 29,048 objects deleted, 3,183 referenced, 309 binaries read. 0 gc-caused recompiles: 357 units recompiled in both copies. The command took 5.2 s cold with deletions, and 0.7 s warm, against the 15 s target. With the default secondary roots it took 118–140 s, spent discovering about 1,400 stray repos under /private/tmp and $TMPDIR, which is outside this feature. Edit test builds took 70.4/64.3 s in the control copy and 63.2/43.5 s in the gc copy, one sample each under load. Units deleted: 0, because three units in the slot had never compiled (Undecided); objects were still cleaned (2.6).
 
 _Requirements: CHECKOUTGC-7.1_
