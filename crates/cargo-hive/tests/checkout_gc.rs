@@ -1077,6 +1077,356 @@ fn the_locks_stay_held_until_the_last_deletion() {
     );
 }
 
+#[test]
+fn unreferenced_objects_are_deleted_and_every_object_a_binary_names_is_kept() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let target = repo.main.join("target");
+    let debug = target.join("debug");
+    let deps = debug.join("deps");
+    let fs = cargo_hive_platform::current().unwrap().fs;
+    let (_live, dead) = decide(&target);
+    let doomed: std::collections::BTreeSet<_> = dead
+        .iter()
+        .flat_map(|unit| unit.files.iter().cloned())
+        .collect();
+    let listing =
+        cargo_hive_gc::checkout::list_profile(fs.as_ref(), &debug, 1_000_000, 100_000).unwrap();
+    let mut kept_names = std::collections::BTreeSet::new();
+    for path in &listing.candidates {
+        if doomed.contains(path) {
+            continue;
+        }
+        if let Ok(Some(map)) = cargo_hive_gc::debug_map::read(fs.as_ref(), path) {
+            kept_names.extend(map.loose);
+        }
+    }
+    assert!(
+        !kept_names.is_empty(),
+        "expected live binaries to name loose objects"
+    );
+    let before_named: Vec<_> = kept_names
+        .iter()
+        .map(|name| deps.join(name))
+        .filter(|p| p.is_file())
+        .collect();
+    assert!(!before_named.is_empty(), "named objects must exist on disk");
+    let orphan = deps.join("orphan-deadbeefdeadbeef.0.rcgu.o");
+    fs::write(&orphan, b"orphan").unwrap();
+    let (out, r) = checkout_gc(&hive, &repo.main);
+    assert!(out.status.success(), "{r}");
+    assert!(!orphan.exists(), "unreferenced object remained: {r}");
+    for path in &before_named {
+        assert!(
+            path.is_file(),
+            "binary-named object was deleted: {}: {r}",
+            path.display()
+        );
+    }
+    assert!(count(&r, "objects_deleted") >= 1, "{r}");
+    assert!(count(&r, "objects_referenced") >= 1, "{r}");
+}
+
+#[test]
+fn a_test_binary_that_was_not_relinked_still_keeps_its_objects() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::with_binaries(&hive);
+    cargo_json(&hive, &repo.main, &["test", "--no-run"]);
+    let debug = repo.main.join("target/debug");
+    let deps = debug.join("deps");
+    let it = named_under(&deps, "it-").expect("integration test binary");
+    let fs = cargo_hive_platform::current().unwrap().fs;
+    let it_loose = match cargo_hive_gc::debug_map::read(fs.as_ref(), &it) {
+        Ok(Some(map)) => map.loose,
+        other => panic!("expected a debug map for {}: {other:?}", it.display()),
+    };
+    assert!(!it_loose.is_empty(), "test binary named no loose objects");
+    fs::write(
+        repo.main.join("app/src/main.rs"),
+        "fn main() { println!(\"relinked-only-bin\"); }\n",
+    )
+    .unwrap();
+    cargo_json(&hive, &repo.main, &["test", "--no-run"]);
+    assert!(it.is_file(), "unrelinked test binary disappeared");
+    let orphan = deps.join("orphan-cafecafecafecafe.0.rcgu.o");
+    fs::write(&orphan, b"orphan").unwrap();
+    let (out, r) = checkout_gc(&hive, &repo.main);
+    assert!(out.status.success(), "{r}");
+    assert!(!orphan.exists(), "orphan remained: {r}");
+    for name in &it_loose {
+        assert!(
+            deps.join(name).is_file(),
+            "unrelinked test binary object {name} was deleted: {r}"
+        );
+    }
+}
+
+#[test]
+fn objects_named_only_by_a_dead_units_binary_go_in_the_same_run() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let target = repo.main.join("target");
+    let debug = target.join("debug");
+    let deps = debug.join("deps");
+    let (_live, dead) = decide(&target);
+    let dead_hash = dead
+        .iter()
+        .find_map(|unit| {
+            unit.unit.dir_name.rsplit('-').next().and_then(|h| {
+                (h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit())).then_some(h.to_string())
+            })
+        })
+        .expect("a dead unit with a 16-hex hash");
+    let object_name = "only-dead-unit-object.0.rcgu.o";
+    let object = deps.join(object_name);
+    fs::write(&object, b"only-dead").unwrap();
+    let binary = deps.join(format!("staleextra-{dead_hash}"));
+    fs::write(&binary, thin_execute_bytes(&[object_name])).unwrap();
+    assert!(
+        decide(&target)
+            .1
+            .iter()
+            .any(|unit| unit.files.iter().any(|p| p == &binary)),
+        "planted binary must belong to a dead unit"
+    );
+    let (out, r) = checkout_gc(&hive, &repo.main);
+    assert!(out.status.success(), "{r}");
+    assert!(!binary.exists(), "dead unit binary remained: {r}");
+    assert!(
+        !object.exists(),
+        "object named only by a dead unit's binary survived: {r}"
+    );
+}
+
+#[test]
+fn a_cloned_target_keeps_the_objects_its_binaries_name_under_the_old_path() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::with_binaries(&hive);
+    let src = repo.worktree("clone-src");
+    let dst = repo.worktree("clone-dst");
+    cargo_json(&hive, &src, &["test", "--no-run"]);
+    let src_target = src.join("target");
+    let dst_target = dst.join("target");
+    let _ = fs::remove_dir_all(&dst_target);
+    let status = Command::new("cp")
+        .args(["-c", "-R"])
+        .arg(&src_target)
+        .arg(&dst_target)
+        .status()
+        .expect("spawn cp");
+    assert!(
+        status.success(),
+        "cp -c -R failed; APFS clone is required for this case: {status}"
+    );
+    let debug = dst_target.join("debug");
+    let deps = debug.join("deps");
+    let fs = cargo_hive_platform::current().unwrap().fs;
+    let listing =
+        cargo_hive_gc::checkout::list_profile(fs.as_ref(), &debug, 1_000_000, 100_000).unwrap();
+    let mut referenced = std::collections::BTreeSet::new();
+    for path in &listing.candidates {
+        if let Ok(Some(map)) = cargo_hive_gc::debug_map::read(fs.as_ref(), path) {
+            referenced.extend(map.loose);
+        }
+    }
+    assert!(!referenced.is_empty(), "cloned binaries named no objects");
+    let named_files: Vec<_> = referenced
+        .iter()
+        .map(|name| deps.join(name))
+        .filter(|p| p.is_file())
+        .collect();
+    assert!(!named_files.is_empty(), "no named objects on disk");
+    let orphan = deps.join("orphan-clonedcloned00.0.rcgu.o");
+    fs::write(&orphan, b"orphan").unwrap();
+    let (out, r) = checkout_gc(&hive, &dst);
+    assert!(out.status.success(), "{r}");
+    assert!(!orphan.exists(), "orphan remained in cloned target: {r}");
+    for path in &named_files {
+        assert!(
+            path.is_file(),
+            "object {} named under the old path was deleted: {r}",
+            path.file_name().unwrap().to_string_lossy()
+        );
+    }
+}
+
+#[test]
+fn an_undecided_target_still_loses_its_unreferenced_objects() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let target = repo.main.join("target");
+    let debug = target.join("debug");
+    let deps = debug.join("deps");
+    let unit = newest_fingerprint_unit(&target);
+    let dir = debug.join(".fingerprint").join(&unit);
+    let json = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "json"))
+        .expect("fingerprint json");
+    let text = fs::read_to_string(&json).unwrap();
+    let ghost = "[1,\"ghostcrate\",false,9999999999999999]";
+    let patched = if text.contains("\"deps\":[]") {
+        text.replacen("\"deps\":[]", &format!("\"deps\":[{ghost}]"), 1)
+    } else {
+        text.replacen("\"deps\":[", &format!("\"deps\":[{ghost},"), 1)
+    };
+    assert_ne!(patched, text, "failed to inject a ghost dependency");
+    fs::write(&json, patched).unwrap();
+    let orphan = deps.join("orphan-undecided0001.0.rcgu.o");
+    fs::write(&orphan, b"orphan").unwrap();
+    let before = fingerprint_dirs(&target);
+    let (out, r) = checkout_gc(&hive, &repo.main);
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    assert_eq!(count(&r, "units_deleted"), 0, "{r}");
+    assert_eq!(fingerprint_dirs(&target), before, "{r}");
+    assert!(
+        r["findings"].as_array().unwrap().iter().any(|f| {
+            f["kind"] == "gc.undecided"
+                && f["detail"].as_str().unwrap().contains("clears when")
+                && !f["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("profile dir unsupported")
+        }),
+        "{r}"
+    );
+    assert!(
+        !orphan.exists(),
+        "undecided target kept an unreferenced object: {r}"
+    );
+    assert!(count(&r, "objects_deleted") >= 1, "{r}");
+}
+
+#[test]
+fn a_profile_with_an_unsupported_fingerprint_format_keeps_every_object() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::with_binaries(&hive);
+    cargo_json(&hive, &repo.main, &["test", "--no-run"]);
+    let debug = repo.main.join("target/debug");
+    let deps = debug.join("deps");
+    let unit = newest_fingerprint_unit(&repo.main.join("target"));
+    let dir = debug.join(".fingerprint").join(&unit);
+    fs::write(dir.join("extra-corrupt.json"), b"{}").unwrap();
+    let orphan = deps.join("orphan-unsupported01.0.rcgu.o");
+    fs::write(&orphan, b"orphan").unwrap();
+    let objects_before = deps_rcgu_o(&deps);
+    assert!(!objects_before.is_empty());
+    let (out, r) = checkout_gc(&hive, &repo.main);
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    assert!(orphan.is_file(), "unsupported profile lost an object: {r}");
+    assert_eq!(
+        deps_rcgu_o(&deps).len(),
+        objects_before.len(),
+        "unsupported profile deleted objects: {r}"
+    );
+    assert!(
+        r["findings"].as_array().unwrap().iter().any(|f| {
+            f["kind"] == "gc.objects_undecided" && f["path"] == serde_json::json!(debug)
+        }),
+        "{r}"
+    );
+    assert_eq!(count(&r, "objects_deleted"), 0, "{r}");
+}
+
+#[test]
+fn the_receipt_counts_objects_deleted_kept_and_binaries_read() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let deps = repo.main.join("target/debug/deps");
+    fs::write(deps.join("orphan-countcount0001.0.rcgu.o"), b"orphan").unwrap();
+    let (out, r) = checkout_gc(&hive, &repo.main);
+    assert!(out.status.success(), "{r}");
+    assert!(count(&r, "objects_deleted") >= 1, "{r}");
+    assert!(count(&r, "objects_referenced") >= 1, "{r}");
+    assert!(count(&r, "binaries_read") >= 1, "{r}");
+}
+
+#[test]
+fn objects_are_read_with_ranged_reads_and_no_child_process() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::with_binaries(&hive);
+    cargo_json(&hive, &repo.main, &["test", "--no-run"]);
+    let debug = repo.main.join("target/debug");
+    let binaries = candidate_binaries(&debug);
+    assert!(
+        !binaries.is_empty(),
+        "no linked binaries found under debug/"
+    );
+    let marker = repo.scratch.path.join("nm-was-run");
+    let nm_dir = repo.scratch.path.join("fake-nm-bin");
+    fs::create_dir_all(&nm_dir).unwrap();
+    let nm = nm_dir.join("nm");
+    fs::write(
+        &nm,
+        format!("#!/bin/sh\necho ran > '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&nm).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&nm, perms).unwrap();
+    let path = format!(
+        "{}:{}",
+        nm_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let (_fs_box, scan, checkout, nested) = library_scan(&hive, &repo);
+    let rec = Recording::over_real();
+    let old_path = std::env::var_os("PATH");
+    // SAFETY: single-threaded test process; PATH restored before the test returns.
+    unsafe { std::env::set_var("PATH", &path) };
+    let report = run_library(&rec, &scan, &checkout, &nested);
+    match old_path {
+        Some(v) => unsafe { std::env::set_var("PATH", v) },
+        None => unsafe { std::env::remove_var("PATH") },
+    }
+    assert!(!report.failed, "{:?}", report.findings);
+    assert!(report.totals.binaries_read >= 1, "{report:?}");
+    let log = rec.log();
+    for bin in &binaries {
+        assert!(
+            log.iter().any(|line| {
+                line.starts_with("read_at ") && line.contains(&bin.display().to_string())
+            }),
+            "missing read_at for {}: {log:?}",
+            bin.display()
+        );
+    }
+    assert!(
+        !marker.exists(),
+        "nm on PATH was invoked; marker at {}",
+        marker.display()
+    );
+}
+
+#[test]
+fn a_binary_whose_read_fails_keeps_every_object_in_its_profile() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::with_binaries(&hive);
+    cargo_json(&hive, &repo.main, &["test", "--no-run"]);
+    let debug = repo.main.join("target/debug");
+    let deps = debug.join("deps");
+    let bin = debug.join("app");
+    assert!(bin.is_file(), "app binary missing");
+    let orphan = deps.join("orphan-failread00001.0.rcgu.o");
+    fs::write(&orphan, b"orphan").unwrap();
+    let before = deps_rcgu_o(&deps);
+    let (_fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let rec = Recording::over_real().fail_read_at(&bin);
+    let report = run_library(&rec, &scan, &checkout, &nested);
+    assert!(orphan.is_file(), "read failure still deleted objects");
+    assert_eq!(deps_rcgu_o(&deps).len(), before.len());
+    assert_eq!(report.totals.objects_deleted, 0, "{report:?}");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| { f.kind == "gc.objects_undecided" && f.path.as_ref() == Some(&bin) }),
+        "{:?}",
+        report.findings
+    );
+}
+
 fn run_library(
     fs: &dyn cargo_hive_platform::Fs,
     scan: &cargo_hive_cargo::discover::TargetScan,
@@ -1327,6 +1677,116 @@ fn scan_only(
     let mut snapshot = cargo_hive_cargo::discover::Snapshot::default();
     let scan = cargo_hive_cargo::discover::targets(&live, &cfg, false, &mut snapshot, || false);
     (scan, checkout, nested)
+}
+
+fn thin_execute_bytes(oso: &[&str]) -> Vec<u8> {
+    const MH_MAGIC_64: u32 = 0xfeed_facf;
+    const MH_EXECUTE: u32 = 0x2;
+    const LC_SYMTAB: u32 = 0x2;
+    const N_OSO: u8 = 0x66;
+    const HEADER64: u32 = 32;
+    const SYMTAB_CMD: u32 = 24;
+    const NLIST64: u32 = 16;
+    let mut strtab = vec![0u8];
+    let mut str_offs = Vec::new();
+    for s in oso {
+        str_offs.push(strtab.len() as u32);
+        strtab.extend_from_slice(s.as_bytes());
+        strtab.push(0);
+    }
+    let nsyms = oso.len() as u32;
+    let symoff = HEADER64 + SYMTAB_CMD;
+    let stroff = symoff + nsyms * NLIST64;
+    let strsize = strtab.len() as u32;
+    let mut buf = Vec::new();
+    let put = |buf: &mut Vec<u8>, v: u32| buf.extend_from_slice(&v.to_le_bytes());
+    put(&mut buf, MH_MAGIC_64);
+    put(&mut buf, 0x0100_000c);
+    put(&mut buf, 0);
+    put(&mut buf, MH_EXECUTE);
+    put(&mut buf, 1);
+    put(&mut buf, SYMTAB_CMD);
+    put(&mut buf, 0);
+    put(&mut buf, 0);
+    put(&mut buf, LC_SYMTAB);
+    put(&mut buf, SYMTAB_CMD);
+    put(&mut buf, symoff);
+    put(&mut buf, nsyms);
+    put(&mut buf, stroff);
+    put(&mut buf, strsize);
+    for off in str_offs {
+        put(&mut buf, off);
+        buf.push(N_OSO);
+        buf.push(0);
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+    }
+    buf.extend_from_slice(&strtab);
+    buf
+}
+
+fn deps_rcgu_o(deps: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(deps) else {
+        return out;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy();
+        if path.is_file() && name.ends_with(".rcgu.o") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+fn candidate_binaries(debug: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut push_dir = |dir: &Path| {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            if name.ends_with(".o") {
+                continue;
+            }
+            if path.is_file() || path_is_symlink_to_file(&path) {
+                out.push(path);
+            }
+        }
+    };
+    push_dir(debug);
+    push_dir(&debug.join("deps"));
+    push_dir(&debug.join("examples"));
+    if let Ok(entries) = fs::read_dir(debug.join("build")) {
+        for entry in entries {
+            let child = entry.unwrap().path();
+            if child.is_dir() {
+                push_dir(&child);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out.into_iter()
+        .filter(|path| {
+            let fs = cargo_hive_platform::current().unwrap().fs;
+            matches!(
+                cargo_hive_gc::debug_map::read(fs.as_ref(), path),
+                Ok(Some(_))
+            )
+        })
+        .collect()
+}
+
+fn path_is_symlink_to_file(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|m| m.file_type().is_symlink())
+        && path.is_file()
 }
 
 fn named_under(dir: &Path, prefix: &str) -> Option<PathBuf> {
