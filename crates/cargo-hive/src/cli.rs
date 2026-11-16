@@ -42,7 +42,7 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
-    /// Delete superseded incremental sessions and leftover rustc temp dirs. A session with a lock file is deleted under that lock. With no repo argument, also evicts from the store
+    /// Delete superseded incremental sessions and leftover rustc temp dirs. A session with a lock file is deleted under that lock. With no repo argument, also evicts from the store. Pass --checkout PATH to delete that one checkout's dead units in its own targets.
     Gc {
         /// Registered repos to clean; none means every target hive knows
         repos: Vec<std::path::PathBuf>,
@@ -52,6 +52,9 @@ pub enum Command {
         /// Store a plan of dead-unit paths and delete nothing
         #[arg(long, conflicts_with = "dry_run")]
         plan: bool,
+        /// Checkout whose own targets are cleaned. Takes no repo argument, --plan, or --dry-run
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["repos", "plan", "dry_run"])]
+        checkout: Option<std::path::PathBuf>,
         #[command(flatten)]
         out: OutputArgs,
     },
@@ -193,9 +196,12 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
             repos,
             dry_run,
             plan,
+            checkout,
             out,
         } => {
-            if plan {
+            if let Some(checkout) = checkout {
+                checkout_cmd(&state, &checkout, &out)
+            } else if plan {
                 plan_cmd(&state, &repos, out)
             } else {
                 gc_cmd(&state, &repos, dry_run, out)
@@ -911,6 +917,34 @@ fn put_counts(b: &mut ReceiptBuilder, suffix: &str, c: &cargo_hive_gc::gc::Count
     }
 }
 
+fn put_checkout_counts(b: &mut ReceiptBuilder, suffix: &str, c: &cargo_hive_gc::checkout::Counts) {
+    b.count(&format!("units_deleted{suffix}"), c.units_deleted)
+        .count(&format!("unit_files_deleted{suffix}"), c.unit_files_deleted)
+        .count(&format!("objects_deleted{suffix}"), c.objects_deleted)
+        .count(&format!("objects_referenced{suffix}"), c.objects_referenced)
+        .count(&format!("binaries_read{suffix}"), c.binaries_read)
+        .count(&format!("targets_shared{suffix}"), c.targets_shared)
+        .count(&format!("targets_outside{suffix}"), c.targets_outside);
+    for name in [
+        "targets_skipped_held",
+        "targets_skipped_lock_unopenable",
+        "targets_skipped_lock_unsupported",
+        "targets_skipped_lock_missing",
+        "targets_skipped_profile_set",
+    ] {
+        b.count(
+            &format!("{name}{suffix}"),
+            c.skips.get(name).copied().unwrap_or(0),
+        );
+    }
+    if let Some(bytes) = c.bytes {
+        b.count(&format!("freed_bytes{suffix}"), bytes.freed).count(
+            &format!("deleted_bytes_still_shared{suffix}"),
+            bytes.still_shared,
+        );
+    }
+}
+
 fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: OutputArgs) -> i32 {
     use cargo_hive_cargo::discover::{self, SNAPSHOT_FILE, Snapshot};
     use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
@@ -1127,6 +1161,206 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
         return emit(state, out, b.finish(), &human, 130);
     }
     emit(state, out, b.finish(), &human, code)
+}
+
+fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 {
+    use cargo_hive_cargo::discover::{self, SNAPSHOT_FILE, Snapshot};
+    use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
+    use cargo_hive_gc::checkout::{self, CheckoutInput};
+    use cargo_hive_state::window_days;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::time::Duration;
+    let command = "gc --checkout";
+    if let Err(e) = platform::signals::install() {
+        return emit_failure(
+            state,
+            *out,
+            command,
+            &format!("could not install signal handlers: {e}"),
+            1,
+        );
+    }
+    let cancelled = || platform::signals::cancelled();
+    let loaded = (|| -> Result<_, StateError> {
+        Ok((
+            state.read::<Registry>(registry::FILE)?,
+            state.config()?,
+            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+            state.read::<Snapshot>(SNAPSHOT_FILE)?,
+        ))
+    })();
+    let (reg, cfg, caps, mut snapshot) = match loaded {
+        Ok(v) => v,
+        Err(e) => return emit_failure(state, *out, command, &e.to_string(), 1),
+    };
+    let Ok(platform) = platform::current() else {
+        eprintln!("{MACOS_ONLY_MESSAGE}");
+        return 2;
+    };
+    if let Err(err) = window_days(cfg.gc_window_days) {
+        let mut b = Receipt::new(command, Scope::default());
+        b.finding("refusal", None, err.to_string());
+        return emit(state, *out, b.finish(), &format!("refused: {err}\n"), 1);
+    }
+    let days = window_days(cfg.gc_window_days).expect("checked above");
+    let release = cargo_hive_cargo::toolchain::resolve_toolchain(state.root())
+        .ok()
+        .map(|t| t.release);
+    for cap in [Capability::FingerprintReading, Capability::Deletion] {
+        if let Err(refusal) = doctor::require(&caps, cap, release.as_deref()) {
+            let mut b = Receipt::new(command, Scope::default());
+            b.toolchain(release.clone());
+            b.finding("refusal", None, refusal.to_string());
+            return emit(state, *out, b.finish(), &format!("refused: {refusal}\n"), 1);
+        }
+    }
+    let (repo, row) = match find_checkout(&reg, &cfg, path) {
+        Ok(v) => v,
+        Err(r) => {
+            let mut b = Receipt::new(command, Scope::default());
+            b.toolchain(release.clone());
+            b.finding(r.kind, r.path, r.detail.clone());
+            return emit(
+                state,
+                *out,
+                b.finish(),
+                &format!("refused: {}\n", r.detail),
+                r.code,
+            );
+        }
+    };
+    let mut b = Receipt::new(
+        command,
+        Scope {
+            repos: vec![repo.main.clone()],
+            checkouts: vec![row.path.clone()],
+        },
+    );
+    b.toolchain(release.clone());
+    let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
+    let (all_rows, checkout_faults) =
+        cargo_hive_cargo::discover::checkouts(&repo, &registered_mains, &cfg);
+    for fault in &checkout_faults {
+        b.finding(
+            "walk.unreadable",
+            Some(fault.path.clone()),
+            fault.detail.clone(),
+        );
+    }
+    let live: Vec<_> = all_rows.into_iter().filter(|c| !c.missing).collect();
+    let nested: Vec<_> = live
+        .iter()
+        .map(|c| c.path.clone())
+        .filter(|p| p != &row.path && p.starts_with(&row.path))
+        .collect();
+    let scan = discover::targets(&live, &cfg, false, &mut snapshot, cancelled);
+    if cancelled() {
+        b.finding("error", None, "gc was cancelled");
+        return emit(state, *out, b.finish(), "gc was cancelled\n", 130);
+    }
+    for fault in &scan.walk_faults {
+        b.finding(
+            "walk.unreadable",
+            Some(fault.path.clone()),
+            fault.detail.clone(),
+        );
+    }
+    for var in &scan.ignored_vars {
+        b.note(format!("{var} is set in the caller's environment and was ignored: ownership comes from each checkout's own Cargo configuration"));
+    }
+    let account_bytes = !caps.disabled.contains_key(&Capability::EvictionAccounting);
+    let volumes = |fs: &dyn platform::Fs| -> BTreeMap<String, (std::path::PathBuf, u64)> {
+        scan.targets
+            .iter()
+            .filter_map(|t| fs.volume(&t.path).ok())
+            .map(|v| (v.container, (v.mount, v.available_bytes)))
+            .collect()
+    };
+    let before = volumes(&*platform.fs);
+    let report = checkout::run(
+        &CheckoutInput {
+            fs: &*platform.fs,
+            scan: &scan,
+            checkout: &row.path,
+            nested: &nested,
+            now: std::time::SystemTime::now(),
+            window: Duration::from_secs(days.saturating_mul(86_400)),
+            account_bytes,
+        },
+        &cancelled,
+    );
+    let after = volumes(&*platform.fs);
+    let touched: BTreeSet<String> = report
+        .per_target
+        .iter()
+        .filter(|(_, c)| c.units_deleted + c.unit_files_deleted + c.objects_deleted > 0)
+        .filter_map(|(p, _)| platform.fs.volume(p).ok().map(|v| v.container))
+        .collect();
+    for note in cargo_hive_gc::plan_tier::apply::cross_check_notes(&before, &after, &touched) {
+        b.note(note);
+    }
+    put_checkout_counts(&mut b, "", &report.totals);
+    let mut human = String::new();
+    for (path, c) in &report.per_target {
+        put_checkout_counts(&mut b, &format!(":{}", path.display()), c);
+        human.push_str(&format!(
+            "{}  {} units, {} unit files{}\n",
+            path.display(),
+            c.units_deleted,
+            c.unit_files_deleted,
+            c.bytes
+                .map(|bytes| format!(", {} bytes freed", bytes.freed))
+                .unwrap_or_default()
+        ));
+    }
+    if !account_bytes {
+        for name in ["freed_bytes", "deleted_bytes_still_shared"] {
+            b.unmeasured(name, "doctor check (c) did not pass");
+        }
+    }
+    for finding in &report.findings {
+        b.finding(&finding.kind, finding.path.clone(), finding.detail.clone());
+    }
+    for (path, why) in &report.unmeasured {
+        b.unmeasured(&path.display().to_string(), why.clone());
+    }
+    if report.unmeasured_more > 0 {
+        b.unmeasured(
+            "unmeasured_paths",
+            format!(
+                "{} more paths could not be measured and are not listed",
+                report.unmeasured_more
+            ),
+        );
+    }
+    if report.cancelled {
+        b.finding("error", None, "gc was cancelled");
+        return emit(state, *out, b.finish(), &human, 130);
+    }
+    let wrote = match state.locked_or_cancelled(cancelled, |tx| {
+        if cancelled() {
+            return Ok(false);
+        }
+        let disk = tx.read(SNAPSHOT_FILE)?;
+        tx.write(
+            SNAPSHOT_FILE,
+            &discover::merge_snapshot(snapshot, disk, &scan.cleared_profiles),
+        )?;
+        Ok(true)
+    }) {
+        Ok(wrote) => wrote,
+        Err(StateError::Cancelled) => false,
+        Err(e) => {
+            b.finding("error", None, e.to_string());
+            return emit(state, *out, b.finish(), &human, 1);
+        }
+    };
+    if !wrote {
+        b.finding("error", None, "gc was cancelled");
+        return emit(state, *out, b.finish(), &human, 130);
+    }
+    let code = if report.failed { 1 } else { 0 };
+    emit(state, *out, b.finish(), &human, code)
 }
 
 fn apply_cmd(state: &State, id: &str, out: OutputArgs) -> i32 {
@@ -1566,22 +1800,11 @@ pub(crate) struct Refusal {
     pub code: i32,
 }
 
-pub(crate) fn locate_checkout(
+pub(crate) fn find_checkout(
     reg: &Registry,
     cfg: &cargo_hive_state::Config,
-    caps: &cargo_hive_doctor::Capabilities,
     path: &std::path::Path,
-) -> Result<
-    (
-        registry::Repo,
-        cargo_hive_cargo::discover::Checkout,
-        cargo_hive_cargo::toolchain::Toolchain,
-    ),
-    Refusal,
-> {
-    use cargo_hive_core::classify::Class;
-    use cargo_hive_doctor::{self as doctor, Capability};
-
+) -> Result<(registry::Repo, cargo_hive_cargo::discover::Checkout), Refusal> {
     let real = match path.canonicalize() {
         Ok(path) => path,
         Err(err) => {
@@ -1621,6 +1844,27 @@ pub(crate) fn locate_checkout(
             code: 1,
         });
     };
+    Ok((repo, row))
+}
+
+pub(crate) fn locate_checkout(
+    reg: &Registry,
+    cfg: &cargo_hive_state::Config,
+    caps: &cargo_hive_doctor::Capabilities,
+    path: &std::path::Path,
+) -> Result<
+    (
+        registry::Repo,
+        cargo_hive_cargo::discover::Checkout,
+        cargo_hive_cargo::toolchain::Toolchain,
+    ),
+    Refusal,
+> {
+    use cargo_hive_core::classify::Class;
+    use cargo_hive_doctor::{self as doctor, Capability};
+
+    let (repo, row) = find_checkout(reg, cfg, path)?;
+    let real = row.path.clone();
     if row.class == Class::Protected {
         let detail = format!(
             "{path} is protected ({reason}); hive leaves a protected checkout untouched",

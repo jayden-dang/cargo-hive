@@ -213,6 +213,7 @@ fn the_cli_has_no_new_subcommand_or_flag() {
         "cargo-hive explain --repos",
         "cargo-hive explain --top",
         "cargo-hive gc",
+        "cargo-hive gc --checkout",
         "cargo-hive gc --dry_run",
         "cargo-hive gc --json",
         "cargo-hive gc --plan",

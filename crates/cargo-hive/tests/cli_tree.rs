@@ -1,4 +1,4 @@
-//! The installed command tree stays as 0.1.0 shipped it.
+//! The installed command tree stays as 0.1.0 shipped it, except the gc checkout surface.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 use cargo_hive::cli::Cli;
 use clap::CommandFactory;
@@ -35,17 +35,87 @@ fn dump(cmd: &clap::Command, depth: usize, out: &mut String) {
     }
 }
 
-#[test]
-fn the_command_tree_matches_0_1_0() {
+fn tree() -> String {
     let mut out = String::new();
     dump(&Cli::command(), 0, &mut out);
+    out
+}
+
+#[test]
+fn the_command_tree_matches_the_current_fixture() {
+    let out = tree();
     let fixture = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/v0.1.0/cli-tree.txt"
+        "/tests/fixtures/current/cli-tree.txt"
     );
     if let Ok(path) = std::env::var("HIVE_WRITE_CLI_TREE") {
         std::fs::write(path, &out).unwrap();
         return;
     }
     assert_eq!(out, std::fs::read_to_string(fixture).unwrap());
+}
+
+#[test]
+fn the_tree_differs_from_0_1_0_only_in_gc() {
+    let current = tree();
+    let old = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/v0.1.0/cli-tree.txt"
+    ))
+    .unwrap();
+    let (old_gc, old_rest) = split_gc(&old);
+    let (cur_gc, cur_rest) = split_gc(&current);
+    assert_eq!(
+        old_rest, cur_rest,
+        "lines outside the gc block and root gc help must match v0.1.0"
+    );
+    let old_args: Vec<&str> = old_gc.lines().filter(|l| l.contains("arg ")).collect();
+    let cur_args: Vec<&str> = cur_gc.lines().filter(|l| l.contains("arg ")).collect();
+    let mut old_set: Vec<&str> = old_args.clone();
+    let mut new_only = Vec::new();
+    for arg in &cur_args {
+        if let Some(i) = old_set.iter().position(|a| a == arg) {
+            old_set.remove(i);
+        } else {
+            new_only.push(*arg);
+        }
+    }
+    assert!(old_set.is_empty(), "gc lost arguments: {old_set:?}");
+    assert_eq!(
+        new_only.len(),
+        1,
+        "only checkout may be a new gc arg: {new_only:?}"
+    );
+    assert!(
+        new_only[0].contains("arg checkout "),
+        "new gc arg must be checkout: {}",
+        new_only[0]
+    );
+}
+
+fn split_gc(tree: &str) -> (String, String) {
+    let lines: Vec<&str> = tree.lines().collect();
+    let mut gc_start = None;
+    let mut gc_end = lines.len();
+    for (n, line) in lines.iter().enumerate() {
+        if line.starts_with("  cmd gc ") {
+            gc_start = Some(n);
+        } else if gc_start.is_some() && line.starts_with("  cmd ") {
+            gc_end = n;
+            break;
+        }
+    }
+    let start = gc_start.expect("gc command present");
+    let gc: String = lines[start..gc_end].join("\n");
+    let mut rest: Vec<String> = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        if n >= start && n < gc_end {
+            continue;
+        }
+        if n < start && (line.contains("Delete superseded") || line.contains("Pass --checkout")) {
+            continue;
+        }
+        rest.push((*line).to_string());
+    }
+    (gc, rest.join("\n"))
 }
