@@ -274,7 +274,7 @@ The per-unit deletion order follows apply's `removal_order` rule (apply.rs:927).
 
 **Depends-on:** Task 2, Task 3, Task 4 (Task 2 shares `crates/gc/src/lib.rs`)
 
-- [ ] **Step 1: Write the failing integration tests** in `checkout_gc.rs` (`Hive::ready`, `RegistryRepo::with_binaries`, `cargo_json(…, ["test", "--no-run"])`, `backdate_all`):
+- [x] **Step 1: Write the failing integration tests** in `checkout_gc.rs` (`Hive::ready`, `RegistryRepo::with_binaries`, `cargo_json(…, ["test", "--no-run"])`, `backdate_all`):
   - `a_checkouts_dead_units_are_deleted_in_one_run_with_no_plan_stored`;
   - `units_compiled_inside_the_window_are_kept_and_the_next_build_recompiles_none`, which reruns the same cargo command and asserts `workspace_recompiled` and `registry_recompiled` are empty;
   - `nothing_under_build_is_touched`;
@@ -306,15 +306,15 @@ The per-unit deletion order follows apply's `removal_order` rule (apply.rs:927).
   - `select_targets_splits_own_shared_outside_and_failed`.
 
   Then `the_tree_differs_from_0_1_0_only_in_gc` in `cli_tree.rs`. It allows changed lines only inside the block from `cmd gc` to the next `cmd` line at the same indent, and on the root `long_help` line naming `gc`. Inside the block, the only new argument may be `checkout`. Run `cargo test -p cargo-hive --test checkout_gc --test cli_tree`; expect a compile failure (no `--checkout`).
-- [ ] **Step 2: Implement** `checkout.rs` up to the dead-unit class, with the whole target selection and its findings and counts, as design "Checkout GC run" steps 1, 2 (acquire, re-read, units) and 3. Also implement `checkout_cmd` as design "CLI mode" steps 1–7, the volume cross-check notes and the `ignored_vars` notes included. Bind the whole `Locked` value for the life of each target's deletions.
-- [ ] **Step 3: Pin the new CLI surface.**
+- [x] **Step 2: Implement** `checkout.rs` up to the dead-unit class, with the whole target selection and its findings and counts, as design "Checkout GC run" steps 1, 2 (acquire, re-read, units) and 3. Also implement `checkout_cmd` as design "CLI mode" steps 1–7, the volume cross-check notes and the `ignored_vars` notes included. Bind the whole `Locked` value for the life of each target's deletions.
+- [x] **Step 3: Pin the new CLI surface.**
   - Regenerate `fixtures/current/cli-tree.txt` with `HIVE_WRITE_CLI_TREE` and read the diff by eye.
   - Replace `the_command_tree_matches_0_1_0` with `the_command_tree_matches_the_current_fixture` plus the diff test.
   - Add `"cargo-hive gc --checkout"` to `tests/liveness.rs`'s list.
   - Leave `fixtures/v0.1.0/` unchanged.
 
   Run the project.md task gate for `cargo-hive-gc`, then `cargo-hive`, then `cargo test -p cargo-hive --test seed` (seed's refusals are unchanged by `find_checkout`); expect pass.
-- [ ] **Step 4: Commit.** `feat(gc): delete one checkout's dead units with gc --checkout`
+- [x] **Step 4: Commit.** `feat(gc): delete one checkout's dead units with gc --checkout`
 
 _Requirements: CHECKOUTGC-1.1, CHECKOUTGC-1.2, CHECKOUTGC-1.3, CHECKOUTGC-1.4, CHECKOUTGC-1.5, CHECKOUTGC-1.6, CHECKOUTGC-1.7, CHECKOUTGC-1.8, CHECKOUTGC-1.9, CHECKOUTGC-1.10, CHECKOUTGC-1.11, CHECKOUTGC-1.12, CHECKOUTGC-3.1, CHECKOUTGC-3.2, CHECKOUTGC-3.5, CHECKOUTGC-3.7, CHECKOUTGC-6.6, CHECKOUTGC-7.2, CHECKOUTGC-7.3_
 
