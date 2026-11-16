@@ -80,6 +80,22 @@ Commands, the task gate and the layer order are in `docs/agents/project.md` (ver
 | `plugin/skills/hive/SKILL.md` | the "Keep a reused worktree fast" section, a Reading-table row, and the "Free disk" line |
 | `skills/hive/eval.json`, `skills/hive/TESTS.md` | the trigger and receipt-reading evals for the new section |
 | `README.md` | the `gc --checkout` subsection |
+| `CONTEXT.md` | the **Linked binary** glossary entry |
+| `crates/cargo-hive/README.md` | packaged copy of the command docs, including `gc --checkout` |
+| `crates/cargo/README.md` | packaged copy of the command docs, including `gc --checkout` |
+| `crates/core/README.md` | packaged copy of the command docs, including `gc --checkout` |
+| `crates/doctor/README.md` | packaged copy of the command docs, including `gc --checkout` |
+| `crates/gc/README.md` | packaged copy of the command docs, including `gc --checkout` |
+| `crates/platform/README.md` | packaged copy of the command docs, including `gc --checkout` |
+| `crates/seed/README.md` | packaged copy of the command docs, including `gc --checkout` |
+| `crates/state/README.md` | packaged copy of the command docs, including `gc --checkout` |
+| `crates/cargo-hive/tests/seed_fill.rs` | the test filesystem forwards `read_at` |
+| `crates/doctor/src/lib.rs` | the test filesystem implements `read_at` |
+| `crates/gc/src/explain.rs` | the test filesystem implements `read_at` |
+| `crates/gc/src/gc/run.rs` | the test filesystem implements `read_at` |
+| `crates/gc/src/liveness.rs` | the test filesystem implements `read_at` |
+| `crates/gc/src/plan_tier/build.rs` | the test filesystem implements `read_at` |
+| `crates/platform/src/testing.rs` | `Hooked` forwards `read_at` |
 | `.skills/verify/2026-11-15-checkout-gc/PLAN.md` | the klynt proof record (git-ignored evidence; no tracked file) |
 
 Retrieval (load-subgraph, run once on this map):
