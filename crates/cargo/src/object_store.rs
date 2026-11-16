@@ -10,8 +10,8 @@ const IDX_VERSION: u32 = 2;
 const IDX_FANOUT_END: u64 = 8 + 256 * 4;
 
 /// True only when `git_dir` is a plain git directory whose object store can be read, has no
-/// alternates, and holds none of `roots`, neither as a loose object nor in a version-2 pack
-/// index. Every doubt answers false, so the caller asks git as before.
+/// alternates or replace refs, and holds none of `roots`, neither as a loose object nor in a
+/// version-2 pack index. Every doubt answers false, so the caller asks git as before.
 pub fn holds_none(git_dir: &Path, roots: &BTreeSet<String>) -> bool {
     let Some(ids) = roots
         .iter()
@@ -24,39 +24,67 @@ pub fn holds_none(git_dir: &Path, roots: &BTreeSet<String>) -> bool {
         return false;
     }
     let objects = git_dir.join("objects");
-    if !absent(&objects.join("info/alternates")) {
+    if !absent(&objects.join("info/alternates")) || has_replace_refs(git_dir) {
         return false;
     }
-    for id in &ids {
-        let hex = to_hex(id);
-        if !absent(&objects.join(&hex[..2]).join(&hex[2..])) {
-            return false;
-        }
-    }
-    let Ok(entries) = std::fs::read_dir(objects.join("pack")) else {
+    let Some(before) = pack_names(&objects) else {
         return false;
     };
-    for entry in entries {
-        let Ok(entry) = entry else {
-            return false;
-        };
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
+    if !loose_absent(&objects, &ids) {
+        return false;
+    }
+    for name in &before {
         if let Some(stem) = name.strip_suffix(".pack") {
-            if absent(&objects.join("pack").join(format!("{stem}.idx"))) {
+            if !before.contains(&format!("{stem}.idx")) {
                 return false;
             }
-        } else if name.ends_with(".idx") && idx_holds_any(&entry.path(), &ids) != Some(false) {
+        } else if name.ends_with(".idx")
+            && idx_holds_any(&objects.join("pack").join(name), &ids) != Some(false)
+        {
             return false;
         }
     }
-    true
+    // A concurrent `git gc` can move an object from a loose file or an old pack into a new pack
+    // while this runs; only an unchanged pack directory and still-absent loose files prove it.
+    pack_names(&objects).as_ref() == Some(&before) && loose_absent(&objects, &ids)
+}
+
+/// The pack directory's file names, or None when it cannot be listed.
+fn pack_names(objects: &Path) -> Option<BTreeSet<String>> {
+    let mut names = BTreeSet::new();
+    for entry in std::fs::read_dir(objects.join("pack")).ok()? {
+        names.insert(entry.ok()?.file_name().to_string_lossy().into_owned());
+    }
+    Some(names)
+}
+
+fn loose_absent(objects: &Path, ids: &[[u8; 20]]) -> bool {
+    ids.iter().all(|id| {
+        let hex = to_hex(id);
+        absent(&objects.join(&hex[..2]).join(&hex[2..]))
+    })
+}
+
+/// Replace refs can make `git rev-list` print a commit the store does not hold.
+fn has_replace_refs(git_dir: &Path) -> bool {
+    if !absent(&git_dir.join("refs/replace")) {
+        return true;
+    }
+    let packed = git_dir.join("packed-refs");
+    if absent(&packed) {
+        return false;
+    }
+    std::fs::read_to_string(packed).map_or(true, |text| text.contains("refs/replace/"))
 }
 
 /// A `.git` directory with a HEAD, an objects directory and a config that sets no object format.
 fn is_plain_sha1_repo(git_dir: &Path) -> bool {
     let is_dir = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
-    if !is_dir(git_dir) || !is_dir(&git_dir.join("objects")) || !git_dir.join("HEAD").is_file() {
+    if !is_dir(git_dir)
+        || !is_dir(&git_dir.join("objects"))
+        || !git_dir.join("HEAD").is_file()
+        || !absent(&git_dir.join("commondir"))
+    {
         return false;
     }
     match std::fs::read_to_string(git_dir.join("config")) {
@@ -252,5 +280,44 @@ mod tests {
         let bytes = std::fs::read(&idx).unwrap();
         std::fs::write(&idx, &bytes[..bytes.len() - 5]).unwrap();
         assert!(!holds_none(&git, &roots()));
+    }
+
+    #[test]
+    fn a_repository_with_replace_refs_is_left_to_git() {
+        let git = store("replace", "[core]\n", &[other()], 2);
+        std::fs::create_dir_all(git.join("refs/replace")).unwrap();
+        std::fs::write(git.join("refs/replace").join(ROOT), format!("{ROOT}\n")).unwrap();
+        assert!(!holds_none(&git, &roots()));
+    }
+
+    #[test]
+    fn a_packed_replace_ref_is_left_to_git() {
+        let git = store("packed-replace", "[core]\n", &[other()], 2);
+        std::fs::write(
+            git.join("packed-refs"),
+            format!("# pack-refs with: peeled\n{ROOT} refs/replace/{ROOT}\n"),
+        )
+        .unwrap();
+        assert!(!holds_none(&git, &roots()));
+    }
+
+    #[test]
+    fn a_git_dir_that_names_a_common_dir_is_left_to_git() {
+        let git = store("commondir", "[core]\n", &[other()], 2);
+        std::fs::write(git.join("commondir"), "../elsewhere\n").unwrap();
+        assert!(!holds_none(&git, &roots()));
+    }
+
+    #[test]
+    fn roots_at_both_ends_of_the_fanout_are_found() {
+        let low = parse_sha1("00aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+        let high = parse_sha1("ffbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+        let git = store("edges", "[core]\n", &[low, other(), high], 2);
+        for root in [low, high] {
+            assert!(!holds_none(&git, &[to_hex(&root)].into()));
+        }
+        let middle: BTreeSet<String> =
+            ["80cccccccccccccccccccccccccccccccccccccc".to_string()].into();
+        assert!(holds_none(&git, &middle));
     }
 }
