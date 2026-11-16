@@ -15,4 +15,4 @@ only writer of the **Roadmap item** cell on new features.
 
 | Domain | Scope | Surface roots | Feature catalog |
 |---|---|---|---|
-| hive | cargo-hive: Cargo artifact discovery, reclaim, and worktree seeding on macOS | `src/` | [catalog](./catalog/hive.md) |
+| hive | cargo-hive: Cargo artifact discovery, reclaim, and worktree seeding on macOS | `crates/`, `plugin/` | [catalog](./catalog/hive.md) |

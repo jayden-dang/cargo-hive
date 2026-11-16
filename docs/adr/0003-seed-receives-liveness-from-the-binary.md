@@ -1,6 +1,6 @@
 # ADR-0003: Seed receives the liveness verdict as a function the binary passes in
 
-Status: Proposed (2026-11-13, unattended ROAD-15 run; the operator decides at the spec sheet)
+Status: Accepted (2026-11-16, by the operator; proposed 2026-11-13 in an unattended run)
 
 When hive is split into crates (ROAD-15), seed needs the closure-liveness verdict: it keeps only live units
 (seed/source.rs:183, :327). But ROAD-15 also requires that changing how gc decides a dead unit rebuilds the gc
