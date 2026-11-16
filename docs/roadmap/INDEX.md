@@ -83,7 +83,7 @@ ID rules:
 |---|---|---|---|---|
 | MILE-1 | Safe automatic reclaim | On any Mac, a user installs cargo-hive from scratch, registers a repo, and reclaims superseded incremental sessions and leftover rustc temp entries across all its checkouts, from the CLI or from an agent driving that same CLI through the hive skill, with a receipt showing per-file bytes freed and zero units rebuilt because of a deletion. | none | Closed |
 | MILE-2 | Planned reclaim | A user or agent previews closure-based garbage and orphan target dirs as a plan, and an agent applies that plan itself on any checkout and on orphan target dirs, with no owner step, hive rechecking it under locks before it deletes. | MILE-1 | Closed |
-| MILE-3 | Warm worktrees from a shared store | A new secondary checkout (a build-in-waves lane, a native Claude worktree) is seeded from a compressed, hive-owned store, so its first build recompiles zero seeded registry units while the seeded copies add about zero private bytes, and `cargo hive bench` gives the measured cold-versus-seeded time. | MILE-2 | Planned |
+| MILE-3 | Warm worktrees from a shared store | A new secondary checkout (a build-in-waves lane, a native Claude worktree) is seeded from a compressed, hive-owned store, so its first build recompiles zero seeded registry units while the seeded copies add about zero private bytes, and `cargo hive bench` gives the measured cold-versus-seeded time. | MILE-2 | Committed |
 | MILE-4 | Upgrades keep hive's state | A user or agent who upgrades hive keeps every registered repo, plan, receipt and store entry an earlier release wrote, or is stopped with the file named and the command that fixes it, and hive never starts empty because it could not read what is there. | none | Closed |
 | MILE-5 | Warm agent worktrees stay fast | An agent that takes a task in a warm worktree at a stable path runs its first commands and every rebuild about as fast as in a freshly built one, however many tasks that worktree has served, with no wrapper, hook or Cargo config installed. | MILE-2 | Planned |
 
@@ -127,7 +127,7 @@ ID rules:
 - **ROAD-11** bench — After: ROAD-8 — Surfaces: None — the module layout is set in design-solution. Expected components: repeated cold-versus-seeded runs reporting median, p90, spread and load average, the hive skill extended to cover it.
 - **ROAD-13** agent-skill-pass — After: ROAD-10, ROAD-11 — Surfaces: None — the hive skill from ROAD-12 and its per-item extensions. Expected components: one read of the whole skill once all three milestones' commands exist, rewriting it to read as one guide rather than a stack of per-item additions, checked against the binary's actual flags and receipts. — Card: [ROAD-13](roads/ROAD-13.md)
 **Depends-on:** MILE-2
-**Commitment:** Planned
+**Commitment:** Committed 2026-11-16
 **Closed:** None
 **Deferred:**
 - ~~**ROAD-9**~~ seed-secondary-checkouts — merged into ROAD-8 2026-11-02: a filled store gives nothing until something clones from it, so one slice delivers both and is proven against GOAL-2 and GOAL-3. ROAD-8 takes the `seed` command and the `status` counts.
