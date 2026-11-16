@@ -400,7 +400,7 @@ _Requirements: CHECKOUTGC-4.1, CHECKOUTGC-4.2, CHECKOUTGC-4.3, CHECKOUTGC-4.4_
 
 **Depends-on:** Task 7 (shares `checkout.rs`), Task 2
 
-- [ ] **Step 1: Write the failing tests.** Integration tests on `RegistryRepo::with_binaries` builds:
+- [x] **Step 1: Write the failing tests.** Integration tests on `RegistryRepo::with_binaries` builds:
   - `unreferenced_objects_are_deleted_and_every_object_a_binary_names_is_kept`;
   - `a_test_binary_that_was_not_relinked_still_keeps_its_objects`, which rebuilds after an edit that relinks one binary and leaves another;
   - `objects_named_only_by_a_dead_units_binary_go_in_the_same_run`;
@@ -420,8 +420,8 @@ _Requirements: CHECKOUTGC-4.1, CHECKOUTGC-4.2, CHECKOUTGC-4.3, CHECKOUTGC-4.4_
   - `names_ending_in_dot_o_are_not_read`.
 
   Run `cargo test -p cargo-hive --test checkout_gc`; expect the new tests to fail.
-- [ ] **Step 2: Implement** the object phase as in design "Checkout GC run" step 2, "Objects": the layout and format check, `list_profile`, the reads, the no-debug-map rule and the deletion. Run the project.md task gate for `cargo-hive-gc`, then `cargo-hive`; expect pass.
-- [ ] **Step 3: Commit.** `feat(gc): gc --checkout deletes debug objects no linked binary references`
+- [x] **Step 2: Implement** the object phase as in design "Checkout GC run" step 2, "Objects": the layout and format check, `list_profile`, the reads, the no-debug-map rule and the deletion. Run the project.md task gate for `cargo-hive-gc`, then `cargo-hive`; expect pass.
+- [x] **Step 3: Commit.** `feat(gc): gc --checkout deletes debug objects no linked binary references`
 
 _Requirements: CHECKOUTGC-2.1, CHECKOUTGC-2.2, CHECKOUTGC-2.5, CHECKOUTGC-2.6, CHECKOUTGC-2.8, CHECKOUTGC-2.9, CHECKOUTGC-2.10, CHECKOUTGC-2.11_
 
