@@ -187,15 +187,15 @@ _Requirements: CHECKOUTGC-2.3, CHECKOUTGC-2.4, CHECKOUTGC-2.7_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing unit tests**, over `TargetScan` values built by hand:
+- [x] **Step 1: Write the failing unit tests**, over `TargetScan` values built by hand:
   - `resolvers_of_names_every_checkout_that_resolves_to_a_target`;
   - `resolvers_of_matches_through_a_symlinked_target_path`;
   - `failed_workspaces_lists_every_failure_not_only_the_first`;
   - `existing_owner_and_failure_are_unchanged`.
 
   Run `cargo test -p cargo-hive-cargo --lib discover::`; expect a compile failure.
-- [ ] **Step 2: Implement** the field, the struct and the two helpers. `owner`, `failure`, `protected_owner` and `Scope` stay as they are. Run the project.md task gate for `cargo-hive-cargo`; expect pass, with every existing discover and plan test green.
-- [ ] **Step 3: Commit.** `feat(cargo): keep each workspace's metadata resolution in the target scan`
+- [x] **Step 2: Implement** the field, the struct and the two helpers. `owner`, `failure`, `protected_owner` and `Scope` stay as they are. Run the project.md task gate for `cargo-hive-cargo`; expect pass, with every existing discover and plan test green.
+- [x] **Step 3: Commit.** `feat(cargo): keep each workspace's metadata resolution in the target scan`
 
 _Requirements: CHECKOUTGC-3.1, CHECKOUTGC-3.2, CHECKOUTGC-3.5_
 
