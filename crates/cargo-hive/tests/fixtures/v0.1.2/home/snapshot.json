@@ -1,0 +1,80 @@
+{
+  "layout": 1,
+  "metadata": {
+    "/private/tmp/hive-capture/work/main": {
+      "stamp": {
+        "/.cargo/config": null,
+        "/.cargo/config.toml": null,
+        "/private/.cargo/config": null,
+        "/private/.cargo/config.toml": null,
+        "/private/rust-toolchain": null,
+        "/private/rust-toolchain.toml": null,
+        "/private/tmp/.cargo/config": null,
+        "/private/tmp/.cargo/config.toml": null,
+        "/private/tmp/hive-capture/.cargo/config": null,
+        "/private/tmp/hive-capture/.cargo/config.toml": null,
+        "/private/tmp/hive-capture/cargo-home/config": null,
+        "/private/tmp/hive-capture/cargo-home/config.toml": 1794845993125066264,
+        "/private/tmp/hive-capture/rust-toolchain": null,
+        "/private/tmp/hive-capture/rust-toolchain.toml": null,
+        "/private/tmp/hive-capture/work/.cargo/config": null,
+        "/private/tmp/hive-capture/work/.cargo/config.toml": null,
+        "/private/tmp/hive-capture/work/main/.cargo/config": null,
+        "/private/tmp/hive-capture/work/main/.cargo/config.toml": null,
+        "/private/tmp/hive-capture/work/main/Cargo.lock": 1794556361756953323,
+        "/private/tmp/hive-capture/work/main/Cargo.toml": 1794556361730491232,
+        "/private/tmp/hive-capture/work/main/rust-toolchain": null,
+        "/private/tmp/hive-capture/work/main/rust-toolchain.toml": null,
+        "/private/tmp/hive-capture/work/rust-toolchain": null,
+        "/private/tmp/hive-capture/work/rust-toolchain.toml": null,
+        "/private/tmp/rust-toolchain": null,
+        "/private/tmp/rust-toolchain.toml": null,
+        "/rust-toolchain": null,
+        "/rust-toolchain.toml": null
+      },
+      "resolved": {
+        "workspace_root": "/private/tmp/hive-capture/work/main",
+        "target_directory": "/private/tmp/hive-capture/work/main/target",
+        "build_directory": "/private/tmp/hive-capture/work/main/target"
+      }
+    },
+    "/private/tmp/hive-capture/work/wt": {
+      "stamp": {
+        "/.cargo/config": null,
+        "/.cargo/config.toml": null,
+        "/private/.cargo/config": null,
+        "/private/.cargo/config.toml": null,
+        "/private/rust-toolchain": null,
+        "/private/rust-toolchain.toml": null,
+        "/private/tmp/.cargo/config": null,
+        "/private/tmp/.cargo/config.toml": null,
+        "/private/tmp/hive-capture/.cargo/config": null,
+        "/private/tmp/hive-capture/.cargo/config.toml": null,
+        "/private/tmp/hive-capture/cargo-home/config": null,
+        "/private/tmp/hive-capture/cargo-home/config.toml": 1794845993125066264,
+        "/private/tmp/hive-capture/rust-toolchain": null,
+        "/private/tmp/hive-capture/rust-toolchain.toml": null,
+        "/private/tmp/hive-capture/work/.cargo/config": null,
+        "/private/tmp/hive-capture/work/.cargo/config.toml": null,
+        "/private/tmp/hive-capture/work/rust-toolchain": null,
+        "/private/tmp/hive-capture/work/rust-toolchain.toml": null,
+        "/private/tmp/hive-capture/work/wt/.cargo/config": null,
+        "/private/tmp/hive-capture/work/wt/.cargo/config.toml": null,
+        "/private/tmp/hive-capture/work/wt/Cargo.lock": 1794556362455599118,
+        "/private/tmp/hive-capture/work/wt/Cargo.toml": 1794556362455679827,
+        "/private/tmp/hive-capture/work/wt/rust-toolchain": null,
+        "/private/tmp/hive-capture/work/wt/rust-toolchain.toml": null,
+        "/private/tmp/rust-toolchain": null,
+        "/private/tmp/rust-toolchain.toml": null,
+        "/rust-toolchain": null,
+        "/rust-toolchain.toml": null
+      },
+      "resolved": {
+        "workspace_root": "/private/tmp/hive-capture/work/wt",
+        "target_directory": "/private/tmp/hive-capture/work/wt/target",
+        "build_directory": "/private/tmp/hive-capture/work/wt/target"
+      }
+    }
+  },
+  "unsupported_profiles": {}
+}

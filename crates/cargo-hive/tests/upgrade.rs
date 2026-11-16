@@ -159,7 +159,9 @@ fn each_state_file_reads_the_values_its_release_wrote() {
     for home in fixture_homes() {
         let state = State::open_at(home.clone()).unwrap();
         for_each_state_file(&home, |name, fixture| {
-            let fixture_value: Value = serde_json::from_slice(fixture).unwrap();
+            let mut fixture_value: Value = serde_json::from_slice(fixture).unwrap();
+            // A release from 0.1.2 on writes the layout itself; compare the other fields.
+            strip_layout(&mut fixture_value);
             let mut written = match name {
                 registry::FILE => {
                     let v: Registry = read_state_file(&state, name);
@@ -233,7 +235,16 @@ fn each_state_files_first_write_adds_only_the_layout_line() {
                 other => panic!("unexpected state file {other}"),
             }
             let got = fs::read(scratch.path.join(name)).unwrap();
-            let want = insert_layout_line(fixture);
+            // A file that already records its layout comes back unchanged (UPGRADE-2.4).
+            let has_layout = serde_json::from_slice::<Value>(fixture)
+                .unwrap()
+                .get("layout")
+                .is_some();
+            let want = if has_layout {
+                fixture.to_vec()
+            } else {
+                insert_layout_line(fixture)
+            };
             assert_eq!(got, want, "{} / {name} first write bytes", home.display());
         });
     }
