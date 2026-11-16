@@ -1234,6 +1234,23 @@ Neither counted `deps/` entries. Neither ran `gc --checkout`. Both ran repo-wide
 
 Expected after the rewrite: count with `ls -f <the checkout's real target dir>/debug/deps | wc -l` (or that profile's `deps/`); when above 20,000, run `cargo hive gc --checkout <worktree> --json`; do not run repo-wide `gc` for this case; no `cargo clean` and no hand deletion. Model re-run is the controller's step after this commit.
 
+
+### Before every test build (CHECKOUTGC-5.5, #31, 2026-11-16)
+
+The operator decided to replace the 20,000-entry trigger on 2026-11-16. A klynt proof showed each test build adds about 10,500 debug objects, so a cleaned slot crossed 20,000 again after one build. Once discovery stopped running git in unrelated repositories, the run cost about a second.
+
+Prompt (sanitized, no rule words): a reused worktree, an edit just finished, about to run `cargo nextest run --workspace --no-run`, and `ls -f target/debug/deps | wc -l` printed 14800. List the commands up to the test build.
+
+**RED, skill at main 08de167:**
+- Sonnet: re-checked the target dir with `cargo metadata`, then went straight to the test build: "14800 is not above 20,000, so no checkout gc is needed."
+- Haiku: did the same: "The count is 14800, which is below the 20,000 threshold, so I skip `cargo hive gc --checkout`."
+
+**GREEN, "Before every test build in a reused worktree, run checkout gc on that worktree":**
+- Sonnet and Haiku both ran `cargo hive --version`, then `cargo hive gc --checkout /work/slot-2 --json`, then the test build.
+- Haiku: "the file says to run checkout gc before every test build in a reused worktree. The 14800 entries in `deps/` don't change that."
+
+**Seen, not fixed in this edit:** both models read the plan fallback as applying to `gc.skipped` and `gc.shared_target` too, and asked whether the worktree must be registered first. That text predates this edit.
+
 ## Reading a checkout-gc receipt
 
 Baseline recorded 2026-11-16 against the skill before the checkout-gc section (full transcripts in `.skills/CHECKOUTGC/task-10-baseline.md`). Skill file only; one read each. Prompt: `gc --checkout` printed a receipt with findings `gc.skipped`, `gc.shared_target`, and `gc.outside_checkout`; what to run next.

@@ -1217,7 +1217,12 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
             return emit(state, *out, b.finish(), &format!("refused: {refusal}\n"), 1);
         }
     }
-    let (repo, row) = match find_checkout(&reg, &cfg, path) {
+    let Found {
+        repo,
+        row,
+        rows: all_rows,
+        faults: checkout_faults,
+    } = match find_checkout(&reg, &cfg, path) {
         Ok(v) => v,
         Err(r) => {
             let detail = match r
@@ -1252,9 +1257,6 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
         },
     );
     b.toolchain(release.clone());
-    let registered_mains: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
-    let (all_rows, checkout_faults) =
-        cargo_hive_cargo::discover::checkouts(&repo, &registered_mains, &cfg);
     for fault in &checkout_faults {
         b.finding(
             "walk.unreadable",
@@ -1815,11 +1817,20 @@ pub(crate) struct Refusal {
     pub code: i32,
 }
 
+/// The named checkout, its repo, and the repo's checkouts and walk faults as listed to find it,
+/// so a caller needs no second listing (CHECKOUTGC-5.6).
+pub(crate) struct Found {
+    pub repo: registry::Repo,
+    pub row: cargo_hive_cargo::discover::Checkout,
+    pub rows: Vec<cargo_hive_cargo::discover::Checkout>,
+    pub faults: Vec<cargo_hive_cargo::discover::WalkFault>,
+}
+
 pub(crate) fn find_checkout(
     reg: &Registry,
     cfg: &cargo_hive_state::Config,
     path: &std::path::Path,
-) -> Result<(registry::Repo, cargo_hive_cargo::discover::Checkout), Refusal> {
+) -> Result<Found, Refusal> {
     let real = match path.canonicalize() {
         Ok(path) => path,
         Err(err) => {
@@ -1838,16 +1849,18 @@ pub(crate) fn find_checkout(
     let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
     let mut matched = None;
     for repo in &reg.repos {
-        let (rows, _) = cargo_hive_cargo::discover::checkouts(repo, &registered_mains, cfg);
-        if let Some(row) = rows
-            .into_iter()
-            .find(|row| row.path == real && !row.missing)
-        {
-            matched = Some((repo.clone(), row));
+        let (rows, faults) = cargo_hive_cargo::discover::checkouts(repo, &registered_mains, cfg);
+        if let Some(row) = rows.iter().find(|row| row.path == real && !row.missing) {
+            matched = Some(Found {
+                repo: repo.clone(),
+                row: row.clone(),
+                rows,
+                faults,
+            });
             break;
         }
     }
-    let Some((repo, row)) = matched else {
+    let Some(found) = matched else {
         let detail = format!(
             "{path} is not a checkout of a registered repository; register it with `cargo hive repo add` and run the command again",
             path = real.display()
@@ -1859,7 +1872,7 @@ pub(crate) fn find_checkout(
             code: 1,
         });
     };
-    Ok((repo, row))
+    Ok(found)
 }
 
 pub(crate) fn locate_checkout(
@@ -1878,7 +1891,7 @@ pub(crate) fn locate_checkout(
     use cargo_hive_core::classify::Class;
     use cargo_hive_doctor::{self as doctor, Capability};
 
-    let (repo, row) = find_checkout(reg, cfg, path)?;
+    let Found { repo, row, .. } = find_checkout(reg, cfg, path)?;
     let real = row.path.clone();
     if row.class == Class::Protected {
         let detail = format!(

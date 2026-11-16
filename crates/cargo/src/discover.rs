@@ -3,6 +3,7 @@
 
 use crate::git::Git;
 use crate::metadata::{self, Resolved};
+use crate::object_store;
 use crate::registry::Repo;
 use cargo_hive_core::classify::{CheckoutFacts, CheckoutKind, Class, classify};
 use cargo_hive_core::fingerprint::{self, Format};
@@ -214,6 +215,9 @@ pub fn checkouts(
                 }
             };
             if seen.contains(&real) {
+                continue;
+            }
+            if object_store::holds_none(&real.join(".git"), &repo.root_commits) {
                 continue;
             }
             let g = Git::at(&real);

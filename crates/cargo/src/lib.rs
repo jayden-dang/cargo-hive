@@ -7,5 +7,6 @@ pub mod discover;
 pub mod env;
 pub mod git;
 pub mod metadata;
+mod object_store;
 pub mod registry;
 pub mod toolchain;

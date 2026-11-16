@@ -64,6 +64,8 @@ impl Drop for Scratch {
 pub struct Hive {
     pub home: Scratch,
     pub cargo_home: Scratch,
+    /// An empty dir that `ready` makes the only secondary root.
+    pub secondary_root: Scratch,
 }
 
 impl Hive {
@@ -71,6 +73,7 @@ impl Hive {
         Hive {
             home: Scratch::new("home"),
             cargo_home: Scratch::new("cargo-home"),
+            secondary_root: Scratch::new("secondary-root"),
         }
     }
 
@@ -87,12 +90,22 @@ impl Hive {
     }
 
     /// A hive whose doctor results are recorded for the active toolchain with every
-    /// capability enabled, and whose cache root is a scratch dir.
+    /// capability enabled, and whose only secondary root is an empty scratch dir, so no test
+    /// walks the machine's /private/tmp or $TMPDIR. A test about the default roots calls
+    /// `use_default_roots`.
     pub fn ready() -> Hive {
         let hive = Hive::new();
         hive.write_ready_capabilities();
-        hive.config("{}");
+        hive.config(&format!(
+            r#"{{"secondary_roots": ["{}"]}}"#,
+            hive.secondary_root.path.display()
+        ));
         hive
+    }
+
+    /// No configuration file content: /private/tmp and $TMPDIR are the secondary roots.
+    pub fn use_default_roots(&self) {
+        self.config("{}");
     }
 
     pub fn write_ready_capabilities(&self) {
@@ -510,3 +523,34 @@ pub mod prove;
 pub mod recording_fs;
 pub mod registry_fixture;
 pub mod store_fixture;
+
+/// A `git` first on PATH that logs each call's working directory and arguments, then runs the real git.
+pub fn counting_git(dir: &Path, log: &Path) -> String {
+    let real = String::from_utf8(
+        std::process::Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    std::fs::create_dir_all(dir).unwrap();
+    let shim = dir.join("git");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\necho \"$PWD $*\" >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            real
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &shim,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .unwrap();
+    format!("{}:{}", dir.display(), std::env::var("PATH").unwrap())
+}

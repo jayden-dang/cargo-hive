@@ -239,10 +239,9 @@
     "eval_name": "checkout-gc-before-a-bloated-test-build",
     "kind": "behavior",
     "derived_from": "## Keep a reused worktree fast",
-    "prompt": "I am about to run tests in my reused worktree at /path/to/worktree; its deps/ looks huge and builds have been slowing down",
+    "prompt": "I just finished an edit in my reused worktree at /path/to/worktree and am about to run cargo nextest run --workspace --no-run; ls -f target/debug/deps | wc -l printed 14800",
     "assertions": [
-      "Counts deps entries with ls -f <the checkout's real target dir>/debug/deps | wc -l (or that profile's deps/)",
-      "When the count is above 20,000, runs cargo hive gc --checkout <worktree> --json",
+      "Runs cargo hive gc --checkout <worktree> --json before the test build, whatever the deps/ count",
       "Does not run cargo clean and does not delete anything inside the target dir by hand"
     ]
   },

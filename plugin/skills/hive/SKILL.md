@@ -44,7 +44,7 @@ cargo hive gc --json
 
 ## Keep a reused worktree fast
 
-Before a test build in a reused worktree, count that checkout's profile `deps/` entries with `ls -f <the checkout's real target dir>/debug/deps | wc -l` (or that profile's `deps/`). When the count is above 20,000, run checkout gc on that worktree. Do not run repo-wide `gc` for this case: that path form covers the whole repo and only drops incremental sessions.
+Before every test build in a reused worktree, run checkout gc on that worktree. Each test build leaves about 10,000 debug objects in `deps/`, and the run takes about a second. Do not run repo-wide `gc` for this case: that path form covers the whole repo and only drops incremental sessions.
 
 ```
 cargo hive gc --checkout /path/to/worktree --json
@@ -93,7 +93,7 @@ A checkout is protected (a registered main checkout, or anything hive cannot cla
 | How big is it, what is orphaned? | `status` |
 | How do I free space? | `gc --dry-run`, then `gc` |
 | What can be deleted later? | `gc --plan` |
-| A reused worktree before a test build, `deps/` over 20,000 | Keep a reused worktree fast (`gc --checkout`) |
+| A reused worktree, before each test build | Keep a reused worktree fast (`gc --checkout`) |
 | Why are there so many copies of a crate? | `explain` |
 | A new secondary checkout, before its first build | `seed` |
 | Cold against seeded build times | `bench` |
