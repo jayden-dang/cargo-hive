@@ -919,20 +919,22 @@ fn an_unopenable_or_unlockable_lock_is_skipped_and_named() {
         let repo = aged_binaries(&hive);
         let target = repo.main.join("target").canonicalize().unwrap();
         let lock = target.join("debug/.cargo-build-lock");
+        fs::remove_file(&lock).unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", &lock).unwrap();
         let before = tree(&target);
-        let rec = Recording::over_real().no_identity(&lock);
+        let rec = Recording::over_real();
         let fs = rec.fs();
         let (scan, checkout, nested) = scan_only(&hive, &repo);
         let report = run_library(fs.as_ref(), &scan, &checkout, &nested);
         assert!(
             !report.failed,
-            "no_identity should skip, not fail: {report:?}"
+            "unopenable should skip, not fail: {report:?}"
         );
         assert_eq!(
             report
                 .totals
                 .skips
-                .get("targets_skipped_lock_missing")
+                .get("targets_skipped_lock_unopenable")
                 .copied(),
             Some(1),
             "{report:?}"
@@ -941,13 +943,12 @@ fn an_unopenable_or_unlockable_lock_is_skipped_and_named() {
             report.findings.iter().any(|f| {
                 f.kind == "gc.skipped"
                     && f.path.as_deref() == Some(target.as_path())
-                    && f.detail == "a required Cargo lock is missing"
+                    && f.detail == "a Cargo lock could not be opened"
             }),
             "{:?}",
             report.findings
         );
         assert_eq!(tree(&target), before);
-        assert!(common::wait_until_lock_free(&lock, Duration::from_secs(5)));
     }
 }
 
@@ -997,11 +998,11 @@ fn a_target_whose_profile_listing_fails_while_locking_exits_1() {
     let _ = fs::set_permissions(&profile, fs::Permissions::from_mode(0o755));
     assert_eq!(out.status.code(), Some(1), "{r}");
     assert!(
-        r["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|f| { f["kind"] == "gc.target_failed" && f["path"] == serde_json::json!(target) }),
+        r["findings"].as_array().unwrap().iter().any(|f| {
+            f["kind"] == "gc.target_failed"
+                && f["path"] == serde_json::json!(target)
+                && f["detail"].as_str().is_some_and(|d| !d.is_empty())
+        }),
         "{r}"
     );
     assert_eq!(count(&r, "units_deleted"), 0, "{r}");
