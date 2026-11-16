@@ -6,7 +6,7 @@ use common::cargo_fixture::{THIRTY_DAYS, backdate_all, decide, set_mtime};
 use common::plan_fixture::tree;
 use common::recording_fs::Recording;
 use common::registry_fixture::{RegistryRepo, cargo_json, set_target_dir};
-use common::{Hive, interrupt, wait_within};
+use common::{Hive, Scratch, git, interrupt, wait_within};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -459,6 +459,204 @@ fn a_target_dir_outside_the_checkout_is_left_and_named() {
 }
 
 #[test]
+fn gc_on_a_worktree_leaves_main_and_every_other_lane_byte_for_byte_unchanged() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let lane = repo.worktree("lane");
+    let other = repo.worktree("other");
+    for wt in [&lane, &other] {
+        cargo_json(&hive, wt, &["test", "--no-run"]);
+        backdate_all(&wt.join("target"), THIRTY_DAYS);
+        bump_app_version(wt);
+        cargo_json(&hive, wt, &["test", "--no-run"]);
+    }
+    let main_before = tree(&repo.main.join("target"));
+    let other_before = tree(&other.join("target"));
+    let (out, r) = checkout_gc(&hive, &lane);
+    assert!(out.status.success(), "{r}");
+    assert!(count(&r, "units_deleted") >= 1, "{r}");
+    assert_eq!(
+        tree(&repo.main.join("target")),
+        main_before,
+        "main target changed: {r}"
+    );
+    assert_eq!(
+        tree(&other.join("target")),
+        other_before,
+        "other lane target changed: {r}"
+    );
+}
+
+#[test]
+fn gc_on_main_leaves_the_worktrees_nested_under_it() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let nested = repo.nested_worktree("nested");
+    cargo_json(&hive, &nested, &["test", "--no-run"]);
+    backdate_all(&nested.join("target"), THIRTY_DAYS);
+    bump_app_version(&nested);
+    cargo_json(&hive, &nested, &["test", "--no-run"]);
+    let nested_before = tree(&nested.join("target"));
+    let (out, r) = checkout_gc(&hive, &repo.main);
+    assert!(out.status.success(), "{r}");
+    assert!(count(&r, "units_deleted") >= 1, "{r}");
+    assert_eq!(
+        tree(&nested.join("target")),
+        nested_before,
+        "nested worktree target changed: {r}"
+    );
+}
+
+#[test]
+fn an_unregistered_path_is_refused_naming_repo_add() {
+    let hive = Hive::ready();
+    let _repo = RegistryRepo::with_binaries(&hive);
+    let empty = Scratch::new("unregistered-empty");
+    let git_dir = Scratch::new("unregistered-git");
+    git(&git_dir.path, &["init", "-q"]);
+    for path in [&empty.path, &git_dir.path] {
+        let (out, r) = checkout_gc(&hive, path);
+        assert_eq!(out.status.code(), Some(1), "{path:?} => {r}");
+        assert!(
+            r["findings"].as_array().unwrap().iter().any(|f| {
+                f["kind"] == "refusal"
+                    && f["detail"]
+                        .as_str()
+                        .unwrap()
+                        .contains("cargo hive repo add")
+            }),
+            "{path:?} => {r}"
+        );
+    }
+}
+
+#[test]
+fn a_directory_inside_a_checkout_is_refused_naming_its_root() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let lane = repo.worktree("inside-lane");
+    cargo_json(&hive, &lane, &["test", "--no-run"]);
+    backdate_all(&lane.join("target"), THIRTY_DAYS);
+    bump_app_version(&lane);
+    cargo_json(&hive, &lane, &["test", "--no-run"]);
+    let main_target_before = tree(&repo.main.join("target"));
+    let lane_target_before = tree(&lane.join("target"));
+    let cases = [
+        (repo.main.join("app"), &repo.main),
+        (lane.join("app"), &repo.main),
+    ];
+    for (path, main) in &cases {
+        let path = path.canonicalize().unwrap();
+        let expected = format!(
+            "{path} is not a checkout of {main}; name the checkout's root directory",
+            path = path.display(),
+            main = main.display()
+        );
+        let (out, r) = checkout_gc(&hive, &path);
+        assert_eq!(out.status.code(), Some(1), "{path:?} => {r}");
+        assert!(
+            r["findings"].as_array().unwrap().iter().any(|f| {
+                f["kind"] == "refusal" && f["detail"].as_str() == Some(expected.as_str())
+            }),
+            "{path:?} => {r}"
+        );
+    }
+    assert_eq!(
+        tree(&repo.main.join("target")),
+        main_target_before,
+        "refused path deleted under main"
+    );
+    assert_eq!(
+        tree(&lane.join("target")),
+        lane_target_before,
+        "refused path deleted under lane"
+    );
+}
+
+#[test]
+fn only_the_receipt_line_and_snapshot_change_under_the_state_root() {
+    let hive = Hive::ready();
+    let repo = aged_binaries(&hive);
+    let store = hive.home.path.join("store/keep");
+    fs::create_dir_all(&store).unwrap();
+    fs::write(store.join("blob"), b"store-bytes").unwrap();
+    fs::write(
+        hive.home.path.join("store.db"),
+        br#"{"layout":1,"units":[],"toolchains":{}}"#,
+    )
+    .unwrap();
+    let root = &hive.home.path;
+    let before = tree(root);
+    let receipts_before = receipt_file_bytes(root);
+    let (out, r) = checkout_gc(&hive, &repo.main);
+    assert!(out.status.success(), "{r}");
+    assert!(count(&r, "units_deleted") >= 1, "{r}");
+    let after = tree(root);
+    let snapshot = root.join("snapshot.json");
+    let lock = root.join(".lock");
+    let receipts = root.join("receipts");
+    for (path, meta) in &after {
+        if path == &snapshot || path == &lock || path.starts_with(&receipts) {
+            continue;
+        }
+        assert_eq!(
+            before.get(path),
+            Some(meta),
+            "{} changed under the state root: {r}",
+            path.display()
+        );
+    }
+    for path in before.keys() {
+        if path == &lock {
+            continue;
+        }
+        assert!(
+            after.contains_key(path),
+            "{} removed under the state root: {r}",
+            path.display()
+        );
+    }
+    assert!(
+        after.contains_key(&snapshot),
+        "snapshot.json missing after checkout gc: {r}"
+    );
+    let receipts_after = receipt_file_bytes(root);
+    assert_eq!(
+        receipts_after.keys().cloned().collect::<Vec<_>>(),
+        receipts_before.keys().cloned().collect::<Vec<_>>(),
+        "receipt day files changed set: before={receipts_before:?} after={receipts_after:?}"
+    );
+    let mut appended = 0u64;
+    for (path, after_bytes) in &receipts_after {
+        let before_bytes = receipts_before.get(path).cloned().unwrap_or_default();
+        assert!(
+            after_bytes.starts_with(&before_bytes),
+            "{} was rewritten rather than appended",
+            path.display()
+        );
+        let added = after_bytes.len() - before_bytes.len();
+        if added == 0 {
+            continue;
+        }
+        let new_text = std::str::from_utf8(&after_bytes[before_bytes.len()..]).unwrap();
+        let new_lines: Vec<_> = new_text.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            new_lines.len(),
+            1,
+            "{} gained more than one receipt line: {new_text}",
+            path.display()
+        );
+        assert!(
+            new_lines[0].contains("\"command\":\"gc --checkout\""),
+            "new receipt line is not checkout gc: {}",
+            new_lines[0]
+        );
+        appended += 1;
+    }
+    assert_eq!(appended, 1, "expected exactly one receipts file to grow");
+}
+
+#[test]
 fn a_stop_after_each_position_in_a_unit_leaves_no_unit_fresh_with_a_file_missing() {
     let steps = {
         let hive = Hive::ready();
@@ -652,10 +850,10 @@ fn first_fingerprint_first_unit(target: &Path) -> Vec<PathBuf> {
                     .is_some_and(|name| name == ".fingerprint")
             })
             .map(|dir| dir.join("invoked.timestamp"));
-        if let Some(stamp) = stamp {
-            if stamp.exists() {
-                set_mtime(&stamp, now);
-            }
+        if let Some(stamp) = stamp
+            && stamp.exists()
+        {
+            set_mtime(&stamp, now);
         }
     }
     for path in &unit.files {
@@ -700,6 +898,21 @@ fn bump_app_version(checkout: &Path) {
 
 fn checkout_gc(hive: &Hive, path: &Path) -> (Output, serde_json::Value) {
     hive.json(&["gc", "--checkout", path.to_str().unwrap()])
+}
+
+fn receipt_file_bytes(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let dir = root.join("receipts");
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            out.insert(path.clone(), fs::read(&path).unwrap());
+        }
+    }
+    out
 }
 
 fn count(r: &serde_json::Value, name: &str) -> u64 {

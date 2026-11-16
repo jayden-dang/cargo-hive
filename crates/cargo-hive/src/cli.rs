@@ -1217,14 +1217,26 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
     let (repo, row) = match find_checkout(&reg, &cfg, path) {
         Ok(v) => v,
         Err(r) => {
+            let detail = match r
+                .path
+                .as_ref()
+                .and_then(|p| owning_repo(&reg, p).map(|owner| (p, owner)))
+            {
+                Some((p, owner)) => format!(
+                    "{path} is not a checkout of {main}; name the checkout's root directory",
+                    path = p.display(),
+                    main = owner.main.display()
+                ),
+                None => r.detail.clone(),
+            };
             let mut b = Receipt::new(command, Scope::default());
             b.toolchain(release.clone());
-            b.finding(r.kind, r.path, r.detail.clone());
+            b.finding(r.kind, r.path, detail.clone());
             return emit(
                 state,
                 *out,
                 b.finish(),
-                &format!("refused: {}\n", r.detail),
+                &format!("refused: {detail}\n"),
                 r.code,
             );
         }
