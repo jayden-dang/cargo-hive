@@ -230,7 +230,9 @@ Run `cargo test --lib platform::`; expect a compile failure.
 - [x] **Step 3: Run.** `cargo test`; expect pass, doctor's check b included: it compares with `==`. `cargo check --target x86_64-unknown-linux-gnu`.
 - [x] **Step 4: Commit.** `feat(platform): Fs::create_dir, and a compression outcome for files it cannot shrink`
 
-_Requirements: SEED-2.23_
+_Requirements: _
+
+SEED-2.23 was delivered by this task, then superseded by SEED-2.28 on 2026-11-11 (requirements.md).
 
 ---
 
@@ -391,7 +393,9 @@ Add: `a_directory_with_no_row_is_adopted_by_merge_without_cloning`, the hand-bui
 - [x] **Step 3: Run.** `cargo test`; expect pass.
 - [x] **Step 4: Commit.** `feat(seed): a store of complete, compressed entries with an atomic publish`
 
-_Requirements: SEED-2.9, SEED-2.10, SEED-2.12, SEED-2.13, SEED-2.20, SEED-2.21, SEED-2.22, SEED-9.3, SEED-9.4_
+_Requirements: SEED-2.13, SEED-2.20, SEED-2.21, SEED-9.3, SEED-9.4_
+
+SEED-2.9 was delivered by this task, then superseded by SEED-2.28 on 2026-11-11 (requirements.md). SEED-2.10 was delivered by this task, then superseded by SEED-2.29 on 2026-11-11 (requirements.md). SEED-2.12 was delivered by this task, then superseded by SEED-2.30 on 2026-11-11 (requirements.md). SEED-2.22 was delivered by this task, then superseded by SEED-2.28 on 2026-11-11 (requirements.md).
 
 ---
 
@@ -560,7 +564,9 @@ A workspace dependency is simply absent from `registry_deps`, which the last cas
 - [x] **Step 3: Run.** `cargo test`; expect pass.
 - [x] **Step 4: Commit.** `feat(seed): choose one consistent set of units for a repo and toolchain`
 
-_Requirements: SEED-3.1, SEED-3.2, SEED-3.3, SEED-3.4, SEED-3.5, SEED-3.6, SEED-3.7_
+_Requirements: SEED-3.1, SEED-3.2, SEED-3.3, SEED-3.4, SEED-3.6, SEED-3.7_
+
+SEED-3.5 was delivered by this task, then superseded by SEED-3.9 and SEED-3.10 on 2026-11-11 (requirements.md).
 
 ---
 
@@ -703,7 +709,9 @@ Add, all through the binary:
 - [x] **Step 4: Run.** `cargo test --test seed`, then `cargo test`; expect pass. If `the_first_build_...` fails for a command, stop and report it: this is the slice's core claim, and it reopens the owner's lock on the file set.
 - [x] **Step 5: Commit.** `feat(seed): cargo hive seed fills the store and clones into a new secondary checkout`
 
-_Requirements: SEED-1.1, SEED-1.2, SEED-2.1, SEED-1.9, SEED-1.10, SEED-1.11, SEED-1.14, SEED-1.15, SEED-1.17, SEED-3.8, SEED-7.1, SEED-7.3, SEED-7.4, SEED-7.5, SEED-10.1, SEED-10.3, SEED-10.12_
+_Requirements: SEED-1.1, SEED-1.2, SEED-2.1, SEED-1.9, SEED-1.10, SEED-1.11, SEED-1.14, SEED-1.15, SEED-3.8, SEED-7.1, SEED-7.3, SEED-7.4, SEED-7.5, SEED-10.1, SEED-10.3, SEED-10.12_
+
+SEED-1.17 was delivered by this task, then superseded by SEED-1.20 on 2026-11-11 (requirements.md).
 
 ---
 

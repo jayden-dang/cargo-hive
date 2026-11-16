@@ -1,6 +1,6 @@
 # ADR-0004: Each state file records its layout as its own first key
 
-Status: Proposed (2026-11-15, unattended ROAD-14 run; the operator decides at the spec sheet)
+Status: Accepted (2026-11-16, by the operator; proposed 2026-11-15 in an unattended run)
 
 Hive's JSON state files record no layout today, and ROAD-14 needs each to record one (ticket #13, UPGRADE-1.1).
 Each of the six persisted types (`Registry`, `Capabilities`, `Snapshot`, `PlansFile`, `StoreFile`, `SeedsFile`)

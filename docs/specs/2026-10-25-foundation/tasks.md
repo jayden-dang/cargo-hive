@@ -6003,7 +6003,9 @@ Added after execution by `root-cause` (2026-10-28). The rustup proxy hands every
 
 - [x] **Step 3: Verify and commit** — run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, and `cargo check --target x86_64-unknown-linux-gnu`; all exit 0 (117 passed, 1 ignored). Commit `fix: keep a directory-selected toolchain out of hive's rustup and cargo children`.
 
-_Requirements: CORE-1.11, CORE-1.12_
+_Requirements: CORE-1.11_
+
+CORE-1.12 was delivered by this task, then superseded by CORE-1.15 and CORE-1.16 on 2026-11-10 (requirements.md).
 
 ### Task 18: A cancelled command stops waiting for hive's state lock
 

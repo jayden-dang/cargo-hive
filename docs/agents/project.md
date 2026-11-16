@@ -20,7 +20,7 @@ has no Compat obligation text in this file for them to read — change the meani
 the derivation in `frame-change`, `clarify-decisions`, and `interpret-session` with it.
 
 - **Delivery intent:** `Production` — the quality bar the output must meet. A bar, not a release state: **Production** says how well the code must be built, never that the project has shipped.
-- **Lifecycle stage:** `Active development` — where the project is in its life. Move it to `Cut Released` when v0.1.0 is published.
+- **Lifecycle stage:** `Cut Released` — where the project is in its life. v0.1.0 was published on 2026-11-12 and v0.1.1 on 2026-11-14, both on crates.io.
 - **Compat obligation** is not written, so it is derived from the lifecycle stage: Idea / Early development / Active development → **None**; Cut Released / Scaling / Maintenance → **External**. **None:** nothing outside this repo depends on any current schema, endpoint, or file format. **Internal:** other services or teams in the same org read them. **External:** users, customers, or third-party clients depend on them. Write a `Compat obligation` line only to override the derivation.
 - **Default PR base:** `main`
   `land-branch` reads it as the third rung of its base-resolution ladder; keep the value alone on its line, since `refresh-lanes` reads the whole rest of the line as the branch name.
