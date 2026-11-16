@@ -12,7 +12,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::macos::fs::MetadataExt as _;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -61,20 +61,6 @@ impl Fs for Apfs {
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         fs::read(path)
-    }
-
-    fn read_at(&self, path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        let file = fs::File::open(path)?;
-        let file_len = file.metadata()?.len();
-        if offset >= file_len {
-            return Ok(Vec::new());
-        }
-        let available = usize::try_from(file_len - offset).unwrap_or(usize::MAX);
-        let to_read = available.min(len);
-        let mut buf = vec![0u8; to_read];
-        let n = file.read_at(&mut buf, offset)?;
-        buf.truncate(n);
-        Ok(buf)
     }
 
     fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {

@@ -417,13 +417,7 @@ fn clean_target(
     }
     report.unmeasured_more = report.unmeasured_more.saturating_add(tally.unmeasured_more);
     if input.account_bytes {
-        if let Some(bytes) = tally.per_target.get(path).copied() {
-            counts.bytes = Some(bytes);
-        } else if tally.total.freed > 0 || tally.total.still_shared > 0 {
-            counts.bytes = Some(tally.total);
-        } else {
-            counts.bytes = Some(Bytes::default());
-        }
+        counts.bytes = Some(tally.per_target.get(path).copied().unwrap_or(tally.total));
     }
     drop(locked);
     counts

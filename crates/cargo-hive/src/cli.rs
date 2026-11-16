@@ -925,13 +925,14 @@ fn put_checkout_counts(b: &mut ReceiptBuilder, suffix: &str, c: &cargo_hive_gc::
         .count(&format!("binaries_read{suffix}"), c.binaries_read)
         .count(&format!("targets_shared{suffix}"), c.targets_shared)
         .count(&format!("targets_outside{suffix}"), c.targets_outside);
-    for name in [
-        "targets_skipped_held",
-        "targets_skipped_lock_unopenable",
-        "targets_skipped_lock_unsupported",
-        "targets_skipped_lock_missing",
-        "targets_skipped_profile_set",
+    for reason in [
+        cargo_hive_core::locks::Reason::Held,
+        cargo_hive_core::locks::Reason::Unopenable,
+        cargo_hive_core::locks::Reason::Unlockable,
+        cargo_hive_core::locks::Reason::Missing,
+        cargo_hive_core::locks::Reason::ProfileSet,
     ] {
+        let name = reason.count_name();
         b.count(
             &format!("{name}{suffix}"),
             c.skips.get(name).copied().unwrap_or(0),
@@ -1197,12 +1198,14 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
         eprintln!("{MACOS_ONLY_MESSAGE}");
         return 2;
     };
-    if let Err(err) = window_days(cfg.gc_window_days) {
-        let mut b = Receipt::new(command, Scope::default());
-        b.finding("refusal", None, err.to_string());
-        return emit(state, *out, b.finish(), &format!("refused: {err}\n"), 1);
-    }
-    let days = window_days(cfg.gc_window_days).expect("checked above");
+    let days = match window_days(cfg.gc_window_days) {
+        Ok(days) => days,
+        Err(err) => {
+            let mut b = Receipt::new(command, Scope::default());
+            b.finding("refusal", None, err.to_string());
+            return emit(state, *out, b.finish(), &format!("refused: {err}\n"), 1);
+        }
+    };
     let release = cargo_hive_cargo::toolchain::resolve_toolchain(state.root())
         .ok()
         .map(|t| t.release);
