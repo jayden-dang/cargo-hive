@@ -52,13 +52,13 @@ cargo hive gc --checkout /path/to/worktree --json
 
 Read `objects_deleted`, `units_deleted`, `freed_bytes` and `targets_skipped_held` from the receipt. Findings and what to do:
 
-- `gc.skipped`: that target was held or could not be locked; leave it and continue.
+- `gc.skipped`: a build held that target or it could not be locked; nothing was deleted there. Leave it and go on to your test build: the checkout gc before your next test build tries it again. Run no repo-wide `gc` or `apply` for it.
 - `gc.shared_target`: another checkout also resolves to it; nothing was deleted there.
-- `gc.outside_checkout`: the target lies outside this checkout or inside a nested one; nothing was deleted there. Repo-wide `gc --plan` then `apply` still collects that target's dead units. That fallback covers main and every lane of the repo and deletes no debug objects; it is not a scoped retry of `gc --checkout`.
+- `gc.outside_checkout`: the target lies outside this checkout or inside a nested one; nothing was deleted there.
 - `ownership.unresolved`: a live checkout's metadata failed; fix or remove that worktree, then retry.
 - `gc.objects_undecided`: objects in that profile were left alone.
 
-When the receipt names `gc.skipped`, `gc.shared_target` or `gc.outside_checkout`, do not stop at `--help`. Run the repo-wide plan then apply fallback above for the dead units those findings left.
+When the receipt names `gc.shared_target` or `gc.outside_checkout`, do not stop at `--help`: run repo-wide `gc --plan` then `apply` for the dead units left in those targets. That fallback covers main and every lane of the repo and deletes no debug objects; it is not a scoped retry of `gc --checkout`.
 
 ## Start new lanes
 

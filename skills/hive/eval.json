@@ -250,12 +250,24 @@
     "eval_name": "checkout-gc-receipt-fallback-to-plan",
     "kind": "behavior",
     "derived_from": "## Reading a checkout-gc receipt",
-    "prompt": "cargo hive gc --checkout just finished on /path/to/worktree and the receipt names gc.skipped, gc.shared_target, or gc.outside_checkout; what do I do next?",
+    "prompt": "cargo hive gc --checkout just finished on /path/to/worktree and the receipt names gc.shared_target or gc.outside_checkout; what do I do next?",
     "assertions": [
       "Does not stop after the checkout-gc receipt",
-      "Runs repo-wide gc --plan then apply for the dead units those findings left",
+      "Runs repo-wide gc --plan then apply for the dead units left in those targets",
       "Treats that fallback as covering main and every lane of the repo, and as deleting no debug objects",
       "Does not treat the fallback as a scoped retry of gc --checkout"
+    ]
+  },
+  {
+    "eval_id": 23,
+    "eval_name": "checkout-gc-held-target-is-left",
+    "kind": "behavior",
+    "derived_from": "## Keep a reused worktree fast",
+    "prompt": "cargo hive gc --checkout on /path/to/worktree exited 0 with targets_skipped_held: 1 and a gc.skipped finding for its target; I was about to run cargo nextest run --workspace --no-run",
+    "assertions": [
+      "Goes on to the test build",
+      "Runs no repo-wide gc, gc --plan or apply for the held target",
+      "Says the checkout gc before the next test build tries that target again"
     ]
   }
 ]
