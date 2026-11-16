@@ -460,26 +460,39 @@ fn a_target_dir_outside_the_checkout_is_left_and_named() {
 
 #[test]
 fn a_stop_after_each_position_in_a_unit_leaves_no_unit_fresh_with_a_file_missing() {
-    let hive = Hive::ready();
-    let repo = aged_binaries(&hive);
-    let (fs_box, scan, checkout, nested) = library_scan(&hive, &repo);
-    let input = cargo_hive_gc::checkout::CheckoutInput {
-        fs: fs_box.as_ref(),
-        scan: &scan,
-        checkout: &checkout,
-        nested: &nested,
-        now: SystemTime::now(),
-        window: Duration::from_secs(7 * 86_400),
-        account_bytes: true,
+    let steps = {
+        let hive = Hive::ready();
+        let repo = aged_binaries(&hive);
+        let ordered = first_fingerprint_first_unit(&repo.main.join("target"));
+        assert!(
+            ordered.len() >= 2,
+            "need a multi-entry fingerprint-first unit"
+        );
+        ordered.len()
     };
-    let probe = cargo_hive_gc::checkout::run(&input, &|| false);
-    assert!(probe.totals.unit_files_deleted >= 2, "{:?}", probe.totals);
-    let steps = probe.totals.unit_files_deleted as usize;
-    for stop_after in 0..steps.min(6) {
+    for stop_after in 0..steps {
         let hive = Hive::ready();
         let repo = aged_binaries(&hive);
         let target = repo.main.join("target");
-        let before_units = fingerprint_dirs(&target);
+        let ordered = first_fingerprint_first_unit(&target);
+        assert!(
+            ordered.len() >= 2,
+            "need two ordered entries for stop {stop_after}, got {ordered:?}"
+        );
+        let fingerprint = ordered
+            .iter()
+            .find(|p| {
+                p.parent()
+                    .and_then(|parent| parent.file_name())
+                    .is_some_and(|name| name == ".fingerprint")
+            })
+            .cloned()
+            .expect("fingerprint dir in the ordered unit");
+        let siblings: Vec<_> = ordered
+            .iter()
+            .filter(|p| *p != &fingerprint)
+            .cloned()
+            .collect();
         let rec = Recording::over_real().fail_removes_after(stop_after);
         let fs = rec.fs();
         let (scan, checkout, nested) = scan_only(&hive, &repo);
@@ -494,22 +507,15 @@ fn a_stop_after_each_position_in_a_unit_leaves_no_unit_fresh_with_a_file_missing
         };
         let report = cargo_hive_gc::checkout::run(&input, &|| false);
         assert!(report.failed, "stop {stop_after}: {report:?}");
-        for unit in &before_units {
-            let dir = target.join("debug/.fingerprint").join(unit);
-            if !dir.exists() {
-                continue;
+        if fingerprint.exists() {
+            for sibling in &siblings {
+                assert!(
+                    sibling.exists(),
+                    "fingerprint {} outlived deleted sibling {} (stop {stop_after})",
+                    fingerprint.display(),
+                    sibling.display()
+                );
             }
-            let hash = unit.rsplit('-').next().unwrap();
-            let deps = target.join("debug/deps");
-            let missing_dep = fs::read_dir(&deps).unwrap().any(|e| {
-                let name = e.unwrap().file_name();
-                let name = name.to_string_lossy();
-                name.contains(hash) && !deps.join(name.as_ref()).exists()
-            });
-            assert!(
-                !missing_dep,
-                "unit {unit} still has a fingerprint dir but a hash-keyed deps file is gone (stop {stop_after})"
-            );
         }
     }
 }
@@ -612,6 +618,59 @@ fn a_unit_changed_between_scan_and_lock_is_judged_on_the_fresh_read() {
         report.totals.units_deleted >= 1,
         "other dead units must still be collected on the fresh read: {report:?}"
     );
+}
+
+/// Revive every dead unit but one, drop that unit's dep-info, and return its fingerprint-first order.
+fn first_fingerprint_first_unit(target: &Path) -> Vec<PathBuf> {
+    let (_, dead) = decide(target);
+    let (index, unit) = dead
+        .iter()
+        .enumerate()
+        .find(|(_, unit)| {
+            unit.files.iter().any(|p| {
+                p.parent()
+                    .and_then(|parent| parent.file_name())
+                    .is_some_and(|name| name == ".fingerprint")
+            }) && unit.files.iter().any(|p| {
+                p.parent()
+                    .and_then(|parent| parent.file_name())
+                    .is_some_and(|name| name != ".fingerprint")
+            })
+        })
+        .expect("a dead unit with a fingerprint dir and at least one other file");
+    let now = SystemTime::now();
+    for (i, other) in dead.iter().enumerate() {
+        if i == index {
+            continue;
+        }
+        let stamp = other
+            .files
+            .iter()
+            .find(|p| {
+                p.parent()
+                    .and_then(|parent| parent.file_name())
+                    .is_some_and(|name| name == ".fingerprint")
+            })
+            .map(|dir| dir.join("invoked.timestamp"));
+        if let Some(stamp) = stamp {
+            if stamp.exists() {
+                set_mtime(&stamp, now);
+            }
+        }
+    }
+    for path in &unit.files {
+        if path.extension().is_some_and(|ext| ext == "d") {
+            let _ = fs::remove_file(path);
+        }
+    }
+    let files: Vec<_> = unit
+        .files
+        .iter()
+        .filter(|p| p.extension().is_none_or(|ext| ext != "d"))
+        .filter(|p| p.exists())
+        .cloned()
+        .collect();
+    cargo_hive_gc::checkout::unit_order(&files)
 }
 
 fn aged_binaries(hive: &Hive) -> RegistryRepo {
