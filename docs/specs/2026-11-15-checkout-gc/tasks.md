@@ -471,9 +471,9 @@ _Requirements: CHECKOUTGC-6.1, CHECKOUTGC-6.2, CHECKOUTGC-6.3, CHECKOUTGC-6.4, C
 
 **Depends-on:** Task 9
 
-- [ ] **Step 1: Write the failing tests.** Extend `parse()` and the three `Parsed::Gc` combos in `skill_documents_every_shipped_command` so that a `gc --checkout` line is told apart from bare `gc`. Add the eval entries: trigger "before a test build with deps/ over 20,000 entries", and reading "a `gc.skipped`, `gc.shared_target` or `gc.outside_checkout` receipt". The last must lead to repo-wide `gc --plan` then `apply`, not to silence. The skill line must also say that this fallback covers main and every lane of the repo and deletes no debug objects, so the agent does not read it as a scoped retry. Run `cargo test -p cargo-hive --test skill`; expect failure (the skill and README lack the line).
-- [ ] **Step 2: Write the skill text through the `author-skills` workflow** (RED baseline, then GREEN, Sonnet and Haiku evals), staying within the 150-line budget (118 used). Also write the README subsection. Run `cargo test -p cargo-hive --test skill`; expect pass.
-- [ ] **Step 3: Commit.** `docs(skill): run gc --checkout before a test build in a bloated worktree`
+- [x] **Step 1: Write the failing tests.** Extend `parse()` and the three `Parsed::Gc` combos in `skill_documents_every_shipped_command` so that a `gc --checkout` line is told apart from bare `gc`. Add the eval entries: trigger "before a test build with deps/ over 20,000 entries", and reading "a `gc.skipped`, `gc.shared_target` or `gc.outside_checkout` receipt". The last must lead to repo-wide `gc --plan` then `apply`, not to silence. The skill line must also say that this fallback covers main and every lane of the repo and deletes no debug objects, so the agent does not read it as a scoped retry. Run `cargo test -p cargo-hive --test skill`; expect failure (the skill and README lack the line).
+- [x] **Step 2: Write the skill text through the `author-skills` workflow** (RED baseline, then GREEN, Sonnet and Haiku evals), staying within the 150-line budget (118 used). Also write the README subsection. Run `cargo test -p cargo-hive --test skill`; expect pass.
+- [x] **Step 3: Commit.** `docs(skill): run gc --checkout before a test build in a bloated worktree`
 
 _Requirements: CHECKOUTGC-5.1, CHECKOUTGC-5.2, CHECKOUTGC-5.3, CHECKOUTGC-5.4_
 
