@@ -145,7 +145,7 @@ _Requirements: CHECKOUTGC-2.10_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing tests.** Byte images come from a small in-test builder of `mach_header_64`, `LC_SYMTAB`, `nlist_64` and a string table, laid out as in `.skills/research/2026-11-15-macho-n-oso.md` (main checkout). Tests:
+- [x] **Step 1: Write the failing tests.** Byte images come from a small in-test builder of `mach_header_64`, `LC_SYMTAB`, `nlist_64` and a string table, laid out as in `.skills/research/2026-11-15-macho-n-oso.md` (main checkout). Tests:
   - `a_thin_executable_yields_its_loose_object_names`;
   - `archive_entries_name_no_loose_object`;
   - `a_path_with_spaces_keeps_its_whole_file_name`;
@@ -162,8 +162,8 @@ _Requirements: CHECKOUTGC-2.10_
   - a boundary table for each of the four caps (exactly at the cap reads; one past is `Bound`).
 
   Run `cargo test -p cargo-hive-gc --lib debug_map::`; expect a compile failure.
-- [ ] **Step 2: Implement** `debug_map.rs`, with its `//!` contract, and the four caps. Every read goes through `fs.read_at`, and one binary's tables are held at a time. Run the project.md task gate for `cargo-hive-gc`, with `cargo-hive-core` escalated per the gate; expect pass.
-- [ ] **Step 3: Commit.** `feat(gc): read the loose objects a Mach-O debug map names`
+- [x] **Step 2: Implement** `debug_map.rs`, with its `//!` contract, and the four caps. Every read goes through `fs.read_at`, and one binary's tables are held at a time. Run the project.md task gate for `cargo-hive-gc`, with `cargo-hive-core` escalated per the gate; expect pass.
+- [x] **Step 3: Commit.** `feat(gc): read the loose objects a Mach-O debug map names`
 
 _Requirements: CHECKOUTGC-2.3, CHECKOUTGC-2.4, CHECKOUTGC-2.7_
 
