@@ -220,9 +220,9 @@ _Requirements: CHECKOUTGC-3.1, CHECKOUTGC-3.2, CHECKOUTGC-3.5_
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing fixture test** `the_binaries_fixture_links_a_bin_a_test_an_example_a_build_script_and_a_proc_macro_offline`. It runs `cargo_json(…, ["test", "--no-run"])` in `main` and asserts each linked file exists, with loose `deps/*.rcgu.o` beside them. Run `cargo test -p cargo-hive --test checkout_gc`; expect a compile failure.
-- [ ] **Step 2: Implement** the four helpers. Run `cargo test -p cargo-hive --test checkout_gc` and the suites that use `RegistryRepo` (`--test seed`, `--test plan_apply`); expect pass.
-- [ ] **Step 3: Commit.** `test: a registry fixture that links binaries and nests a worktree`
+- [x] **Step 1: Write the failing fixture test** `the_binaries_fixture_links_a_bin_a_test_an_example_a_build_script_and_a_proc_macro_offline`. It runs `cargo_json(…, ["test", "--no-run"])` in `main` and asserts each linked file exists, with loose `deps/*.rcgu.o` beside them. Run `cargo test -p cargo-hive --test checkout_gc`; expect a compile failure.
+- [x] **Step 2: Implement** the four helpers. Run `cargo test -p cargo-hive --test checkout_gc` and the suites that use `RegistryRepo` (`--test seed`, `--test plan_apply`); expect pass.
+- [x] **Step 3: Commit.** `test: a registry fixture that links binaries and nests a worktree`
 
 _Requirements: CHECKOUTGC-1.4, CHECKOUTGC-2.2, CHECKOUTGC-3.7_
 
