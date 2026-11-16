@@ -158,10 +158,10 @@ Crate names approved: 2026-11-14
    ```sh
    HIVE_NEW_BIN=/private/tmp/hive-release/inst/bin/cargo-hive \
    HIVE_V010_BIN=/private/tmp/hive-fixture-0.1.0/target/debug/cargo-hive \
-     cargo test -p cargo-hive --test capture -- --ignored
+     cargo test -p cargo-hive --test capture -- --ignored --skip write_fixture_home
    ```
 
-   Stop on any difference. The capture test takes the new binary from `HIVE_NEW_BIN` when set, else `CARGO_BIN_EXE_cargo-hive`. `HIVE_V010_BIN` is built from tag `v0.1.0` under `/private/tmp/hive-fixture-0.1.0/` with an isolated `CARGO_HOME` in that dir (`mkdir -p /private/tmp/hive-fixture-0.1.0/src && git archive v0.1.0 | tar -x -C /private/tmp/hive-fixture-0.1.0/src`, then `CARGO_HOME=/private/tmp/hive-fixture-0.1.0/cargo-home CARGO_TARGET_DIR=/private/tmp/hive-fixture-0.1.0/target cargo build --locked --manifest-path /private/tmp/hive-fixture-0.1.0/src/Cargo.toml`). Every run of a development build sets `HIVE_HOME` to a scratch dir under `/private/tmp`, never `~/.hive`.
+   Stop on any difference. `write_fixture_home` is step 7's generator; it needs `HIVE_FIXTURE_BIN` and panics without it. The capture test takes the new binary from `HIVE_NEW_BIN` when set, else `CARGO_BIN_EXE_cargo-hive`. `HIVE_V010_BIN` is built from tag `v0.1.0` under `/private/tmp/hive-fixture-0.1.0/` with an isolated `CARGO_HOME` in that dir (`mkdir -p /private/tmp/hive-fixture-0.1.0/src && git archive v0.1.0 | tar -x -C /private/tmp/hive-fixture-0.1.0/src`, then `CARGO_HOME=/private/tmp/hive-fixture-0.1.0/cargo-home CARGO_TARGET_DIR=/private/tmp/hive-fixture-0.1.0/target cargo build --locked --manifest-path /private/tmp/hive-fixture-0.1.0/src/Cargo.toml`). Every run of a development build sets `HIVE_HOME` to a scratch dir under `/private/tmp`, never `~/.hive`.
 7. Fixtures: build this release's binary from its own tag the same way under `/private/tmp/hive-fixture-<release>/` (isolated `CARGO_HOME` in that dir; for a workspace tag use `cargo build --locked -p cargo-hive` with that tree's root `Cargo.toml`). Then run `write_fixture_home` with the generator's variables — the generator uses capture.rs's isolated `CARGO_HOME`, never `~/.cargo`:
 
    ```sh

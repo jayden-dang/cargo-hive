@@ -1,0 +1,67 @@
+{
+  "layout": 1,
+  "plans": [
+    {
+      "id": "b13835af9d7a4f4d",
+      "class": "protected",
+      "window_days": 7,
+      "made_at": 1794845995,
+      "scope_repos": [
+        "/private/tmp/hive-capture/work/main"
+      ],
+      "planned": {
+        "freed": 0,
+        "still_shared": 36864
+      },
+      "targets": [
+        {
+          "path": "/private/tmp/hive-capture/work/main/target",
+          "owner": "/private/tmp/hive-capture/work/main",
+          "planned": {
+            "freed": 0,
+            "still_shared": 36864
+          },
+          "entries": [
+            {
+              "path": "/private/tmp/hive-capture/work/main/target/debug/.fingerprint/app-90f278200a918606",
+              "unit": "debug/app-90f278200a918606",
+              "kind": "dir",
+              "dev": 16777234,
+              "ino": 556605710
+            },
+            {
+              "path": "/private/tmp/hive-capture/work/main/target/debug/deps/app-90f278200a918606.bf5xgrdwxnr1nulotjtra12u8.1gt8zbe.rcgu.o",
+              "unit": "debug/app-90f278200a918606",
+              "kind": "file",
+              "dev": 16777234,
+              "ino": 556605752
+            },
+            {
+              "path": "/private/tmp/hive-capture/work/main/target/debug/deps/app-90f278200a918606.d",
+              "unit": "debug/app-90f278200a918606",
+              "kind": "file",
+              "dev": 16777234,
+              "ino": 556605743
+            },
+            {
+              "path": "/private/tmp/hive-capture/work/main/target/debug/deps/libapp-90f278200a918606.rlib",
+              "unit": "debug/app-90f278200a918606",
+              "kind": "file",
+              "dev": 16777234,
+              "ino": 556605742
+            },
+            {
+              "path": "/private/tmp/hive-capture/work/main/target/debug/deps/libapp-90f278200a918606.rmeta",
+              "unit": "debug/app-90f278200a918606",
+              "kind": "file",
+              "dev": 16777234,
+              "ino": 556605747
+            }
+          ],
+          "orphan": null
+        }
+      ],
+      "state": "live"
+    }
+  ]
+}
