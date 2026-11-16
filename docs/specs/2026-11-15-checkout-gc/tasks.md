@@ -447,8 +447,8 @@ _Requirements: CHECKOUTGC-2.1, CHECKOUTGC-2.2, CHECKOUTGC-2.5, CHECKOUTGC-2.6, C
 
 **Depends-on:** Task 8
 
-- [ ] **Step 1: Run** `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check` and `cargo check --workspace --target x86_64-unknown-linux-gnu`. Expect every existing suite green, with no assertion edited apart from the two Task 5 names in Global Constraints.
-- [ ] **Step 2: Confirm** with `git diff main -- crates/cargo-hive/tests` that no existing test changed beyond those two and the `skill.rs` work of Task 10. Record the run in the task report.
+- [x] **Step 1: Run** `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check` and `cargo check --workspace --target x86_64-unknown-linux-gnu`. Expect every existing suite green, with no assertion edited apart from the two Task 5 names in Global Constraints.
+- [x] **Step 2: Confirm** with `git diff main -- crates/cargo-hive/tests` that no existing test changed beyond those two and the `skill.rs` work of Task 10. Record the run in the task report.
 
 _Requirements: CHECKOUTGC-6.1, CHECKOUTGC-6.2, CHECKOUTGC-6.3, CHECKOUTGC-6.4, CHECKOUTGC-6.5, CHECKOUTGC-6.7_
 
