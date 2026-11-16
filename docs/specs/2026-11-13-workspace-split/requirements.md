@@ -1,7 +1,7 @@
 # Requirements: Workspace split
 
 Feature code: SPLIT
-Status: Implemented
+Status: Shipped
 Approved: 2026-11-13, by the operator (Jayden), reply relayed by the conductor: "approve"
 Date: 2026-11-13
 Roadmap item: ROAD-15 (docs/roadmap/roads/ROAD-15.md), ticket #26
