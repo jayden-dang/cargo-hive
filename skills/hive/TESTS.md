@@ -1251,6 +1251,30 @@ Prompt (sanitized, no rule words): a reused worktree, an edit just finished, abo
 
 **Seen, not fixed in this edit:** both models read the plan fallback as applying to `gc.skipped` and `gc.shared_target` too, and asked whether the worktree must be registered first. That text predates this edit.
 
+
+### A held target is left; only shared and outside targets fall back (2026-11-16)
+
+**Line 61 contradicted line 55.** Line 55 says `gc.skipped` → "leave it and continue". Line 61, added by the #29 build, says: "When the receipt names `gc.skipped`, `gc.shared_target` or `gc.outside_checkout` … Run the repo-wide plan then apply fallback."
+
+**Prompt (sanitized):** the receipt held only `gc.skipped` for the slot's own target ("held"), and the next step was the test build.
+
+**RED (skill at main ab62d1c):**
+- Sonnet ran `gc --plan /work/slot-2` and applied every plan, protected included, before the build: "The skill says not to stop there."
+- Haiku did the same: "The skill says to run the repo-wide plan then apply fallback for the dead units that finding left."
+- That repo-wide apply covers main and every lane. It would also skip the held target anyway.
+
+**GREEN:**
+- `gc.skipped` now says to leave it and go on to the test build, because the next checkout gc retries it.
+- The fallback is stated once, for `gc.shared_target` and `gc.outside_checkout` only.
+
+| Run | Result |
+|---|---|
+| Sonnet, skipped | The test build only: "the file only calls for those on `gc.shared_target` or `gc.outside_checkout`" |
+| Haiku, skipped | The test build only: "The file says to leave it and go straight to the test build" |
+| Haiku, `gc.shared_target` (control) | Still ran `gc --plan` then `apply` before the build |
+
+The eval for this case is `checkout-gc-held-target-is-left`. Eval 22 now names only the shared and outside cases.
+
 ## Reading a checkout-gc receipt
 
 Baseline recorded 2026-11-16 against the skill before the checkout-gc section (full transcripts in `.skills/CHECKOUTGC/task-10-baseline.md`). Skill file only; one read each. Prompt: `gc --checkout` printed a receipt with findings `gc.skipped`, `gc.shared_target`, and `gc.outside_checkout`; what to run next.
