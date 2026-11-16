@@ -1,0 +1,1286 @@
+//! One checkout's dead-unit and unreferenced debug-object GC.
+
+use crate::debug_map;
+use crate::liveness::liveness;
+use crate::plan_tier::guard::{self, Expect};
+use cargo_hive_cargo::discover::{self, TargetScan};
+use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
+use cargo_hive_core::fingerprint::{self, Format, ProfileReport};
+use cargo_hive_core::ledger::{self, Bytes, Ledger};
+use cargo_hive_core::liveness::Liveness;
+use cargo_hive_core::locks::{self, Acquired, Reason};
+use cargo_hive_core::receipt::Finding;
+use cargo_hive_core::target::{self, Layout, TargetDir};
+use cargo_hive_platform::{EntryKind, Fs};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+pub struct CheckoutInput<'a> {
+    pub fs: &'a dyn Fs,
+    pub scan: &'a TargetScan,
+    pub checkout: &'a Path,
+    pub nested: &'a [PathBuf],
+    pub now: SystemTime,
+    pub window: Duration,
+    pub account_bytes: bool,
+}
+
+#[derive(Debug)]
+pub struct CheckoutReport {
+    pub per_target: Vec<(PathBuf, Counts)>,
+    pub totals: Counts,
+    pub findings: Vec<Finding>,
+    pub unmeasured: Vec<(PathBuf, String)>,
+    pub unmeasured_more: u64,
+    pub cancelled: bool,
+    pub failed: bool,
+}
+
+#[derive(Debug)]
+pub struct Counts {
+    pub units_deleted: u64,
+    pub unit_files_deleted: u64,
+    pub objects_deleted: u64,
+    pub objects_referenced: u64,
+    pub binaries_read: u64,
+    pub targets_shared: u64,
+    pub targets_outside: u64,
+    pub bytes: Option<Bytes>,
+    pub skips: BTreeMap<&'static str, u64>,
+}
+
+pub struct Selection {
+    pub own: Vec<PathBuf>,
+    pub shared: Vec<PathBuf>,
+    pub outside: Vec<PathBuf>,
+    pub failed: Vec<(PathBuf, String)>,
+}
+
+impl Counts {
+    fn empty() -> Counts {
+        Counts {
+            units_deleted: 0,
+            unit_files_deleted: 0,
+            objects_deleted: 0,
+            objects_referenced: 0,
+            binaries_read: 0,
+            targets_shared: 0,
+            targets_outside: 0,
+            bytes: None,
+            skips: BTreeMap::new(),
+        }
+    }
+
+    fn add_target(&mut self, other: &Counts) {
+        self.units_deleted += other.units_deleted;
+        self.unit_files_deleted += other.unit_files_deleted;
+        self.objects_deleted += other.objects_deleted;
+        self.objects_referenced += other.objects_referenced;
+        self.binaries_read += other.binaries_read;
+        self.targets_shared += other.targets_shared;
+        self.targets_outside += other.targets_outside;
+        for (name, n) in &other.skips {
+            *self.skips.entry(*name).or_insert(0) += *n;
+        }
+        if let Some(bytes) = other.bytes {
+            let slot = self.bytes.get_or_insert(Bytes::default());
+            slot.freed = slot.freed.saturating_add(bytes.freed);
+            slot.still_shared = slot.still_shared.saturating_add(bytes.still_shared);
+        }
+    }
+}
+
+pub fn unit_order(files: &[PathBuf]) -> Vec<PathBuf> {
+    let mut deps = Vec::new();
+    let mut others = Vec::new();
+    let mut prints = Vec::new();
+    for path in files {
+        if is_dep_info(path) {
+            deps.push(path.clone());
+        } else if is_fingerprint_dir(path) {
+            prints.push(path.clone());
+        } else {
+            others.push(path.clone());
+        }
+    }
+    if deps.is_empty() && others.is_empty() {
+        return Vec::new();
+    }
+    let mut group = Vec::new();
+    if deps.is_empty() {
+        group.extend(prints);
+        group.extend(others);
+    } else {
+        group.extend(deps);
+        group.extend(others);
+        group.extend(prints);
+    }
+    group
+}
+
+pub fn select_targets(scan: &TargetScan, checkout: &Path, nested: &[PathBuf]) -> Selection {
+    let failed = discover::failed_workspaces(scan);
+    let mut own = Vec::new();
+    let mut shared = Vec::new();
+    let mut outside = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut targets: Vec<&Path> = scan.targets.iter().map(|t| t.path.as_path()).collect();
+    targets.sort();
+    for path in targets {
+        if !seen.insert(path.to_path_buf()) {
+            continue;
+        }
+        let resolvers = discover::resolvers_of(scan, path);
+        if !resolvers.iter().any(|r| r == checkout) {
+            continue;
+        }
+        let others: Vec<_> = resolvers.into_iter().filter(|r| r != checkout).collect();
+        if !others.is_empty() {
+            shared.push(path.to_path_buf());
+            continue;
+        }
+        if !path.starts_with(checkout) || nested.iter().any(|n| path.starts_with(n)) {
+            outside.push(path.to_path_buf());
+            continue;
+        }
+        own.push(path.to_path_buf());
+    }
+    Selection {
+        own,
+        shared,
+        outside,
+        failed,
+    }
+}
+
+pub fn run(input: &CheckoutInput, cancel: &dyn Fn() -> bool) -> CheckoutReport {
+    let mut report = CheckoutReport {
+        per_target: Vec::new(),
+        totals: Counts::empty(),
+        findings: Vec::new(),
+        unmeasured: Vec::new(),
+        unmeasured_more: 0,
+        cancelled: false,
+        failed: false,
+    };
+    let selected = select_targets(input.scan, input.checkout, input.nested);
+    if !selected.failed.is_empty() {
+        for (dir, err) in selected.failed {
+            report.findings.push(Finding {
+                kind: "ownership.unresolved".into(),
+                path: Some(dir),
+                detail: format!(
+                    "{err}; clears when that workspace's cargo metadata succeeds, or its worktree is removed"
+                ),
+                measured: BTreeMap::new(),
+            });
+        }
+        report.failed = true;
+        return report;
+    }
+    report.totals.targets_shared = selected.shared.len() as u64;
+    report.totals.targets_outside = selected.outside.len() as u64;
+    for path in &selected.shared {
+        let resolvers = discover::resolvers_of(input.scan, path);
+        let others: Vec<_> = resolvers
+            .into_iter()
+            .filter(|r| r != input.checkout)
+            .map(|p| p.display().to_string())
+            .collect();
+        report.findings.push(Finding {
+            kind: "gc.shared_target".into(),
+            path: Some(path.clone()),
+            detail: format!("also resolved by {}", others.join(", ")),
+            measured: BTreeMap::new(),
+        });
+    }
+    for path in &selected.outside {
+        report.findings.push(Finding {
+            kind: "gc.outside_checkout".into(),
+            path: Some(path.clone()),
+            detail: "target lies outside the checkout or inside a nested checkout".into(),
+            measured: BTreeMap::new(),
+        });
+    }
+    for path in &selected.own {
+        if cancel() {
+            report.cancelled = true;
+            break;
+        }
+        let counts = clean_target(input, path, cancel, &mut report);
+        report.totals.add_target(&counts);
+        report.per_target.push((path.clone(), counts));
+        if report.cancelled {
+            break;
+        }
+    }
+    report
+}
+
+fn clean_target(
+    input: &CheckoutInput,
+    path: &Path,
+    cancel: &dyn Fn() -> bool,
+    report: &mut CheckoutReport,
+) -> Counts {
+    let mut counts = Counts::empty();
+    let locked = match locks::acquire(input.fs, path, true) {
+        Acquired::Locked(locked) => locked,
+        Acquired::Skipped(reason) => {
+            *counts.skips.entry(reason.count_name()).or_insert(0) += 1;
+            report.findings.push(Finding {
+                kind: "gc.skipped".into(),
+                path: Some(path.to_path_buf()),
+                detail: reason_text(reason),
+                measured: BTreeMap::new(),
+            });
+            return counts;
+        }
+        Acquired::Failed(why) => {
+            report.failed = true;
+            report.findings.push(Finding {
+                kind: "gc.target_failed".into(),
+                path: Some(path.to_path_buf()),
+                detail: why,
+                measured: BTreeMap::new(),
+            });
+            return counts;
+        }
+    };
+    let found = match target::identify_bounded(input.fs, path, CRATE_DIR_CAP) {
+        Some(Ok(found)) => found,
+        Some(Err(why)) => {
+            report.failed = true;
+            report.findings.push(Finding {
+                kind: "gc.target_failed".into(),
+                path: Some(path.to_path_buf()),
+                detail: why,
+                measured: BTreeMap::new(),
+            });
+            return counts;
+        }
+        None => {
+            skip_profile_set(&mut counts, report, path);
+            return counts;
+        }
+    };
+    let first: BTreeSet<_> = locked.profiles.iter().cloned().collect();
+    let again: BTreeSet<_> = found.iter().map(|(p, _)| p.clone()).collect();
+    if first != again {
+        skip_profile_set(&mut counts, report, path);
+        return counts;
+    }
+    let reports: Vec<ProfileReport> = found
+        .iter()
+        .map(|(p, _)| fingerprint::read_profile(p))
+        .collect();
+    let owner = input
+        .scan
+        .targets
+        .iter()
+        .find(|t| t.path == path)
+        .map(|t| t.owner.clone())
+        .unwrap_or_else(|| cargo_hive_core::target::Owner::Owned {
+            checkout: input.checkout.to_path_buf(),
+        });
+    let fresh = TargetDir {
+        path: path.to_path_buf(),
+        owner,
+        profiles: reports.clone(),
+        size: None,
+        unreadable: None,
+    };
+    let mut ledger = Ledger::new();
+    match liveness(input.fs, &fresh, input.now, input.window) {
+        Liveness::Undecided { reasons } => {
+            for reason in reasons {
+                report.findings.push(Finding {
+                    kind: "gc.undecided".into(),
+                    path: Some(path.to_path_buf()),
+                    detail: format!("{reason} — clears when {}", reason.clears_when()),
+                    measured: BTreeMap::new(),
+                });
+            }
+        }
+        Liveness::Decided { dead, .. } => {
+            'units: for unit in dead {
+                let ordered = unit_order(&unit.files);
+                if ordered.is_empty() {
+                    continue;
+                }
+                if cancel() {
+                    report.cancelled = true;
+                    break;
+                }
+                let mut stats = Vec::new();
+                for entry in &ordered {
+                    match input.fs.entry_stat(entry) {
+                        Ok(stat) if stat.kind != EntryKind::Other => stats.push((entry, stat)),
+                        Ok(_) | Err(_) => {
+                            report.failed = true;
+                            report.findings.push(Finding {
+                                kind: "gc.delete_failed".into(),
+                                path: Some(entry.clone()),
+                                detail: format!("could not stat {}", entry.display()),
+                                measured: BTreeMap::new(),
+                            });
+                            break 'units;
+                        }
+                    }
+                }
+                let mut deleted_files = 0u64;
+                for (entry, stat) in &stats {
+                    if let Err(reason) = guard::check_entry(
+                        input.fs,
+                        path,
+                        entry,
+                        Expect::Entry {
+                            kind: stat.kind,
+                            dev: stat.dev,
+                            ino: stat.ino,
+                        },
+                    ) {
+                        report.failed = true;
+                        report.findings.push(Finding {
+                            kind: "gc.delete_failed".into(),
+                            path: Some((*entry).clone()),
+                            detail: format!("{} ({reason:?})", entry.display()),
+                            measured: BTreeMap::new(),
+                        });
+                        break 'units;
+                    }
+                    match ledger::remove_counted(
+                        input.fs,
+                        &mut ledger,
+                        path,
+                        entry,
+                        input.account_bytes,
+                        false,
+                    ) {
+                        Ok(removed) if removed.existed => deleted_files += 1,
+                        Ok(_) => {}
+                        Err(err) => {
+                            report.failed = true;
+                            report.findings.push(Finding {
+                                kind: "gc.delete_failed".into(),
+                                path: Some((*entry).clone()),
+                                detail: err.to_string(),
+                                measured: BTreeMap::new(),
+                            });
+                            break 'units;
+                        }
+                    }
+                }
+                if deleted_files > 0 {
+                    counts.units_deleted += 1;
+                    counts.unit_files_deleted += deleted_files;
+                }
+            }
+        }
+    }
+    if !report.cancelled {
+        for ((profile, layout), profile_report) in found.iter().zip(&reports) {
+            let outcome = clean_profile_objects(ObjectsClean {
+                fs: input.fs,
+                target: path,
+                profile,
+                layout: *layout,
+                profile_report,
+                account_bytes: input.account_bytes,
+                cancel,
+                ledger: &mut ledger,
+            });
+            counts.binaries_read = counts.binaries_read.saturating_add(outcome.binaries_read);
+            counts.objects_referenced = counts
+                .objects_referenced
+                .saturating_add(outcome.objects_referenced);
+            counts.objects_deleted = counts
+                .objects_deleted
+                .saturating_add(outcome.objects_deleted);
+            for finding in outcome.findings {
+                report.findings.push(finding);
+            }
+            if outcome.failed {
+                report.failed = true;
+            }
+            if outcome.cancelled {
+                report.cancelled = true;
+                break;
+            }
+        }
+    }
+    let tally = ledger.finish();
+    for (p, why) in tally.unmeasured {
+        report.unmeasured.push((p, why));
+    }
+    report.unmeasured_more = report.unmeasured_more.saturating_add(tally.unmeasured_more);
+    if input.account_bytes {
+        counts.bytes = Some(tally.per_target.get(path).copied().unwrap_or(tally.total));
+    }
+    drop(locked);
+    counts
+}
+
+struct ObjectsClean<'a> {
+    fs: &'a dyn Fs,
+    target: &'a Path,
+    profile: &'a Path,
+    layout: Layout,
+    profile_report: &'a ProfileReport,
+    account_bytes: bool,
+    cancel: &'a dyn Fn() -> bool,
+    ledger: &'a mut Ledger,
+}
+
+struct ObjectsOutcome {
+    binaries_read: u64,
+    objects_referenced: u64,
+    objects_deleted: u64,
+    findings: Vec<Finding>,
+    failed: bool,
+    cancelled: bool,
+}
+
+fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
+    let mut out = ObjectsOutcome {
+        binaries_read: 0,
+        objects_referenced: 0,
+        objects_deleted: 0,
+        findings: Vec::new(),
+        failed: false,
+        cancelled: false,
+    };
+    if ctx.layout != Layout::Fingerprint {
+        out.findings.push(objects_finding(
+            ctx.profile,
+            format!("profile layout is {:?}, not fingerprint", ctx.layout),
+        ));
+        return out;
+    }
+    if let Format::Unsupported(why) = &ctx.profile_report.format {
+        out.findings.push(objects_finding(
+            ctx.profile,
+            format!("fingerprint format unsupported: {why}"),
+        ));
+        return out;
+    }
+    let listing = match list_profile(ctx.fs, ctx.profile, DEPS_CAP, CRATE_DIR_CAP) {
+        Ok(listing) => listing,
+        Err(why) => {
+            out.findings.push(objects_finding(ctx.profile, why));
+            return out;
+        }
+    };
+    if listing.objects.is_empty()
+        && listing.candidates.is_empty()
+        && !dir_present(ctx.fs, &ctx.profile.join("deps"))
+    {
+        return out;
+    }
+    let mut loose = BTreeSet::new();
+    let mut oso_entries = 0u64;
+    for path in &listing.candidates {
+        match debug_map::read(ctx.fs, path) {
+            Ok(Some(map)) => {
+                out.binaries_read += 1;
+                oso_entries = oso_entries
+                    .saturating_add(map.loose.len() as u64)
+                    .saturating_add(map.archive_entries);
+                loose.extend(map.loose);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                out.findings.push(objects_finding(path, err.to_string()));
+                return out;
+            }
+        }
+    }
+    if out.binaries_read >= 1 && !listing.objects.is_empty() && oso_entries == 0 {
+        out.findings.push(objects_finding(
+            ctx.profile,
+            "linked binaries and loose objects are present but no N_OSO debug-map entry was found"
+                .into(),
+        ));
+        return out;
+    }
+    for (object, dev, ino) in &listing.objects {
+        let name = object
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if loose.contains(name) {
+            out.objects_referenced = out.objects_referenced.saturating_add(1);
+            continue;
+        }
+        if (ctx.cancel)() {
+            out.cancelled = true;
+            return out;
+        }
+        if let Err(reason) = guard::check_entry(
+            ctx.fs,
+            ctx.target,
+            object,
+            Expect::Entry {
+                kind: EntryKind::File,
+                dev: *dev,
+                ino: *ino,
+            },
+        ) {
+            out.failed = true;
+            out.findings.push(Finding {
+                kind: "gc.delete_failed".into(),
+                path: Some(object.clone()),
+                detail: format!("{} ({reason:?})", object.display()),
+                measured: BTreeMap::new(),
+            });
+            return out;
+        }
+        match ledger::remove_counted(
+            ctx.fs,
+            ctx.ledger,
+            ctx.target,
+            object,
+            ctx.account_bytes,
+            false,
+        ) {
+            Ok(removed) if removed.existed => {
+                out.objects_deleted = out.objects_deleted.saturating_add(1);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                out.failed = true;
+                out.findings.push(Finding {
+                    kind: "gc.delete_failed".into(),
+                    path: Some(object.clone()),
+                    detail: err.to_string(),
+                    measured: BTreeMap::new(),
+                });
+                return out;
+            }
+        }
+    }
+    out
+}
+
+fn objects_finding(path: &Path, detail: String) -> Finding {
+    Finding {
+        kind: "gc.objects_undecided".into(),
+        path: Some(path.to_path_buf()),
+        detail,
+        measured: BTreeMap::new(),
+    }
+}
+
+fn dir_present(fs: &dyn Fs, path: &Path) -> bool {
+    matches!(fs.entry_stat(path), Ok(stat) if stat.kind == EntryKind::Dir)
+}
+
+fn is_not_found(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::NotFound
+}
+
+fn skip_profile_set(counts: &mut Counts, report: &mut CheckoutReport, path: &Path) {
+    let name = Reason::ProfileSet.count_name();
+    *counts.skips.entry(name).or_insert(0) += 1;
+    report.findings.push(Finding {
+        kind: "gc.skipped".into(),
+        path: Some(path.to_path_buf()),
+        detail: reason_text(Reason::ProfileSet),
+        measured: BTreeMap::new(),
+    });
+}
+
+fn reason_text(reason: Reason) -> String {
+    match reason {
+        Reason::Held => "a Cargo lock is held".into(),
+        Reason::Unopenable => "a Cargo lock could not be opened".into(),
+        Reason::Unlockable => "a Cargo lock could not be locked".into(),
+        Reason::Missing => "a required Cargo lock is missing".into(),
+        Reason::ProfileSet => "the profile set changed while locking".into(),
+    }
+}
+
+fn is_dep_info(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "d")
+}
+
+fn is_fingerprint_dir(path: &Path) -> bool {
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .is_some_and(|name| name == ".fingerprint")
+}
+
+#[derive(Debug)]
+pub struct Listing {
+    pub objects: Vec<(PathBuf, u64, u64)>,
+    pub candidates: Vec<PathBuf>,
+}
+
+pub fn list_profile(
+    fs: &dyn Fs,
+    profile: &Path,
+    deps_cap: usize,
+    dir_cap: usize,
+) -> Result<Listing, String> {
+    let deps = profile.join("deps");
+    let deps_entries = match fs.read_dir_bounded(&deps, deps_cap) {
+        Ok(entries) => entries,
+        Err(err) if is_not_found(&err) => {
+            return Ok(Listing {
+                objects: Vec::new(),
+                candidates: Vec::new(),
+            });
+        }
+        Err(err) => {
+            return Err(format!("{}: {err}", deps.display()));
+        }
+    };
+    let mut objects = Vec::new();
+    let mut candidates = Vec::new();
+    for (name, kind) in deps_entries {
+        let path = deps.join(&name);
+        if name.ends_with(".rcgu.o") && kind == EntryKind::File {
+            let stat = fs
+                .entry_stat(&path)
+                .map_err(|err| format!("{}: {err}", path.display()))?;
+            if stat.kind == EntryKind::File {
+                objects.push((path.clone(), stat.dev, stat.ino));
+            }
+        }
+        if !name.ends_with(".o") && is_candidate_kind(kind) {
+            candidates.push(path);
+        }
+    }
+    push_dir_candidates(fs, profile, deps_cap, &mut candidates)?;
+    let examples = profile.join("examples");
+    match fs.read_dir_bounded(&examples, deps_cap) {
+        Ok(entries) => {
+            for (name, kind) in entries {
+                if !name.ends_with(".o") && is_candidate_kind(kind) {
+                    candidates.push(examples.join(name));
+                }
+            }
+        }
+        Err(err) if is_not_found(&err) => {}
+        Err(err) => return Err(format!("{}: {err}", examples.display())),
+    }
+    let build = profile.join("build");
+    match fs.read_dir_bounded(&build, dir_cap) {
+        Ok(entries) => {
+            for (name, kind) in entries {
+                if kind != EntryKind::Dir {
+                    if !name.ends_with(".o") && is_candidate_kind(kind) {
+                        candidates.push(build.join(&name));
+                    }
+                    continue;
+                }
+                let child = build.join(&name);
+                let child_entries = fs
+                    .read_dir_bounded(&child, dir_cap)
+                    .map_err(|err| format!("{}: {err}", child.display()))?;
+                for (child_name, child_kind) in child_entries {
+                    if !child_name.ends_with(".o") && is_candidate_kind(child_kind) {
+                        candidates.push(child.join(child_name));
+                    }
+                }
+            }
+        }
+        Err(err) if is_not_found(&err) => {}
+        Err(err) => return Err(format!("{}: {err}", build.display())),
+    }
+    Ok(Listing {
+        objects,
+        candidates,
+    })
+}
+
+fn is_candidate_kind(kind: EntryKind) -> bool {
+    matches!(kind, EntryKind::File | EntryKind::Symlink)
+}
+
+fn push_dir_candidates(
+    fs: &dyn Fs,
+    dir: &Path,
+    cap: usize,
+    candidates: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let entries = fs
+        .read_dir_bounded(dir, cap)
+        .map_err(|err| format!("{}: {err}", dir.display()))?;
+    for (name, kind) in entries {
+        if !name.ends_with(".o") && is_candidate_kind(kind) {
+            candidates.push(dir.join(name));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CheckoutInput, list_profile, select_targets, unit_order};
+    use cargo_hive_cargo::discover::{TargetScan, WorkspaceResolution};
+    use cargo_hive_core::target::{Owner, TAG_LINE, TargetDir};
+    use cargo_hive_platform::{self as platform, EntryKind, EntryStat, Fs};
+    use std::cell::Cell;
+    use std::collections::BTreeSet;
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn scan(
+        targets: Vec<(&str, Owner)>,
+        workspaces: Vec<(&str, &str, Result<&str, &str>)>,
+    ) -> TargetScan {
+        TargetScan {
+            targets: targets
+                .into_iter()
+                .map(|(path, owner)| TargetDir {
+                    path: PathBuf::from(path),
+                    owner,
+                    profiles: Vec::new(),
+                    size: None,
+                    unreadable: None,
+                })
+                .collect(),
+            metadata_calls: 0,
+            metadata_cache_hits: 0,
+            ignored_vars: Vec::new(),
+            walk_faults: Vec::new(),
+            cleared_profiles: BTreeSet::new(),
+            workspaces: workspaces
+                .into_iter()
+                .map(|(dir, checkout, result)| WorkspaceResolution {
+                    dir: PathBuf::from(dir),
+                    checkout: PathBuf::from(checkout),
+                    result: match result {
+                        Ok(target) => Ok(cargo_hive_cargo::metadata::Resolved {
+                            workspace_root: PathBuf::from(dir),
+                            target_directory: PathBuf::from(target),
+                            build_directory: PathBuf::from(target),
+                        }),
+                        Err(err) => Err(err.to_string()),
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn unit_entries_are_ordered_dep_info_first_and_fingerprint_dir_last() {
+        let files = [
+            PathBuf::from("/t/debug/.fingerprint/u-aaaaaaaaaaaaaaaa"),
+            PathBuf::from("/t/debug/deps/libu-aaaaaaaaaaaaaaaa.rlib"),
+            PathBuf::from("/t/debug/deps/u-aaaaaaaaaaaaaaaa.d"),
+            PathBuf::from("/t/debug/deps/u-aaaaaaaaaaaaaaaa.dSYM"),
+        ];
+        let ordered = unit_order(&files);
+        assert_eq!(
+            ordered,
+            vec![
+                PathBuf::from("/t/debug/deps/u-aaaaaaaaaaaaaaaa.d"),
+                PathBuf::from("/t/debug/deps/libu-aaaaaaaaaaaaaaaa.rlib"),
+                PathBuf::from("/t/debug/deps/u-aaaaaaaaaaaaaaaa.dSYM"),
+                PathBuf::from("/t/debug/.fingerprint/u-aaaaaaaaaaaaaaaa"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_unit_without_dep_info_orders_its_fingerprint_dir_first() {
+        let files = [
+            PathBuf::from("/t/debug/deps/libu-aaaaaaaaaaaaaaaa.rlib"),
+            PathBuf::from("/t/debug/.fingerprint/u-aaaaaaaaaaaaaaaa"),
+        ];
+        let ordered = unit_order(&files);
+        assert_eq!(
+            ordered,
+            vec![
+                PathBuf::from("/t/debug/.fingerprint/u-aaaaaaaaaaaaaaaa"),
+                PathBuf::from("/t/debug/deps/libu-aaaaaaaaaaaaaaaa.rlib"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_unit_with_only_a_fingerprint_dir_yields_nothing() {
+        let files = [PathBuf::from("/t/debug/.fingerprint/u-aaaaaaaaaaaaaaaa")];
+        assert!(unit_order(&files).is_empty());
+    }
+
+    #[test]
+    fn select_targets_splits_own_shared_outside_and_failed() {
+        let checkout = Path::new("/repo/main");
+        let nested = [PathBuf::from("/repo/main/.worktrees/lane")];
+        let scan = scan(
+            vec![
+                (
+                    "/repo/main/target",
+                    Owner::Owned {
+                        checkout: checkout.to_path_buf(),
+                    },
+                ),
+                (
+                    "/shared/target",
+                    Owner::Owned {
+                        checkout: checkout.to_path_buf(),
+                    },
+                ),
+                (
+                    "/outside/target",
+                    Owner::Owned {
+                        checkout: checkout.to_path_buf(),
+                    },
+                ),
+                (
+                    "/repo/main/.worktrees/lane/extra",
+                    Owner::Owned {
+                        checkout: checkout.to_path_buf(),
+                    },
+                ),
+            ],
+            vec![
+                ("/repo/main", "/repo/main", Ok("/repo/main/target")),
+                ("/repo/main", "/repo/main", Ok("/shared/target")),
+                ("/repo/wt", "/repo/wt", Ok("/shared/target")),
+                ("/repo/main", "/repo/main", Ok("/outside/target")),
+                (
+                    "/repo/main",
+                    "/repo/main",
+                    Ok("/repo/main/.worktrees/lane/extra"),
+                ),
+                ("/repo/broken", "/repo/broken", Err("manifest broken")),
+            ],
+        );
+        let got = select_targets(&scan, checkout, &nested);
+        assert_eq!(got.own, vec![PathBuf::from("/repo/main/target")]);
+        assert_eq!(got.shared, vec![PathBuf::from("/shared/target")]);
+        assert_eq!(
+            got.outside,
+            vec![
+                PathBuf::from("/outside/target"),
+                PathBuf::from("/repo/main/.worktrees/lane/extra"),
+            ]
+        );
+        assert_eq!(
+            got.failed,
+            vec![(PathBuf::from("/repo/broken"), "manifest broken".to_string())]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    struct Scratch(PathBuf);
+
+    #[cfg(target_os = "macos")]
+    impl Scratch {
+        fn new(label: &str) -> Scratch {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = PathBuf::from(format!(
+                "/private/tmp/hive-it-checkout-{label}-{}-{nanos}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn thin_execute(strings: &[&str]) -> Vec<u8> {
+        const MH_MAGIC_64: u32 = 0xfeed_facf;
+        const MH_EXECUTE: u32 = 0x2;
+        const LC_SYMTAB: u32 = 0x2;
+        const N_OSO: u8 = 0x66;
+        const HEADER64: u32 = 32;
+        const SYMTAB_CMD: u32 = 24;
+        const NLIST64: u32 = 16;
+        let mut strtab = vec![0u8];
+        let mut str_offs = Vec::new();
+        for s in strings {
+            str_offs.push(strtab.len() as u32);
+            strtab.extend_from_slice(s.as_bytes());
+            strtab.push(0);
+        }
+        let nsyms = strings.len() as u32;
+        let symoff = HEADER64 + SYMTAB_CMD;
+        let stroff = symoff + nsyms * NLIST64;
+        let strsize = strtab.len() as u32;
+        let mut buf = Vec::new();
+        let put = |buf: &mut Vec<u8>, v: u32| buf.extend_from_slice(&v.to_le_bytes());
+        put(&mut buf, MH_MAGIC_64);
+        put(&mut buf, 0x0100_000c);
+        put(&mut buf, 0);
+        put(&mut buf, MH_EXECUTE);
+        put(&mut buf, 1);
+        put(&mut buf, SYMTAB_CMD);
+        put(&mut buf, 0);
+        put(&mut buf, 0);
+        put(&mut buf, LC_SYMTAB);
+        put(&mut buf, SYMTAB_CMD);
+        put(&mut buf, symoff);
+        put(&mut buf, nsyms);
+        put(&mut buf, stroff);
+        put(&mut buf, strsize);
+        for off in str_offs {
+            put(&mut buf, off);
+            buf.push(N_OSO);
+            buf.push(0);
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&0u64.to_le_bytes());
+        }
+        buf.extend_from_slice(&strtab);
+        buf
+    }
+
+    #[cfg(target_os = "macos")]
+    fn thin_execute_no_oso() -> Vec<u8> {
+        thin_execute(&[])
+    }
+
+    #[cfg(target_os = "macos")]
+    fn plant_locks(profile: &Path) {
+        for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
+            std::fs::write(profile.join(name), b"").unwrap();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn plant_fingerprint(profile: &Path) {
+        let unit = profile.join(".fingerprint/lib-aaaaaaaaaaaaaaaa");
+        std::fs::create_dir_all(&unit).unwrap();
+        std::fs::write(unit.join("lib-lib"), "0000000000000068").unwrap();
+        std::fs::write(
+            unit.join("lib-lib.json"),
+            r#"{"rustc":1,"features":"[]","declared_features":"[]","target":2,"profile":3,"path":4,"deps":[],"local":[],"rustflags":[],"config":5,"compile_kind":0}"#,
+        )
+        .unwrap();
+        let stamp = unit.join("invoked.timestamp");
+        std::fs::write(&stamp, b"").unwrap();
+        let aged = SystemTime::now() - Duration::from_secs(30 * 86_400);
+        std::fs::File::open(&stamp)
+            .unwrap()
+            .set_modified(aged)
+            .unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn plant_target(root: &Path) -> PathBuf {
+        let target = root.join("target");
+        let profile = target.join("debug");
+        std::fs::create_dir_all(profile.join("deps")).unwrap();
+        std::fs::write(
+            target.join("CACHEDIR.TAG"),
+            format!("Signature: 8a477f597d28d172789f06886806bc55\n{TAG_LINE}\n"),
+        )
+        .unwrap();
+        plant_fingerprint(&profile);
+        plant_locks(&profile);
+        target
+    }
+
+    #[cfg(target_os = "macos")]
+    fn scan_one(checkout: &Path, target: &Path) -> TargetScan {
+        scan(
+            vec![(
+                target.to_str().unwrap(),
+                Owner::Owned {
+                    checkout: checkout.to_path_buf(),
+                },
+            )],
+            vec![(
+                checkout.to_str().unwrap(),
+                checkout.to_str().unwrap(),
+                Ok(target.to_str().unwrap()),
+            )],
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn run_one(fs: &dyn Fs, checkout: &Path, target: &Path) -> super::CheckoutReport {
+        let scan = scan_one(checkout, target);
+        let input = CheckoutInput {
+            fs,
+            scan: &scan,
+            checkout,
+            nested: &[],
+            now: SystemTime::now(),
+            window: Duration::from_secs(7 * 86_400),
+            account_bytes: true,
+        };
+        super::run(&input, &|| false)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_missing_examples_or_build_dir_reads_as_empty() {
+        let s = Scratch::new("missing-dirs");
+        let profile = s.0.join("debug");
+        std::fs::create_dir_all(profile.join("deps")).unwrap();
+        std::fs::write(profile.join("deps/keep-aaaaaaaaaaaaaaaa.0.rcgu.o"), b"o").unwrap();
+        std::fs::write(profile.join("app"), b"bin").unwrap();
+        let fs = platform::current().unwrap().fs;
+        let listing = list_profile(fs.as_ref(), &profile, 100, 100).unwrap();
+        assert!(
+            listing
+                .candidates
+                .iter()
+                .any(|p| p.file_name().is_some_and(|n| n == "app")),
+            "profile file must be a candidate: {:?}",
+            listing.candidates
+        );
+        assert!(
+            !listing
+                .candidates
+                .iter()
+                .any(|p| p.to_string_lossy().contains("/examples/")
+                    || p.to_string_lossy().contains("/build/")),
+            "missing examples/ and build/ must read as empty: {:?}",
+            listing.candidates
+        );
+        assert_eq!(listing.objects.len(), 1, "{:?}", listing.objects);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn list_profile_at_its_cap_lists_and_one_past_fails() {
+        let s = Scratch::new("list-cap");
+        let profile = s.0.join("debug");
+        let deps = profile.join("deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        for i in 0..3 {
+            std::fs::write(deps.join(format!("f{i}.rcgu.o")), b"o").unwrap();
+        }
+        let fs = platform::current().unwrap().fs;
+        let ok = list_profile(fs.as_ref(), &profile, 3, 100).unwrap();
+        assert_eq!(ok.objects.len(), 3, "{:?}", ok.objects);
+        let err = list_profile(fs.as_ref(), &profile, 2, 100).unwrap_err();
+        assert!(!err.is_empty(), "{err}");
+
+        let build = profile.join("build");
+        std::fs::create_dir_all(build.join("pkg")).unwrap();
+        for i in 0..3 {
+            std::fs::write(build.join("pkg").join(format!("c{i}")), b"x").unwrap();
+        }
+        let ok = list_profile(fs.as_ref(), &profile, 100, 3).unwrap();
+        assert!(
+            ok.candidates
+                .iter()
+                .any(|p| p.ends_with("build/pkg/c0") || p.file_name().is_some_and(|n| n == "c0")),
+            "{:?}",
+            ok.candidates
+        );
+        let err = list_profile(fs.as_ref(), &profile, 100, 2).unwrap_err();
+        assert!(!err.is_empty(), "{err}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_deps_rcgu_o_files_are_candidates_for_deletion() {
+        let s = Scratch::new("only-rcgu");
+        let profile = s.0.join("debug");
+        let deps = profile.join("deps");
+        std::fs::create_dir_all(profile.join("examples")).unwrap();
+        std::fs::create_dir_all(deps).unwrap();
+        std::fs::write(profile.join("deps/keep-aaaaaaaaaaaaaaaa.0.rcgu.o"), b"o").unwrap();
+        std::fs::write(profile.join("deps/other.o"), b"o").unwrap();
+        std::fs::write(profile.join("deps/libx.rlib"), b"r").unwrap();
+        std::fs::write(profile.join("examples/ex.rcgu.o"), b"o").unwrap();
+        let fs = platform::current().unwrap().fs;
+        let listing = list_profile(fs.as_ref(), &profile, 100, 100).unwrap();
+        let names: Vec<_> = listing
+            .objects
+            .iter()
+            .map(|(p, _, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["keep-aaaaaaaaaaaaaaaa.0.rcgu.o".to_string()]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn names_ending_in_dot_o_are_not_read() {
+        let s = Scratch::new("skip-dot-o");
+        let profile = s.0.join("debug");
+        std::fs::create_dir_all(profile.join("deps")).unwrap();
+        std::fs::write(profile.join("deps/foo.rcgu.o"), b"o").unwrap();
+        std::fs::write(profile.join("deps/bar.o"), b"o").unwrap();
+        std::fs::write(profile.join("deps/libx.rlib"), b"r").unwrap();
+        std::fs::write(profile.join("app"), b"bin").unwrap();
+        let fs = platform::current().unwrap().fs;
+        let listing = list_profile(fs.as_ref(), &profile, 100, 100).unwrap();
+        assert!(
+            listing.candidates.iter().all(|p| !p
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".o")),
+            "{:?}",
+            listing.candidates
+        );
+        let names: BTreeSet<_> = listing
+            .candidates
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains("libx.rlib"), "{names:?}");
+        assert!(names.contains("app"), "{names:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_profile_with_binaries_and_objects_but_no_debug_map_keeps_every_object() {
+        let s = Scratch::new("no-debug-map");
+        let checkout = s.0.join("repo");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let target = plant_target(&checkout);
+        let profile = target.join("debug");
+        let object = profile.join("deps/orphan-bbbbbbbbbbbbbbbb.0.rcgu.o");
+        std::fs::write(&object, b"obj").unwrap();
+        std::fs::write(profile.join("app"), thin_execute_no_oso()).unwrap();
+        let fs = platform::current().unwrap().fs;
+        let report = run_one(fs.as_ref(), &checkout, &target);
+        assert!(object.is_file(), "object was deleted without a debug map");
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.kind == "gc.objects_undecided" && f.path.as_ref() == Some(&profile)),
+            "{:?}",
+            report.findings
+        );
+        assert_eq!(report.totals.objects_deleted, 0, "{report:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    struct SwapAfterStat {
+        real: Box<dyn Fs>,
+        path: PathBuf,
+        swapped: Cell<bool>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Fs for SwapAfterStat {
+        fn temp_dir(&self, parent: &Path, prefix: &str) -> io::Result<platform::TempDir> {
+            self.real.temp_dir(parent, prefix)
+        }
+        fn write_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.real.write_file(path, bytes)
+        }
+        fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+            self.real.read(path)
+        }
+        fn read_at(&self, path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            self.real.read_at(path, offset, len)
+        }
+        fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {
+            self.real.hardlink(src, dst)
+        }
+        fn set_mtime(&self, path: &Path, t: SystemTime) -> io::Result<()> {
+            self.real.set_mtime(path, t)
+        }
+        fn mtime(&self, path: &Path) -> io::Result<SystemTime> {
+            self.real.mtime(path)
+        }
+        fn inode(&self, path: &Path) -> io::Result<u64> {
+            self.real.inode(path)
+        }
+        fn clone_file(&self, src: &Path, dst: &Path) -> io::Result<()> {
+            self.real.clone_file(src, dst)
+        }
+        fn create_dir(&self, path: &Path) -> io::Result<()> {
+            self.real.create_dir(path)
+        }
+        fn sharing(&self, path: &Path) -> io::Result<platform::Sharing> {
+            self.real.sharing(path)
+        }
+        fn compress(&self, path: &Path) -> platform::CompressOutcome {
+            self.real.compress(path)
+        }
+        fn hold_lock(
+            &self,
+            kind: platform::LockKind,
+            path: &Path,
+        ) -> io::Result<platform::LockHolder> {
+            self.real.hold_lock(kind, path)
+        }
+        fn try_lock_exclusive(&self, path: &Path) -> platform::TryLock {
+            self.real.try_lock_exclusive(path)
+        }
+        fn try_lock_elsewhere(
+            &self,
+            kind: platform::LockKind,
+            path: &Path,
+        ) -> io::Result<platform::LockState> {
+            self.real.try_lock_elsewhere(kind, path)
+        }
+        fn entry_stat(&self, path: &Path) -> io::Result<EntryStat> {
+            let stat = self.real.entry_stat(path)?;
+            if path == self.path && !self.swapped.get() && stat.kind == EntryKind::File {
+                self.swapped.set(true);
+                std::fs::remove_file(path).unwrap();
+                std::fs::create_dir(path).unwrap();
+            }
+            Ok(stat)
+        }
+        fn read_dir_bounded(&self, dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)>> {
+            self.real.read_dir_bounded(dir, cap)
+        }
+        fn remove_tree(&self, path: &Path) -> io::Result<()> {
+            self.real.remove_tree(path)
+        }
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            self.real.remove_file(path)
+        }
+        fn volume(&self, path: &Path) -> io::Result<platform::VolumeInfo> {
+            self.real.volume(path)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_object_swapped_for_a_directory_is_refused() {
+        let s = Scratch::new("swap-object");
+        let checkout = s.0.join("repo");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let target = plant_target(&checkout);
+        let profile = target.join("debug");
+        let kept = "keep-cccccccccccccccc.0.rcgu.o";
+        let swap = "swap-dddddddddddddddd.0.rcgu.o";
+        std::fs::write(profile.join("deps").join(kept), b"k").unwrap();
+        let swap_path = profile.join("deps").join(swap);
+        std::fs::write(&swap_path, b"s").unwrap();
+        std::fs::write(
+            profile.join("app"),
+            thin_execute(&[&format!("/old/deps/{kept}")]),
+        )
+        .unwrap();
+        let fs = SwapAfterStat {
+            real: platform::current().unwrap().fs,
+            path: swap_path.clone(),
+            swapped: Cell::new(false),
+        };
+        let report = run_one(&fs, &checkout, &target);
+        assert!(
+            swap_path.is_dir(),
+            "swapped path must be refused, not removed"
+        );
+        assert!(
+            fs.swapped.get(),
+            "listing must have statted the object before the check: {report:?}"
+        );
+        assert!(
+            profile.join("deps").join(kept).is_file(),
+            "referenced object must remain"
+        );
+    }
+}

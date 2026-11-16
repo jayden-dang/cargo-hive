@@ -1223,3 +1223,27 @@ Bare `gc` after the batch: 5 of 5, each after seeding one lane, building it, the
 Named paths still stay named: Free disk across named lanes (3 runs) and Free space (2 runs) each ran `gc --dry-run` then `gc` with the named paths, and none ran bare `gc`.
 
 Haiku arm: not run (see Runner labels).
+
+## Keep a reused worktree fast
+
+Baseline recorded 2026-11-16 against the skill before the checkout-gc section (full transcripts in `.skills/CHECKOUTGC/task-10-baseline.md`). Skill file only; one read each. Prompt: about to run the test build in a reused worktree whose target debug deps directory has more than 20000 entries.
+
+### RED (skill before checkout-gc), Sonnet and Haiku
+
+Neither counted `deps/` entries. Neither ran `gc --checkout`. Both ran repo-wide `gc --dry-run` then `gc` on the worktree path (the Free disk recipe), which the skill says covers the whole repo and only drops incremental sessions. Both named the owner's real worktree path instead of a `/path/to/...` placeholder.
+
+Expected after the rewrite: count with `ls -f <the checkout's real target dir>/debug/deps | wc -l` (or that profile's `deps/`); when above 20,000, run `cargo hive gc --checkout <worktree> --json`; do not run repo-wide `gc` for this case; no `cargo clean` and no hand deletion. Model re-run is the controller's step after this commit.
+
+## Reading a checkout-gc receipt
+
+Baseline recorded 2026-11-16 against the skill before the checkout-gc section (full transcripts in `.skills/CHECKOUTGC/task-10-baseline.md`). Skill file only; one read each. Prompt: `gc --checkout` printed a receipt with findings `gc.skipped`, `gc.shared_target`, and `gc.outside_checkout`; what to run next.
+
+### RED (skill before checkout-gc), Sonnet
+
+Stopped at `cargo hive gc --help`. Did not run repo-wide `gc --plan` then `apply`. Did not say the fallback covers main and every lane or deletes no debug objects.
+
+### RED (skill before checkout-gc), Haiku
+
+Started with `cargo hive gc --help`, then ran the existing `gc --plan` then `apply`. Did not say that fallback covers main and every lane, deletes no debug objects, or that it is not a scoped retry of `gc --checkout`.
+
+Expected after the rewrite: do not stop; run repo-wide `gc --plan` then `apply` for the dead units those findings left; state that the fallback covers main and every lane, deletes no debug objects, and is not a scoped retry of `gc --checkout`. Model re-run is the controller's step after this commit.

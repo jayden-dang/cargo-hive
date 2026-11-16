@@ -213,6 +213,7 @@ fn the_cli_has_no_new_subcommand_or_flag() {
         "cargo-hive explain --repos",
         "cargo-hive explain --top",
         "cargo-hive gc",
+        "cargo-hive gc --checkout",
         "cargo-hive gc --dry_run",
         "cargo-hive gc --json",
         "cargo-hive gc --plan",
@@ -1048,6 +1049,9 @@ impl platform::Fs for Volumes {
     }
     fn read(&self, p: &Path) -> std::io::Result<Vec<u8>> {
         self.inner.read(p)
+    }
+    fn read_at(&self, p: &Path, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        self.inner.read_at(p, offset, len)
     }
     fn hardlink(&self, s: &Path, d: &Path) -> std::io::Result<()> {
         self.inner.hardlink(s, d)

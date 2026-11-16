@@ -3030,6 +3030,9 @@ mod tests {
         fn read(&self, _: &Path) -> std::io::Result<Vec<u8>> {
             Err(unused_io())
         }
+        fn read_at(&self, path: &Path, _offset: u64, _len: usize) -> std::io::Result<Vec<u8>> {
+            self.read(path)
+        }
         fn hardlink(&self, _: &Path, _: &Path) -> std::io::Result<()> {
             Err(unused_io())
         }

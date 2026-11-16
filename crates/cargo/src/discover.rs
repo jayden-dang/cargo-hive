@@ -515,6 +515,12 @@ fn owner_checkout(workspace_root: &Path, checkouts: &[PathBuf]) -> PathBuf {
         .unwrap_or_else(|| workspace_root.to_path_buf())
 }
 
+pub struct WorkspaceResolution {
+    pub dir: PathBuf,
+    pub checkout: PathBuf,
+    pub result: Result<Resolved, String>,
+}
+
 pub struct TargetScan {
     pub targets: Vec<TargetDir>,
     pub metadata_calls: u64,
@@ -523,6 +529,39 @@ pub struct TargetScan {
     pub walk_faults: Vec<WalkFault>,
     /// Profile paths this run found supported; merge must drop them even if disk still lists them.
     pub cleared_profiles: BTreeSet<PathBuf>,
+    pub workspaces: Vec<WorkspaceResolution>,
+}
+
+pub fn resolvers_of(scan: &TargetScan, target: &Path) -> Vec<PathBuf> {
+    let real = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for workspace in &scan.workspaces {
+        let Ok(resolved) = &workspace.result else {
+            continue;
+        };
+        if (resolved.target_directory == real || resolved.build_directory == real)
+            && seen.insert(workspace.checkout.clone())
+        {
+            out.push(workspace.checkout.clone());
+        }
+    }
+    out
+}
+
+pub fn failed_workspaces(scan: &TargetScan) -> Vec<(PathBuf, String)> {
+    scan.workspaces
+        .iter()
+        .filter_map(|workspace| {
+            workspace
+                .result
+                .as_ref()
+                .err()
+                .map(|err| (workspace.dir.clone(), err.clone()))
+        })
+        .collect()
 }
 
 /// Every Cargo target dir of the live `checkouts` (3 levels) and the cache roots (2 levels),
@@ -649,6 +688,14 @@ pub fn targets(
             unreadable: identified.err(),
         });
     }
+    let workspaces = resolutions
+        .iter()
+        .map(|r| WorkspaceResolution {
+            dir: r.dir.clone(),
+            checkout: owner_checkout(&r.dir, &live),
+            result: r.result.clone(),
+        })
+        .collect();
     TargetScan {
         targets,
         metadata_calls: resolutions.iter().filter(|r| !r.cached).count() as u64,
@@ -656,6 +703,7 @@ pub fn targets(
         ignored_vars: overrides.into_iter().map(|(name, _)| name).collect(),
         walk_faults,
         cleared_profiles,
+        workspaces,
     }
 }
 
@@ -1035,5 +1083,186 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    fn resolved(root: &str, target: &str, build: &str) -> Resolved {
+        Resolved {
+            workspace_root: PathBuf::from(root),
+            target_directory: PathBuf::from(target),
+            build_directory: PathBuf::from(build),
+        }
+    }
+
+    fn scan_with(workspaces: Vec<WorkspaceResolution>, targets: Vec<TargetDir>) -> TargetScan {
+        TargetScan {
+            targets,
+            metadata_calls: 0,
+            metadata_cache_hits: 0,
+            ignored_vars: Vec::new(),
+            walk_faults: Vec::new(),
+            cleared_profiles: BTreeSet::new(),
+            workspaces,
+        }
+    }
+
+    #[test]
+    fn resolvers_of_names_every_checkout_that_resolves_to_a_target() {
+        let shared = PathBuf::from("/shared/target");
+        let main = PathBuf::from("/repo/main");
+        let worktree = PathBuf::from("/repo/worktree");
+        let other = PathBuf::from("/repo/other");
+        let scan = scan_with(
+            vec![
+                WorkspaceResolution {
+                    dir: main.clone(),
+                    checkout: main.clone(),
+                    result: Ok(resolved("/repo/main", "/shared/target", "/shared/target")),
+                },
+                WorkspaceResolution {
+                    dir: worktree.clone(),
+                    checkout: worktree.clone(),
+                    result: Ok(resolved(
+                        "/repo/worktree",
+                        "/shared/target",
+                        "/shared/build",
+                    )),
+                },
+                WorkspaceResolution {
+                    dir: other.clone(),
+                    checkout: other.clone(),
+                    result: Ok(resolved(
+                        "/repo/other",
+                        "/repo/other/target",
+                        "/repo/other/target",
+                    )),
+                },
+                WorkspaceResolution {
+                    dir: main.join("crate"),
+                    checkout: main.clone(),
+                    result: Ok(resolved("/repo/main", "/shared/target", "/shared/target")),
+                },
+            ],
+            Vec::new(),
+        );
+        assert_eq!(resolvers_of(&scan, &shared), vec![main, worktree]);
+        assert_eq!(
+            resolvers_of(&scan, Path::new("/shared/build")),
+            vec![PathBuf::from("/repo/worktree")]
+        );
+        assert!(resolvers_of(&scan, Path::new("/nobody")).is_empty());
+    }
+
+    #[test]
+    fn resolvers_of_matches_through_a_symlinked_target_path() {
+        let root = PathBuf::from(format!(
+            "/private/tmp/hive-it-resolvers-symlink-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        let real_target = root.join("real").join("target");
+        std::fs::create_dir_all(&real_target).unwrap();
+        let link = root.join("link-target");
+        std::os::unix::fs::symlink(&real_target, &link).unwrap();
+        let canonical = real_target.canonicalize().unwrap();
+        let checkout = PathBuf::from("/repo/main");
+        let scan = scan_with(
+            vec![WorkspaceResolution {
+                dir: checkout.clone(),
+                checkout: checkout.clone(),
+                result: Ok(Resolved {
+                    workspace_root: checkout.clone(),
+                    target_directory: canonical.clone(),
+                    build_directory: canonical.clone(),
+                }),
+            }],
+            Vec::new(),
+        );
+        assert_eq!(resolvers_of(&scan, &link), vec![checkout]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn failed_workspaces_lists_every_failure_not_only_the_first() {
+        let scan = scan_with(
+            vec![
+                WorkspaceResolution {
+                    dir: PathBuf::from("/repo/ok"),
+                    checkout: PathBuf::from("/repo/ok"),
+                    result: Ok(resolved("/repo/ok", "/repo/ok/target", "/repo/ok/target")),
+                },
+                WorkspaceResolution {
+                    dir: PathBuf::from("/repo/a"),
+                    checkout: PathBuf::from("/repo/a"),
+                    result: Err("first boom".into()),
+                },
+                WorkspaceResolution {
+                    dir: PathBuf::from("/repo/b"),
+                    checkout: PathBuf::from("/repo/b"),
+                    result: Err("second boom".into()),
+                },
+            ],
+            Vec::new(),
+        );
+        assert_eq!(
+            failed_workspaces(&scan),
+            vec![
+                (PathBuf::from("/repo/a"), "first boom".into()),
+                (PathBuf::from("/repo/b"), "second boom".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn existing_owner_and_failure_are_unchanged() {
+        let checkout = PathBuf::from("/repo/main");
+        let first_failure =
+            "ownership unknown: cargo metadata failed in /repo/broken: boom".to_string();
+        let owned = target_at(
+            "/repo/main/target",
+            Owner::Owned {
+                checkout: checkout.clone(),
+            },
+        );
+        let unresolved = target_at(
+            "/cache/elsewhere",
+            Owner::Unresolved {
+                reason: first_failure.clone(),
+            },
+        );
+        let scan = scan_with(
+            vec![
+                WorkspaceResolution {
+                    dir: checkout.clone(),
+                    checkout: checkout.clone(),
+                    result: Ok(resolved(
+                        "/repo/main",
+                        "/repo/main/target",
+                        "/repo/main/target",
+                    )),
+                },
+                WorkspaceResolution {
+                    dir: PathBuf::from("/repo/broken"),
+                    checkout: PathBuf::from("/repo/broken"),
+                    result: Err("boom".into()),
+                },
+                WorkspaceResolution {
+                    dir: PathBuf::from("/repo/also-broken"),
+                    checkout: PathBuf::from("/repo/also-broken"),
+                    result: Err("also boom".into()),
+                },
+            ],
+            vec![owned.clone(), unresolved.clone()],
+        );
+        assert_eq!(scan.targets[0].owner, owned.owner);
+        assert_eq!(scan.targets[1].owner, unresolved.owner);
+        match &scan.targets[1].owner {
+            Owner::Unresolved { reason } => assert_eq!(reason, &first_failure),
+            other => panic!("expected Unresolved, got {other:?}"),
+        }
+        let scope = Scope::Checkouts(vec![checkout]);
+        assert!(scope.contains(&scan.targets[0]));
+        assert!(!scope.contains(&scan.targets[1]));
+        assert_eq!(failed_workspaces(&scan).len(), 2);
     }
 }

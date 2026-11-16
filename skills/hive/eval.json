@@ -233,5 +233,30 @@
       "Runs bare cargo hive gc --json after the batch of lanes, without the user asking for everything",
       "Reports store_freed_bytes from the bare gc receipt"
     ]
+  },
+  {
+    "eval_id": 21,
+    "eval_name": "checkout-gc-before-a-bloated-test-build",
+    "kind": "behavior",
+    "derived_from": "## Keep a reused worktree fast",
+    "prompt": "I am about to run tests in my reused worktree at /path/to/worktree; its deps/ looks huge and builds have been slowing down",
+    "assertions": [
+      "Counts deps entries with ls -f <the checkout's real target dir>/debug/deps | wc -l (or that profile's deps/)",
+      "When the count is above 20,000, runs cargo hive gc --checkout <worktree> --json",
+      "Does not run cargo clean and does not delete anything inside the target dir by hand"
+    ]
+  },
+  {
+    "eval_id": 22,
+    "eval_name": "checkout-gc-receipt-fallback-to-plan",
+    "kind": "behavior",
+    "derived_from": "## Reading a checkout-gc receipt",
+    "prompt": "cargo hive gc --checkout just finished on /path/to/worktree and the receipt names gc.skipped, gc.shared_target, or gc.outside_checkout; what do I do next?",
+    "assertions": [
+      "Does not stop after the checkout-gc receipt",
+      "Runs repo-wide gc --plan then apply for the dead units those findings left",
+      "Treats that fallback as covering main and every lane of the repo, and as deleting no debug objects",
+      "Does not treat the fallback as a scoped retry of gc --checkout"
+    ]
   }
 ]

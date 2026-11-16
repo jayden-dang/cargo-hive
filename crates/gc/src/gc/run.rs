@@ -471,6 +471,9 @@ mod tests {
         fn read(&self, _: &Path) -> io::Result<Vec<u8>> {
             Err(io::Error::other("not used by gc"))
         }
+        fn read_at(&self, path: &Path, _offset: u64, _len: usize) -> io::Result<Vec<u8>> {
+            self.read(path)
+        }
         fn hardlink(&self, _: &Path, _: &Path) -> io::Result<()> {
             Err(io::Error::other("not used by gc"))
         }

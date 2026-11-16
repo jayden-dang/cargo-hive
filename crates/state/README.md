@@ -60,6 +60,7 @@ directory.
 |---|---|
 | Show where build output lives, how big it is, and which checkout owns it | Yes: `status` |
 | Delete superseded incremental sessions and leftover rustc temp dirs | Yes: `gc` |
+| Delete one checkout's dead units and unreferenced debug objects | Yes: `gc --checkout` |
 | Delete dead units, and whole orphan target dirs that no checkout owns | Yes: `gc --plan`, then `apply` |
 | Seed registry dependencies into a fresh worktree before its first build | Yes: `seed` |
 | Explain why a crate is built in many copies (feature splits, failed units) | Yes: `explain` |
@@ -179,6 +180,7 @@ Each row shows one command form. Optional arguments are described in the row's t
 | `cargo hive gc /path/to/repo --dry-run` | Previews what `gc` would delete and deletes nothing |
 | `cargo hive gc /path/to/repo` | Deletes superseded incremental sessions and `deps/rustc*`/`rmeta*` temp dirs. Freed bytes are counted per inode and reported as totals. With a repo argument it leaves the store alone |
 | `cargo hive gc` | With no repo argument, covers every target hive knows, including orphan candidates and targets under a cache root, and also evicts from the store. Bare `cargo hive gc` keeps the store under 40 GB. `--dry-run` previews it |
+| `cargo hive gc --checkout /path/to/worktree` | Deletes that one checkout's dead units and unreferenced `deps/*.rcgu.o` debug objects in its own targets only. Conflicts with a repo argument, `--plan`, and `--dry-run` |
 | `cargo hive gc /path/to/repo --plan` | Writes a plan and deletes nothing. Leave out the path for every target hive knows, including orphan candidates and targets under a cache root |
 | `cargo hive apply plan-id` | Deletes the plan's paths for every class |
 | `cargo hive explain /path/to/repo --top 0` | Reports copies of one crate, feature splits, and units whose last compile failed. `--top` defaults to 10 groups; `--top 0` shows every group. Leave out the path for every registered repo |
@@ -222,6 +224,22 @@ are not counted in it.
 plus whole orphan target dirs, and writes the plan without deleting anything.
 `cargo hive apply <id>` applies one plan. Before deleting, it rechecks liveness, locks
 and the fingerprint format, and it refuses a stale plan.
+
+### gc --checkout
+
+`cargo hive gc --checkout /path/to/worktree` deletes, in one run under the target's Cargo
+locks, that registered checkout's dead units and the loose debug objects no linked binary
+in its profile dirs still names. It touches only targets that checkout alone resolves to
+inside its own directory. Shared targets, targets outside the checkout, and targets a
+build holds are left alone and named in the receipt (`gc.shared_target`,
+`gc.outside_checkout`, `gc.skipped`). Counts include `units_deleted`, `objects_deleted`,
+`freed_bytes`, and `targets_skipped_held`. The receipt command is `gc --checkout`. It
+does not take a repo argument, `--plan`, or `--dry-run`.
+
+When a receipt names `gc.outside_checkout`, nothing was deleted in that target.
+Repo-wide `cargo hive gc --plan` then `cargo hive apply <id>` can still collect its dead
+units, though not its debug objects; that fallback covers main and every lane of the
+repo and is not a scoped retry of `gc --checkout`.
 
 ## How it works
 

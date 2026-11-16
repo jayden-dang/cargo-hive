@@ -84,39 +84,70 @@ impl RegistryRepo {
         RegistryRepo::build(hive, true)
     }
 
+    pub fn with_binaries(hive: &Hive) -> RegistryRepo {
+        let scratch = pack_registry(hive, false);
+        let main = scratch.path.join("main");
+        fs::create_dir_all(main.join("app/src")).unwrap();
+        fs::create_dir_all(main.join("app/tests")).unwrap();
+        fs::create_dir_all(main.join("app/examples")).unwrap();
+        fs::create_dir_all(main.join("appmacro/src")).unwrap();
+        git(&main, &["init", "-q"]);
+        fs::write(
+            main.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"appmacro\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        fs::write(
+            main.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ndepcrate = \"1\"\nappmacro = { path = \"../appmacro\" }\n",
+        )
+        .unwrap();
+        fs::write(
+            main.join("app/build.rs"),
+            "fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }\n",
+        )
+        .unwrap();
+        fs::write(
+            main.join("app/src/lib.rs"),
+            "appmacro::m!();\npub fn app() -> u32 { depcrate::dep() }\n",
+        )
+        .unwrap();
+        fs::write(
+            main.join("app/src/main.rs"),
+            "fn main() { println!(\"{}\", app::app()); }\n",
+        )
+        .unwrap();
+        fs::write(
+            main.join("app/tests/it.rs"),
+            "#[test]\nfn it_works() { assert_eq!(app::app(), 8); }\n",
+        )
+        .unwrap();
+        fs::write(
+            main.join("app/examples/ex.rs"),
+            "fn main() { println!(\"{}\", app::app()); }\n",
+        )
+        .unwrap();
+        fs::write(
+            main.join("appmacro/Cargo.toml"),
+            "[package]\nname = \"appmacro\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n",
+        )
+        .unwrap();
+        fs::write(
+            main.join("appmacro/src/lib.rs"),
+            "extern crate proc_macro;\nuse proc_macro::TokenStream;\n#[proc_macro]\npub fn m(_: TokenStream) -> TokenStream { TokenStream::new() }\n",
+        )
+        .unwrap();
+        fs::write(main.join(".gitignore"), "target\n").unwrap();
+        finish_repo(hive, scratch, main)
+    }
+
     fn build(hive: &Hive, top: bool) -> RegistryRepo {
-        let scratch = Scratch::new("registry");
-        let reg = scratch.path.join("reg");
-        fs::create_dir_all(&reg).unwrap();
-        let leaf_cksum = pack(&scratch, &reg, "leafcrate", LEAF_TOML, LEAF_LIB, None);
-        let dep_cksum = pack(
-            &scratch,
-            &reg,
-            "depcrate",
-            DEP_TOML,
-            DEP_LIB,
-            Some(DEP_BUILD),
-        );
-        write_index(&reg, "leafcrate", "[]", &leaf_cksum);
-        write_index(&reg, "depcrate", DEP_DEPS, &dep_cksum);
-        if top {
-            let top_cksum = pack(&scratch, &reg, "topcrate", TOP_TOML, TOP_LIB, None);
-            write_index(&reg, "topcrate", TOP_DEPS, &top_cksum);
-        }
+        let scratch = pack_registry(hive, top);
         let (app_dep, app_lib) = if top {
             ("topcrate", "pub fn app() -> u32 { topcrate::top() }\n")
         } else {
             ("depcrate", "pub fn app() -> u32 { depcrate::dep() }\n")
         };
-        fs::write(
-            hive.cargo_home.path.join("config.toml"),
-            format!(
-                "[source.crates-io]\nreplace-with = \"fixture\"\n\n[source.fixture]\nlocal-registry = \"{}\"\n",
-                reg.display()
-            ),
-        )
-        .unwrap();
-
         let main = scratch.path.join("main");
         fs::create_dir_all(main.join("src")).unwrap();
         git(&main, &["init", "-q"]);
@@ -127,26 +158,7 @@ impl RegistryRepo {
         .unwrap();
         fs::write(main.join("src/lib.rs"), app_lib).unwrap();
         fs::write(main.join(".gitignore"), "target\n").unwrap();
-        let mut lock = Command::new("cargo");
-        lock.args(["generate-lockfile", "--offline"])
-            .current_dir(&main)
-            .env("CARGO_HOME", &hive.cargo_home.path)
-            .env_remove("CARGO_TARGET_DIR")
-            .env_remove("CARGO_BUILD_TARGET_DIR")
-            .env_remove("CARGO_BUILD_BUILD_DIR");
-        checked(&scratch.path, "generate-lockfile", &mut lock);
-        git(&main, &["add", "-A"]);
-        git(
-            &main,
-            &["commit", "-q", "-m", &format!("init {}", main.display())],
-        );
-        let main = main.canonicalize().unwrap();
-        hive.config(&format!(
-            r#"{{"secondary_roots": ["{}"]}}"#,
-            scratch.path.display()
-        ));
-        register(hive, &main);
-        RegistryRepo { scratch, main }
+        finish_repo(hive, scratch, main)
     }
 
     pub fn worktree(&self, name: &str) -> PathBuf {
@@ -157,11 +169,31 @@ impl RegistryRepo {
         );
         path
     }
+
+    pub fn nested_worktree(&self, name: &str) -> PathBuf {
+        let path = self.main.join(".worktrees").join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        git(
+            &self.main,
+            &["worktree", "add", "-q", "-b", name, path.to_str().unwrap()],
+        );
+        path
+    }
+}
+
+pub fn set_target_dir(checkout: &Path, dir: &Path) {
+    fs::create_dir_all(checkout.join(".cargo")).unwrap();
+    fs::write(
+        checkout.join(".cargo/config.toml"),
+        format!("[build]\ntarget-dir = \"{}\"\n", dir.display()),
+    )
+    .unwrap();
 }
 
 pub struct Compiled {
     pub registry_fresh: Vec<String>,
     pub registry_recompiled: Vec<String>,
+    pub workspace_fresh: Vec<String>,
     pub workspace_recompiled: Vec<String>,
 }
 
@@ -233,10 +265,64 @@ fn write_index(reg: &Path, name: &str, deps: &str, cksum: &str) {
     .unwrap();
 }
 
+fn pack_registry(hive: &Hive, top: bool) -> Scratch {
+    let scratch = Scratch::new("registry");
+    let reg = scratch.path.join("reg");
+    fs::create_dir_all(&reg).unwrap();
+    let leaf_cksum = pack(&scratch, &reg, "leafcrate", LEAF_TOML, LEAF_LIB, None);
+    let dep_cksum = pack(
+        &scratch,
+        &reg,
+        "depcrate",
+        DEP_TOML,
+        DEP_LIB,
+        Some(DEP_BUILD),
+    );
+    write_index(&reg, "leafcrate", "[]", &leaf_cksum);
+    write_index(&reg, "depcrate", DEP_DEPS, &dep_cksum);
+    if top {
+        let top_cksum = pack(&scratch, &reg, "topcrate", TOP_TOML, TOP_LIB, None);
+        write_index(&reg, "topcrate", TOP_DEPS, &top_cksum);
+    }
+    fs::write(
+        hive.cargo_home.path.join("config.toml"),
+        format!(
+            "[source.crates-io]\nreplace-with = \"fixture\"\n\n[source.fixture]\nlocal-registry = \"{}\"\n",
+            reg.display()
+        ),
+    )
+    .unwrap();
+    scratch
+}
+
+fn finish_repo(hive: &Hive, scratch: Scratch, main: PathBuf) -> RegistryRepo {
+    let mut lock = Command::new("cargo");
+    lock.args(["generate-lockfile", "--offline"])
+        .current_dir(&main)
+        .env("CARGO_HOME", &hive.cargo_home.path)
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .env_remove("CARGO_BUILD_BUILD_DIR");
+    checked(&scratch.path, "generate-lockfile", &mut lock);
+    git(&main, &["add", "-A"]);
+    git(
+        &main,
+        &["commit", "-q", "-m", &format!("init {}", main.display())],
+    );
+    let main = main.canonicalize().unwrap();
+    hive.config(&format!(
+        r#"{{"secondary_roots": ["{}"]}}"#,
+        scratch.path.display()
+    ));
+    register(hive, &main);
+    RegistryRepo { scratch, main }
+}
+
 fn parse_compiled(text: &str) -> Compiled {
     let mut compiled = Compiled {
         registry_fresh: Vec::new(),
         registry_recompiled: Vec::new(),
+        workspace_fresh: Vec::new(),
         workspace_recompiled: Vec::new(),
     };
     for (n, line) in text.lines().enumerate() {
@@ -262,7 +348,9 @@ fn parse_compiled(text: &str) -> Compiled {
             } else {
                 compiled.registry_recompiled.push(name);
             }
-        } else if !fresh {
+        } else if fresh {
+            compiled.workspace_fresh.push(name);
+        } else {
             compiled.workspace_recompiled.push(name);
         }
     }
@@ -273,12 +361,17 @@ fn unit_name(package_id: &str) -> String {
     let hash = package_id
         .find('#')
         .unwrap_or_else(|| panic!("no # in {package_id}"));
-    let at = package_id[hash + 1..]
-        .find('@')
-        .unwrap_or_else(|| panic!("no @ in {package_id}"))
-        + hash
-        + 1;
-    package_id[hash + 1..at].to_string()
+    let after = &package_id[hash + 1..];
+    if let Some(at) = after.find('@') {
+        after[..at].to_string()
+    } else {
+        package_id[..hash]
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| panic!("no name in {package_id}"))
+            .to_string()
+    }
 }
 
 fn checked(dir: &Path, label: &str, cmd: &mut Command) -> String {

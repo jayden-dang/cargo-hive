@@ -445,7 +445,11 @@ enum Parsed {
     RepoList,
     RepoRemove,
     Status,
-    Gc { dry_run: bool, plan: bool },
+    Gc {
+        dry_run: bool,
+        plan: bool,
+        checkout: bool,
+    },
     Apply,
     Explain,
     Seed,
@@ -473,7 +477,16 @@ fn parse(words: &[String]) -> Result<Parsed, String> {
             RepoCommand::Remove { .. } => Ok(Parsed::RepoRemove),
         },
         Command::Status { .. } => Ok(Parsed::Status),
-        Command::Gc { dry_run, plan, .. } => Ok(Parsed::Gc { dry_run, plan }),
+        Command::Gc {
+            dry_run,
+            plan,
+            checkout,
+            ..
+        } => Ok(Parsed::Gc {
+            dry_run,
+            plan,
+            checkout: checkout.is_some(),
+        }),
         Command::Apply { .. } => Ok(Parsed::Apply),
         Command::Explain { .. } => Ok(Parsed::Explain),
         Command::Seed { .. } => Ok(Parsed::Seed),
@@ -711,15 +724,23 @@ fn skill_documents_every_shipped_command() {
         Parsed::Gc {
             dry_run: true,
             plan: false,
+            checkout: false,
         },
         Parsed::Gc {
             dry_run: false,
             plan: false,
+            checkout: false,
         },
         Parsed::Apply,
         Parsed::Gc {
             dry_run: false,
             plan: true,
+            checkout: false,
+        },
+        Parsed::Gc {
+            dry_run: false,
+            plan: false,
+            checkout: true,
         },
         Parsed::Explain,
         Parsed::Seed,
@@ -1157,10 +1178,17 @@ fn readme_command_lines_and_names_match_the_binary() {
         Parsed::Gc {
             dry_run: false,
             plan: false,
+            checkout: false,
         },
         Parsed::Gc {
             dry_run: false,
             plan: true,
+            checkout: false,
+        },
+        Parsed::Gc {
+            dry_run: false,
+            plan: false,
+            checkout: true,
         },
         Parsed::Apply,
         Parsed::Explain,

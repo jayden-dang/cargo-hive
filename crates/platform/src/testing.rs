@@ -35,6 +35,10 @@ impl Fs for Hooked {
         self.inner.read(path)
     }
 
+    fn read_at(&self, path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.inner.read_at(path, offset, len)
+    }
+
     fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {
         self.inner.hardlink(src, dst)
     }
