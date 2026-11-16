@@ -334,15 +334,15 @@ _Requirements: CHECKOUTGC-1.1, CHECKOUTGC-1.2, CHECKOUTGC-1.3, CHECKOUTGC-1.4, C
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1: Write the failing integration tests:**
+- [x] **Step 1: Write the failing integration tests:**
   - `gc_on_a_worktree_leaves_main_and_every_other_lane_byte_for_byte_unchanged`, which compares the `tree()` of every other target before and after;
   - `gc_on_main_leaves_the_worktrees_nested_under_it` (`nested_worktree`);
   - `an_unregistered_path_is_refused_naming_repo_add` and `a_directory_inside_a_checkout_is_refused_naming_its_root` (table);
   - `only_the_receipt_line_and_snapshot_change_under_the_state_root`, which diffs the state root and the store before and after.
 
   Run `cargo test -p cargo-hive --test checkout_gc`; expect the refusal test to fail and the others to pass or fail per Task 5.
-- [ ] **Step 2: Implement** the refusal wording. Run the project.md task gate for `cargo-hive`; expect pass.
-- [ ] **Step 3: Commit.** `feat(cli): gc --checkout names the checkout root a path sits in`
+- [x] **Step 2: Implement** the refusal wording. Run the project.md task gate for `cargo-hive`; expect pass.
+- [x] **Step 3: Commit.** `feat(cli): gc --checkout names the checkout root a path sits in`
 
 _Requirements: CHECKOUTGC-3.3, CHECKOUTGC-3.4, CHECKOUTGC-3.6_
 
