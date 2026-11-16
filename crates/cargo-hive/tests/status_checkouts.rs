@@ -1,6 +1,6 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
-use common::{Hive, Scratch, git, init_repo, register};
+use common::{Hive, Scratch, counting_git, git, init_repo, register};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -121,6 +121,7 @@ fn secondary_roots_are_compared_as_realpaths() {
 #[test]
 fn without_configuration_private_tmp_is_a_secondary_root() {
     let hive = Hive::ready();
+    hive.use_default_roots();
     let s = Scratch::new("defaults"); // lives under /private/tmp
     let main = init_repo(&s.path.join("main"), "");
     git(&s.path, &["clone", "-q", main.to_str().unwrap(), "clone"]);
@@ -324,5 +325,81 @@ fn an_unregistered_repo_argument_is_refused() {
             .unwrap()
             .iter()
             .any(|f| f["kind"] == "refusal")
+    );
+}
+
+#[test]
+fn unrelated_repositories_under_a_secondary_root_start_no_git_process() {
+    let hive = Hive::ready();
+    let s = Scratch::new("strays");
+    let sec = s.path.join("sec");
+    std::fs::create_dir_all(&sec).unwrap();
+    hive.config(&format!("{{\"secondary_roots\": [\"{}\"]}}", sec.display()));
+    let main = init_repo(&s.path.join("main"), "");
+    // Two unrelated templates: one keeps loose objects, one is packed.
+    let loose = init_repo(&s.path.join("tpl-loose"), "");
+    let packed = init_repo(&s.path.join("tpl-packed"), "");
+    git(&packed, &["gc", "-q", "--aggressive"]);
+    assert!(
+        std::fs::read_dir(packed.join(".git/objects/pack"))
+            .unwrap()
+            .count()
+            > 0
+    );
+    for i in 0..100 {
+        for (tpl, name) in [(&loose, "l"), (&packed, "p")] {
+            let ok = std::process::Command::new("cp")
+                .args(["-R", tpl.to_str().unwrap()])
+                .arg(sec.join(format!("{name}{i}")))
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok);
+        }
+    }
+    git(&sec, &["clone", "-q", main.to_str().unwrap(), "app"]);
+    // Clones that must still be found: one borrowing objects through alternates, one packed.
+    git(
+        &sec,
+        &["clone", "-q", "--shared", main.to_str().unwrap(), "shared"],
+    );
+    git(&sec, &["clone", "-q", main.to_str().unwrap(), "repacked"]);
+    git(&sec.join("repacked"), &["gc", "-q", "--aggressive"]);
+    register(&hive, &main);
+    let log = s.path.join("git-calls.log");
+    let path = counting_git(&s.path.join("shim"), &log);
+    let (out, receipt) = hive.json_env(
+        &["status", main.to_str().unwrap()],
+        &[("PATH", path.as_str())],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(class_of(&receipt, &sec.join("app")), "secondary");
+    assert_eq!(class_of(&receipt, &sec.join("l0")), "absent");
+    assert_eq!(class_of(&receipt, &sec.join("p0")), "absent");
+    assert_eq!(class_of(&receipt, &sec.join("shared")), "secondary");
+    assert_eq!(class_of(&receipt, &sec.join("repacked")), "secondary");
+    assert_eq!(receipt["counts"]["checkouts"], 4);
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    let sec_real = sec.canonicalize().unwrap();
+    let stray_calls = calls
+        .lines()
+        .filter(|line| {
+            ["l", "p"].iter().any(|prefix| {
+                line.split_whitespace().any(|word| {
+                    let w = Path::new(word);
+                    w.parent() == Some(sec_real.as_path())
+                        && w.file_name()
+                            .is_some_and(|n| n.to_string_lossy().starts_with(prefix))
+                })
+            })
+        })
+        .count();
+    assert_eq!(
+        stray_calls, 0,
+        "git ran in unrelated repositories:\n{calls}"
     );
 }

@@ -6161,3 +6161,12 @@ Added after the klynt run (2026-11-11) at the owner's request. `gc <worktree>` w
 - [x] **Step 3: Verify and commit** `feat(cli): a path inside a registered repo, or its worktree, names that repo`.
 
 _Requirements: CORE-2.13, CORE-2.14_
+
+### Task 25: Rule out unrelated repositories under a secondary root without git (#31)
+
+- [x] **Step 1:** `crates/cargo/src/object_store.rs` answers `holds_none` from loose objects and version-2 pack indexes. It defers to git on alternates, another object format, a pack without its index, or an index it cannot read. Eight unit tests cover these cases, and each was mutation-checked.
+- [x] **Step 2:** `discover::checkouts` skips a candidate that `holds_none` rules out. The test `unrelated_repositories_under_a_secondary_root_start_no_git_process` saw 800 git calls in 200 strays before the change and 0 after. Shared and repacked clones are still listed.
+- [x] **Step 3:** test harness: `Hive::ready()` uses a scratch secondary root, and the test of the default roots opts back in.
+
+_Requirements: CORE-3.9, CORE-3.10_
+

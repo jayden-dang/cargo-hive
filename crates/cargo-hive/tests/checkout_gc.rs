@@ -1865,3 +1865,27 @@ fn pid_alive(pid: u32) -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
+
+#[test]
+fn checkout_gc_lists_the_repositorys_checkouts_once() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    let log = repo.scratch.path.join("git-calls.log");
+    let path = common::counting_git(&repo.scratch.path.join("shim"), &log);
+    let out = hive
+        .command(&["gc", "--checkout", repo.main.to_str().unwrap(), "--json"])
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = fs::read_to_string(&log).unwrap_or_default();
+    let listings = calls
+        .lines()
+        .filter(|l| l.contains("worktree list"))
+        .count();
+    assert_eq!(listings, 1, "git calls:\n{calls}");
+}

@@ -491,7 +491,9 @@ _Requirements: CHECKOUTGC-6.1, CHECKOUTGC-6.2, CHECKOUTGC-6.3, CHECKOUTGC-6.4, C
 - [x] **Step 2: Write the skill text through the `author-skills` workflow** (RED baseline, then GREEN, Sonnet and Haiku evals), staying within the 150-line budget (118 used). Also write the README subsection. Run `cargo test -p cargo-hive --test skill`; expect pass.
 - [x] **Step 3: Commit.** `docs(skill): run gc --checkout before a test build in a bloated worktree`
 
-_Requirements: CHECKOUTGC-5.1, CHECKOUTGC-5.2, CHECKOUTGC-5.3, CHECKOUTGC-5.4_
+_Requirements: CHECKOUTGC-5.2, CHECKOUTGC-5.3, CHECKOUTGC-5.4_
+
+CHECKOUTGC-5.1 was delivered by this task, then superseded by CHECKOUTGC-5.5 on 2026-11-16 (requirements.md).
 
 ---
 
@@ -536,3 +538,10 @@ _Requirements: CHECKOUTGC-5.1, CHECKOUTGC-5.2, CHECKOUTGC-5.3, CHECKOUTGC-5.4_
 Proof run 2026-11-16 on main 08de167, release build, copies of klynt `timing-lane1` (record: main checkout `.skills/verify/2026-11-15-checkout-gc/PLAN.md`, git-ignored). `deps/` went from 38,261 to 9,213 entries: 29,048 objects deleted, 3,183 referenced, 309 binaries read. 0 gc-caused recompiles: 357 units recompiled in both copies. The command took 5.2 s cold with deletions, and 0.7 s warm, against the 15 s target. With the default secondary roots it took 118–140 s, spent discovering about 1,400 stray repos under /private/tmp and $TMPDIR, which is outside this feature. Edit test builds took 70.4/64.3 s in the control copy and 63.2/43.5 s in the gc copy, one sample each under load. Units deleted: 0, because three units in the slot had never compiled (Undecided); objects were still cleaned (2.6).
 
 _Requirements: CHECKOUTGC-7.1_
+
+### Task 12: Run checkout gc before every test build, and list checkouts once (#31)
+
+- [x] **Step 1:** `plugin/skills/hive/SKILL.md` "Keep a reused worktree fast" and its Reading row say to run `gc --checkout` before every test build. Eval 21 and TESTS.md record the RED and GREEN runs on Sonnet and Haiku.
+- [x] **Step 2:** `find_checkout` returns the listing it made, and `checkout_cmd` reuses it. The test `checkout_gc_lists_the_repositorys_checkouts_once` saw 2 `git worktree list` calls before the change and 1 after.
+
+_Requirements: CHECKOUTGC-5.5, CHECKOUTGC-5.6_

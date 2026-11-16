@@ -84,10 +84,12 @@ In this file:
 
 **Story:** As an agent that reads the hive skill, I want it to tell me when to run checkout gc on my worktree and how to read its receipt, so that I run it before my test builds slow down without being asked.
 
-- **CHECKOUTGC-5.1** (agent-decided) THE SYSTEM SHALL ship a hive skill that tells an agent working in a reused worktree to run `cargo hive gc --checkout <that worktree> --json` before a test build whenever that checkout's profile `deps/` holds more than 20,000 entries. It SHALL say how the agent counts those entries.
+- ~~**CHECKOUTGC-5.1**~~ superseded by CHECKOUTGC-5.5 (operator decision 2026-11-16, #31: each test build adds about 10,500 debug objects, so the 20,000-entry threshold was crossed again after one build) — was: (agent-decided) THE SYSTEM SHALL ship a hive skill that tells an agent working in a reused worktree to run `cargo hive gc --checkout <that worktree> --json` before a test build whenever that checkout's profile `deps/` holds more than 20,000 entries. It SHALL say how the agent counts those entries.
 - **CHECKOUTGC-5.2** THE SYSTEM SHALL ship the README describing `gc --checkout` the same way, with every command line and receipt name it cites existing in the binary.
 - **CHECKOUTGC-5.3** THE SYSTEM SHALL ship a hive skill that names this mode's counts and findings, held-target skips included, with what the agent does for each. For `gc.outside_checkout`, that is: nothing was deleted there, and repo-wide `gc --plan` then `apply` can still collect that target's dead units. The skill SHALL also state that `gc <path>` still covers the whole repo.
 - **CHECKOUTGC-5.4** (guard) WHEN `tests/skill.rs` runs THE SYSTEM SHALL CONTINUE TO pass these checks: that every `cargo hive` line in the skill parses with the CLI, that every shipped command is documented, and that the "Free disk" section keeps its pinned phrases. The new command line is among the lines checked, and `parse()` tells it apart from bare `gc`.
+- **CHECKOUTGC-5.5** (operator decision 2026-11-16, #31) THE SYSTEM SHALL ship a hive skill that tells an agent working in a reused worktree to run `cargo hive gc --checkout <that worktree> --json` before every test build there.
+- **CHECKOUTGC-5.6** (fix, 2026-11-16, #31) WHEN the command runs THE SYSTEM SHALL list the repository's checkouts once, and use that one list both to find the named checkout and to resolve its targets.
 
 ## 6. Existing commands keep working
 
