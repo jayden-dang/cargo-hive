@@ -857,4 +857,74 @@ mod tests {
             assert_eq!(via_default, via_apfs, "offset={offset} len={len}");
         }
     }
+
+    #[test]
+    fn a_ranged_read_returns_len_bytes_without_loading_the_file() {
+        struct DefaultReadAt;
+        impl Fs for DefaultReadAt {
+            fn temp_dir(&self, _: &Path, _: &str) -> io::Result<TempDir> {
+                Err(io::Error::other("unused"))
+            }
+            fn write_file(&self, _: &Path, _: &[u8]) -> io::Result<()> {
+                Err(io::Error::other("unused"))
+            }
+            fn read(&self, _: &Path) -> io::Result<Vec<u8>> {
+                panic!("read_at default must not call read");
+            }
+            fn hardlink(&self, _: &Path, _: &Path) -> io::Result<()> {
+                Err(io::Error::other("unused"))
+            }
+            fn set_mtime(&self, _: &Path, _: SystemTime) -> io::Result<()> {
+                Err(io::Error::other("unused"))
+            }
+            fn mtime(&self, _: &Path) -> io::Result<SystemTime> {
+                Err(io::Error::other("unused"))
+            }
+            fn inode(&self, _: &Path) -> io::Result<u64> {
+                Err(io::Error::other("unused"))
+            }
+            fn clone_file(&self, _: &Path, _: &Path) -> io::Result<()> {
+                Err(io::Error::other("unused"))
+            }
+            fn create_dir(&self, _: &Path) -> io::Result<()> {
+                Err(io::Error::other("unused"))
+            }
+            fn sharing(&self, _: &Path) -> io::Result<Sharing> {
+                Err(io::Error::other("unused"))
+            }
+            fn compress(&self, _: &Path) -> CompressOutcome {
+                CompressOutcome::Failed("unused".into())
+            }
+            fn hold_lock(&self, _: LockKind, _: &Path) -> io::Result<LockHolder> {
+                Err(io::Error::other("unused"))
+            }
+            fn try_lock_exclusive(&self, _: &Path) -> TryLock {
+                TryLock::Unopenable(io::Error::other("unused"))
+            }
+            fn try_lock_elsewhere(&self, _: LockKind, _: &Path) -> io::Result<LockState> {
+                Err(io::Error::other("unused"))
+            }
+            fn entry_stat(&self, _: &Path) -> io::Result<EntryStat> {
+                Err(io::Error::other("unused"))
+            }
+            fn read_dir_bounded(&self, _: &Path, _: usize) -> io::Result<Vec<(String, EntryKind)>> {
+                Err(io::Error::other("unused"))
+            }
+            fn remove_tree(&self, _: &Path) -> io::Result<()> {
+                Err(io::Error::other("unused"))
+            }
+            fn remove_file(&self, _: &Path) -> io::Result<()> {
+                Err(io::Error::other("unused"))
+            }
+            fn volume(&self, _: &Path) -> io::Result<VolumeInfo> {
+                Err(io::Error::other("unused"))
+            }
+        }
+        let t = tmp("read-at-no-slurp");
+        let path = t.path().join("big");
+        let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+        apfs().write_file(&path, &data).unwrap();
+        let got = DefaultReadAt.read_at(&path, 1000, 32).unwrap();
+        assert_eq!(got, &data[1000..1032]);
+    }
 }

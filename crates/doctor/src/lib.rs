@@ -929,6 +929,17 @@ mod tests {
         fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
             std::fs::read(path)
         }
+        fn read_at(&self, path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            let bytes = self.read(path)?;
+            let Ok(start) = usize::try_from(offset) else {
+                return Ok(Vec::new());
+            };
+            if start >= bytes.len() {
+                return Ok(Vec::new());
+            }
+            let end = start.saturating_add(len).min(bytes.len());
+            Ok(bytes[start..end].to_vec())
+        }
         fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {
             std::fs::hard_link(src, dst)
         }

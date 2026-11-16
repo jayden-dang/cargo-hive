@@ -524,7 +524,7 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
             out.cancelled = true;
             return out;
         }
-        if guard::check_entry(
+        if let Err(reason) = guard::check_entry(
             ctx.fs,
             ctx.target,
             object,
@@ -533,10 +533,15 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
                 dev: *dev,
                 ino: *ino,
             },
-        )
-        .is_err()
-        {
-            continue;
+        ) {
+            out.failed = true;
+            out.findings.push(Finding {
+                kind: "gc.delete_failed".into(),
+                path: Some(object.clone()),
+                detail: format!("{} ({reason:?})", object.display()),
+                measured: BTreeMap::new(),
+            });
+            return out;
         }
         match ledger::remove_counted(
             ctx.fs,
@@ -1179,6 +1184,9 @@ mod tests {
         }
         fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
             self.real.read(path)
+        }
+        fn read_at(&self, path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            self.real.read_at(path, offset, len)
         }
         fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {
             self.real.hardlink(src, dst)

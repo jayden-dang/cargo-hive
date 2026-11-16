@@ -307,15 +307,26 @@ pub trait Fs {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
     /// Up to `len` bytes from `offset`; fewer at EOF, empty past it. Follows a symlink.
     fn read_at(&self, path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-        let bytes = self.read(path)?;
-        let Ok(start) = usize::try_from(offset) else {
-            return Ok(Vec::new());
-        };
-        if start >= bytes.len() {
-            return Ok(Vec::new());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            let file = std::fs::File::open(path)?;
+            let file_len = file.metadata()?.len();
+            if offset >= file_len {
+                return Ok(Vec::new());
+            }
+            let available = usize::try_from(file_len - offset).unwrap_or(usize::MAX);
+            let to_read = available.min(len);
+            let mut buf = vec![0u8; to_read];
+            let n = file.read_at(&mut buf, offset)?;
+            buf.truncate(n);
+            Ok(buf)
         }
-        let end = start.saturating_add(len).min(bytes.len());
-        Ok(bytes[start..end].to_vec())
+        #[cfg(not(unix))]
+        {
+            let _ = (path, offset, len);
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
     }
     fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()>;
     fn set_mtime(&self, path: &Path, t: SystemTime) -> io::Result<()>;
@@ -397,6 +408,10 @@ impl Fs for DirListFs {
 
     fn read(&self, _path: &Path) -> io::Result<Vec<u8>> {
         Err(unsupported_fs())
+    }
+
+    fn read_at(&self, path: &Path, _offset: u64, _len: usize) -> io::Result<Vec<u8>> {
+        self.read(path)
     }
 
     fn hardlink(&self, _src: &Path, _dst: &Path) -> io::Result<()> {
@@ -548,6 +563,9 @@ mod tests {
         }
         fn read(&self, _: &Path) -> io::Result<Vec<u8>> {
             Err(refused())
+        }
+        fn read_at(&self, path: &Path, _offset: u64, _len: usize) -> io::Result<Vec<u8>> {
+            self.read(path)
         }
         fn hardlink(&self, _: &Path, _: &Path) -> io::Result<()> {
             Err(refused())

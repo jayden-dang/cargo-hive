@@ -352,6 +352,17 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing"))
         }
+        fn read_at(&self, path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            let bytes = self.read(path)?;
+            let Ok(start) = usize::try_from(offset) else {
+                return Ok(Vec::new());
+            };
+            if start >= bytes.len() {
+                return Ok(Vec::new());
+            }
+            let end = start.saturating_add(len).min(bytes.len());
+            Ok(bytes[start..end].to_vec())
+        }
         fn hardlink(&self, _: &Path, _: &Path) -> io::Result<()> {
             Err(unused())
         }

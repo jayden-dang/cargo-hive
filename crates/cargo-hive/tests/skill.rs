@@ -1185,6 +1185,11 @@ fn readme_command_lines_and_names_match_the_binary() {
             plan: true,
             checkout: false,
         },
+        Parsed::Gc {
+            dry_run: false,
+            plan: false,
+            checkout: true,
+        },
         Parsed::Apply,
         Parsed::Explain,
         Parsed::Seed,

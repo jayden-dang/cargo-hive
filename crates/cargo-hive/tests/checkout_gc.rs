@@ -375,7 +375,7 @@ fn walk_faults_become_walk_unreadable_findings() {
     ));
     let (out, r) = checkout_gc(&hive, &repo.main);
     let _ = fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755));
-    assert!(out.status.success() || out.status.code() == Some(0), "{r}");
+    assert_eq!(out.status.code(), Some(0), "{r}");
     assert!(
         r["findings"]
             .as_array()
@@ -779,6 +779,34 @@ fn an_entry_swapped_after_its_stat_is_refused() {
     assert!(report.failed, "{report:?}");
     assert!(
         report.findings.iter().any(|f| f.kind == "gc.delete_failed"),
+        "{:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn an_object_swapped_after_its_stat_is_refused() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::with_binaries(&hive);
+    cargo_json(&hive, &repo.main, &["test", "--no-run"]);
+    let deps = repo.main.join("target/debug/deps");
+    let orphan = deps.join("orphan-swappedobject1.0.rcgu.o");
+    fs::write(&orphan, b"orphan").unwrap();
+    let outside = repo.scratch.path.join("outside-object");
+    fs::write(&outside, b"nope").unwrap();
+    let (_fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let rec = Recording::over_real().symlink_after_stat(&orphan, &outside);
+    let report = run_library(&rec, &scan, &checkout, &nested);
+    assert!(
+        orphan.symlink_metadata().is_ok(),
+        "swapped object was deleted: {report:?}"
+    );
+    assert!(report.failed, "{report:?}");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| { f.kind == "gc.delete_failed" && f.path.as_ref() == Some(&orphan) }),
         "{:?}",
         report.findings
     );

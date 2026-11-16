@@ -1459,6 +1459,9 @@ mod tests {
         fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
             self.real.read(path)
         }
+        fn read_at(&self, path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            self.real.read_at(path, offset, len)
+        }
         fn hardlink(&self, src: &Path, dst: &Path) -> io::Result<()> {
             self.real.hardlink(src, dst)
         }
