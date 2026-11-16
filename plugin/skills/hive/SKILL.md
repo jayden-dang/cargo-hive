@@ -20,7 +20,7 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 
 ## Free disk
 
-The repos a command acts on come from its arguments. Never infer them from the current directory. `status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root. Pass explicit paths, except in the two cases that call for bare `gc`: the user asked for everything, or a batch of lanes has finished (Start new lanes). A path inside a registered repo, or a linked worktree of one, makes `gc` act on that whole repo, with a note.
+The repos a command acts on come from its arguments. Never infer them from the current directory. `status`, `gc` and `explain` act on registered repos, so run `repo add` first. Leaving out the repo arguments means every registered repo; for `gc` it means every target hive knows, including orphan candidates and targets under a cache root. Pass explicit paths, except in the two cases that call for bare `gc`: the user asked for everything, or a batch of lanes has finished (Start new lanes). A path inside a registered repo, or a linked worktree of one, makes `gc` act on that whole repo, with a note. `gc <path>` still covers the whole repo.
 
 To free disk on the checkouts the user named, run `gc --dry-run` with those checkouts as arguments, then `gc` with the same arguments. The auto tier is safe to run unasked on every checkout, protected or secondary (both defined under Look before acting). `gc` without `--plan` deletes superseded incremental sessions (with their lock files) and leftover rustc temp entries, taking each owner's lock without waiting where one exists and skipping anything held.
 
@@ -41,6 +41,24 @@ Bare `gc`, when the user asked for everything or a batch of lanes has finished:
 ```
 cargo hive gc --json
 ```
+
+## Keep a reused worktree fast
+
+Before a test build in a reused worktree, count that checkout's profile `deps/` entries with `ls -f <the checkout's real target dir>/debug/deps | wc -l` (or that profile's `deps/`). When the count is above 20,000, run checkout gc on that worktree. Do not run repo-wide `gc` for this case: that path form covers the whole repo and only drops incremental sessions.
+
+```
+cargo hive gc --checkout /path/to/worktree --json
+```
+
+Read `objects_deleted`, `units_deleted`, `freed_bytes` and `targets_skipped_held` from the receipt. Findings and what to do:
+
+- `gc.skipped`: that target was held or could not be locked; leave it and continue.
+- `gc.shared_target`: another checkout also resolves to it; nothing was deleted there.
+- `gc.outside_checkout`: the target lies outside this checkout or inside a nested one; nothing was deleted there. Repo-wide `gc --plan` then `apply` still collects that target's dead units. That fallback covers main and every lane of the repo and deletes no debug objects; it is not a scoped retry of `gc --checkout`.
+- `ownership.unresolved`: a live checkout's metadata failed; fix or remove that worktree, then retry.
+- `gc.objects_undecided`: objects in that profile were left alone.
+
+When the receipt names `gc.skipped`, `gc.shared_target` or `gc.outside_checkout`, do not stop at `--help`. Run the repo-wide plan then apply fallback above for the dead units those findings left.
 
 ## Start new lanes
 
@@ -75,6 +93,7 @@ A checkout is protected (a registered main checkout, or anything hive cannot cla
 | How big is it, what is orphaned? | `status` |
 | How do I free space? | `gc --dry-run`, then `gc` |
 | What can be deleted later? | `gc --plan` |
+| A reused worktree before a test build, `deps/` over 20,000 | Keep a reused worktree fast (`gc --checkout`) |
 | Why are there so many copies of a crate? | `explain` |
 | A new secondary checkout, before its first build | `seed` |
 | Cold against seeded build times | `bench` |
