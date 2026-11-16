@@ -110,7 +110,7 @@ Retrieval (load-subgraph, run once on this map):
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing tests** (table-driven over offset and length) in `apfs.rs`:
+- [x] **Step 1: Write the failing tests** (table-driven over offset and length) in `apfs.rs`:
   - `read_at_returns_the_requested_range`;
   - `read_at_is_short_at_end_of_file`;
   - `read_at_past_end_of_file_is_empty`;
@@ -118,8 +118,8 @@ Retrieval (load-subgraph, run once on this map):
   - `the_default_read_at_matches_apfs_on_the_same_file`.
 
   Run `cargo test -p cargo-hive-platform --lib`; expect a compile failure (no `read_at`).
-- [ ] **Step 2: Implement** the trait method with its default, the `Apfs` override, and the three `Recording` additions. Run the project.md task gate for `cargo-hive-platform`; expect pass.
-- [ ] **Step 3: Commit.** `feat(platform): read a byte range of a file through Fs`
+- [x] **Step 2: Implement** the trait method with its default, the `Apfs` override, and the three `Recording` additions. Run the project.md task gate for `cargo-hive-platform`; expect pass.
+- [x] **Step 3: Commit.** `feat(platform): read a byte range of a file through Fs`
 
 _Requirements: CHECKOUTGC-2.10_
 
