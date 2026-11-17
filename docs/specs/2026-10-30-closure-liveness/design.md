@@ -216,7 +216,7 @@ deep modules — an interface much simpler than what it hides.
 
 Satisfies: LIVE-1.12, LIVE-1.13, LIVE-1.14, LIVE-1.11, LIVE-1.3, LIVE-1.4, LIVE-1.5, LIVE-1.6, LIVE-1.7, LIVE-1.8, LIVE-1.9, LIVE-1.10, LIVE-2.1, LIVE-2.14, LIVE-2.15, LIVE-2.12, LIVE-2.17, LIVE-2.18, LIVE-2.5, LIVE-2.6, LIVE-2.16, LIVE-2.8, LIVE-2.9, LIVE-2.10, LIVE-2.11, LIVE-3.1, LIVE-3.2, LIVE-3.3, LIVE-3.5, LIVE-3.6
 Reuse: none — new code (rung 7). Nothing computes reachability or lists files per unit. The inputs come from rung 2: `TargetDir`/`ProfileReport`/`Unit`/`NotCurrentUnit`, `fingerprint::{le_hex, kind_of, unit_hash, dep_name}`, `Fs::{mtime, read_dir_bounded}`, and `gc::DEPS_CAP` as the listing cap.
-Respects: ARCH-1, ARCH-9, ARCH-15, ARCH-16, ARCH-17, ARCH-18, ARCH-20
+Respects: ARCH-1, ARCH-9, ARCH-15, ARCH-16, ARCH-17, ARCH-22, ARCH-20
 Interface:
 ```
 pub const DEFAULT_WINDOW: Duration;                       // 7 days

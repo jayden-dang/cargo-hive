@@ -189,7 +189,7 @@ Locality: extend `src/doctor.rs`; neighbors leave.
 
 Satisfies: STOREGC-1.1, STOREGC-1.4, STOREGC-1.7, STOREGC-1.8, STOREGC-2.2, STOREGC-3.1, STOREGC-3.2, STOREGC-3.3, STOREGC-3.4, STOREGC-4.1, STOREGC-4.4, STOREGC-4.5, STOREGC-5.1, STOREGC-5.2, STOREGC-7.1, STOREGC-7.2, STOREGC-7.3, STOREGC-7.4, STOREGC-9.1, STOREGC-9.2, STOREGC-9.3
 Reuse: none — new code (rung 7), because no module orders evictions or phases a store commit. Inside it: rung 2 for `gc::measure` (per-entry freeable), `gc::account::remove_counted` with `Ledger` (removal and freed bytes), `split_checkout_faults` and `faults_that_can_hide_an_owner` (`src/plan_tier/mod.rs:50-64`), and `Receipt` builders.
-Respects: ARCH-2, ARCH-4, ARCH-8, ARCH-10, ARCH-11, ARCH-15, ARCH-16, ARCH-18
+Respects: ARCH-2, ARCH-4, ARCH-8, ARCH-10, ARCH-11, ARCH-15, ARCH-16, ARCH-22
 Interface: `seed::evict::run(ctx: &EvictCtx, limits: Limits, dry_run: bool, cancel: &dyn Fn() -> bool) -> EvictOutcome`.
 - `EvictCtx { state, fs, targets, checkouts, checkout_faults, scan_faults, cache_roots, window, account_bytes, now, caller_toolchain, caller_toolchain_kept, rustup }`, where `caller_toolchain_kept` is `doctor::caller_toolchain_kept()` read once by `gc_cmd` so the module reads no environment, where `caller_toolchain` is the whole `Toolchain` `gc_cmd` already resolves at `src/cli.rs:849`, lookup (b)'s single result (`None` when (b) is needed is a failed lookup, STOREGC-2.4), and `rustup` is the rustup path (`gc_cmd` passes `rustup`; tests pass a fake script).
 - `Limits { cap_bytes, max_age_secs }`.

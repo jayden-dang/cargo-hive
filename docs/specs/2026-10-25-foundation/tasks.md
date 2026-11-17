@@ -2370,7 +2370,9 @@ Run: `cargo test --lib fingerprint` — expect: 5 passed.
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(fingerprint): exact-signature reader with little-endian edge resolution"`
 
-_Requirements: CORE-4.7, CORE-4.8, CORE-4.14_
+_Requirements: CORE-4.7, CORE-4.8_
+
+CORE-4.14 was delivered by this task, then superseded by BUILDDIR-1.5 and BUILDDIR-1.7 on 2026-11-17 (requirements.md).
 
 ---
 
@@ -5500,7 +5502,9 @@ Run: `cargo test --lib -- cargo_target state` and `cargo test --test status_targ
 
 Run `cargo fmt`, then `git add -A && git commit -m "feat(status): Cargo target dirs with owners, orphan candidates and fingerprint reports"`
 
-_Requirements: CORE-4.2, CORE-4.3, CORE-4.5, CORE-4.7, CORE-4.8, CORE-4.10, CORE-4.12, CORE-4.13, CORE-4.14, CORE-4.15, CORE-6.2_
+_Requirements: CORE-4.2, CORE-4.3, CORE-4.5, CORE-4.7, CORE-4.8, CORE-4.10, CORE-4.12, CORE-4.13, CORE-4.15, CORE-6.2_
+
+CORE-4.14 was delivered by this task, then superseded by BUILDDIR-1.5 and BUILDDIR-1.7 on 2026-11-17 (requirements.md).
 
 ---
 
