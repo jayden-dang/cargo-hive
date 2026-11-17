@@ -234,14 +234,18 @@ pub enum CapabilityRefusal {
     },
 }
 
+/// Operator line when check (f) has disabled a capability.
+pub fn check_f_disabled_line() -> &'static str {
+    "rerun `cargo hive doctor`: this hive reads Cargo 1.100 unit dirs"
+}
+
 impl fmt::Display for CapabilityRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CapabilityRefusal::RunDoctor(why) => write!(f, "run `cargo hive doctor` first: {why}"),
-            CapabilityRefusal::Disabled { checks, .. } if checks.contains(&CheckId::F) => write!(
-                f,
-                "rerun `cargo hive doctor`: this hive reads Cargo 1.100 unit dirs"
-            ),
+            CapabilityRefusal::Disabled { checks, .. } if checks.contains(&CheckId::F) => {
+                write!(f, "{}", check_f_disabled_line())
+            }
             CapabilityRefusal::Disabled { capability, checks } => {
                 let ids: Vec<String> = checks.iter().map(|c| format!("({})", c.letter())).collect();
                 write!(

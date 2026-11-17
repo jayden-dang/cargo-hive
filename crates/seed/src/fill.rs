@@ -661,7 +661,11 @@ fn held_row(
     row.filled_at = now;
     row.last_live_at = now;
     row.repos = vec![repo.main.clone()];
-    if let Some(existing) = stored.units.iter().find(|kept| same_key(kept, &row)) {
+    if let Some(existing) = stored
+        .units
+        .iter()
+        .find(|kept| store::row_matches(kept, &store::row_key(&row)))
+    {
         row.size = existing.size;
         row.filled_at = existing.filled_at;
         return Ok(row);
@@ -688,21 +692,13 @@ fn skeleton(unit: &SourceUnit) -> Row {
     }
 }
 
-fn same_key(left: &Row, right: &Row) -> bool {
-    left.toolchain_value == right.toolchain_value
-        && left.unit_layout == right.unit_layout
-        && left.name_meta == right.name_meta
-        && left.fingerprint_hash == right.fingerprint_hash
-        && left.variant == right.variant
-}
-
 fn profile_listings(
     fs: &dyn Fs,
     target: &TargetDir,
 ) -> Result<HashMap<PathBuf, Vec<(String, EntryKind)>>, String> {
     let mut listings = HashMap::new();
     for profile in &target.profiles {
-        let dir = profile.path.join("deps");
+        let dir = unit_path::flat_deps_dir(&profile.path);
         let listing = match fs.read_dir_bounded(&dir, DEPS_CAP) {
             Ok(listing) => listing,
             Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),

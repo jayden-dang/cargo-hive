@@ -505,7 +505,7 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
     }
     for (cap, checks) in &caps.disabled {
         let line = if checks.contains(&doctor::CheckId::F) {
-            "rerun `cargo hive doctor`: this hive reads Cargo 1.100 unit dirs".to_string()
+            doctor::check_f_disabled_line().to_string()
         } else {
             let ids: Vec<String> = checks.iter().map(|c| format!("({})", c.letter())).collect();
             format!(

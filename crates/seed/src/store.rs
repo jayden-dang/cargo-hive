@@ -19,10 +19,6 @@ use cargo_hive_core::unit_path::UnitLayout;
 use cargo_hive_platform::{EntryKind, Fs};
 use cargo_hive_state::{Layout, State, StateError};
 
-fn unit_layout_is_flat(layout: &UnitLayout) -> bool {
-    *layout == UnitLayout::Flat
-}
-
 pub const STORE_FILE: &str = "store.db";
 pub const MAX_STORE_BYTES: u64 = 32 * 1024 * 1024;
 const TMP_KEEP: Duration = Duration::from_secs(86_400);
@@ -52,7 +48,7 @@ pub struct Row {
     pub registry_deps: Vec<String>,
     #[serde(default)]
     pub variant: u32,
-    #[serde(default, skip_serializing_if = "unit_layout_is_flat")]
+    #[serde(default, skip_serializing_if = "UnitLayout::is_flat")]
     pub unit_layout: UnitLayout,
 }
 
@@ -63,7 +59,7 @@ pub struct SourceUnitRef {
     pub name_meta: String,
     pub fingerprint_hash: String,
     pub variant: u32,
-    #[serde(default, skip_serializing_if = "unit_layout_is_flat")]
+    #[serde(default, skip_serializing_if = "UnitLayout::is_flat")]
     pub unit_layout: UnitLayout,
 }
 

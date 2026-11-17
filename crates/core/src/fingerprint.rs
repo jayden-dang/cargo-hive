@@ -567,6 +567,14 @@ struct ProfileAccum<'a> {
     problem: &'a mut Option<String>,
 }
 
+fn output_names(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|n| n.starts_with("output-"))
+        .cloned()
+        .collect()
+}
+
 fn absorb_fingerprint_dir(dir: &Path, loc: UnitLoc, names: &[String], acc: &mut ProfileAccum<'_>) {
     if names.is_empty() {
         return;
@@ -578,11 +586,7 @@ fn absorb_fingerprint_dir(dir: &Path, loc: UnitLoc, names: &[String], acc: &mut 
             loc,
             stem: None,
             features: None,
-            outputs: names
-                .iter()
-                .filter(|n| n.starts_with("output-"))
-                .cloned()
-                .collect(),
+            outputs: output_names(names),
             deps: Vec::new(),
         });
         return;
@@ -613,11 +617,7 @@ fn absorb_fingerprint_dir(dir: &Path, loc: UnitLoc, names: &[String], acc: &mut 
                 loc,
                 stem: Some(stem),
                 features: Some(features),
-                outputs: names
-                    .iter()
-                    .filter(|n| n.starts_with("output-"))
-                    .cloned()
-                    .collect(),
+                outputs: output_names(names),
                 deps,
             });
         }

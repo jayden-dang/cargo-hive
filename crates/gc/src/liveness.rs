@@ -448,7 +448,7 @@ fn unit_dir_dead_files(
     }
 
     let unit = unit_path::unit_dir(profile, loc).expect("unit-dir layout has a unit dir");
-    let run_dir = unit.join("run");
+    let run_dir = unit_path::run_dir(profile, loc).expect("unit-dir layout has a run dir");
     match fs.entry_stat(&run_dir) {
         Ok(stat) if stat.kind == EntryKind::Dir => files.push(run_dir),
         Ok(_) => {}

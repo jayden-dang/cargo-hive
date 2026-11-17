@@ -18,7 +18,7 @@ use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_core::fingerprint;
 use cargo_hive_core::liveness;
 use cargo_hive_core::size::{MAX_DEPTH, allocated_bytes};
-use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
+use cargo_hive_core::unit_path::{self, UnitLayout, UnitLoc};
 use cargo_hive_platform::{EntryKind, Fs};
 
 use super::Error;
@@ -626,26 +626,22 @@ fn area(rel: &Path, layout: UnitLayout) -> u8 {
             3
         }
         UnitLayout::UnitDir => {
-            let comps: Vec<_> = rel.components().collect();
-            for i in 0..comps.len().saturating_sub(3) {
-                let (Component::Normal(build), Component::Normal(_pkg), Component::Normal(hex)) =
-                    (&comps[i], &comps[i + 1], &comps[i + 2])
-                else {
-                    continue;
-                };
-                if *build != "build"
-                    || fingerprint::UnitHash::parse(&hex.to_string_lossy()).is_none()
-                {
-                    continue;
-                }
-                return match comps.get(i + 3).and_then(|c| c.as_os_str().to_str()) {
-                    Some("out") => 0,
-                    Some("run") => 1,
-                    Some("fingerprint") => 2,
-                    _ => 3,
-                };
+            let Some(root) = unit_path::unit_dir_of(rel) else {
+                return 3;
+            };
+            let Ok(rest) = rel.strip_prefix(&root) else {
+                return 3;
+            };
+            match rest
+                .components()
+                .next()
+                .and_then(|c| c.as_os_str().to_str())
+            {
+                Some("out") => 0,
+                Some("run") => 1,
+                Some("fingerprint") => 2,
+                _ => 3,
             }
-            3
         }
     }
 }

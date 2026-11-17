@@ -15,6 +15,12 @@ pub enum UnitLayout {
     UnitDir,
 }
 
+impl UnitLayout {
+    pub fn is_flat(&self) -> bool {
+        *self == Self::Flat
+    }
+}
+
 /// Where a unit lives: its layout and the shared `<package>-<16 hex>` name-meta.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UnitLoc {
@@ -77,6 +83,14 @@ pub fn outputs(profile: &Path, loc: &UnitLoc) -> PathBuf {
     match loc.layout {
         UnitLayout::Flat => flat_deps_dir(profile),
         UnitLayout::UnitDir => unit_root(profile, loc).join("out"),
+    }
+}
+
+/// The `run/` directory for a unit-dir unit; `None` for flat.
+pub fn run_dir(profile: &Path, loc: &UnitLoc) -> Option<PathBuf> {
+    match loc.layout {
+        UnitLayout::Flat => None,
+        UnitLayout::UnitDir => Some(unit_root(profile, loc).join("run")),
     }
 }
 

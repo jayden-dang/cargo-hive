@@ -693,7 +693,11 @@ pub fn list_profile(
                         && fingerprint::UnitHash::parse(&child_name).is_some()
                     {
                         saw_unit_dir = true;
-                        let out_dir = child.join(&child_name).join("out");
+                        let loc = unit_path::UnitLoc {
+                            layout: unit_path::UnitLayout::UnitDir,
+                            name_meta: format!("{name}-{child_name}"),
+                        };
+                        let out_dir = unit_path::outputs(profile, &loc);
                         push_out_listing(fs, &out_dir, deps_cap, &mut objects, &mut candidates)?;
                         continue;
                     }

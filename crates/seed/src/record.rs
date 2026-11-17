@@ -23,10 +23,6 @@ use cargo_hive_state::{Layout, State, StateError};
 pub const SEEDS_FILE: &str = "seeds.json";
 pub const MAX_SEEDS_BYTES: u64 = 16 * 1024 * 1024;
 
-fn unit_layout_is_flat(layout: &UnitLayout) -> bool {
-    *layout == UnitLayout::Flat
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeededUnit {
     pub rel_profile: PathBuf,
@@ -34,7 +30,7 @@ pub struct SeededUnit {
     pub stamp: Option<(PathBuf, u64)>,
     pub has_build: bool,
     pub deps_files: u32,
-    #[serde(default, skip_serializing_if = "unit_layout_is_flat")]
+    #[serde(default, skip_serializing_if = "UnitLayout::is_flat")]
     pub unit_layout: UnitLayout,
 }
 
@@ -139,10 +135,12 @@ fn dep_listings(
 ) -> Result<BTreeMap<PathBuf, Vec<String>>, String> {
     let mut dirs = BTreeSet::new();
     for profile in &target.profiles {
-        dirs.insert(profile.path.join("deps"));
+        dirs.insert(unit_path::flat_deps_dir(&profile.path));
     }
     for unit in &record.units {
-        dirs.insert(target.path.join(&unit.rel_profile).join("deps"));
+        dirs.insert(unit_path::flat_deps_dir(
+            &target.path.join(&unit.rel_profile),
+        ));
     }
     let mut listed = BTreeMap::new();
     for dir in dirs {
@@ -211,9 +209,16 @@ fn unit_missing(
     };
     match unit.unit_layout {
         UnitLayout::Flat => {
-            let present = counted_deps(&profile.join("deps"), deps, &unit.dir_name, cap)?;
+            let present = counted_deps(
+                &unit_path::flat_deps_dir(&profile),
+                deps,
+                &unit.dir_name,
+                cap,
+            )?;
             let unit_dir_gone = !is_dir(&unit_path::fingerprint_dir(&profile, &loc));
-            let build_gone = unit.has_build && !is_dir(&profile.join("build").join(&unit.dir_name));
+            let run_stamp = unit_path::stamp(&profile, &loc, fingerprint::UnitKind::RunBuildScript);
+            let build_gone =
+                unit.has_build && !is_dir(run_stamp.parent().expect("stamp path has a parent"));
             Ok(unit_dir_gone || build_gone || present < unit.deps_files)
         }
         UnitLayout::UnitDir => {
@@ -296,22 +301,9 @@ fn stamp_present(target: &Path, unit: &SeededUnit) -> bool {
         layout: unit.unit_layout,
         name_meta: unit.dir_name.clone(),
     };
-    match unit.unit_layout {
-        UnitLayout::Flat => [".fingerprint", "build"].into_iter().any(|base| {
-            fs::metadata(
-                profile
-                    .join(base)
-                    .join(&unit.dir_name)
-                    .join(fingerprint::INVOKED_TIMESTAMP),
-            )
-            .is_ok()
-        }),
-        UnitLayout::UnitDir => {
-            let lib_stamp = unit_path::stamp(&profile, &loc, fingerprint::UnitKind::Lib);
-            let run_stamp = unit_path::stamp(&profile, &loc, fingerprint::UnitKind::RunBuildScript);
-            fs::metadata(lib_stamp).is_ok() || fs::metadata(run_stamp).is_ok()
-        }
-    }
+    let lib_stamp = unit_path::stamp(&profile, &loc, fingerprint::UnitKind::Lib);
+    let run_stamp = unit_path::stamp(&profile, &loc, fingerprint::UnitKind::RunBuildScript);
+    fs::metadata(lib_stamp).is_ok() || fs::metadata(run_stamp).is_ok()
 }
 
 fn file_mtime_ns(path: &Path) -> Option<u64> {

@@ -469,16 +469,22 @@ pub fn unit_files(
     let mut files = Vec::new();
     match unit.layout {
         UnitLayout::Flat => {
-            for sub in [".fingerprint", "build"] {
-                walk(
-                    fs,
-                    target,
-                    &profile.join(sub).join(&unit.dir_name),
-                    dir_cap,
-                    0,
-                    &mut files,
-                )?;
-            }
+            let loc = UnitLoc {
+                layout: UnitLayout::Flat,
+                name_meta: unit.dir_name.clone(),
+            };
+            walk(
+                fs,
+                target,
+                &unit_path::fingerprint_dir(&profile, &loc),
+                dir_cap,
+                0,
+                false,
+                &mut files,
+            )?;
+            let run_stamp = unit_path::stamp(&profile, &loc, fingerprint::UnitKind::RunBuildScript);
+            let build_dir = run_stamp.parent().expect("stamp path has a parent");
+            walk(fs, target, build_dir, dir_cap, 0, false, &mut files)?;
             let meta = fingerprint::unit_hash(&unit.dir_name)
                 .map(|h| h.to_string())
                 .unwrap_or_default();
@@ -491,15 +497,9 @@ pub fn unit_files(
                 .map(|(name, _)| name.as_str())
                 .collect();
             names.sort_unstable();
+            let deps = unit_path::flat_deps_dir(&profile);
             for name in names {
-                take_entry(
-                    fs,
-                    target,
-                    &profile.join("deps").join(name),
-                    dir_cap,
-                    0,
-                    &mut files,
-                )?;
+                take_entry(fs, target, &deps.join(name), dir_cap, 0, false, &mut files)?;
             }
         }
         UnitLayout::UnitDir => {
@@ -510,7 +510,7 @@ pub fn unit_files(
             let Some(root) = unit_path::unit_dir(&profile, &loc) else {
                 return Ok(files);
             };
-            walk_unit_dir(fs, target, &root, dir_cap, 0, &mut files)?;
+            walk(fs, target, &root, dir_cap, 0, true, &mut files)?;
         }
     }
     files.sort();
@@ -539,7 +539,7 @@ enum DepClass {
 }
 
 fn list_deps(fs: &dyn Fs, profile: &Path) -> Result<Vec<(String, EntryKind)>, Skip> {
-    let dir = profile.join("deps");
+    let dir = unit_path::flat_deps_dir(profile);
     match fs.read_dir_bounded(&dir, DEPS_CAP) {
         Ok(entries) => Ok(entries),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -587,7 +587,7 @@ fn flat_dep_class(
         .iter()
         .any(|(name, kind)| name == &dep_name && *kind == EntryKind::File)
     {
-        Some(profile.join("deps").join(dep_name))
+        Some(unit_path::flat_deps_dir(profile).join(dep_name))
     } else {
         build_dep_info(fs, profile, dir_name, &meta_text)?
     };
@@ -656,7 +656,15 @@ fn build_dep_info(
     dir_name: &str,
     meta: &str,
 ) -> Result<Option<PathBuf>, Skip> {
-    let dir = profile.join("build").join(dir_name);
+    let loc = UnitLoc {
+        layout: UnitLayout::Flat,
+        name_meta: dir_name.to_string(),
+    };
+    let run_stamp = unit_path::stamp(profile, &loc, fingerprint::UnitKind::RunBuildScript);
+    let dir = run_stamp
+        .parent()
+        .expect("stamp path has a parent")
+        .to_path_buf();
     let entries = match fs.read_dir_bounded(&dir, CRATE_DIR_CAP) {
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -808,6 +816,7 @@ fn walk(
     dir: &Path,
     dir_cap: usize,
     depth: usize,
+    skip_rcgu_under_out: bool,
     files: &mut Vec<PathBuf>,
 ) -> Result<(), Refused> {
     if depth > MAX_DEPTH {
@@ -824,70 +833,22 @@ fn walk(
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(Refused(dir.to_path_buf(), err.to_string())),
     };
-    for (name, _) in entries {
-        take_entry(fs, target, &dir.join(name), dir_cap, depth + 1, files)?;
-    }
-    Ok(())
-}
-
-fn walk_unit_dir(
-    fs: &dyn Fs,
-    target: &Path,
-    dir: &Path,
-    dir_cap: usize,
-    depth: usize,
-    files: &mut Vec<PathBuf>,
-) -> Result<(), Refused> {
-    if depth > MAX_DEPTH {
-        return Err(Refused(
-            dir.to_path_buf(),
-            format!(
-                "{} is deeper than {MAX_DEPTH} levels; remove directories past that depth and build the unit again",
-                dir.display()
-            ),
-        ));
-    }
-    let entries = match fs.read_dir_bounded(dir, dir_cap) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(Refused(dir.to_path_buf(), err.to_string())),
-    };
-    let skip_rcgu = dir.file_name().is_some_and(|name| name == "out");
+    let skip_rcgu = skip_rcgu_under_out && dir.file_name().is_some_and(|name| name == "out");
     for (name, _) in entries {
         if skip_rcgu && name.ends_with(".rcgu.o") {
             continue;
         }
-        take_unit_dir_entry(fs, target, &dir.join(name), dir_cap, depth + 1, files)?;
+        take_entry(
+            fs,
+            target,
+            &dir.join(name),
+            dir_cap,
+            depth + 1,
+            skip_rcgu_under_out,
+            files,
+        )?;
     }
     Ok(())
-}
-
-fn take_unit_dir_entry(
-    fs: &dyn Fs,
-    target: &Path,
-    path: &Path,
-    dir_cap: usize,
-    depth: usize,
-    files: &mut Vec<PathBuf>,
-) -> Result<(), Refused> {
-    let stat = fs
-        .entry_stat(path)
-        .map_err(|err| Refused(path.to_path_buf(), err.to_string()))?;
-    match stat.kind {
-        EntryKind::File => {
-            files.push(relative_to(target, path));
-            Ok(())
-        }
-        EntryKind::Dir => walk_unit_dir(fs, target, path, dir_cap, depth, files),
-        EntryKind::Symlink => Err(Refused(
-            path.to_path_buf(),
-            "symbolic link; remove it and build the unit again".to_string(),
-        )),
-        EntryKind::Other => Err(Refused(
-            path.to_path_buf(),
-            "not a regular file or directory; remove it and build the unit again".to_string(),
-        )),
-    }
 }
 
 fn take_entry(
@@ -896,6 +857,7 @@ fn take_entry(
     path: &Path,
     dir_cap: usize,
     depth: usize,
+    skip_rcgu_under_out: bool,
     files: &mut Vec<PathBuf>,
 ) -> Result<(), Refused> {
     let stat = fs
@@ -906,7 +868,7 @@ fn take_entry(
             files.push(relative_to(target, path));
             Ok(())
         }
-        EntryKind::Dir => walk(fs, target, path, dir_cap, depth, files),
+        EntryKind::Dir => walk(fs, target, path, dir_cap, depth, skip_rcgu_under_out, files),
         EntryKind::Symlink => Err(Refused(
             path.to_path_buf(),
             "symbolic link; remove it and build the unit again".to_string(),
