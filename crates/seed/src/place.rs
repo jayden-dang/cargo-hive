@@ -386,7 +386,11 @@ fn place_unit(
             ),
         ));
     }
-    files.sort_by(|left, right| area(left).cmp(&area(right)).then(left.cmp(right)));
+    files.sort_by(|left, right| {
+        area(left, row.unit_layout)
+            .cmp(&area(right, row.unit_layout))
+            .then(left.cmp(right))
+    });
     let mut deps_files = 0u32;
     let mut has_build = false;
     for rel in &files {
@@ -414,9 +418,11 @@ fn place_unit(
                 if ctx.account_bytes {
                     charge(ctx.fs, added, &src, &dst);
                 }
-                match area(rel) {
-                    0 => deps_files = deps_files.saturating_add(1),
-                    1 => has_build = true,
+                match (row.unit_layout, area(rel, row.unit_layout)) {
+                    (UnitLayout::Flat, 0) => deps_files = deps_files.saturating_add(1),
+                    (UnitLayout::Flat, 1) => has_build = true,
+                    (UnitLayout::UnitDir, 0) => deps_files = deps_files.saturating_add(1),
+                    (UnitLayout::UnitDir, _) => {}
                     _ => {}
                 }
             }
@@ -433,6 +439,9 @@ fn place_unit(
             }
         }
     }
+    if row.unit_layout == UnitLayout::UnitDir {
+        has_build = false;
+    }
     let stamp = read_stamp(ctx.fs, target, row);
     let outside = stamp_outside(stamp.as_ref(), ctx.now, window);
     Ok(UnitOutcome::Cloned(
@@ -442,7 +451,7 @@ fn place_unit(
             stamp,
             has_build,
             deps_files,
-            unit_layout: UnitLayout::Flat,
+            unit_layout: row.unit_layout,
         },
         outside,
     ))
@@ -567,7 +576,7 @@ fn ensure_dirs(
 
 fn read_stamp(fs: &dyn Fs, target: &Path, row: &Row) -> Option<(PathBuf, u64)> {
     let loc = UnitLoc {
-        layout: UnitLayout::Flat,
+        layout: row.unit_layout,
         name_meta: row.name_meta.clone(),
     };
     let absolute = liveness::unit_timestamp(
@@ -603,16 +612,42 @@ fn normal_only(path: &Path) -> bool {
         .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn area(rel: &Path) -> u8 {
-    for component in rel.components() {
-        match component.as_os_str().to_str() {
-            Some("deps") => return 0,
-            Some("build") => return 1,
-            Some(".fingerprint") => return 2,
-            _ => {}
+fn area(rel: &Path, layout: UnitLayout) -> u8 {
+    match layout {
+        UnitLayout::Flat => {
+            for component in rel.components() {
+                match component.as_os_str().to_str() {
+                    Some("deps") => return 0,
+                    Some("build") => return 1,
+                    Some(".fingerprint") => return 2,
+                    _ => {}
+                }
+            }
+            3
+        }
+        UnitLayout::UnitDir => {
+            let comps: Vec<_> = rel.components().collect();
+            for i in 0..comps.len().saturating_sub(3) {
+                let (Component::Normal(build), Component::Normal(_pkg), Component::Normal(hex)) =
+                    (&comps[i], &comps[i + 1], &comps[i + 2])
+                else {
+                    continue;
+                };
+                if *build != "build"
+                    || fingerprint::UnitHash::parse(&hex.to_string_lossy()).is_none()
+                {
+                    continue;
+                }
+                return match comps.get(i + 3).and_then(|c| c.as_os_str().to_str()) {
+                    Some("out") => 0,
+                    Some("run") => 1,
+                    Some("fingerprint") => 2,
+                    _ => 3,
+                };
+            }
+            3
         }
     }
-    3
 }
 
 fn is_full(err: &io::Error) -> bool {

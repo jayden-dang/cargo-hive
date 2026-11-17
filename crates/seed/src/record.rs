@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use cargo_hive_core::fingerprint::{self, DepEdge};
 use cargo_hive_core::liveness;
 use cargo_hive_core::target::TargetDir;
-use cargo_hive_core::unit_path::UnitLayout;
+use cargo_hive_core::unit_path::{self, UnitLayout, UnitLoc};
 use cargo_hive_state::{Layout, State, StateError};
 
 pub const SEEDS_FILE: &str = "seeds.json";
@@ -205,10 +205,23 @@ fn unit_missing(
     cap: usize,
 ) -> Result<bool, String> {
     let profile = target.join(&unit.rel_profile);
-    let present = counted_deps(&profile.join("deps"), deps, &unit.dir_name, cap)?;
-    let unit_dir_gone = !is_dir(&profile.join(".fingerprint").join(&unit.dir_name));
-    let build_gone = unit.has_build && !is_dir(&profile.join("build").join(&unit.dir_name));
-    Ok(unit_dir_gone || build_gone || present < unit.deps_files)
+    let loc = UnitLoc {
+        layout: unit.unit_layout,
+        name_meta: unit.dir_name.clone(),
+    };
+    match unit.unit_layout {
+        UnitLayout::Flat => {
+            let present = counted_deps(&profile.join("deps"), deps, &unit.dir_name, cap)?;
+            let unit_dir_gone = !is_dir(&unit_path::fingerprint_dir(&profile, &loc));
+            let build_gone = unit.has_build && !is_dir(&profile.join("build").join(&unit.dir_name));
+            Ok(unit_dir_gone || build_gone || present < unit.deps_files)
+        }
+        UnitLayout::UnitDir => {
+            let unit_dir_gone = !is_dir(&unit_path::fingerprint_dir(&profile, &loc));
+            let present = count_files(&unit_path::outputs(&profile, &loc), cap, 0)?;
+            Ok(unit_dir_gone || present < unit.deps_files)
+        }
+    }
 }
 
 fn is_dir(path: &Path) -> bool {
@@ -279,15 +292,26 @@ fn stamp_differs(target: &Path, unit: &SeededUnit) -> bool {
 
 fn stamp_present(target: &Path, unit: &SeededUnit) -> bool {
     let profile = target.join(&unit.rel_profile);
-    [".fingerprint", "build"].into_iter().any(|base| {
-        fs::metadata(
-            profile
-                .join(base)
-                .join(&unit.dir_name)
-                .join(fingerprint::INVOKED_TIMESTAMP),
-        )
-        .is_ok()
-    })
+    let loc = UnitLoc {
+        layout: unit.unit_layout,
+        name_meta: unit.dir_name.clone(),
+    };
+    match unit.unit_layout {
+        UnitLayout::Flat => [".fingerprint", "build"].into_iter().any(|base| {
+            fs::metadata(
+                profile
+                    .join(base)
+                    .join(&unit.dir_name)
+                    .join(fingerprint::INVOKED_TIMESTAMP),
+            )
+            .is_ok()
+        }),
+        UnitLayout::UnitDir => {
+            let lib_stamp = unit_path::stamp(&profile, &loc, fingerprint::UnitKind::Lib);
+            let run_stamp = unit_path::stamp(&profile, &loc, fingerprint::UnitKind::RunBuildScript);
+            fs::metadata(lib_stamp).is_ok() || fs::metadata(run_stamp).is_ok()
+        }
+    }
 }
 
 fn file_mtime_ns(path: &Path) -> Option<u64> {

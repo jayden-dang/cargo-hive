@@ -788,7 +788,7 @@ fn entries_of_a_value_no_checkout_maps_to_are_dropped_with_their_table_text() {
     let state = State::open_at(hive.home.path.clone()).unwrap();
     let file = store::read(&state).unwrap();
     assert!(matches!(
-        choose::choose(&file, &repo.main, &text, &[]),
+        choose::choose(&file, &repo.main, &text, &[], Some(UnitLayout::Flat)),
         Choice::NoRow { .. }
     ));
 }

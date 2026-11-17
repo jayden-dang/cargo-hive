@@ -11,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cargo_hive_core::unit_path::{self, UnitLayout};
 use common::Hive;
 use common::registry_fixture::{RegistryRepo, cargo_json};
 
@@ -167,6 +168,90 @@ fn the_counts_are_as_of_each_status() {
         "first {first} second {second}"
     );
     assert_ne!(count(&second, "reused_fresh"), fresh, "{second}");
+}
+
+#[test]
+fn status_counts_a_seeded_unit_dir_unit_fresh_then_missing_after_its_unit_dir_is_removed() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let prime = repo.worktree("prime-status");
+    let (out, receipt) = hive.json(&["seed", prime.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let profile = repo.main.join("target/debug");
+    let registry = hive
+        .cargo_home
+        .path
+        .join("registry/src/index.crates.io-1/a-1.0.0/src/lib.rs");
+    let registry = registry.display().to_string();
+    let hex = "aaaaaaaaaaaaaaaa";
+    let fp = u64::from_str_radix(hex, 16).unwrap();
+    let loc = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "reg",
+        hex,
+        "lib-reg",
+        fp,
+        &[],
+        &["libreg.rlib", "libreg.rmeta", "reg.d"],
+    );
+    fs::write(
+        unit_path::outputs(&profile, &loc).join("reg.d"),
+        format!("reg.d: {registry}\n"),
+    )
+    .unwrap();
+    let refill = repo.worktree("refill-status");
+    let (out, receipt) = hive.json(&["seed", refill.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    set_recorded_unit_layout(&hive, "unit-dir");
+    let lane = repo.worktree("status-udir");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0,
+        "{receipt}"
+    );
+    let lane_profile = lane.join("target/debug");
+    let ws_hex = "bbbbbbbbbbbbbbbb";
+    let ws_fp = u64::from_str_radix(ws_hex, 16).unwrap();
+    common::unit_dirs::plant_unit(
+        &lane_profile,
+        UnitLayout::UnitDir,
+        "app",
+        ws_hex,
+        "lib-app",
+        ws_fp,
+        &[(fp, "reg")],
+        &["libapp.rlib"],
+    );
+    let target = lane.join("target").canonicalize().unwrap();
+    let key = |name: &str| format!("{name}:{}", target.display());
+    let (_, status) = hive.json(&["status", repo.main.to_str().unwrap()]);
+    assert!(
+        status["counts"][&key("reused_fresh")].as_u64().unwrap() > 0,
+        "{status}"
+    );
+    assert_eq!(
+        status["counts"][&key("seeded_missing")]
+            .as_u64()
+            .unwrap_or(0),
+        0
+    );
+    let seeded_root = unit_path::unit_dir(&lane_profile, &loc).unwrap();
+    fs::remove_dir_all(&seeded_root).unwrap();
+    let (_, after) = hive.json(&["status", repo.main.to_str().unwrap()]);
+    assert!(
+        after["counts"][&key("seeded_missing")].as_u64().unwrap() > 0,
+        "{after}"
+    );
+}
+
+fn set_recorded_unit_layout(hive: &Hive, layout: &str) {
+    let path = hive.home.path.join("capabilities.json");
+    let mut caps: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    caps["unit_layout"] = serde_json::json!(layout);
+    fs::write(&path, caps.to_string()).unwrap();
 }
 
 fn bump_one_stamp(hive: &Hive, target: &Path) {

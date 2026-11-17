@@ -2021,7 +2021,14 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
     };
     b.toolchain(Some(toolchain.release.clone()));
     b.scope_mut().checkouts.push(real.clone());
-    let result = cargo_hive_seed::run(&ctx, &repos[0], &row, &toolchain, &cancelled);
+    let result = cargo_hive_seed::run(
+        &ctx,
+        &repos[0],
+        &row,
+        &toolchain,
+        caps.unit_layout_or_flat(),
+        &cancelled,
+    );
     let code = cargo_hive_seed::exit_code(&result);
     cargo_hive_seed::record_seed_result(&mut b, &result);
     match result {
@@ -2141,6 +2148,7 @@ fn bench_cmd(
         Limits {
             build_deadline: BUILD_DEADLINE,
         },
+        caps.unit_layout_or_flat(),
         &cancelled,
     );
     b.toolchain(Some(plan.toolchain.release.clone()));
