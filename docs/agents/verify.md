@@ -85,7 +85,7 @@ Leave `.skills/verify/`.
 
 ### doctor
 
-- **Sub-features:** checks (a) clone sharing, (b) Applesauce compression, (c) clone id, (d) exclusive lock proof, (f) fingerprint format, (g) failed-unit marker. There is no check (e); the owner-authentication check it held was removed.
+- **Sub-features:** checks (a) clone sharing, (b) APFS compression probe (Applesauce, in a scratch dir; the store is never compressed), (c) clone id, (d) exclusive lock proof, (f) fingerprint format, (g) failed-unit marker. There is no check (e); the owner-authentication check it held was removed.
 - **How to get to it (user POV):** run `cargo hive doctor` after install, and again after a toolchain change.
 - **Driving it with the shell:** `"$HIVE" doctor --json > doctor.json`; assert exit 0 and `[c["id"], c["verdict"]]` for each of `doctor.json["checks"]`.
 - **Gotchas:** below macOS 27 it still runs every check and reports the floor.
