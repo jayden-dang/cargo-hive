@@ -563,12 +563,12 @@ _Requirements: BUILDDIR-8.1, BUILDDIR-8.2_
 
 **Depends-on:** Task 3, Task 6, Task 7, Task 8, Task 12, Task 13
 
-- [ ] **Step 1:** Run `RUSTUP_TOOLCHAIN=1.100.0 scripts/gate.sh` and list each failure. Port each real-cargo assertion to `cargo_fixture::layout_of` (Task 2), never weakening what it checks on flat.
-- [ ] **Step 2:** Run `grep -rn '"\.fingerprint"\|"deps"\|join("out")\|join("run")' crates/*/src | grep -v unit_path.rs`. Expect only the profile-wide listings that `unit_path::flat_deps_dir` cannot express, each named in the report, or nothing.
-- [ ] **Step 3:** Run `scripts/gate.sh` under 1.97.1 and under 1.100.0; expect both green.
+- [x] **Step 1:** Run `RUSTUP_TOOLCHAIN=1.100.0 scripts/gate.sh` and list each failure. Port each real-cargo assertion to `cargo_fixture::layout_of` (Task 2), never weakening what it checks on flat.
+- [x] **Step 2:** Run `grep -rn '"\.fingerprint"\|"deps"\|join("out")\|join("run")' crates/*/src | grep -v unit_path.rs`. Expect only the profile-wide listings that `unit_path::flat_deps_dir` cannot express, each named in the report, or nothing.
+- [x] **Step 3:** Run `scripts/gate.sh` under 1.97.1 and under 1.100.0; expect both green.
 - [ ] **Step 4:** Update `ci.yml` to the matrix, push the branch, and confirm both jobs pass on the PR.
 - [ ] **Step 5:** After merge, the operator approves `gh api` branch protection with `contexts: ["gate (1.97.1)", "gate (1.100.0)"]`.
-- [ ] **Step 6: Commit.** `ci: require the gate on rustc 1.97.1 and 1.100.0`
+- [x] **Step 6: Commit.** `ci: require the gate on rustc 1.97.1 and 1.100.0`
 
 _Requirements: BUILDDIR-9.3_
 
