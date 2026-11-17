@@ -35,11 +35,11 @@ A pool of worktrees kept at stable paths and switched between commits, so each k
 _Avoid_: warm pool, reusable worktree
 
 **Debug object**:
-An `*.rcgu.o` file in a profile dir's `deps/` that rustc leaves for a linked binary's debug map under macOS's unpacked split-debuginfo. It is *unreferenced* when no linked binary in that profile dir names it; deleting it rebuilds nothing.
+An `*.rcgu.o` file that rustc leaves for a linked binary's debug map under macOS's unpacked split-debuginfo: in a flat profile dir's `deps/`, or directly in a unit-dir unit's `out/`. It is *unreferenced* when no linked binary in that profile dir names it; deleting it rebuilds nothing.
 _Avoid_: object file, stale .o
 
 **Linked binary**:
-A Mach-O executable, dylib or bundle (thin or fat) in a profile dir, under `deps/`, `examples/`, `build/<dir>/` or the profile dir itself, relinked recently or not. Its debug map's N_OSO entries name the loose debug objects it references; an entry of the form `lib….rlib(member.o)` names an rlib member, not a loose file.
+A Mach-O executable, dylib or bundle (thin or fat) in a profile dir — under `deps/`, `examples/`, `build/<dir>/` or the profile dir itself in the flat layout, or directly in a unit dir's `out/` in the unit-dir layout — relinked recently or not. Its debug map's N_OSO entries name the loose debug objects it references; an entry of the form `lib….rlib(member.o)` names an rlib member, not a loose file.
 _Avoid_: test binary (one kind of it), executable
 
 **Platform crate**:
@@ -59,7 +59,7 @@ Where Cargo keeps intermediates and fingerprints (`build_directory` in `cargo me
 _Avoid_: build-dir cache, intermediate dir
 
 **Unit**:
-One Cargo compilation unit: a directory under `.fingerprint/` holding exactly one fingerprint JSON, identified by `<name>-<metadata hash>` and its fingerprint hash.
+One Cargo compilation unit. In the flat layout it is a directory under `.fingerprint/` holding exactly one fingerprint JSON, identified by `<name>-<metadata hash>` and its fingerprint hash. In the unit-dir layout it is a `build/<package>/<unit hash>/` dir whose `fingerprint/` holds that same JSON and hash file.
 _Avoid_: crate (a crate has many units), artifact
 
 **Fingerprint format signature**:
@@ -103,11 +103,11 @@ _Avoid_: toolchain hash, rustc fingerprint
 _Avoid_: cache key
 
 **Entry**:
-The files the store holds for one store key, each with its path relative to the Cargo target dir: the whole `.fingerprint/<dir>/`, the whole `build/<dir>/` if present, and the `deps/` files in whose names `embedded_hashes` finds the unit's hash, except names ending in `.rcgu.o`.
+The files the store holds for one store key, each with its path relative to the Cargo target dir. For a flat unit: the whole `.fingerprint/<dir>/`, the whole `build/<dir>/` if present, and the `deps/` files in whose names `embedded_hashes` finds the unit's hash, except names ending in `.rcgu.o`. For a unit-dir unit: every file of its unit dir except the `*.rcgu.o` files in `out/`.
 _Avoid_: store item, artifact
 
 **Stamp**:
-A unit's `invoked.timestamp`, at the path `liveness::unit_timestamp` gives for its kind: under `build/<dir>/` for a run-build-script unit, under `.fingerprint/<dir>/` otherwise.
+A unit's `invoked.timestamp`, at the path `unit_path::stamp` (via `liveness::unit_timestamp`) gives for its kind and layout: flat run-build-script under `build/<dir>/`, flat otherwise under `.fingerprint/<dir>/`; unit-dir run-build-script under `run/`, unit-dir otherwise under `fingerprint/`.
 _Avoid_: timestamp file
 
 **Toolchain table**:
@@ -122,11 +122,11 @@ A unit is live if it is reachable from the roots over the fingerprint graph of i
 _Avoid_: reachability GC, mark phase
 
 **Dead unit**:
-A unit in a Decided target dir that is not live, and whose hash-keyed `deps/` and `examples/` files plus fingerprint dir may be collected. Build-script, run-build-script, doc and `other`-kind units are never dead units.
+A unit in a Decided target dir that is not live and may be collected: in the flat layout, its hash-keyed `deps/` and `examples/` files plus fingerprint dir; in the unit-dir layout, its whole unit dir. Build-script, run-build-script, doc and `other`-kind units are never dead units.
 _Avoid_: garbage unit, stale unit, orphan unit
 
 **Unit hash**:
-The 16 lowercase hex characters after the last `-` of a unit's directory name under `.fingerprint/`; it names the unit's files in `deps/` and `examples/`, and is not the fingerprint stored in its hash file.
+The 16 lowercase hex that names a unit's outputs. In the flat layout it is the characters after the last `-` of the `.fingerprint/` directory name, and it appears in `deps/` and `examples/` file names. In the unit-dir layout it is the unit dir's own name under `build/<package>/`. It is not the fingerprint stored in the hash file.
 _Avoid_: fingerprint, metadata hash
 
 **Not-current unit**:
@@ -176,6 +176,18 @@ _Avoid_: metadata file, cache file, database
 **Layout**:
 The shape a state file was written in, a whole number the file records as its first key, `layout`. A state file without the key is layout 1, the shape 0.1.0 wrote. A receipt line's `schema` plays this part for receipts, and `store.db`'s layout also covers the store's entry path scheme. `cargo_hive_core::target::Layout` is the Cargo target-dir shape (Fingerprint / NewBuildDir), not this term.
 _Avoid_: version (that is hive's release), schema (that is the receipt's)
+
+**Flat layout**:
+What Cargo 1.99 and older write under a profile dir: units as dirs under `.fingerprint/` named `<name>-<unit hash>`, outputs as hash-keyed files in `deps/` and `examples/`, and build-script dirs under `build/<name>-<unit hash>/`.
+_Avoid_: old layout, fingerprint layout (the files, not the layout)
+
+**Unit-dir layout**:
+What Cargo 1.100 writes (cargo issue 15010): each unit is one dir `build/<package>/<unit hash>/` (the unit dir) with `fingerprint/`, `out/`, and for a run-build-script unit `run/`. There is no `.fingerprint/` and no `deps/`.
+_Avoid_: new layout, build-dir layout (Cargo's name; hive says unit-dir)
+
+**Unit layout**:
+Which of the two layouts a unit, a store entry or a seeded unit is in: `flat` or `unit-dir`. Not the state-file Layout above.
+_Avoid_: layout (alone), target layout
 
 **Bench sample**:
 One timed first build that `cargo hive bench` runs in one fresh secondary checkout the caller made, with no target dir before it. It is either a cold sample or a seeded sample.

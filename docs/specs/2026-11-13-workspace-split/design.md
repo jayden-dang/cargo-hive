@@ -343,7 +343,7 @@ Reuse: rung 2 — these move whole:
 - plan_tier/{apply,build,guard,orphan,record}.rs;
 - explain.rs;
 - `cross_check_notes` (cli.rs:915). Moving it here removes the plan_tier → cli edge.
-Respects: ARCH-17, ARCH-18, ARCH-20
+Respects: ARCH-17, ARCH-22, ARCH-20
 Surface:
 - cli.rs callers of `cross_check_notes`, `plan_tier::apply::exit_code` (cli.rs:1215), `explain::*`: replace
   (path).

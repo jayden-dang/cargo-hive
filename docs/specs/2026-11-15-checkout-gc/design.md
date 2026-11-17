@@ -172,7 +172,7 @@ Reuse: rung 2:
 - `ledger::{Ledger, remove_counted}` (crates/core/src/ledger/account.rs:44).
 
 The per-unit deletion order follows apply's `removal_order` rule (apply.rs:927: `.d` files first, then the rest, the fingerprint dir last, or first when the unit has no `.d`), rewritten over paths because apply's helper works on `PlannedEntry`.
-Respects: ARCH-2, ARCH-3, ARCH-4, ARCH-9, ARCH-11, ARCH-18, ARCH-19
+Respects: ARCH-2, ARCH-3, ARCH-4, ARCH-9, ARCH-11, ARCH-22, ARCH-19
 Surface: `crates/gc/src/lib.rs` gets one `pub mod checkout; pub mod debug_map;` line. No existing reader changes, and plan, apply and auto tier are untouched (CHECKOUTGC-6.1).
 Interface:
 ```

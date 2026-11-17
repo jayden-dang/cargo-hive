@@ -209,7 +209,7 @@ Locality: extend — `src/doctor.rs`. Checks (a), (b), (c), (e) and (f) and the 
 
 Satisfies: AUTOGC-2.1, AUTOGC-2.2, AUTOGC-2.3, AUTOGC-2.4, AUTOGC-2.5, AUTOGC-2.6, AUTOGC-2.7, AUTOGC-2.8, AUTOGC-2.9, AUTOGC-2.10, AUTOGC-2.11, AUTOGC-2.12, AUTOGC-2.13, AUTOGC-2.14, AUTOGC-3.1, AUTOGC-3.2, AUTOGC-4.1, AUTOGC-4.2, AUTOGC-4.3, AUTOGC-4.5, AUTOGC-5.1, AUTOGC-5.2, AUTOGC-5.3, AUTOGC-5.5, AUTOGC-5.6, AUTOGC-6.1, AUTOGC-6.2, AUTOGC-6.3, AUTOGC-6.4, AUTOGC-6.5
 Reuse: none — new code (rung 7). No library models rustc's session naming or an inode ledger. It composes `platform::Fs`, `cargo_target::{TargetDir, Owner}`, `fingerprint::Format` and `size::MAX_DEPTH`.
-Respects: ARCH-2, ARCH-3, ARCH-4, ARCH-9, ARCH-11, ARCH-18, ARCH-19
+Respects: ARCH-2, ARCH-3, ARCH-4, ARCH-9, ARCH-11, ARCH-22, ARCH-19
 
 Interface:
 - `run(fs: &dyn Fs, targets: &[TargetDir], scope: Scope::{All, Checkouts(Vec<PathBuf>)}, opts: RunOpts{dry_run, now, account_bytes}, cancel: &dyn Fn() -> bool) -> GcReport`
