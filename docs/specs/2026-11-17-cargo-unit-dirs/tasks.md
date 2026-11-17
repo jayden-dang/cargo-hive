@@ -451,15 +451,15 @@ _Requirements: BUILDDIR-6.4, BUILDDIR-6.6, BUILDDIR-6.7_
 
 **Depends-on:** Task 9
 
-- [ ] **Step 1: Failing tests.**
+- [x] **Step 1: Failing tests.**
   - Fill on a synthetic unit-dir target with a registry lib unit and a registry build-script pair stores three `u.` entries. Each holds `fingerprint/`, `out/` minus `*.rcgu.o`, and `run/` for the run unit.
   - A build-script unit whose `out/build_script_build.d` names only registry paths is a registry unit.
   - A workspace unit is left out.
   - A changed hash file between listing and clone aborts that unit.
   - An unsupported unit-dir profile holds `<pkg>-<hex>` against eviction.
   - A partial unit dir is never filled from.
-- [ ] **Step 2: Implement.** Run the seed and cargo-hive task gates; expect pass.
-- [ ] **Step 3: Commit.** `feat(seed): fill the store from Cargo 1.100 unit dirs`
+- [x] **Step 2: Implement.** Run the seed and cargo-hive task gates; expect pass.
+- [x] **Step 3: Commit.** `feat(seed): fill the store from Cargo 1.100 unit dirs`
 
 _Requirements: BUILDDIR-6.1, BUILDDIR-6.2, BUILDDIR-6.5_
 
