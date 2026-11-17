@@ -2348,3 +2348,136 @@ fn deleting_through_execute_on_a_fixture_clone_rebuilds_no_live_unit() {
     );
     assert_eq!(report.rebuilt_live_units, 0, "{report:?}");
 }
+
+fn synthetic_target(root: &Path, profile: &Path) -> TargetDir {
+    TargetDir {
+        path: root.to_path_buf(),
+        owner: target::Owner::Unresolved {
+            reason: "test".into(),
+        },
+        profiles: vec![fingerprint::read_profile(profile)],
+        size: None,
+        unreadable: None,
+    }
+}
+
+fn age_stamp(profile: &Path, loc: &UnitLoc, stem: &str, age: Duration) {
+    let stamp =
+        cargo_hive_core::liveness::unit_timestamp(profile, loc, fingerprint::UnitKind::of(stem));
+    fs::File::open(&stamp)
+        .unwrap()
+        .set_modified(SystemTime::now() - age)
+        .unwrap();
+}
+
+#[test]
+fn a_dead_unit_dir_lists_out_d_files_then_out_run_fingerprint_and_the_unit_dir() {
+    let s = Scratch::new("liveness-udir-order");
+    let profile = s.path.join("debug");
+    fs::create_dir_all(&profile).unwrap();
+    let loc = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "d",
+        "4444444444444444",
+        "lib-d",
+        104,
+        &[],
+        &["libd.rmeta", "z.d", "a.d", "m.d", "libd.rlib"],
+    );
+    let unit = cargo_hive_core::unit_path::unit_dir(&profile, &loc).unwrap();
+    fs::create_dir_all(unit.join("run")).unwrap();
+    age_stamp(&profile, &loc, "lib-d", THIRTY_DAYS);
+    let fs_ = platform::current().unwrap().fs;
+    let Liveness::Decided { dead, .. } = cargo_hive_gc::liveness::liveness(
+        fs_.as_ref(),
+        &synthetic_target(&s.path, &profile),
+        SystemTime::now(),
+        WINDOW,
+    ) else {
+        panic!("expected Decided");
+    };
+    let dead = dead
+        .into_iter()
+        .find(|d| d.unit.loc.name_meta == loc.name_meta)
+        .expect("unit-dir lib is dead");
+    assert_eq!(
+        dead.files,
+        [
+            unit.join("out").join("a.d"),
+            unit.join("out").join("m.d"),
+            unit.join("out").join("z.d"),
+            unit.join("out"),
+            unit.join("run"),
+            unit.join("fingerprint"),
+            unit.clone(),
+        ]
+    );
+}
+
+#[test]
+fn a_mixed_profile_keeps_flat_dead_files_and_unit_dir_order() {
+    let s = Scratch::new("liveness-udir-mixed");
+    let profile = s.path.join("debug");
+    fs::create_dir_all(profile.join(".fingerprint")).unwrap();
+    let flat = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::Flat,
+        "d",
+        "4444444444444444",
+        "lib-d",
+        104,
+        &[],
+        &["dep-4444444444444444.o"],
+    );
+    age_stamp(&profile, &flat, "lib-d", THIRTY_DAYS);
+    let ud = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "u",
+        "5555555555555555",
+        "lib-u",
+        105,
+        &[],
+        &["u.d"],
+    );
+    age_stamp(&profile, &ud, "lib-u", THIRTY_DAYS);
+    fs::create_dir_all(profile.join("examples")).unwrap();
+    fs::write(profile.join("examples").join("ex-4444444444444444.d"), "").unwrap();
+    let fs_ = platform::current().unwrap().fs;
+    let Liveness::Decided { dead, .. } = cargo_hive_gc::liveness::liveness(
+        fs_.as_ref(),
+        &synthetic_target(&s.path, &profile),
+        SystemTime::now(),
+        WINDOW,
+    ) else {
+        panic!("expected Decided");
+    };
+    assert_eq!(dead.len(), 2);
+    let flat_dead = dead
+        .iter()
+        .find(|d| d.unit.loc.name_meta == flat.name_meta)
+        .unwrap();
+    assert_eq!(
+        flat_dead.files,
+        [
+            profile.join(".fingerprint").join(&flat.name_meta),
+            profile.join("deps").join("dep-4444444444444444.o"),
+            profile.join("examples").join("ex-4444444444444444.d"),
+        ]
+    );
+    let unit = cargo_hive_core::unit_path::unit_dir(&profile, &ud).unwrap();
+    let ud_dead = dead
+        .iter()
+        .find(|d| d.unit.loc.name_meta == ud.name_meta)
+        .unwrap();
+    assert_eq!(
+        ud_dead.files,
+        [
+            unit.join("out").join("u.d"),
+            unit.join("out"),
+            unit.join("fingerprint"),
+            unit.clone(),
+        ]
+    );
+}
