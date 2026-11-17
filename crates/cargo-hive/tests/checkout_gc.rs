@@ -791,7 +791,7 @@ fn a_dsym_dir_of_a_dead_unit_is_deleted() {
     let hive = Hive::ready();
     let repo = aged_binaries(&hive);
     let target = repo.main.join("target");
-    let dead = oldest_fingerprint_unit(&target);
+    let (dead, _) = oldest_fingerprint_unit(&target);
     let hash = dead.rsplit('-').next().unwrap();
     let plant = orphan_object_dir(&target.join("debug"));
     let dsym = plant.join(format!("unit-{hash}.dSYM"));
@@ -882,12 +882,39 @@ fn an_object_swapped_after_its_stat_is_refused() {
 }
 
 #[test]
+fn stamp_for_a_run_build_script_uses_the_kind_specific_path() {
+    for layout in [UnitLayout::UnitDir, UnitLayout::Flat] {
+        let scratch = Scratch::new("stamp-rbs");
+        let target = scratch.path.join("target");
+        let profile = target.join("debug");
+        fs::create_dir_all(&profile).unwrap();
+        let hex = "0123456789abcdef";
+        let loc = common::unit_dirs::plant_unit(
+            &profile,
+            layout,
+            "pkg",
+            hex,
+            "run-build-script",
+            u64::from_str_radix(hex, 16).unwrap(),
+            &[],
+            &[],
+        );
+        let want = unit_path::stamp(
+            &profile,
+            &loc,
+            cargo_hive_core::fingerprint::UnitKind::RunBuildScript,
+        );
+        assert!(want.is_file(), "{} ({layout:?})", want.display());
+        assert_eq!(stamp_for(&target, &loc.name_meta), want, "{layout:?}");
+    }
+}
+
+#[test]
 fn a_unit_changed_between_scan_and_lock_is_judged_on_the_fresh_read() {
     let hive = Hive::ready();
     let repo = aged_binaries(&hive);
     let target = repo.main.join("target");
-    let dead = oldest_fingerprint_unit(&target);
-    let stamp = stamp_for(&target, &dead);
+    let (dead, stamp) = oldest_fingerprint_unit(&target);
     let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
     let before_dead = decide(&target).1.len();
     assert!(before_dead >= 1, "need a dead unit before the revive");
@@ -2114,11 +2141,29 @@ fn fingerprint_dir_for(target: &Path, name_meta: &str) -> PathBuf {
 }
 
 fn stamp_for(target: &Path, name_meta: &str) -> PathBuf {
-    unit_path::stamp(
-        &target.join("debug"),
-        &unit_loc_for(target, name_meta),
-        cargo_hive_core::fingerprint::UnitKind::Lib,
-    )
+    let profile = target.join("debug");
+    let loc = unit_loc_for(target, name_meta);
+    unit_path::stamp(&profile, &loc, kind_for_unit(target, name_meta))
+}
+
+fn kind_for_unit(target: &Path, name_meta: &str) -> cargo_hive_core::fingerprint::UnitKind {
+    let report = cargo_hive_core::fingerprint::read_profile(&target.join("debug"));
+    if let Some(graph) = &report.graph {
+        if let Some(unit) = graph.units.iter().find(|u| u.loc.name_meta == name_meta) {
+            return unit.kind;
+        }
+    }
+    report
+        .not_current_units
+        .iter()
+        .find(|nc| nc.loc.name_meta == name_meta)
+        .map(|nc| {
+            nc.stem.as_deref().map_or(
+                cargo_hive_core::fingerprint::UnitKind::Other,
+                cargo_hive_core::fingerprint::UnitKind::of,
+            )
+        })
+        .unwrap_or(cargo_hive_core::fingerprint::UnitKind::Lib)
 }
 
 /// Directory where a planted unreferenced `.rcgu.o` is visible to checkout GC.
@@ -2199,18 +2244,18 @@ fn find_linked_named(debug: &Path, prefix: &str) -> Option<PathBuf> {
     }
 }
 
-fn oldest_fingerprint_unit(target: &Path) -> String {
+fn oldest_fingerprint_unit(target: &Path) -> (String, PathBuf) {
     let profile = target.join("debug");
     let report = cargo_hive_core::fingerprint::read_profile(&profile);
-    let mut best: Option<(SystemTime, String)> = None;
+    let mut best: Option<(SystemTime, String, PathBuf)> = None;
     let mut consider = |loc: &unit_path::UnitLoc, kind: cargo_hive_core::fingerprint::UnitKind| {
         let stamp = unit_path::stamp(&profile, loc, kind);
         let Ok(meta) = fs::metadata(&stamp) else {
             return;
         };
         let t = meta.modified().unwrap();
-        if best.as_ref().is_none_or(|(b, _)| t < *b) {
-            best = Some((t, loc.name_meta.clone()));
+        if best.as_ref().is_none_or(|(b, _, _)| t < *b) {
+            best = Some((t, loc.name_meta.clone(), stamp));
         }
     };
     if let Some(graph) = &report.graph {
@@ -2225,7 +2270,8 @@ fn oldest_fingerprint_unit(target: &Path) -> String {
         );
         consider(&nc.loc, kind);
     }
-    best.expect("a fingerprint unit").1
+    let (_, name, stamp) = best.expect("a fingerprint unit");
+    (name, stamp)
 }
 
 fn newest_fingerprint_unit(target: &Path) -> String {
