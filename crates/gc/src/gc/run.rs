@@ -6,9 +6,10 @@ use super::is_temp_entry;
 use super::plan::{self, Action};
 use cargo_hive_cargo::discover::Scope;
 use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
-use cargo_hive_core::fingerprint::Format;
+use cargo_hive_core::fingerprint::{Format, UnitHash};
 use cargo_hive_core::ledger::{Bytes, Ledger, RemoveFailed, remove_counted};
 use cargo_hive_core::target::TargetDir;
+use cargo_hive_core::unit_path::{self, UnitLayout, UnitLoc};
 use cargo_hive_platform::{EntryKind, Fs, HeldLock, TryLock};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -337,6 +338,65 @@ impl Runner<'_> {
                     }
                     if self.remove_measured(target, &deps.join(&name)) {
                         c.temp_entries_deleted += 1;
+                    }
+                }
+            }
+        }
+        let build = profile.join("build");
+        match self.fs.read_dir_bounded(&build, CRATE_DIR_CAP) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => self.skip(&build, format!("could not list it: {e}")),
+            Ok(packages) => {
+                'units: for (pkg_name, pkg_kind) in packages {
+                    if pkg_kind != EntryKind::Dir {
+                        continue;
+                    }
+                    if self.stop() {
+                        break;
+                    }
+                    let pkg_dir = build.join(&pkg_name);
+                    let children = match self.fs.read_dir_bounded(&pkg_dir, CRATE_DIR_CAP) {
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                        Err(e) => {
+                            self.skip(&pkg_dir, format!("could not list it: {e}"));
+                            break;
+                        }
+                        Ok(entries) => entries,
+                    };
+                    if !children.iter().all(|(name, kind)| {
+                        *kind == EntryKind::Dir && UnitHash::parse(name).is_some()
+                    }) {
+                        continue;
+                    }
+                    for (hex, _) in &children {
+                        if self.stop() {
+                            break 'units;
+                        }
+                        let loc = UnitLoc {
+                            layout: UnitLayout::UnitDir,
+                            name_meta: format!("{pkg_name}-{hex}"),
+                        };
+                        let out = unit_path::outputs(profile, &loc);
+                        match self.fs.read_dir_bounded(&out, DEPS_CAP) {
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                            Err(e) => {
+                                self.skip(&out, format!("could not list it: {e}"));
+                                break 'units;
+                            }
+                            Ok(entries) => {
+                                for (name, kind) in entries {
+                                    if !is_temp_entry(&name, kind) {
+                                        continue;
+                                    }
+                                    if self.stop() {
+                                        break 'units;
+                                    }
+                                    if self.remove_measured(target, &out.join(&name)) {
+                                        c.temp_entries_deleted += 1;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

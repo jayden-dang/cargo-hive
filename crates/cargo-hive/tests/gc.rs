@@ -1,6 +1,8 @@
 #![cfg(target_os = "macos")]
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
+use cargo_hive_core::unit_path::{self, UnitLayout};
+use common::unit_dirs::plant_unit;
 use common::{
     Hive, Scratch, crate_dirs, git, init_repo, plant_session, register, sessions_in, wait_within,
 };
@@ -184,6 +186,59 @@ fn temp_entries_go_and_look_alikes_stay() {
     assert_eq!(count(&r, "temp_entries_deleted"), 2, "{r}");
     assert!(!deps.join("rmetaAb12").exists() && !deps.join("rustcQw3").exists());
     assert!(deps.join("rustc_hash-0123456789abcdef.d").exists());
+}
+
+#[test]
+fn unit_dir_out_temp_entries_go_under_the_build_lock_and_look_alikes_stay() {
+    let hive = Hive::ready();
+    let s = Scratch::new("gc-unit-temps");
+    let repo = init_repo(&s.path.join("app"), "");
+    hive.build_with_sessions(&repo, None);
+    register(&hive, &repo);
+    let target = repo.join("target");
+    let profile = target.join("debug");
+    let loc = plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "probe",
+        "0123456789abcdef",
+        "lib-probe",
+        1,
+        &[],
+        &["libprobe.rlib"],
+    );
+    let out = unit_path::outputs(&profile, &loc);
+    fs::create_dir_all(out.join("rmetaAb12")).unwrap();
+    fs::write(out.join("rmetaAb12/lib.rmeta"), vec![1u8; 4096]).unwrap();
+    fs::create_dir_all(out.join("rustcX9")).unwrap();
+    fs::create_dir_all(out.join("rmeta-not")).unwrap();
+    std::os::unix::fs::symlink(&repo, out.join("rmetaZ")).unwrap();
+    assert!(
+        session_counts(&target).values().any(|n| *n > 1),
+        "the fixture has no superseded session"
+    );
+
+    let mut build_holder = hive.hold_lock_child("flock", &profile.join(".cargo-build-lock"));
+    let (_, held) = gc(&hive, &[repo.to_str().unwrap()]);
+    assert!(
+        out.join("rmetaAb12").exists() && out.join("rustcX9").exists(),
+        "{held}"
+    );
+    assert!(count(&held, "skipped_held") >= 1, "{held}");
+    assert!(count(&held, "sessions_deleted") >= 1, "{held}");
+    assert!(
+        session_counts(&target).values().all(|n| *n == 1),
+        "{:?}",
+        session_counts(&target)
+    );
+    build_holder.kill().unwrap();
+    build_holder.wait().unwrap();
+
+    let (_, r) = gc(&hive, &[repo.to_str().unwrap()]);
+    assert_eq!(count(&r, "temp_entries_deleted"), 2, "{r}");
+    assert!(!out.join("rmetaAb12").exists() && !out.join("rustcX9").exists());
+    assert!(out.join("rmeta-not").exists());
+    assert!(fs::symlink_metadata(out.join("rmetaZ")).is_ok() && repo.exists());
 }
 
 #[test]
