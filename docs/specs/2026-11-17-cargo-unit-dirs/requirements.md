@@ -2,7 +2,7 @@
 
 Feature code: BUILDDIR
 Status: Approved
-Approved: 2026-11-17, by the operator (Jayden), in session: "xác nhận" (each story confirmed as one demoable act)
+Approved: 2026-11-17, by the operator (Jayden), in session: "xác nhận" (each story confirmed as one demoable act); BUILDDIR-1.8 and 3.6 rewordings approved 2026-11-17 with the design: "duyet"
 Date: 2026-11-17
 Roadmap item: — (issue #33, a bug outside the roadmap's items)
 
