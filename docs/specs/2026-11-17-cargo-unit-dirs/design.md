@@ -333,14 +333,15 @@ Surface:
 - UPGRADE-7.1 (only `layout` may be added): its text is retired and its successor is BUILDDIR-6.7.
 - Store entry dirs: flat entries are frozen and keep `{name_meta}-{fp}[~n]`. New unit-dir entries
   are `u.{name_meta}-{fp}[~n]`.
-- `seed::Ctx` gains `unit_layout: Option<UnitLayout>`: replace.
-  - The four `cli.rs` sites that build it pass `Capabilities::unit_layout()`.
-  - Bench's direct `run_clone` call (`bench/mod.rs:371`) gets it through the same `Ctx`.
-  - `choose` reads it from `Ctx`.
+- `seed::run` and `seed::run_clone` (`crates/seed/src/lib.rs:254,344`) gain a parameter
+  `unit_layout: Option<UnitLayout>` and pass it to `choose`, which gains the same parameter: replace.
+  The callers are the `cli.rs` seed sites and bench's `run_clone` call (`bench/mod.rs:371`), which
+  pass `Capabilities::unit_layout_or_flat()`. The shared `cargo_hive_cargo::ctx::Ctx` is left
+  unchanged, because adding a field there would break about 14 unrelated sites.
 - `parse_entry_key` (`store.rs:610`): replace. Today it would read `u.<…>` as a flat rowless key,
   which evict would then delete. Unparseable entry dirs are still skipped (`store.rs:490`).
 - `holds`, which keys `name_metas` without a layout: leave. It can only over-hold, never under-hold.
-- `choose` filters rows by `unit_layout`; a `None` layout chooses nothing (`Choice::NoRow`).
+- `choose` filters rows by `unit_layout`. A `None` layout chooses nothing: a new `Choice::NoUnitLayout` refuses, naming `cargo hive doctor`.
 
 Interface:
 - **Fill.** For a unit-dir `SourceUnit`, `unit_files` is a recursive walk of `unit_dir`, minus
