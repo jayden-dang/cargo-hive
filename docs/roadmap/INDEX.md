@@ -76,14 +76,14 @@ ID rules:
 
 ## Focus
 
-**Now:** ROAD-16
-**Next:** ROAD-17
+**Now:** ROAD-17
+**Next:** None
 
 | ID | Milestone | Outcome | Depends-on | Commitment |
 |---|---|---|---|---|
 | MILE-1 | Safe automatic reclaim | On any Mac, a user installs cargo-hive from scratch, registers a repo, and reclaims superseded incremental sessions and leftover rustc temp entries across all its checkouts, from the CLI or from an agent driving that same CLI through the hive skill, with a receipt showing per-file bytes freed and zero units rebuilt because of a deletion. | none | Closed |
 | MILE-2 | Planned reclaim | A user or agent previews closure-based garbage and orphan target dirs as a plan, and an agent applies that plan itself on any checkout and on orphan target dirs, with no owner step, hive rechecking it under locks before it deletes. | MILE-1 | Closed |
-| MILE-3 | Warm worktrees from a shared store | A new secondary checkout (a build-in-waves lane, a native Claude worktree) is seeded from a compressed, hive-owned store, so its first build recompiles zero seeded registry units while the seeded copies add about zero private bytes, and `cargo hive bench` gives the measured cold-versus-seeded time. | MILE-2 | Closed |
+| MILE-3 | Warm worktrees from a shared store | A new secondary checkout (a build-in-waves lane, a native Claude worktree) is seeded from a ~~compressed,~~ hive-owned store (uncompressed since 2026-11-11: rustc rejects a compressed rmeta), so its first build recompiles zero seeded registry units while the seeded copies add about zero private bytes, and `cargo hive bench` gives the measured cold-versus-seeded time. | MILE-2 | Closed |
 | MILE-4 | Upgrades keep hive's state | A user or agent who upgrades hive keeps every registered repo, plan, receipt and store entry an earlier release wrote, or is stopped with the file named and the command that fixes it, and hive never starts empty because it could not read what is there. | none | Closed |
 | MILE-5 | Warm agent worktrees stay fast | An agent that takes a task in a warm worktree at a stable path runs its first commands and every rebuild about as fast as in a freshly built one, however many tasks that worktree has served, with no wrapper, hook or Cargo config installed. | MILE-2 | Planned |
 
@@ -119,10 +119,10 @@ ID rules:
 
 ## MILE-3 — Warm worktrees from a shared store
 
-**Outcome:** A new secondary checkout (a build-in-waves lane, a native Claude worktree) is seeded from a compressed, hive-owned store, so its first build recompiles zero seeded registry units while the seeded copies add about zero private bytes, and `cargo hive bench` gives the measured cold-versus-seeded time.
+**Outcome:** A new secondary checkout (a build-in-waves lane, a native Claude worktree) is seeded from a ~~compressed,~~ hive-owned store (uncompressed since 2026-11-11: rustc rejects a compressed rmeta), so its first build recompiles zero seeded registry units while the seeded copies add about zero private bytes, and `cargo hive bench` gives the measured cold-versus-seeded time.
 **Goals:** GOAL-2, GOAL-3, GOAL-4, GOAL-7
 **Members:**
-- **ROAD-8** store-fill-compress — After: MILE-2 — Surfaces: None — the module layout is set in design-solution. Expected components: D8 try-locked fill, D1 key, embedded Applesauce compression in the store, `store.db` (`size`, `filled_at`, `last_live_at`, the repo that used each key), the learned toolchain table, the seed record written through state, clonefile out (D2), for each `<name>-<metadata hash>` the copy with the newest `last_live_at` among that repo's units, a CLI `seed` command that fills then clones, per-target counts of seeded units in `status`, freed-byte accounting per D7 for compressed clones, the hive skill extended to cover it.
+- **ROAD-8** store-fill-compress — After: MILE-2 — Surfaces: None — the module layout is set in design-solution. Expected components: D8 try-locked fill, D1 key, ~~embedded Applesauce compression in the store~~ (dropped 2026-11-11, the store is uncompressed), `store.db` (`size`, `filled_at`, `last_live_at`, the repo that used each key), the learned toolchain table, the seed record written through state, clonefile out (D2), for each `<name>-<metadata hash>` the copy with the newest `last_live_at` among that repo's units, a CLI `seed` command that fills then clones, per-target counts of seeded units in `status`, freed-byte accounting per D7 for compressed clones, the hive skill extended to cover it.
 - **ROAD-10** store-gc — After: ROAD-8 — Surfaces: None — the module layout is set in design-solution. Expected components: 30-day not-live eviction, rustc generation drop, cap by freeable bytes (D7), never evicting live units, the hive skill extended to cover it.
 - **ROAD-11** bench — After: ROAD-8 — Surfaces: None — the module layout is set in design-solution. Expected components: repeated cold-versus-seeded runs reporting median, p90, spread and load average, the hive skill extended to cover it.
 - **ROAD-13** agent-skill-pass — After: ROAD-10, ROAD-11 — Surfaces: None — the hive skill from ROAD-12 and its per-item extensions. Expected components: one read of the whole skill once all three milestones' commands exist, rewriting it to read as one guide rather than a stack of per-item additions, checked against the binary's actual flags and receipts. — Card: [ROAD-13](roads/ROAD-13.md)
