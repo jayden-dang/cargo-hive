@@ -20,6 +20,7 @@ use cargo_hive_core::ledger;
 use cargo_hive_core::liveness::{Liveness, Uncertain, UnitRef};
 use cargo_hive_core::receipt::{ReasonRecord, UndecidedRecord, Unmeasured};
 use cargo_hive_core::target::{Owner, TargetDir};
+use cargo_hive_core::unit_path::UnitLayout;
 use cargo_hive_state::window_days;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,7 +460,15 @@ fn add_target(plan: &mut Plan, target: PlannedTarget) {
 
 fn unit_label(target: &Path, unit: &UnitRef) -> String {
     let rel = unit.profile.strip_prefix(target).unwrap_or(&unit.profile);
-    format!("{}/{}", rel.display(), unit.loc.name_meta)
+    match unit.loc.layout {
+        UnitLayout::Flat => format!("{}/{}", rel.display(), unit.loc.name_meta),
+        UnitLayout::UnitDir => format!(
+            "{}/build/{}/{}",
+            rel.display(),
+            unit.loc.package(),
+            unit.loc.hex()
+        ),
+    }
 }
 
 fn mint_id() -> String {

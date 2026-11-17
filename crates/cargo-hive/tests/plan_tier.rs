@@ -3,12 +3,98 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use cargo_hive_core::locks::{Acquired, Reason, acquire};
 use cargo_hive_core::receipt::Outcome;
+use cargo_hive_core::target::TAG_LINE;
+use cargo_hive_core::unit_path::{self, UnitLayout, UnitLoc};
 use cargo_hive_gc::plan_tier::apply::apply;
-use common::plan_fixture::Planned;
+use common::plan_fixture::{LibCtx, Planned};
 use common::recording_fs::Recording;
+use common::unit_dirs;
+use common::{Hive, Scratch, init_repo, register};
+
+const THIRTY_DAYS: Duration = Duration::from_secs(30 * 86_400);
+
+struct UnitDirPlanned {
+    hive: Hive,
+    #[allow(dead_code)]
+    scratch: Scratch,
+    profile: PathBuf,
+    unit: PathBuf,
+    id: String,
+}
+
+fn tag_target(target: &Path) {
+    std::fs::create_dir_all(target.join("debug")).unwrap();
+    std::fs::write(
+        target.join("CACHEDIR.TAG"),
+        format!("Signature: 8a477f597d28d172789f06886806bc55\n{TAG_LINE}\n"),
+    )
+    .unwrap();
+}
+
+fn age_stamp(profile: &Path, loc: &UnitLoc, stem: &str) {
+    let stamp = cargo_hive_core::liveness::unit_timestamp(
+        profile,
+        loc,
+        cargo_hive_core::fingerprint::UnitKind::of(stem),
+    );
+    std::fs::File::open(&stamp)
+        .unwrap()
+        .set_modified(SystemTime::now() - THIRTY_DAYS)
+        .unwrap();
+}
+
+fn unit_dir_planned_with(label: &str, outputs: &[&str]) -> UnitDirPlanned {
+    let hive = Hive::ready();
+    let scratch = Scratch::new(label);
+    let repo = init_repo(&scratch.path.join("app"), "");
+    let target = repo.join("target");
+    let profile = target.join("debug");
+    tag_target(&target);
+    let loc = unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "widget",
+        "4444444444444444",
+        "lib-widget",
+        104,
+        &[],
+        outputs,
+    );
+    let unit = unit_path::unit_dir(&profile, &loc).unwrap();
+    std::fs::create_dir_all(unit.join("run")).unwrap();
+    age_stamp(&profile, &loc, "lib-widget");
+    for name in [".cargo-build-lock", ".cargo-lock"] {
+        std::fs::write(profile.join(name), b"").unwrap();
+    }
+    register(&hive, &repo);
+    let (out, planned) = hive.json(&["gc", "--plan"]);
+    assert!(out.status.success(), "{planned}");
+    let id = planned["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["class"] == "protected")
+        .unwrap_or_else(|| panic!("no protected plan in {planned}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    UnitDirPlanned {
+        hive,
+        scratch,
+        profile,
+        unit,
+        id,
+    }
+}
+
+fn unit_dir_planned(label: &str) -> UnitDirPlanned {
+    unit_dir_planned_with(label, &["libwidget.rmeta", "z.d", "a.d", "libwidget.rlib"])
+}
 
 fn skipped(a: Acquired) -> Reason {
     match a {
@@ -978,4 +1064,91 @@ fn a_target_dir_that_gained_an_owner_after_the_plan_is_not_removed() {
     let done = apply(&p.library_ctx().ctx(), &id, &|| false).unwrap();
     assert_eq!(done.outcome, Outcome::Refused);
     assert!(orphan.exists());
+}
+
+#[test]
+fn a_unit_dir_without_dot_d_files_keeps_plan_order_fingerprint_last() {
+    // No .d files: the flat re-sort would put fingerprint/ first once it is
+    // recognised. Unit-dir groups must keep plan order instead.
+    let fx = unit_dir_planned_with("apply-udir-order", &["libwidget.rmeta", "libwidget.rlib"]);
+    let rec = Recording::over_real();
+    let lib = LibCtx::open(&fx.hive, rec.fs());
+    let done = apply(&lib.ctx(), &fx.id, &|| false).unwrap();
+    assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.findings);
+    let log = rec.log();
+    let removes: Vec<&str> = log
+        .iter()
+        .filter(|l| l.starts_with("remove "))
+        .map(|l| l.strip_prefix("remove ").unwrap())
+        .collect();
+    let unit = fx.unit.to_str().unwrap();
+    let out = removes
+        .iter()
+        .position(|p| *p == format!("{unit}/out"))
+        .expect("out/");
+    let run = removes
+        .iter()
+        .position(|p| *p == format!("{unit}/run"))
+        .expect("run/");
+    let fingerprint = removes
+        .iter()
+        .position(|p| *p == format!("{unit}/fingerprint"))
+        .expect("fingerprint/");
+    let unit_pos = removes.iter().position(|p| *p == unit).expect("unit dir");
+    assert!(out < run, "run/ follows out/: {removes:?}");
+    assert!(run < fingerprint, "fingerprint/ follows run/: {removes:?}");
+    assert!(fingerprint < unit_pos, "the unit dir is last: {removes:?}");
+}
+
+#[test]
+fn a_failed_out_removal_leaves_the_unit_dir_fingerprint_present() {
+    let fx = unit_dir_planned("apply-udir-fail-out");
+    let out_dir = fx.unit.join("out");
+    let fingerprint = fx.unit.join("fingerprint");
+    let rec = Recording::over_real().fail_remove(&out_dir);
+    let lib = LibCtx::open(&fx.hive, rec.fs());
+    let done = apply(&lib.ctx(), &fx.id, &|| false).unwrap();
+    assert_eq!(done.outcome, Outcome::Partial, "{:?}", done.findings);
+    assert!(
+        done.findings
+            .iter()
+            .any(|(kind, path, _)| kind == "plan.delete_failed"
+                && path.as_ref().is_some_and(|p| p == &out_dir)),
+        "{:?}",
+        done.findings
+    );
+    assert!(
+        fingerprint.is_dir(),
+        "fingerprint/ must survive a failed out/ removal"
+    );
+    assert!(fx.unit.is_dir(), "the unit dir must survive too");
+}
+
+#[test]
+fn a_unit_dir_apply_try_locks_build_and_cargo_locks_not_the_artifact_lock() {
+    let fx = unit_dir_planned("apply-udir-locks");
+    // Present an artifact lock so a mistaken lists_examples would try it.
+    std::fs::write(fx.profile.join(".cargo-artifact-lock"), b"").unwrap();
+    let rec = Recording::over_real();
+    let lib = LibCtx::open(&fx.hive, rec.fs());
+    let done = apply(&lib.ctx(), &fx.id, &|| false).unwrap();
+    assert_eq!(done.outcome, Outcome::Applied, "{:?}", done.findings);
+    let log = rec.log();
+    let locks: Vec<&str> = log
+        .iter()
+        .filter(|l| l.starts_with("lock "))
+        .map(|l| l.as_str())
+        .collect();
+    assert!(
+        locks.iter().any(|l| l.ends_with("debug/.cargo-build-lock")),
+        "build lock missing: {locks:?}"
+    );
+    assert!(
+        locks.iter().any(|l| l.ends_with("debug/.cargo-lock")),
+        "cargo lock missing: {locks:?}"
+    );
+    assert!(
+        locks.iter().all(|l| !l.contains(".cargo-artifact-lock")),
+        "artifact lock must not be taken for a unit-dir plan: {locks:?}"
+    );
 }
