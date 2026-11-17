@@ -68,8 +68,9 @@ targets and their edges, so that I can see hive reads them instead of calling th
   with neither stays unidentified as a profile dir, as CORE-4.12 has it.
 - **BUILDDIR-1.8** WHEN status reports a profile dir THE SYSTEM SHALL name the unit layouts its units
   are in, in the human line (`flat`, `unit-dir` or `flat + unit-dir` after the edge counts) and in the
-  receipt's profile entry as `unit_layouts`, a sorted list of `"flat"` and `"unit-dir"`
-  (agent-decided: the names).
+  receipt as the counts `units_flat:<profile>` and `units_unit_dir:<profile>`, the number of units
+  in each layout, a layout with no units getting no key (agent-decided: the names; reworded
+  2026-11-17 in design, because a receipt holds per-profile counts, not profile entries).
 - **BUILDDIR-1.9** WHEN hive dates a unit-dir unit for liveness THE SYSTEM SHALL read its stamp at
   `run/invoked.timestamp` for a run-build-script unit and at `fingerprint/invoked.timestamp`
   otherwise, and the hash file inside `fingerprint/`.
@@ -120,9 +121,11 @@ targets' dead units, so that old builds' units stop filling my disk.
   apply time, the unit is still dead under liveness, the target's locks are taken, its profile dir's
   format is supported and the unit dir's device and inode equal those the plan recorded. Any other
   outcome refuses that unit as stale, as a stale flat entry is refused (GCPLAN).
-- **BUILDDIR-3.6** WHEN a dead unit dir is deleted THE SYSTEM SHALL count it in the receipt's units
-  deleted, its files in unit files deleted, and its bytes per inode in freed bytes or in deleted
-  bytes a surviving link or clone still holds.
+- **BUILDDIR-3.6** WHEN a dead unit dir is deleted THE SYSTEM SHALL count it with the counts that
+  command keeps for a flat unit (`gc --checkout`: units deleted, and unit files deleted counting
+  every file in the unit dir; `apply`: paths deleted), and its bytes per inode in freed bytes or in
+  deleted bytes a surviving link or clone still holds (reworded 2026-11-17 in design: `apply` keeps
+  no unit counts).
 - **BUILDDIR-3.7** (guard) WHEN a plan or apply handles flat units THE SYSTEM SHALL CONTINUE TO
   delete only their hash-keyed `deps/` and `examples/` files with their fingerprint dirs, and nothing
   under `build/` (ARCH-18 for the flat layout).
