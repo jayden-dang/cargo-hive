@@ -232,15 +232,15 @@ _Requirements: BUILDDIR-1.1, BUILDDIR-1.2, BUILDDIR-1.3, BUILDDIR-1.4, BUILDDIR-
 
 **Depends-on:** Task 2
 
-- [ ] **Step 1: Failing tests** in `status_targets.rs`, on synthetic registered targets:
+- [x] **Step 1: Failing tests** in `status_targets.rs`, on synthetic registered targets:
   - a unit-dir target prints `2 units, edges 1 resolved / 0 unresolved / 0 ambiguous (unit-dir)` and has `units_unit_dir:<profile>` = 2 with no `units_flat:` key;
   - a mixed target prints `(flat + unit-dir)`;
   - a partial unit dir shows `, 1 partial` and `partial_unit_dirs:<profile>` = 1;
   - a flat-only target keeps every 0.1.2 key and line, with ` (flat)` appended.
 
   Run `cargo test -p cargo-hive --test status_targets`; expect failures.
-- [ ] **Step 2: Implement.** Run the task gate for `cargo-hive-cargo` and `cargo-hive`; expect pass.
-- [ ] **Step 3: Commit.** `feat(status): name each profile dir's unit layouts`
+- [x] **Step 2: Implement.** Run the task gate for `cargo-hive-cargo` and `cargo-hive`; expect pass.
+- [x] **Step 3: Commit.** `feat(status): name each profile dir's unit layouts`
 
 _Requirements: BUILDDIR-1.8, BUILDDIR-1.4, BUILDDIR-1.10_
 
@@ -302,7 +302,7 @@ _Requirements: BUILDDIR-2.1, BUILDDIR-2.2, BUILDDIR-2.3, BUILDDIR-2.4, BUILDDIR-
 
 **Depends-on:** Task 2
 
-- [ ] **Step 1: Failing tests** on synthetic targets:
+- [x] **Step 1: Failing tests** on synthetic targets:
   - a dead unit-dir lib unit lists exactly that order;
   - a unit with no `out/` lists `fingerprint/` and the unit dir;
   - an `out/` listing error makes the target Undecided with `ListingFailed`;
@@ -311,8 +311,8 @@ _Requirements: BUILDDIR-2.1, BUILDDIR-2.2, BUILDDIR-2.3, BUILDDIR-2.4, BUILDDIR-
   - in a mixed target, flat dead units list exactly their 0.1.2 files.
 
   Run `cargo test -p cargo-hive-gc --lib liveness::`; expect failures.
-- [ ] **Step 2: Implement.** Run the gc task gate; expect pass.
-- [ ] **Step 3: Commit.** `feat(gc): list a dead unit dir's files in deletion order`
+- [x] **Step 2: Implement.** Run the gc task gate; expect pass.
+- [x] **Step 3: Commit.** `feat(gc): list a dead unit dir's files in deletion order`
 
 _Requirements: BUILDDIR-3.1, BUILDDIR-3.2, BUILDDIR-3.4_
 
@@ -391,15 +391,15 @@ _Requirements: BUILDDIR-4.1, BUILDDIR-4.2, BUILDDIR-4.3, BUILDDIR-4.4, BUILDDIR-
 
 **Depends-on:** Task 2
 
-- [ ] **Step 1: Failing tests**, on a synthetic unit-dir profile with `.cargo-build-lock`:
+- [x] **Step 1: Failing tests**, on a synthetic unit-dir profile with `.cargo-build-lock`:
   - `out/rmetaAb12` and `out/rustcX9` dirs are deleted and counted in `temp_entries_deleted`;
   - `out/rmeta-not` and a symlink named `rmetaZ` stay;
   - with the build lock held, nothing is deleted and the target is counted `skipped_held`;
   - incremental sessions are handled as before.
 
   Run `cargo test -p cargo-hive --test gc`; expect failures.
-- [ ] **Step 2: Implement.** Run the gc and cargo-hive task gates; expect pass.
-- [ ] **Step 3: Commit.** `feat(gc): delete rustc temp dirs left in unit dirs`
+- [x] **Step 2: Implement.** Run the gc and cargo-hive task gates; expect pass.
+- [x] **Step 3: Commit.** `feat(gc): delete rustc temp dirs left in unit dirs`
 
 _Requirements: BUILDDIR-5.1, BUILDDIR-5.2_
 
@@ -509,14 +509,14 @@ _Requirements: BUILDDIR-6.3, BUILDDIR-6.8_
 
 **Depends-on:** Task 2
 
-- [ ] **Step 1: Failing tests** on a synthetic unit-dir target:
+- [x] **Step 1: Failing tests** on a synthetic unit-dir target:
   - a crate built with two feature sets shows two copies in one copy group, with mode from each unit's `out/`: an rlib means build and an rmeta alone means check;
   - a failed unit-dir unit with an E0308 `output-*` is reported under `unit.failed`;
   - flat explain output is unchanged.
 
   Run `cargo test -p cargo-hive --test explain`; expect failures.
-- [ ] **Step 2: Implement.** Run the gc and cargo-hive task gates; expect pass.
-- [ ] **Step 3: Commit.** `feat(explain): read copies, splits and failed units in Cargo 1.100 unit dirs`
+- [x] **Step 2: Implement.** Run the gc and cargo-hive task gates; expect pass.
+- [x] **Step 3: Commit.** `feat(explain): read copies, splits and failed units in Cargo 1.100 unit dirs`
 
 _Requirements: BUILDDIR-7.1, BUILDDIR-7.2_
 
