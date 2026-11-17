@@ -14,6 +14,7 @@ Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
+Delivered-by: PR #34
 
 **Goal:** Every hive command reads, collects, cleans, seeds, explains and benches profile dirs whose
 units Cargo 1.100 writes as `build/<package>/<hash>/`, beside the flat layout and in the same profile
