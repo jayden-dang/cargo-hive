@@ -3,8 +3,10 @@
 //! decide liveness. Shared by the liveness tests; `cargo_in` kills a cargo that outlives its deadline.
 
 use super::{Scratch, prove, wait_within};
+use cargo_hive_core::fingerprint::{self, Format};
 use cargo_hive_core::liveness::{DeadUnit, Liveness, UnitRef};
 use cargo_hive_core::target::TargetDir;
+use cargo_hive_core::unit_path::UnitLayout;
 use cargo_hive_gc::liveness::liveness;
 use cargo_hive_platform as platform;
 use std::collections::{BTreeMap, BTreeSet};
@@ -124,6 +126,23 @@ pub fn host_triple() -> String {
 
 pub fn profile_dirs(target: &Path) -> Vec<PathBuf> {
     prove::profile_dirs_of(target).expect("a cargo-tagged target dir with readable profiles")
+}
+
+/// The single unit layout `read_profile` found in the fixture's `debug/`.
+pub fn layout_of(target: &Path) -> UnitLayout {
+    let report = fingerprint::read_profile(&target.join("debug"));
+    assert_eq!(
+        report.format,
+        Format::Supported,
+        "fixture debug/ must be a supported profile"
+    );
+    assert_eq!(
+        report.layouts.len(),
+        1,
+        "fixture debug/ must hold exactly one unit layout: {:?}",
+        report.layouts
+    );
+    report.layouts.into_iter().next().unwrap()
 }
 
 pub fn set_mtime(path: &Path, time: SystemTime) {

@@ -1592,7 +1592,7 @@ mod tests {
         write_unit(&host, D, "lib-d", 104, &[], Some(30 * DAY));
         write_unit(&cross, A, "lib-a", 101, &[], Some(HOUR));
         for (profile, sub) in [
-            (&host, "build"),
+            (&host, "build/other-0000000000000001"),
             (&host, "incremental"),
             (&host, ""),
             (&host, ".fingerprint"),

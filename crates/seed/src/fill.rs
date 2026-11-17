@@ -1005,6 +1005,7 @@ mod tests {
     };
     use cargo_hive_core::target::{Owner, TargetDir};
     use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
+    use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1109,6 +1110,8 @@ mod tests {
                     offsets: vec![0, 0],
                     targets: Vec::new(),
                 }),
+                layouts: BTreeSet::from([UnitLayout::Flat]),
+                partial_unit_dirs: 0,
             }],
             size: None,
             unreadable: None,

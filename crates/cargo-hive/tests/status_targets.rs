@@ -196,7 +196,7 @@ fn a_build_dir_outside_every_search_root_is_owned_and_its_artifact_dir_is_not_a_
 }
 
 #[test]
-fn a_profile_in_the_newer_layout_is_unsupported_has_no_edges_and_is_recorded() {
+fn a_profile_with_a_unit_dir_and_no_fingerprint_dir_is_supported() {
     let hive = Hive::ready();
     let s = Scratch::new("newlayout");
     let repo = init_repo(&s.path.join("app"), "");
@@ -206,19 +206,17 @@ fn a_profile_in_the_newer_layout_is_unsupported_has_no_edges_and_is_recorded() {
     register(&hive, &repo);
     let r = status(&hive, &[repo.to_str().unwrap()]);
     let profile = t.join("debug");
-    assert!(
-        finding(&r, "profile.unsupported", &profile)
-            .unwrap()
-            .contains(".fingerprint")
-    );
+    assert_eq!(finding(&r, "profile.unsupported", &profile), None);
     assert_eq!(
         count(&r, &format!("edges_resolved:{}", profile.display())),
-        None
+        Some(0)
     );
     let snapshot: serde_json::Value =
         serde_json::from_slice(&fs::read(hive.home.path.join("snapshot.json")).unwrap()).unwrap();
     assert!(
-        snapshot["unsupported_profiles"][profile.to_str().unwrap()].is_string(),
+        snapshot["unsupported_profiles"]
+            .get(profile.to_str().unwrap())
+            .is_none(),
         "{snapshot}"
     );
 }

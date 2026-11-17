@@ -310,6 +310,7 @@ fn an_unsupported_profile_is_reported_and_left_alone() {
     register(&hive, &repo);
     let weird = repo.join("weird");
     fs::create_dir_all(weird.join("debug/build/fixture/0123456789abcdef/fingerprint")).unwrap();
+    fs::write(weird.join("debug/build/stray"), b"x").unwrap();
     fs::write(
         weird.join("CACHEDIR.TAG"),
         "# This file is a cache directory tag created by cargo.\n",

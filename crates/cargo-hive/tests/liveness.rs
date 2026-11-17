@@ -2241,6 +2241,8 @@ fn profile_report(path: &Path) -> fingerprint::ProfileReport {
         not_current_units: Vec::new(),
         edges: None,
         graph: None,
+        layouts: Default::default(),
+        partial_unit_dirs: 0,
     }
 }
 

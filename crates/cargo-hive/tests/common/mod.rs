@@ -523,6 +523,7 @@ pub mod prove;
 pub mod recording_fs;
 pub mod registry_fixture;
 pub mod store_fixture;
+pub mod unit_dirs;
 
 /// A `git` first on PATH that logs each call's working directory and arguments, then runs the real git.
 pub fn counting_git(dir: &Path, log: &Path) -> String {

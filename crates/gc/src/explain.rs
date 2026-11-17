@@ -3225,6 +3225,8 @@ mod tests {
                     units,
                     targets: Vec::new(),
                 }),
+                layouts: std::collections::BTreeSet::from([UnitLayout::Flat]),
+                partial_unit_dirs: 0,
             }],
             size: None,
             unreadable: None,

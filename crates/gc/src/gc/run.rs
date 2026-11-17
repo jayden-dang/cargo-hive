@@ -671,6 +671,8 @@ mod tests {
                 not_current_units: Vec::new(),
                 edges: None,
                 graph: None,
+                layouts: BTreeSet::new(),
+                partial_unit_dirs: 0,
             }],
             size: None,
             unreadable: None,

@@ -767,6 +767,8 @@ mod tests {
                     units: graph_units,
                     targets: Vec::new(),
                 }),
+                layouts: BTreeSet::from([UnitLayout::Flat]),
+                partial_unit_dirs: 0,
             }],
             size: None,
             unreadable: None,
