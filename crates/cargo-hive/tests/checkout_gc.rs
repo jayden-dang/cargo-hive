@@ -2,11 +2,13 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 
-use common::cargo_fixture::{THIRTY_DAYS, backdate_all, decide, set_mtime};
+use cargo_hive_core::unit_path::{self, UnitLayout};
+use common::cargo_fixture::{THIRTY_DAYS, backdate_all, decide, layout_of, set_mtime};
 use common::plan_fixture::tree;
 use common::recording_fs::Recording;
 use common::registry_fixture::{RegistryRepo, cargo_json, set_target_dir};
-use common::{Hive, Scratch, git, interrupt, wait_within};
+use common::unit_dirs::plant_unit;
+use common::{Hive, Scratch, git, init_repo, interrupt, register, wait_within};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -1453,6 +1455,402 @@ fn a_binary_whose_read_fails_keeps_every_object_in_its_profile() {
         "{:?}",
         report.findings
     );
+}
+
+#[test]
+fn a_dead_unit_dir_is_deleted_in_order_and_its_files_are_counted() {
+    let hive = Hive::ready();
+    let s = Scratch::new("checkout-udir-dead");
+    let repo = init_repo(&s.path.join("app"), "");
+    register(&hive, &repo);
+    hive.build_crate(&repo, None);
+    let target = repo.join("target");
+    let profile = target.join("debug");
+    let loc = plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "probe",
+        "0123456789abcdef",
+        "lib-probe",
+        42,
+        &[],
+        &["libprobe.rmeta", "z.d", "a.d", "m.d", "libprobe.rlib"],
+    );
+    let unit = unit_path::unit_dir(&profile, &loc).unwrap();
+    fs::create_dir_all(unit.join("run")).unwrap();
+    let stamp = unit_path::stamp(
+        &profile,
+        &loc,
+        cargo_hive_core::fingerprint::UnitKind::of("lib-probe"),
+    );
+    set_mtime(&stamp, SystemTime::now() - THIRTY_DAYS);
+    let expected_order = [
+        unit.join("out").join("a.d"),
+        unit.join("out").join("m.d"),
+        unit.join("out").join("z.d"),
+        unit.join("out"),
+        unit.join("run"),
+        unit.join("fingerprint"),
+        unit.clone(),
+    ];
+    let files_before = count_regular_files_under(&unit);
+    assert!(files_before > 0);
+
+    let rec = Recording::over_real();
+    let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
+    let cfg = state.config().unwrap();
+    let reg: cargo_hive_cargo::registry::Registry =
+        state.read(cargo_hive_cargo::registry::FILE).unwrap();
+    let registered: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
+    let (rows, _) = cargo_hive_cargo::discover::checkouts(
+        reg.repos.iter().find(|r| r.main == repo).unwrap(),
+        &registered,
+        &cfg,
+    );
+    let live: Vec<_> = rows.into_iter().filter(|c| !c.missing).collect();
+    let nested: Vec<PathBuf> = Vec::new();
+    let mut snapshot = cargo_hive_cargo::discover::Snapshot::default();
+    let scan = cargo_hive_cargo::discover::targets(&live, &cfg, false, &mut snapshot, || false);
+    let report = run_library(rec.fs().as_ref(), &scan, &repo, &nested);
+
+    assert!(
+        !unit.exists(),
+        "dead unit dir remained: {:?}; findings={:?}",
+        report.totals,
+        report.findings
+    );
+    assert!(
+        profile.join("build/probe").is_dir(),
+        "package dir must stay"
+    );
+    let removes: Vec<_> = rec
+        .log()
+        .into_iter()
+        .filter_map(|line| line.strip_prefix("remove ").map(PathBuf::from))
+        .filter(|p| p.starts_with(&unit) || p == &unit)
+        .collect();
+    assert_eq!(
+        removes,
+        expected_order,
+        "deletion order; log={:?}",
+        rec.log()
+    );
+    assert_eq!(report.totals.units_deleted, 1, "{report:?}");
+    assert_eq!(
+        report.totals.unit_files_deleted, files_before,
+        "unit_files_deleted must count every regular file under the unit dir: {report:?}"
+    );
+}
+
+fn count_regular_files_under(root: &Path) -> u64 {
+    let mut n = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let ft = entry.file_type().unwrap();
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+#[test]
+fn an_out_cap_hit_or_unreadable_package_dir_names_the_dir_and_deletes_no_object() {
+    let real = cargo_hive_platform::current().unwrap().fs;
+
+    let s_cap = Scratch::new("checkout-udir-out-cap");
+    let profile_cap = s_cap.path.join("debug");
+    fs::create_dir_all(&profile_cap).unwrap();
+    let loc = plant_unit(
+        &profile_cap,
+        UnitLayout::UnitDir,
+        "probe",
+        "0123456789abcdef",
+        "lib-probe",
+        1,
+        &[],
+        &["a.0.rcgu.o", "b.0.rcgu.o", "c.0.rcgu.o"],
+    );
+    let out = unit_path::outputs(&profile_cap, &loc);
+    let err =
+        cargo_hive_gc::checkout::list_profile(real.as_ref(), &profile_cap, 2, 100).unwrap_err();
+    assert!(
+        err.contains(out.display().to_string().as_str()),
+        "cap error must name the out dir: {err}"
+    );
+
+    let hive = Hive::ready();
+    let s = Scratch::new("checkout-udir-pkg-unreadable");
+    let repo = init_repo(&s.path.join("app"), "");
+    register(&hive, &repo);
+    hive.build_crate(&repo, None);
+    let profile = repo.join("target/debug");
+    let loc = plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "probe",
+        "1123456789abcdef",
+        "lib-probe",
+        2,
+        &[],
+        &["keep.0.rcgu.o", "orphan.0.rcgu.o"],
+    );
+    let out_dir = unit_path::outputs(&profile, &loc);
+    fs::write(out_dir.join("bin"), thin_execute_bytes(&["keep.0.rcgu.o"])).unwrap();
+    let orphan = out_dir.join("orphan.0.rcgu.o");
+    let keep = out_dir.join("keep.0.rcgu.o");
+    let pkg = profile.join("build/probe");
+    let objects_before = count_regular_files_under(&out_dir);
+    let fail = FailListFs {
+        real,
+        blocked: pkg.clone(),
+    };
+    let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
+    let cfg = state.config().unwrap();
+    let reg: cargo_hive_cargo::registry::Registry =
+        state.read(cargo_hive_cargo::registry::FILE).unwrap();
+    let registered: Vec<_> = reg.repos.iter().map(|r| r.main.clone()).collect();
+    let (rows, _) = cargo_hive_cargo::discover::checkouts(
+        reg.repos.iter().find(|r| r.main == repo).unwrap(),
+        &registered,
+        &cfg,
+    );
+    let live: Vec<_> = rows.into_iter().filter(|c| !c.missing).collect();
+    let mut snapshot = cargo_hive_cargo::discover::Snapshot::default();
+    let scan = cargo_hive_cargo::discover::targets(&live, &cfg, false, &mut snapshot, || false);
+    let report = run_library(&fail, &scan, &repo, &[]);
+    assert!(
+        orphan.is_file() && keep.is_file(),
+        "unreadable package dir must delete no object: {report:?}"
+    );
+    assert_eq!(
+        count_regular_files_under(&out_dir),
+        objects_before,
+        "{report:?}"
+    );
+    assert_eq!(report.totals.objects_deleted, 0, "{report:?}");
+    assert!(
+        report.findings.iter().any(|f| {
+            f.kind == "gc.objects_undecided"
+                && f.detail.contains(pkg.display().to_string().as_str())
+        }),
+        "{:?}",
+        report.findings
+    );
+}
+
+struct FailListFs {
+    real: Box<dyn cargo_hive_platform::Fs>,
+    blocked: PathBuf,
+}
+
+impl cargo_hive_platform::Fs for FailListFs {
+    fn temp_dir(
+        &self,
+        parent: &Path,
+        prefix: &str,
+    ) -> std::io::Result<cargo_hive_platform::TempDir> {
+        self.real.temp_dir(parent, prefix)
+    }
+    fn write_file(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        self.real.write_file(path, bytes)
+    }
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        self.real.read(path)
+    }
+    fn read_at(&self, path: &Path, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        self.real.read_at(path, offset, len)
+    }
+    fn hardlink(&self, src: &Path, dst: &Path) -> std::io::Result<()> {
+        self.real.hardlink(src, dst)
+    }
+    fn set_mtime(&self, path: &Path, t: SystemTime) -> std::io::Result<()> {
+        self.real.set_mtime(path, t)
+    }
+    fn mtime(&self, path: &Path) -> std::io::Result<SystemTime> {
+        self.real.mtime(path)
+    }
+    fn inode(&self, path: &Path) -> std::io::Result<u64> {
+        self.real.inode(path)
+    }
+    fn clone_file(&self, src: &Path, dst: &Path) -> std::io::Result<()> {
+        self.real.clone_file(src, dst)
+    }
+    fn create_dir(&self, path: &Path) -> std::io::Result<()> {
+        self.real.create_dir(path)
+    }
+    fn sharing(&self, path: &Path) -> std::io::Result<cargo_hive_platform::Sharing> {
+        self.real.sharing(path)
+    }
+    fn compress(&self, path: &Path) -> cargo_hive_platform::CompressOutcome {
+        self.real.compress(path)
+    }
+    fn hold_lock(
+        &self,
+        kind: cargo_hive_platform::LockKind,
+        path: &Path,
+    ) -> std::io::Result<cargo_hive_platform::LockHolder> {
+        self.real.hold_lock(kind, path)
+    }
+    fn try_lock_exclusive(&self, path: &Path) -> cargo_hive_platform::TryLock {
+        self.real.try_lock_exclusive(path)
+    }
+    fn try_lock_elsewhere(
+        &self,
+        kind: cargo_hive_platform::LockKind,
+        path: &Path,
+    ) -> std::io::Result<cargo_hive_platform::LockState> {
+        self.real.try_lock_elsewhere(kind, path)
+    }
+    fn entry_stat(&self, path: &Path) -> std::io::Result<cargo_hive_platform::EntryStat> {
+        self.real.entry_stat(path)
+    }
+    fn read_dir_bounded(
+        &self,
+        dir: &Path,
+        cap: usize,
+    ) -> std::io::Result<Vec<(String, cargo_hive_platform::EntryKind)>> {
+        if dir == self.blocked {
+            return Err(std::io::Error::other(format!(
+                "{}: permission denied",
+                dir.display()
+            )));
+        }
+        self.real.read_dir_bounded(dir, cap)
+    }
+    fn remove_tree(&self, path: &Path) -> std::io::Result<()> {
+        self.real.remove_tree(path)
+    }
+    fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        self.real.remove_file(path)
+    }
+    fn volume(&self, path: &Path) -> std::io::Result<cargo_hive_platform::VolumeInfo> {
+        self.real.volume(path)
+    }
+}
+
+#[test]
+fn a_real_cargo_unit_dir_checkout_deletes_unreferenced_out_objects() {
+    if !rustc_release_is("1.100.0") {
+        eprintln!("skip: active rustc is not 1.100.0");
+        return;
+    }
+    let hive = Hive::ready();
+    let repo = RegistryRepo::with_binaries(&hive);
+    cargo_json(&hive, &repo.main, &["test", "--no-run"]);
+    let target = repo.main.join("target");
+    let layout = layout_of(&target);
+    assert_eq!(
+        layout,
+        UnitLayout::UnitDir,
+        "1.100.0 fixture must land in the unit-dir layout"
+    );
+    let debug = target.join("debug");
+    let fs = cargo_hive_platform::current().unwrap().fs;
+    let listing =
+        cargo_hive_gc::checkout::list_profile(fs.as_ref(), &debug, 1_000_000, 100_000).unwrap();
+    assert!(
+        listing
+            .objects
+            .iter()
+            .any(|(p, _, _)| p.to_string_lossy().contains("/out/")),
+        "expected out/*.rcgu.o objects: {:?}",
+        listing.objects
+    );
+    let mut kept_names = std::collections::BTreeSet::new();
+    for path in &listing.candidates {
+        if let Ok(Some(map)) = cargo_hive_gc::debug_map::read(fs.as_ref(), path) {
+            kept_names.extend(map.loose);
+        }
+    }
+    assert!(
+        !kept_names.is_empty(),
+        "test or example binaries in out/ must name loose objects"
+    );
+    let lib_out = listing
+        .objects
+        .iter()
+        .map(|(p, _, _)| p.parent().unwrap().to_path_buf())
+        .find(|out| {
+            out.join("libapp.rlib").is_file()
+                || fs::read_dir(out).unwrap().any(|e| {
+                    let n = e.unwrap().file_name();
+                    let n = n.to_string_lossy();
+                    n.starts_with("lib") && n.ends_with(".rlib")
+                })
+        })
+        .expect("a lib unit out/ dir");
+    let before_named: Vec<_> = kept_names
+        .iter()
+        .flat_map(|name| {
+            listing
+                .objects
+                .iter()
+                .map(|(p, _, _)| p)
+                .filter(|p| p.file_name().is_some_and(|n| n == name.as_str()))
+                .cloned()
+        })
+        .collect();
+    assert!(!before_named.is_empty(), "named out objects must exist");
+    let orphan = lib_out.join("orphan-unitdirdead01.0.rcgu.o");
+    fs::write(&orphan, b"orphan").unwrap();
+    let (out, r) = checkout_gc(&hive, &repo.main);
+    assert!(out.status.success(), "{r}");
+    assert!(
+        !orphan.exists(),
+        "unreferenced lib out object remained: {r}"
+    );
+    for path in &before_named {
+        assert!(
+            path.is_file(),
+            "binary-named out object was deleted: {}: {r}",
+            path.display()
+        );
+    }
+    assert!(count(&r, "objects_deleted") >= 1, "{r}");
+    assert!(count(&r, "binaries_read") > 0, "{r}");
+}
+
+fn rustc_release_is(want: &str) -> bool {
+    let out = Command::new("rustc").arg("-V").output().unwrap();
+    String::from_utf8_lossy(&out.stdout).contains(want)
+}
+
+#[test]
+fn a_profile_with_unit_dirs_and_no_deps_still_cleans_out_objects() {
+    let hive = Hive::ready();
+    let s = Scratch::new("checkout-udir-no-deps");
+    let repo = init_repo(&s.path.join("app"), "");
+    register(&hive, &repo);
+    hive.build_crate(&repo, None);
+    let profile = repo.join("target/debug");
+    let _ = fs::remove_dir_all(profile.join("deps"));
+    assert!(!profile.join("deps").exists());
+    let loc = plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "probe",
+        "2123456789abcdef",
+        "lib-probe",
+        3,
+        &[],
+        &["keep.0.rcgu.o", "orphan.0.rcgu.o", "libprobe.rlib"],
+    );
+    let out = unit_path::outputs(&profile, &loc);
+    fs::write(out.join("bin"), thin_execute_bytes(&["keep.0.rcgu.o"])).unwrap();
+    let keep = out.join("keep.0.rcgu.o");
+    let orphan = out.join("orphan.0.rcgu.o");
+    let (cmd, r) = checkout_gc(&hive, &repo);
+    assert!(cmd.status.success(), "{r}");
+    assert!(!orphan.exists(), "unreferenced out object remained: {r}");
+    assert!(keep.is_file(), "referenced out object was deleted: {r}");
+    assert!(count(&r, "objects_deleted") >= 1, "{r}");
+    assert!(count(&r, "binaries_read") >= 1, "{r}");
 }
 
 fn run_library(
