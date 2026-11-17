@@ -475,6 +475,101 @@ fn a_live_unit_in_a_target_gc_skips_for_an_unsupported_profile_still_holds_its_k
 }
 
 #[test]
+fn an_unsupported_unit_dir_profile_holds_pkg_hex_against_eviction() {
+    let hive = Hive::ready();
+    let fs = apfs();
+    let value = 88_010u64;
+    let meta = "holdpkg-aaaaaaaaaaaaaaaa";
+    let hash = "bbbbbbbbbbbbbbbb";
+    synth_entry_layout(
+        &hive,
+        (value, meta, hash),
+        UnitLayout::UnitDir,
+        &[],
+        &[("blob", kib256(3))],
+        31 * DAY,
+    );
+    let root = hive.home.path.join("udir-unsup-hold");
+    let profile = root.join("debug");
+    let hex = "aaaaaaaaaaaaaaaa";
+    let fp = u64::from_str_radix(hex, 16).unwrap();
+    common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "holdpkg",
+        hex,
+        "lib-holdpkg",
+        fp,
+        &[],
+        &["libholdpkg.rlib"],
+    );
+    fs::create_dir_all(profile.join("build/weird-name/out")).unwrap();
+    fs::write(
+        root.join("CACHEDIR.TAG"),
+        format!("Signature: 8a477f597d28d172789f06886806bc55\n{TAG_LINE}\n"),
+    )
+    .unwrap();
+    let report = fingerprint::read_profile(&profile);
+    assert!(
+        matches!(
+            report.format,
+            cargo_hive_core::fingerprint::Format::Unsupported(_)
+        ),
+        "{:?}",
+        report.format
+    );
+    let target = TargetDir {
+        path: root.clone(),
+        owner: Owner::Unresolved {
+            reason: "hold test".into(),
+        },
+        profiles: vec![report],
+        size: None,
+        unreadable: None,
+    };
+    let before = entry_dirs(&hive)
+        .into_iter()
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&format!("u.{meta}"))
+        })
+        .expect("unit-dir store entry");
+    assert!(before.is_dir(), "{}", before.display());
+    let outcome = run_evict(
+        &hive,
+        &fs,
+        &[target],
+        Limits {
+            cap_bytes: CAP_BYTES,
+            max_age_secs: MAX_AGE_SECS,
+        },
+        false,
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_entries_evicted_age"),
+        0,
+        "{:?}",
+        outcome.counts
+    );
+    assert!(
+        before.is_dir(),
+        "unsupported unit-dir hold released {}: {:?}",
+        before.display(),
+        outcome.counts
+    );
+    assert!(
+        rows(&hive).iter().any(|row| {
+            row["name_meta"].as_str() == Some(meta)
+                && row["unit_layout"].as_str() == Some("unit-dir")
+        }),
+        "{:?}",
+        rows(&hive)
+    );
+}
+
+#[test]
 fn an_unreadable_target_holds_the_whole_store_and_gc_still_deletes_sessions_with_its_usual_exit_code()
  {
     use std::os::unix::fs::PermissionsExt;

@@ -44,15 +44,15 @@ pub fn plant_unit(
     )
     .unwrap();
     fs::write(fp.join(format!("{stem}.json")), unit_json(deps)).unwrap();
-    fs::write(
-        unit_path::stamp(
-            profile,
-            &loc,
-            cargo_hive_core::fingerprint::UnitKind::of(stem),
-        ),
-        "This file has an mtime of when this was started.",
-    )
-    .unwrap();
+    let stamp = unit_path::stamp(
+        profile,
+        &loc,
+        cargo_hive_core::fingerprint::UnitKind::of(stem),
+    );
+    if let Some(parent) = stamp.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(&stamp, "This file has an mtime of when this was started.").unwrap();
     let out_dir = unit_path::outputs(profile, &loc);
     if !outputs.is_empty() {
         fs::create_dir_all(&out_dir).unwrap();

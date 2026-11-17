@@ -2,7 +2,7 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -595,6 +595,235 @@ fn a_unit_left_out_for_an_unresolved_edge_is_named_and_the_others_are_filled() {
         "the other unit is still filled: {rows:?} {report:?}"
     );
     assert!(!report.cancelled);
+}
+
+#[test]
+fn fill_stores_unit_dir_registry_lib_and_build_script_pair_as_three_u_entries() {
+    let planted = planted_unit_dir_registry_pair();
+    let recording = Recording::over_real();
+    let lib = narrowed(&planted.hive, recording.fs(), &planted.repo);
+    let report = fill_in(&planted.hive, &lib, &planted.target, &|| false);
+    assert_eq!(report.entries_added, 3, "{report:?}");
+    let rows = store_rows(&lib);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(
+        rows.iter()
+            .all(|row| row.unit_layout == UnitLayout::UnitDir),
+        "{rows:?}"
+    );
+    let metas: BTreeSet<_> = rows.iter().map(|row| row.name_meta.as_str()).collect();
+    assert_eq!(
+        metas,
+        BTreeSet::from([
+            planted.lib_meta.as_str(),
+            planted.script_meta.as_str(),
+            planted.run_meta.as_str(),
+        ])
+    );
+    for row in &rows {
+        let entry = store::entry_dir(&lib.state, row);
+        let name = entry.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.starts_with("u."),
+            "unit-dir entry must use the u. prefix: {name}"
+        );
+        let files = entry_relative_files(&entry);
+        let unit_prefix = format!(
+            "debug/build/{}/{}",
+            row.name_meta.rsplit_once('-').unwrap().0,
+            row.name_meta.rsplit_once('-').unwrap().1
+        );
+        let fp_prefix = format!("{unit_prefix}/fingerprint/");
+        let out_prefix = format!("{unit_prefix}/out/");
+        let run_prefix = format!("{unit_prefix}/run/");
+        assert!(
+            files
+                .iter()
+                .any(|p| p.to_string_lossy().starts_with(&fp_prefix)),
+            "{} missing fingerprint/: {files:?}",
+            row.name_meta
+        );
+        assert!(
+            files
+                .iter()
+                .any(|p| p.to_string_lossy().starts_with(&out_prefix)),
+            "{} missing out/: {files:?}",
+            row.name_meta
+        );
+        assert!(
+            files.iter().all(|p| {
+                let text = p.to_string_lossy();
+                !(text.starts_with(&out_prefix)
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.ends_with(".rcgu.o")))
+            }),
+            "{} stored an out/*.rcgu.o: {files:?}",
+            row.name_meta
+        );
+        if row.name_meta == planted.run_meta {
+            assert!(
+                files
+                    .iter()
+                    .any(|p| p.to_string_lossy().starts_with(&run_prefix)),
+                "run unit missing run/: {files:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_changed_unit_dir_hash_file_between_listing_and_clone_aborts_that_unit() {
+    let planted = planted_unit_dir_registry_pair();
+    let loc = UnitLoc {
+        layout: UnitLayout::UnitDir,
+        name_meta: planted.lib_meta.clone(),
+    };
+    let hash_path =
+        cargo_hive_core::unit_path::hash_file(&planted.target_path.join("debug"), &loc, "lib-reg");
+    let recording = Recording::over_real();
+    let lib = narrowed(&planted.hive, recording.fs(), &planted.repo);
+    std::fs::write(&hash_path, b"ffffffffffffffff").unwrap();
+    let report = fill_in(&planted.hive, &lib, &planted.target, &|| false);
+    let rows = store_rows(&lib);
+    assert!(
+        rows.iter().all(|row| row.name_meta != planted.lib_meta),
+        "changed hash unit was stored: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.name_meta == planted.script_meta)
+            && rows.iter().any(|row| row.name_meta == planted.run_meta),
+        "the other units are still filled: {rows:?} {report:?}"
+    );
+}
+
+struct PlantedUnitDir {
+    hive: Hive,
+    repo: PathBuf,
+    target_path: PathBuf,
+    target: TargetDir,
+    lib_meta: String,
+    script_meta: String,
+    run_meta: String,
+}
+
+fn planted_unit_dir_registry_pair() -> PlantedUnitDir {
+    let hive = Hive::ready();
+    let repo = common::init_repo(&hive.home.path.join("app"), "");
+    common::register(&hive, &repo);
+    let target_path = hive.home.path.join("target");
+    let profile = target_path.join("debug");
+    let registry = hive
+        .cargo_home
+        .path
+        .join("registry/src/index.crates.io-1/a-1.0.0/src/lib.rs");
+    let registry = registry.display().to_string();
+
+    let lib_hex = "aaaaaaaaaaaaaaaa";
+    let script_hex = "bbbbbbbbbbbbbbbb";
+    let run_hex = "cccccccccccccccc";
+    let lib_fp = u64::from_str_radix(lib_hex, 16).unwrap();
+    let script_fp = u64::from_str_radix(script_hex, 16).unwrap();
+    let run_fp = u64::from_str_radix(run_hex, 16).unwrap();
+
+    let lib = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "reg",
+        lib_hex,
+        "lib-reg",
+        lib_fp,
+        &[],
+        &["libreg.rlib", "libreg.rmeta", "reg.d", "libreg.rcgu.o"],
+    );
+    let script = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "withbs",
+        script_hex,
+        "build-script-build",
+        script_fp,
+        &[],
+        &["build_script_build", "build_script_build.d"],
+    );
+    let run = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "withbs",
+        run_hex,
+        "run-build-script-build-script-build",
+        run_fp,
+        &[(script_fp, "withbs")],
+        &["run-output"],
+    );
+    plant_out_dep_info(&profile, &lib, "reg.d", &registry);
+    plant_out_dep_info(&profile, &script, "build_script_build.d", &registry);
+
+    std::fs::write(profile.join(".cargo-build-lock"), b"lock").unwrap();
+    std::fs::write(
+        target_path.join("CACHEDIR.TAG"),
+        format!(
+            "Signature: 8a477f597d28d172789f06886806bc55\n{}\n",
+            cargo_hive_core::target::TAG_LINE
+        ),
+    )
+    .unwrap();
+    plant_rustc_info(&target_path, &repo);
+    let profile_report = read_profile(&profile);
+    assert!(
+        matches!(
+            profile_report.format,
+            cargo_hive_core::fingerprint::Format::Supported
+        ),
+        "{:?}",
+        profile_report.format
+    );
+    assert_eq!(profile_report.units, 3, "{profile_report:?}");
+    let target = TargetDir {
+        path: target_path.clone(),
+        owner: Owner::Owned {
+            checkout: repo.clone(),
+        },
+        profiles: vec![profile_report],
+        size: None,
+        unreadable: None,
+    };
+    PlantedUnitDir {
+        hive,
+        repo,
+        target_path,
+        target,
+        lib_meta: lib.name_meta,
+        script_meta: script.name_meta,
+        run_meta: run.name_meta,
+    }
+}
+
+fn plant_out_dep_info(profile: &Path, loc: &UnitLoc, dep_name: &str, first_input: &str) {
+    let out = cargo_hive_core::unit_path::outputs(profile, loc);
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join(dep_name), format!("{dep_name}: {first_input}\n")).unwrap();
+}
+
+fn entry_relative_files(entry: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![entry.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for item in entries {
+            let path = item.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                out.push(path.strip_prefix(entry).unwrap().to_path_buf());
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 struct Planted {

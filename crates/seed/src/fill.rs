@@ -19,6 +19,7 @@ use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive_core::locks::{self, Acquired, Locked};
 use cargo_hive_core::size::MAX_DEPTH;
 use cargo_hive_core::target::{Owner, TargetDir};
+use cargo_hive_core::unit_path::{self, UnitLoc};
 use cargo_hive_platform::{EntryKind, Fs};
 use cargo_hive_state::{StateError, window_days};
 
@@ -170,10 +171,14 @@ fn fill_target(
     let mut newest_at = 0u64;
     for unit in units {
         let profile = target.path.join(&unit.rel_profile);
-        let hash_path = profile
-            .join(".fingerprint")
-            .join(&unit.dir_name)
-            .join(&unit.stem);
+        let hash_path = unit_path::hash_file(
+            &profile,
+            &UnitLoc {
+                layout: unit.layout,
+                name_meta: unit.dir_name.clone(),
+            },
+            &unit.stem,
+        );
         newest_at = newest_at.max(mtime_nanos(&hash_path));
         let listing = listings.get(&profile).map(Vec::as_slice).unwrap_or(&[]);
         let files =
@@ -409,10 +414,14 @@ fn clone_unit(
 ) -> Result<ClonedUnit, String> {
     let unit = &new.unit;
     let profile = target.path.join(&unit.rel_profile);
-    let hash_path = profile
-        .join(".fingerprint")
-        .join(&unit.dir_name)
-        .join(&unit.stem);
+    let hash_path = unit_path::hash_file(
+        &profile,
+        &UnitLoc {
+            layout: unit.layout,
+            name_meta: unit.dir_name.clone(),
+        },
+        &unit.stem,
+    );
     match hash_unchanged(&hash_path, &unit.fingerprint_hash) {
         Ok(true) => {}
         Ok(false) => return Ok(ClonedUnit::Skip),
@@ -427,7 +436,7 @@ fn clone_unit(
     }
     let files = &new.files;
     let key = store::entry_name(
-        cargo_hive_core::unit_path::UnitLayout::Flat,
+        unit.layout,
         &unit.dir_name,
         &unit.fingerprint_hash,
         new.variant,
@@ -675,7 +684,7 @@ fn skeleton(unit: &SourceUnit) -> Row {
         repos: Vec::new(),
         registry_deps: unit.registry_deps.clone(),
         variant: 0,
-        unit_layout: cargo_hive_core::unit_path::UnitLayout::Flat,
+        unit_layout: unit.layout,
     }
 }
 
@@ -1242,6 +1251,7 @@ mod tests {
             fingerprint_hash: "0123456789abcdef".into(),
             toolchain_value: value,
             registry_deps: Vec::new(),
+            layout: UnitLayout::Flat,
         }
     }
 
