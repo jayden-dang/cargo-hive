@@ -536,9 +536,9 @@ _Requirements: BUILDDIR-7.1, BUILDDIR-7.2_
 
 **Depends-on:** Task 11
 
-- [ ] **Step 1:** Run `RUSTUP_TOOLCHAIN=1.100.0 cargo test -p cargo-hive --test bench`. Expect the bench failures #33 records from the 1.100 CI run (11 of 22 bench tests) to be gone. Seeded samples place `u.` entries, with seeded unit counts > 0. If any fail, add the failing assertion as a test first and fix through seed, not bench.
-- [ ] **Step 2:** Run the existing build-directory refusal test under both toolchains; expect pass.
-- [ ] **Step 3: Commit.** Only if tests changed: `test(bench): run cold and seeded samples on Cargo 1.100`
+- [x] **Step 1:** Run `RUSTUP_TOOLCHAIN=1.100.0 cargo test -p cargo-hive --test bench`. Expect the bench failures #33 records from the 1.100 CI run (11 of 22 bench tests) to be gone. Seeded samples place `u.` entries, with seeded unit counts > 0. If any fail, add the failing assertion as a test first and fix through seed, not bench.
+- [x] **Step 2:** Run the existing build-directory refusal test under both toolchains; expect pass.
+- [x] **Step 3: Commit.** Only if tests changed: `test(bench): run cold and seeded samples on Cargo 1.100`
 
 _Requirements: BUILDDIR-8.1, BUILDDIR-8.2_
 
