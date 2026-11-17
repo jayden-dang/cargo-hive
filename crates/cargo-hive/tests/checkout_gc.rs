@@ -2148,10 +2148,10 @@ fn stamp_for(target: &Path, name_meta: &str) -> PathBuf {
 
 fn kind_for_unit(target: &Path, name_meta: &str) -> cargo_hive_core::fingerprint::UnitKind {
     let report = cargo_hive_core::fingerprint::read_profile(&target.join("debug"));
-    if let Some(graph) = &report.graph {
-        if let Some(unit) = graph.units.iter().find(|u| u.loc.name_meta == name_meta) {
-            return unit.kind;
-        }
+    if let Some(graph) = &report.graph
+        && let Some(unit) = graph.units.iter().find(|u| u.loc.name_meta == name_meta)
+    {
+        return unit.kind;
     }
     report
         .not_current_units
