@@ -533,11 +533,15 @@ fn flat_loc_for(dir: &Path) -> UnitLoc {
     }
 }
 
-fn list_names(dir: &Path, problem: &mut Option<String>) -> Option<Vec<String>> {
+fn list_names(dir: &Path, problem: &mut Option<String>, cap: usize) -> Option<Vec<String>> {
     match fs::read_dir(dir) {
         Ok(entries) => {
             let mut names = Vec::new();
-            for entry in entries {
+            for (seen, entry) in entries.enumerate() {
+                if seen >= cap {
+                    problem.get_or_insert(format!("{} has more than {cap} entries", dir.display()));
+                    return None;
+                }
                 match entry {
                     Ok(entry) => names.push(entry.file_name().to_string_lossy().to_string()),
                     Err(e) => {
@@ -633,6 +637,10 @@ fn is_package_dir_entries(names: &[String], paths: &[PathBuf]) -> bool {
 }
 
 pub fn read_profile(profile_dir: &Path) -> ProfileReport {
+    read_profile_capped(profile_dir, crate::caps::CRATE_DIR_CAP)
+}
+
+fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
     let path = profile_dir.to_path_buf();
     let unsupported = |units: usize, reason: String| ProfileReport {
         path: path.clone(),
@@ -663,7 +671,13 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
             Err(e) => return unsupported(0, format!("cannot read .fingerprint/: {e}")),
         };
         let mut dirs: Vec<PathBuf> = Vec::new();
-        for entry in entries {
+        for (seen, entry) in entries.enumerate() {
+            if seen >= dir_cap {
+                return unsupported(
+                    0,
+                    format!("{} has more than {dir_cap} entries", fp.display()),
+                );
+            }
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(e) => {
@@ -681,7 +695,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
         }
         dirs.sort();
         for dir in dirs {
-            let Some(names) = list_names(&dir, &mut problem) else {
+            let Some(names) = list_names(&dir, &mut problem, dir_cap) else {
                 continue;
             };
             absorb_fingerprint_dir(
@@ -705,7 +719,13 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
         let mut children: Vec<PathBuf> = Vec::new();
         match fs::read_dir(&build) {
             Ok(entries) => {
-                for entry in entries {
+                for (seen, entry) in entries.enumerate() {
+                    if seen >= dir_cap {
+                        return unsupported(
+                            counted,
+                            format!("{} has more than {dir_cap} entries", build.display()),
+                        );
+                    }
                     let entry = match entry {
                         Ok(entry) => entry,
                         Err(e) => {
@@ -737,7 +757,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let Some(child_names) = list_names(&pkg_path, &mut problem) else {
+            let Some(child_names) = list_names(&pkg_path, &mut problem, dir_cap) else {
                 continue;
             };
             let child_paths: Vec<PathBuf> =
@@ -757,7 +777,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
                         partial_unit_dirs += 1;
                         continue;
                     }
-                    let Some(names) = list_names(&fp_dir, &mut problem) else {
+                    let Some(names) = list_names(&fp_dir, &mut problem, dir_cap) else {
                         continue;
                     };
                     if names.is_empty() {
@@ -793,10 +813,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
         return unsupported(counted, reason);
     }
     if !saw_fingerprint && !saw_package_dir {
-        return unsupported(
-            0,
-            "no .fingerprint/ directory (newer or unknown Cargo layout)".into(),
-        );
+        return unsupported(0, "no .fingerprint/ directory and no unit dirs".into());
     }
     let mut index: HashMap<UnitHash, Vec<UnitId>> = HashMap::new();
     for (i, u) in units.iter().enumerate() {
@@ -1863,6 +1880,44 @@ mod tests {
         let r = read_profile(&p);
         assert!(r.not_current_units[0].deps.is_empty());
         fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_profile_listing_past_the_entry_cap_is_unsupported() {
+        let p = scratch();
+        write_unit(&p, "a-0000000000000001", "lib-a", 1, &[]);
+        write_unit(&p, "b-0000000000000002", "lib-b", 2, &[]);
+        write_unit(&p, "c-0000000000000003", "lib-c", 3, &[]);
+        let r = read_profile_capped(&p, 2);
+        assert!(
+            matches!(
+                r.format,
+                Format::Unsupported(ref why) if why.contains("2") && why.contains("entries")
+            ),
+            "{:?}",
+            r.format
+        );
+        assert_eq!(r.edges, None);
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_profile_with_neither_fingerprint_nor_unit_dirs_names_both() {
+        let unsupported = scratch();
+        fs::remove_dir_all(unsupported.join(".fingerprint")).unwrap();
+        let r = read_profile(&unsupported);
+        assert!(
+            matches!(
+                r.format,
+                Format::Unsupported(ref why)
+                    if why.starts_with("no .fingerprint/")
+                        && why.contains("no unit dirs")
+                        && !why.contains("newer")
+            ),
+            "{:?}",
+            r.format
+        );
+        fs::remove_dir_all(unsupported).unwrap();
     }
 
     #[test]
