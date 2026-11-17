@@ -1,7 +1,8 @@
 # Requirements: Cargo 1.100 unit dirs
 
 Feature code: BUILDDIR
-Status: Draft
+Status: Approved
+Approved: 2026-11-17, by the operator (Jayden), in session: "xác nhận" (each story confirmed as one demoable act)
 Date: 2026-11-17
 Roadmap item: — (issue #33, a bug outside the roadmap's items)
 
