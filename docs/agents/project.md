@@ -77,6 +77,10 @@ With the roster above the band is **Solo**.
 Run in this order; all must pass before any completion claim. Every run of a development build
 sets `HIVE_HOME` to a scratch dir under `/private/tmp`, never `~/.hive`.
 
+The merge gate is `scripts/gate.sh` (the same script CI's `gate` job runs). It runs, in order and
+stopping at the first failure: `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings`;
+`cargo test --workspace`; `cargo check --workspace --target x86_64-unknown-linux-gnu`.
+
 | Check | Command |
 |---|---|
 | Typecheck | `cargo check --workspace --all-targets` and `cargo check --workspace --target x86_64-unknown-linux-gnu` |
@@ -131,7 +135,7 @@ None — not deployed. hive is a local CLI with no hosted component.
 
 ## release steps
 
-1. Gate: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo check --workspace --target x86_64-unknown-linux-gnu`.
+1. Gate: `scripts/gate.sh` (`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo check --workspace --target x86_64-unknown-linux-gnu`).
 2. Version: the release after 0.1.1 is `0.1.2`. Set `[workspace.package] version` to that number (members inherit it; do not set a version inside each member), also set the same version in `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json` and `plugin/skills/hive/SKILL.md` `metadata.hive-version` (tests/skill.rs fails if they differ), then `cargo check` so `Cargo.lock` follows. Commit that bump before the package check: `git commit -am "release: v0.1.2"`.
 3. Package check: `cargo package --workspace --list --allow-dirty` shows, for every member, only `src/` files, `Cargo.toml`, `Cargo.toml.orig`, `.cargo_vcs_info.json`, `Cargo.lock`, `README.md` and the two license files (no `tests/` path). Then `CARGO_TARGET_DIR=target/package-verify cargo publish --workspace --dry-run --allow-dirty` and expect "aborting upload due to dry run" for each member in Cargo's dependency order: cargo-hive-platform, cargo-hive-core, cargo-hive-state, cargo-hive-cargo, cargo-hive-doctor, cargo-hive-gc, cargo-hive-seed, cargo-hive. Then probe every member:
 
