@@ -624,15 +624,15 @@ _Requirements: BUILDDIR-1.7, BUILDDIR-3.4, BUILDDIR-6.7_
 
 **Depends-on:** Task 14
 
-- [ ] **Step 1:** Prepare the copies.
+- [x] **Step 1:** Prepare the copies.
   1. Copy a klynt worktree to `/private/var/tmp/hive-proof-1100/a`, outside the secondary roots, with a scratch `HIVE_HOME`.
   2. Build its tests with `cargo +1.100.0 test --no-run`, then backdate the stamps 8 days (the CHECKOUTGC procedure).
   3. Make a second copy `b` as the cold baseline.
-- [ ] **Step 2:** Run `cargo hive doctor` and `gc --checkout a`.
+- [x] **Step 2:** Run `cargo hive doctor` and `gc --checkout a`.
   - Time `gc --checkout` outside hive and record its wall time against 15 s.
   - Record units deleted, objects deleted and freed bytes.
   - Rerun `cargo +1.100.0 test --no-run -v` in `a` and `b` and count `Compiling` lines. Expect equal counts, which means 0 gc-caused recompiles.
-- [ ] **Step 3:** Seed a fresh secondary copy `c` from `a`'s repo and build it; record `seeded_recompiled` = 0. Then run `gc --plan` and `apply` on a further backdated copy, and rerun its build; expect 0 gc-caused recompiles.
-- [ ] **Step 4:** Write PLAN.md with every number and command, and summarise it on #33 without naming any other tool.
+- [x] **Step 3:** Seed a fresh secondary copy `c` from `a`'s repo and build it; record `seeded_recompiled` = 0. Then run `gc --plan` and `apply` on a further backdated copy, and rerun its build; expect 0 gc-caused recompiles.
+- [x] **Step 4:** Write PLAN.md with every number and command, and summarise it on #33 without naming any other tool.
 
 _Requirements: BUILDDIR-9.1, BUILDDIR-9.2_
