@@ -106,7 +106,8 @@ Requirements:
   `cargo hive doctor` passes
 - a Rust toolchain (rustup)
 - the Xcode Command Line Tools (`xcode-select --install`), which also build the C parts
-  of the embedded [Applesauce](https://crates.io/crates/applesauce) library
+  of the embedded [Applesauce](https://crates.io/crates/applesauce) library, which only
+  `cargo hive doctor` uses, to probe APFS compression (the store is never compressed)
 
 ```sh
 git clone https://github.com/jayden-dang/cargo-hive

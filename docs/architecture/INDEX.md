@@ -29,7 +29,7 @@ package (A1-A6, D2-D5, D7, S1-S2, C1), the F9 amendment and SPIKES.md.
 - **ARCH-3** Never replace a build artifact in place.
 - **ARCH-4** On a protected checkout, only read or delete.
 - **ARCH-5** Seed only secondary checkouts.
-- **ARCH-6** Compress only in the store, before any checkout shares that file, then clone out; never compress a file a checkout already shares.
+- ~~**ARCH-6**~~ retired 2026-11-17: the store no longer compresses its files, because rustc rejects an rmeta that keeps the compressed-file flag, so placed clones had to be expanded (SEED-2.28 to SEED-2.30). Superseded by ARCH-21.
 - **ARCH-7** Classify every checkout by the C1 rules, and treat anything unclassifiable as protected.
 - **ARCH-8** Take operation scope from arguments or a plan, never from the current directory.
 - **ARCH-9** Accept Cargo fingerprint files only in a known exact format signature; refuse to act on any other shape.
@@ -44,6 +44,7 @@ package (A1-A6, D2-D5, D7, S1-S2, C1), the F9 amendment and SPIKES.md.
 - **ARCH-18** A deletion inside a Cargo target dir never removes a fingerprint dir on its own and never touches `build/`; only a plan that deletes a whole orphan target removes the target entire.
 - **ARCH-19** Never delete from, or fill out of, a Cargo target dir while another process holds the lock guarding that entry; the lock is tried without waiting and the entry is skipped when held.
 - **ARCH-20** A plan is applied only after rechecking liveness, locks and format at apply time; a stale plan is refused.
+- **ARCH-21** Never compress a store file; a clone placed from the store shares every block with its store entry.
 
 ## Domains
 
