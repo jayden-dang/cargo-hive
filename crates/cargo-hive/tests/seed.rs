@@ -1237,13 +1237,13 @@ fn a_seed_with_an_unparseable_record_file_clones_reports_record_failed_and_exits
 #[derive(Clone, Copy)]
 enum FileDamage {
     Unparseable,
-    LayoutTwo,
+    LayoutNewer,
 }
 
 fn damaged_state_bytes(damage: FileDamage, existing: Option<&[u8]>, empty_shape: &str) -> Vec<u8> {
     match damage {
         FileDamage::Unparseable => b"{not json".to_vec(),
-        FileDamage::LayoutTwo => {
+        FileDamage::LayoutNewer => {
             let base = match existing {
                 Some(bytes) => bytes.to_vec(),
                 None => empty_shape.as_bytes().to_vec(),
@@ -1264,7 +1264,7 @@ fn seed_stops_on_each_damaged_seeds_or_store_file_and_leaves_it_untouched() {
     let seeds_recovery =
         "remove it; seed counts are lost, and the next `cargo hive seed` writes it again";
     let store_recovery = "remove it, build a checkout of the repository, then run `cargo hive seed`; store entries are kept and adopted";
-    for (case, damage) in [FileDamage::Unparseable, FileDamage::LayoutTwo]
+    for (case, damage) in [FileDamage::Unparseable, FileDamage::LayoutNewer]
         .into_iter()
         .enumerate()
     {
@@ -1300,7 +1300,7 @@ fn seed_stops_on_each_damaged_seeds_or_store_file_and_leaves_it_untouched() {
                     detail.contains(seeds_recovery),
                     "missing seeds recovery: {detail}"
                 ),
-                FileDamage::LayoutTwo => assert!(
+                FileDamage::LayoutNewer => assert!(
                     detail.contains("records layout 3")
                         && detail.contains("cargo install cargo-hive"),
                     "missing newer-layout text: {detail}"
@@ -1339,7 +1339,7 @@ fn seed_stops_on_each_damaged_seeds_or_store_file_and_leaves_it_untouched() {
                     detail.contains(store_recovery),
                     "missing store recovery: {detail}"
                 ),
-                FileDamage::LayoutTwo => assert!(
+                FileDamage::LayoutNewer => assert!(
                     detail.contains("records layout 3")
                         && detail.contains("cargo install cargo-hive"),
                     "missing newer-layout text: {detail}"

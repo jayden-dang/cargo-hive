@@ -332,7 +332,7 @@ fn each_state_files_first_write_adds_only_the_layout_line() {
                 other => panic!("unexpected state file {other}"),
             }
             let got = fs::read(scratch.path.join(name)).unwrap();
-            // A file that already records its layout comes back unchanged (UPGRADE-2.4).
+            // A file that already records its layout comes back unchanged.
             let want = if has_layout {
                 fixture.to_vec()
             } else {
@@ -519,13 +519,13 @@ fn config_json_is_read_without_a_layout_key_and_refused_with_one() {
 #[derive(Clone, Copy)]
 enum FileDamage {
     Unparseable,
-    LayoutTwo,
+    LayoutNewer,
 }
 
 fn damaged_state_bytes(damage: FileDamage, existing: Option<&[u8]>, empty_shape: &str) -> Vec<u8> {
     match damage {
         FileDamage::Unparseable => b"{not json".to_vec(),
-        FileDamage::LayoutTwo => {
+        FileDamage::LayoutNewer => {
             let base = match existing {
                 Some(bytes) => bytes.to_vec(),
                 None => empty_shape.as_bytes().to_vec(),
@@ -572,7 +572,7 @@ fn status_stops_on_each_damaged_state_file_and_leaves_it_untouched() {
         ),
     ];
     for (name, empty_shape, recovery) in cases {
-        for damage in [FileDamage::Unparseable, FileDamage::LayoutTwo] {
+        for damage in [FileDamage::Unparseable, FileDamage::LayoutNewer] {
             let hive = Hive::ready();
             let scratch = Scratch::new(&format!("upgrade-status-{name}"));
             let repo = init_repo(&scratch.path.join("app"), "");
@@ -599,7 +599,7 @@ fn status_stops_on_each_damaged_state_file_and_leaves_it_untouched() {
                     detail.contains(recovery),
                     "{name}: detail missing recovery: {detail}"
                 ),
-                FileDamage::LayoutTwo => assert!(
+                FileDamage::LayoutNewer => assert!(
                     detail.contains("records layout 3")
                         && detail.contains("cargo install cargo-hive"),
                     "{name}: detail missing newer-layout text: {detail}"
@@ -615,7 +615,7 @@ fn status_stops_on_each_damaged_state_file_and_leaves_it_untouched() {
 fn gc_plan_stops_on_a_damaged_plans_file_and_leaves_it_untouched() {
     let recovery =
         "remove it; unapplied plans are lost, so make new ones with `cargo hive gc --plan`";
-    for damage in [FileDamage::Unparseable, FileDamage::LayoutTwo] {
+    for damage in [FileDamage::Unparseable, FileDamage::LayoutNewer] {
         let hive = Hive::ready();
         let path = hive.home.path.join(PLANS_FILE);
         let damaged = damaged_state_bytes(damage, None, r#"{"plans":[]}"#);
@@ -633,7 +633,7 @@ fn gc_plan_stops_on_a_damaged_plans_file_and_leaves_it_untouched() {
                 detail.ends_with(recovery),
                 "detail missing plans recovery: {detail}"
             ),
-            FileDamage::LayoutTwo => assert!(
+            FileDamage::LayoutNewer => assert!(
                 detail.contains("records layout 3") && detail.contains("cargo install cargo-hive"),
                 "detail missing newer-layout text: {detail}"
             ),

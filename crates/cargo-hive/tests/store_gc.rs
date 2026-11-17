@@ -2798,13 +2798,13 @@ fn a_seed_after_store_db_was_lost_adopts_equal_entries_and_rewrites_store_db() {
 #[derive(Clone, Copy)]
 enum FileDamage {
     Unparseable,
-    LayoutTwo,
+    LayoutNewer,
 }
 
 fn damaged_store_bytes(damage: FileDamage, existing: &[u8]) -> Vec<u8> {
     match damage {
         FileDamage::Unparseable => b"not-json".to_vec(),
-        FileDamage::LayoutTwo => {
+        FileDamage::LayoutNewer => {
             let mut value: serde_json::Value = serde_json::from_slice(existing).unwrap();
             value
                 .as_object_mut()
@@ -2818,7 +2818,7 @@ fn damaged_store_bytes(damage: FileDamage, existing: &[u8]) -> Vec<u8> {
 #[test]
 fn bare_gc_and_dry_run_keep_store_write_failed_on_a_damaged_store_db() {
     let store_recovery = "remove it, build a checkout of the repository, then run `cargo hive seed`; store entries are kept and adopted";
-    for damage in [FileDamage::Unparseable, FileDamage::LayoutTwo] {
+    for damage in [FileDamage::Unparseable, FileDamage::LayoutNewer] {
         for args in [&["gc"][..], &["gc", "--dry-run"][..]] {
             let hive = Hive::ready();
             let repo = seeded_store(&hive);
@@ -2847,7 +2847,7 @@ fn bare_gc_and_dry_run_keep_store_write_failed_on_a_damaged_store_db() {
                     detail.contains(store_recovery),
                     "missing store recovery: {detail}"
                 ),
-                FileDamage::LayoutTwo => assert!(
+                FileDamage::LayoutNewer => assert!(
                     detail.contains("records layout 3")
                         && detail.contains("cargo install cargo-hive"),
                     "missing newer-layout text: {detail}"
