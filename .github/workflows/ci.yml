@@ -1,0 +1,84 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The toolchain the gate is verified on. Cargo 1.100 moved build output to a new
+  # layout hive does not read yet (#33); gate-latest-stable watches the newest stable.
+  RUST_TOOLCHAIN: "1.97.1"
+
+jobs:
+  gate:
+    name: gate
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
+            --component rustfmt --component clippy \
+            --target x86_64-unknown-linux-gnu
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+      - name: Merge gate
+        run: scripts/gate.sh
+
+  package:
+    name: package
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      - name: Package listing and publish dry-run
+        run: scripts/package-check.sh
+
+  capabilities:
+    name: capabilities
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2
+      - name: Report runner capabilities
+        run: scripts/doctor-summary.sh >> "$GITHUB_STEP_SUMMARY"
+
+  gate-latest-stable:
+    # Not required: shows early when a new stable Cargo changes what hive reads.
+    name: gate (latest stable, non-blocking)
+    runs-on: macos-15
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --component rustfmt --component clippy \
+            --target x86_64-unknown-linux-gnu
+          rustup default stable
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+      - name: Merge gate
+        run: scripts/gate.sh

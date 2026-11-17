@@ -9,7 +9,7 @@ How cargo-hive is tested and what must pass before a merge. Covers the merge gat
 
 ## Merge gate
 
-Every merge needs all four commands to exit 0:
+The gate is `scripts/gate.sh`. It runs these four commands in order, stops at the first failure, and sets `HIVE_HOME` to a fresh scratch dir under `/private/tmp` (or `$RUNNER_TEMP` in CI). CI (`.github/workflows/ci.yml`, job `gate`) runs the same script. Every merge needs all four to exit 0:
 
 - `cargo fmt --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
