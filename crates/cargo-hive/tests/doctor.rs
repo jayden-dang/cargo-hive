@@ -79,8 +79,8 @@ fn doctor(hive: &Hive) -> (Output, serde_json::Value) {
 const EXPECTED_IDS: [&str; 6] = ["a", "b", "c", "d", "f", "g"];
 
 fn check_f_expects_pass(toolchain: &str) -> bool {
-    // Cargo 1.100 unit dirs keep Unit.hash as the directory hex (BUILDDIR-1.1), so dep
-    // edges that key on the fingerprint hash file stay unresolved and check (f) fails.
+    // Cargo 1.100 unit dirs keep Unit.hash as the directory hex, so dep edges that key
+    // on the fingerprint hash file stay unresolved and check (f) fails.
     !toolchain.starts_with("1.100.")
 }
 
