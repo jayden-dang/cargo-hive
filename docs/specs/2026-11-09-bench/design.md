@@ -105,7 +105,7 @@ Reuse: rung 2 — `seed::run_fill` / `seed::run_clone` (section 6), `record::rea
 `Snapshot::default()` (src/discover.rs:523, as src/seed/source.rs:86 does), the bounded runner (section 7),
 `ReceiptBuilder` (src/receipt.rs:140-215). The sequencing itself is new code (rung 7), because nothing
 sequences builds and seeds.
-Respects: ARCH-2, ARCH-5, ARCH-6, ARCH-10, ARCH-16, ARCH-17, ARCH-18, ARCH-19
+Respects: ARCH-2, ARCH-5, ARCH-21, ARCH-10, ARCH-16, ARCH-17, ARCH-18, ARCH-19
 Interface:
 ```rust
 pub struct Plan { pub repo: Repo, pub cold: Vec<Checkout>, pub seeded: Vec<Checkout>,

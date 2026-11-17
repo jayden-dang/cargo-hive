@@ -93,7 +93,7 @@ Only `Owner::Owned` targets of this repo's checkouts are read, with `all_repos =
 
 Satisfies: SEED-2.1, SEED-2.5, SEED-2.6, SEED-2.7, SEED-2.8, SEED-2.14, SEED-2.15, SEED-2.16, SEED-2.17, SEED-2.18, SEED-2.19, SEED-9.8, SEED-10.8
 Reuse: rung 2 — `locks::acquire` and `Locked` unchanged, dropped before compressing (`src/plan_tier/locks.rs:43`), `Fs::clone_file`, `Fs::entry_stat`
-Respects: ARCH-2, ARCH-4, ARCH-6, ARCH-19
+Respects: ARCH-2, ARCH-4, ARCH-21, ARCH-19
 Interface: `fill(ctx, repo, targets, cancel) -> FillReport { entries_added, entries_held, targets_read, targets_skipped, findings, cancelled }`.
 Depth: callers know only that afterward the store holds this repo's live units; the lock window, the hash re-check, the no-follow walk, the tag and the toolchain row stay inside.
 Locality: new file; leave `plan_tier`.
@@ -106,7 +106,7 @@ The toolchain row: read `.rustc_info.json` from the target, take the one `output
 
 Satisfies: SEED-2.9, SEED-2.10, SEED-2.12, SEED-2.13, SEED-2.20, SEED-2.21, SEED-2.22, SEED-2.23, SEED-9.3, SEED-9.4
 Reuse: rung 2 — `Tx::read_bounded`, `Tx::write_bounded`, `State::locked_or_cancelled`, the read-merge-write of `plan_tier/record.rs`, `Fs::compress`, `Fs::volume`; `std::fs::rename` (rung 3) for publishing
-Respects: ARCH-6, ARCH-16
+Respects: ARCH-21, ARCH-16
 Surface: `CompressOutcome` gains `Incompressible`: `doctor.rs` check b — leave (it compares with `==`), `Display` in `platform/mod.rs` — replace, `Apfs::compress` and `Watch` — replace. Test doubles construct only existing variants — leave.
 Interface: `read(state) -> StoreFile` (available rows only), `compress_and_publish(fs, tmp, key, cancel) -> Published`, `merge(state, rows, table_rows, cancel)`. `StoreFile { units: Vec<Row>, toolchains: BTreeMap<String, u64> }`. `Row { toolchain_value, name_meta, fingerprint_hash, kind, rel_profile, size, filled_at, last_live_at, repos: Vec<PathBuf>, registry_deps: Vec<String> }`.
 Depth: callers keep knowing only that a row from `read` is a complete, compressed entry; the temp directory, the rename, adoption, pruning and the cap stay hidden.
@@ -128,7 +128,7 @@ Locality: new file, no I/O; leave everything else.
 
 Satisfies: SEED-1.3, SEED-1.4, SEED-1.5, SEED-1.6, SEED-1.7, SEED-1.8, SEED-1.9, SEED-1.12, SEED-1.16, SEED-1.18, SEED-1.19, SEED-4.1, SEED-4.2, SEED-4.3, SEED-4.4, SEED-7.2, SEED-9.2, SEED-9.5, SEED-10.9
 Reuse: rung 2 — `cargo_target::resolve`, `Fs::clone_file`, `Fs::sharing`, `Fs::entry_stat`, `size::allocated_bytes` for the store's size, `liveness::unit_timestamp`, the window from `Config`
-Respects: ARCH-2, ARCH-3, ARCH-5, ARCH-6, ARCH-10, ARCH-11, ARCH-15
+Respects: ARCH-2, ARCH-3, ARCH-5, ARCH-21, ARCH-10, ARCH-11, ARCH-15
 Surface: `Fs` gains required `create_dir`: `Apfs` — replace; `explain::DirListFs` — replace (`Unsupported`, as its other methods); wrappers `FailStat` (`plan_tier/build.rs:637`), `Volumes` (`tests/liveness.rs:968`), `Recording` (`tests/common/recording_fs.rs:189`), `liveness::FakeFs` (`liveness.rs:1570`) — replace (forward); doubles `doctor::FakeFs`, `explain::FakeFs`, `gc/run.rs` `Rec` — replace (trivial).
 Interface: `place(ctx, checkout, units: &[Row], cancel) -> PlaceReport { placed: Vec<SeededUnit>, cloned, existing, failed, outside_window, bytes_not_shared, findings, unmeasured, cancelled }`.
 Depth: callers keep knowing only that an absent target gets a seed and a present one gets a finding; the order, the path check and the sharing measurement stay inside.
