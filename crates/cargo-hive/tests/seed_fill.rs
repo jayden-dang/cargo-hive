@@ -517,7 +517,22 @@ fn a_seeded_target_no_build_has_touched_counts_as_lock_missing() {
             std::fs::remove_file(&path).unwrap();
         }
     }
-    assert!(built.target_path.join("debug/.fingerprint").is_dir());
+    let layout = common::cargo_fixture::layout_of(&built.target_path);
+    match layout {
+        UnitLayout::Flat => {
+            assert!(built.target_path.join("debug/.fingerprint").is_dir());
+        }
+        UnitLayout::UnitDir => {
+            assert!(
+                built
+                    .target
+                    .profiles
+                    .iter()
+                    .any(|p| p.layouts.contains(&UnitLayout::UnitDir)),
+                "unit-dir profile must be present when locks are stripped"
+            );
+        }
+    }
     let recording = Recording::over_real();
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
     let report = fill_in(&built.hive, &lib, &built.target, &|| false);

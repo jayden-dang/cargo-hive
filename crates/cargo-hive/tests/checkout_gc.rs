@@ -2,8 +2,11 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 
+use cargo_hive_core::liveness::Liveness;
 use cargo_hive_core::unit_path::{self, UnitLayout};
-use common::cargo_fixture::{THIRTY_DAYS, backdate_all, decide, layout_of, set_mtime};
+use common::cargo_fixture::{
+    THIRTY_DAYS, WINDOW, backdate_all, decide, decide_at, layout_of, set_mtime,
+};
 use common::plan_fixture::tree;
 use common::recording_fs::Recording;
 use common::registry_fixture::{RegistryRepo, cargo_json, set_target_dir};
@@ -21,35 +24,79 @@ fn the_binaries_fixture_links_a_bin_a_test_an_example_a_build_script_and_a_proc_
     let hive = Hive::ready();
     let repo = RegistryRepo::with_binaries(&hive);
     let _built = cargo_json(&hive, &repo.main, &["test", "--no-run"]);
-    let debug = repo.main.join("target/debug");
-    let deps = debug.join("deps");
+    let target = repo.main.join("target");
+    let debug = target.join("debug");
+    let layout = layout_of(&target);
 
     assert!(debug.join("app").is_file(), "bin missing");
-    assert!(
-        named_under(&deps, "it-").is_some_and(|p| is_linked_binary(&p)),
-        "integration test binary missing under deps/"
-    );
     assert!(debug.join("examples/ex").is_file(), "example missing");
-    assert!(
-        build_script_under(&debug.join("build")).is_some(),
-        "build-script-build missing under build/"
-    );
-    assert!(
-        deps_dylib(&deps, "libappmacro-").is_some(),
-        "proc-macro dylib missing under deps/"
-    );
-
-    let objects: Vec<_> = fs::read_dir(&deps)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| {
-            p.extension().is_some_and(|x| x == "o") && p.to_string_lossy().contains(".rcgu.")
-        })
-        .collect();
-    assert!(
-        !objects.is_empty(),
-        "expected loose deps/*.rcgu.o beside the linked binaries"
-    );
+    match layout {
+        UnitLayout::Flat => {
+            let deps = debug.join("deps");
+            assert!(
+                named_under(&deps, "it-").is_some_and(|p| is_linked_binary(&p)),
+                "integration test binary missing under deps/"
+            );
+            assert!(
+                build_script_under(&debug.join("build")).is_some(),
+                "build-script-build missing under build/"
+            );
+            assert!(
+                deps_dylib(&deps, "libappmacro-").is_some(),
+                "proc-macro dylib missing under deps/"
+            );
+            let objects: Vec<_> = fs::read_dir(&deps)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| {
+                    p.extension().is_some_and(|x| x == "o")
+                        && p.to_string_lossy().contains(".rcgu.")
+                })
+                .collect();
+            assert!(
+                !objects.is_empty(),
+                "expected loose deps/*.rcgu.o beside the linked binaries"
+            );
+        }
+        UnitLayout::UnitDir => {
+            let fs = cargo_hive_platform::current().unwrap().fs;
+            let listing =
+                cargo_hive_gc::checkout::list_profile(fs.as_ref(), &debug, 1_000_000, 100_000)
+                    .unwrap();
+            assert!(
+                listing
+                    .objects
+                    .iter()
+                    .any(|(p, _, _)| p.to_string_lossy().contains("/out/")
+                        && p.to_string_lossy().contains(".rcgu.")),
+                "expected out/*.rcgu.o objects: {:?}",
+                listing.objects
+            );
+            assert!(
+                listing.candidates.iter().any(|p| {
+                    p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with("it-"))
+                        && is_linked_binary(p)
+                }),
+                "integration test binary missing under out/: {:?}",
+                listing.candidates
+            );
+            assert!(
+                listing.candidates.iter().any(|p| {
+                    p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().contains("appmacro"))
+                        || p.file_name()
+                            .is_some_and(|n| n.to_string_lossy().ends_with(".dylib"))
+                }),
+                "proc-macro dylib missing under out/: {:?}",
+                listing.candidates
+            );
+            assert!(
+                build_script_under_unit_dir(&debug.join("build")).is_some(),
+                "build-script-build missing under build/<pkg>/<hex>/"
+            );
+        }
+    }
 }
 
 #[test]
@@ -96,11 +143,26 @@ fn units_compiled_inside_the_window_are_kept_and_the_next_build_recompiles_none(
 fn nothing_under_build_is_touched() {
     let hive = Hive::ready();
     let repo = aged_binaries(&hive);
-    let build = repo.main.join("target/debug/build");
+    let target = repo.main.join("target");
+    let build = target.join("debug/build");
     let before = tree(&build);
+    let before_units = fingerprint_dirs(&target);
     let (out, r) = checkout_gc(&hive, &repo.main);
     assert!(out.status.success(), "{r}");
-    assert_eq!(tree(&build), before, "build/ changed: {r}");
+    match layout_of(&target) {
+        UnitLayout::Flat => {
+            assert_eq!(tree(&build), before, "build/ changed: {r}");
+        }
+        UnitLayout::UnitDir => {
+            // Object GC removes unreferenced out/*.rcgu.o under build/; unit dirs stay.
+            assert_eq!(
+                fingerprint_dirs(&target),
+                before_units,
+                "unit dirs under build/ changed: {r}"
+            );
+            assert_eq!(count(&r, "units_deleted"), 0, "{r}");
+        }
+    }
 }
 
 #[test]
@@ -110,7 +172,7 @@ fn an_undecided_target_deletes_no_unit_and_names_each_reason_with_what_clears_it
     let target = repo.main.join("target");
     let before = fingerprint_dirs(&target);
     let unit = newest_fingerprint_unit(&target);
-    let dir = target.join("debug/.fingerprint").join(&unit);
+    let dir = fingerprint_dir_for(&target, &unit);
     let hash = hash_file_in(&dir);
     fs::write(&hash, b"").unwrap();
     set_mtime(&hash, SystemTime::now());
@@ -337,10 +399,13 @@ fn a_cancel_right_after_discovery_deletes_nothing_and_exits_130() {
 fn a_failed_deletion_exits_1() {
     let hive = Hive::ready();
     let repo = aged_binaries(&hive);
-    let deps = repo.main.join("target/debug/deps");
-    fs::set_permissions(&deps, fs::Permissions::from_mode(0o500)).unwrap();
+    let debug = repo.main.join("target/debug");
+    let plant = orphan_object_dir(&debug);
+    let orphan = plant.join("orphan-faileddel0001.0.rcgu.o");
+    fs::write(&orphan, b"orphan").unwrap();
+    fs::set_permissions(&plant, fs::Permissions::from_mode(0o500)).unwrap();
     let (out, r) = checkout_gc(&hive, &repo.main);
-    let _ = fs::set_permissions(&deps, fs::Permissions::from_mode(0o755));
+    let _ = fs::set_permissions(&plant, fs::Permissions::from_mode(0o755));
     assert_eq!(out.status.code(), Some(1), "{r}");
     assert!(
         r["findings"]
@@ -728,7 +793,8 @@ fn a_dsym_dir_of_a_dead_unit_is_deleted() {
     let target = repo.main.join("target");
     let dead = oldest_fingerprint_unit(&target);
     let hash = dead.rsplit('-').next().unwrap();
-    let dsym = target.join("debug/deps").join(format!("unit-{hash}.dSYM"));
+    let plant = orphan_object_dir(&target.join("debug"));
+    let dsym = plant.join(format!("unit-{hash}.dSYM"));
     fs::create_dir_all(dsym.join("Contents")).unwrap();
     fs::write(dsym.join("Contents/Info.plist"), b"x").unwrap();
     let (fs_box, scan, checkout, nested) = library_scan(&hive, &repo);
@@ -756,10 +822,11 @@ fn an_entry_swapped_after_its_stat_is_refused() {
         .iter()
         .flat_map(|unit| unit.files.iter())
         .find(|path| {
-            path.parent()
+            let parent_name = path
+                .parent()
                 .and_then(|p| p.file_name())
-                .is_some_and(|n| n == "deps")
-                && path.is_file()
+                .map(|n| n.to_string_lossy().into_owned());
+            matches!(parent_name.as_deref(), Some("deps") | Some("out")) && path.is_file()
         })
         .cloned()
         .expect("a dead unit deps file");
@@ -791,8 +858,8 @@ fn an_object_swapped_after_its_stat_is_refused() {
     let hive = Hive::ready();
     let repo = RegistryRepo::with_binaries(&hive);
     cargo_json(&hive, &repo.main, &["test", "--no-run"]);
-    let deps = repo.main.join("target/debug/deps");
-    let orphan = deps.join("orphan-swappedobject1.0.rcgu.o");
+    let debug = repo.main.join("target/debug");
+    let orphan = orphan_object_dir(&debug).join("orphan-swappedobject1.0.rcgu.o");
     fs::write(&orphan, b"orphan").unwrap();
     let outside = repo.scratch.path.join("outside-object");
     fs::write(&outside, b"nope").unwrap();
@@ -820,10 +887,7 @@ fn a_unit_changed_between_scan_and_lock_is_judged_on_the_fresh_read() {
     let repo = aged_binaries(&hive);
     let target = repo.main.join("target");
     let dead = oldest_fingerprint_unit(&target);
-    let stamp = target
-        .join("debug/.fingerprint")
-        .join(&dead)
-        .join("invoked.timestamp");
+    let stamp = stamp_for(&target, &dead);
     let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
     let before_dead = decide(&target).1.len();
     assert!(before_dead >= 1, "need a dead unit before the revive");
@@ -838,7 +902,7 @@ fn a_unit_changed_between_scan_and_lock_is_judged_on_the_fresh_read() {
         account_bytes: true,
     };
     let report = cargo_hive_gc::checkout::run(&input, &|| false);
-    let dir = target.join("debug/.fingerprint").join(&dead);
+    let dir = fingerprint_dir_for(&target, &dead);
     assert!(
         dir.exists(),
         "a unit revived before the fresh read was deleted: {report:?}"
@@ -1113,13 +1177,16 @@ fn unreferenced_objects_are_deleted_and_every_object_a_binary_names_is_kept() {
     let repo = aged_binaries(&hive);
     let target = repo.main.join("target");
     let debug = target.join("debug");
-    let deps = debug.join("deps");
     let fs = cargo_hive_platform::current().unwrap().fs;
-    let (_live, dead) = decide(&target);
-    let doomed: std::collections::BTreeSet<_> = dead
-        .iter()
-        .flat_map(|unit| unit.files.iter().cloned())
-        .collect();
+    let doomed: std::collections::BTreeSet<_> = match decide_at(&target, SystemTime::now(), WINDOW)
+    {
+        Liveness::Decided { dead, .. } => dead
+            .iter()
+            .flat_map(|unit| unit.files.iter().cloned())
+            .collect(),
+        // Hash-rule undecided on 1.100: treat every candidate as live for the keep check.
+        Liveness::Undecided { .. } => std::collections::BTreeSet::new(),
+    };
     let listing =
         cargo_hive_gc::checkout::list_profile(fs.as_ref(), &debug, 1_000_000, 100_000).unwrap();
     let mut kept_names = std::collections::BTreeSet::new();
@@ -1135,13 +1202,9 @@ fn unreferenced_objects_are_deleted_and_every_object_a_binary_names_is_kept() {
         !kept_names.is_empty(),
         "expected live binaries to name loose objects"
     );
-    let before_named: Vec<_> = kept_names
-        .iter()
-        .map(|name| deps.join(name))
-        .filter(|p| p.is_file())
-        .collect();
+    let before_named = object_paths_named(&debug, &kept_names);
     assert!(!before_named.is_empty(), "named objects must exist on disk");
-    let orphan = deps.join("orphan-deadbeefdeadbeef.0.rcgu.o");
+    let orphan = orphan_object_dir(&debug).join("orphan-deadbeefdeadbeef.0.rcgu.o");
     fs::write(&orphan, b"orphan").unwrap();
     let (out, r) = checkout_gc(&hive, &repo.main);
     assert!(out.status.success(), "{r}");
@@ -1163,8 +1226,7 @@ fn a_test_binary_that_was_not_relinked_still_keeps_its_objects() {
     let repo = RegistryRepo::with_binaries(&hive);
     cargo_json(&hive, &repo.main, &["test", "--no-run"]);
     let debug = repo.main.join("target/debug");
-    let deps = debug.join("deps");
-    let it = named_under(&deps, "it-").expect("integration test binary");
+    let it = find_linked_named(&debug, "it-").expect("integration test binary");
     let fs = cargo_hive_platform::current().unwrap().fs;
     let it_loose = match cargo_hive_gc::debug_map::read(fs.as_ref(), &it) {
         Ok(Some(map)) => map.loose,
@@ -1178,15 +1240,22 @@ fn a_test_binary_that_was_not_relinked_still_keeps_its_objects() {
     .unwrap();
     cargo_json(&hive, &repo.main, &["test", "--no-run"]);
     assert!(it.is_file(), "unrelinked test binary disappeared");
-    let orphan = deps.join("orphan-cafecafecafecafe.0.rcgu.o");
+    let orphan = orphan_object_dir(&debug).join("orphan-cafecafecafecafe.0.rcgu.o");
     fs::write(&orphan, b"orphan").unwrap();
     let (out, r) = checkout_gc(&hive, &repo.main);
     assert!(out.status.success(), "{r}");
     assert!(!orphan.exists(), "orphan remained: {r}");
-    for name in &it_loose {
+    let named = object_paths_named(&debug, &it_loose);
+    assert_eq!(
+        named.len(),
+        it_loose.len(),
+        "unrelinked test binary objects missing: {r}"
+    );
+    for path in &named {
         assert!(
-            deps.join(name).is_file(),
-            "unrelinked test binary object {name} was deleted: {r}"
+            path.is_file(),
+            "unrelinked test binary object {} was deleted: {r}",
+            path.display()
         );
     }
 }
@@ -1197,7 +1266,7 @@ fn objects_named_only_by_a_dead_units_binary_go_in_the_same_run() {
     let repo = aged_binaries(&hive);
     let target = repo.main.join("target");
     let debug = target.join("debug");
-    let deps = debug.join("deps");
+    let plant = orphan_object_dir(&debug);
     let (_live, dead) = decide(&target);
     let dead_hash = dead
         .iter()
@@ -1208,9 +1277,9 @@ fn objects_named_only_by_a_dead_units_binary_go_in_the_same_run() {
         })
         .expect("a dead unit with a 16-hex hash");
     let object_name = "only-dead-unit-object.0.rcgu.o";
-    let object = deps.join(object_name);
+    let object = plant.join(object_name);
     fs::write(&object, b"only-dead").unwrap();
-    let binary = deps.join(format!("staleextra-{dead_hash}"));
+    let binary = plant.join(format!("staleextra-{dead_hash}"));
     fs::write(&binary, thin_execute_bytes(&[object_name])).unwrap();
     assert!(
         decide(&target)
@@ -1249,7 +1318,6 @@ fn a_cloned_target_keeps_the_objects_its_binaries_name_under_the_old_path() {
         "cp -c -R failed; APFS clone is required for this case: {status}"
     );
     let debug = dst_target.join("debug");
-    let deps = debug.join("deps");
     let fs = cargo_hive_platform::current().unwrap().fs;
     let listing =
         cargo_hive_gc::checkout::list_profile(fs.as_ref(), &debug, 1_000_000, 100_000).unwrap();
@@ -1260,13 +1328,9 @@ fn a_cloned_target_keeps_the_objects_its_binaries_name_under_the_old_path() {
         }
     }
     assert!(!referenced.is_empty(), "cloned binaries named no objects");
-    let named_files: Vec<_> = referenced
-        .iter()
-        .map(|name| deps.join(name))
-        .filter(|p| p.is_file())
-        .collect();
+    let named_files = object_paths_named(&debug, &referenced);
     assert!(!named_files.is_empty(), "no named objects on disk");
-    let orphan = deps.join("orphan-clonedcloned00.0.rcgu.o");
+    let orphan = orphan_object_dir(&debug).join("orphan-clonedcloned00.0.rcgu.o");
     fs::write(&orphan, b"orphan").unwrap();
     let (out, r) = checkout_gc(&hive, &dst);
     assert!(out.status.success(), "{r}");
@@ -1286,9 +1350,8 @@ fn an_undecided_target_still_loses_its_unreferenced_objects() {
     let repo = aged_binaries(&hive);
     let target = repo.main.join("target");
     let debug = target.join("debug");
-    let deps = debug.join("deps");
     let unit = newest_fingerprint_unit(&target);
-    let dir = debug.join(".fingerprint").join(&unit);
+    let dir = fingerprint_dir_for(&target, &unit);
     let json = fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -1303,7 +1366,7 @@ fn an_undecided_target_still_loses_its_unreferenced_objects() {
     };
     assert_ne!(patched, text, "failed to inject a ghost dependency");
     fs::write(&json, patched).unwrap();
-    let orphan = deps.join("orphan-undecided0001.0.rcgu.o");
+    let orphan = orphan_object_dir(&debug).join("orphan-undecided0001.0.rcgu.o");
     fs::write(&orphan, b"orphan").unwrap();
     let before = fingerprint_dirs(&target);
     let (out, r) = checkout_gc(&hive, &repo.main);
@@ -1334,19 +1397,19 @@ fn a_profile_with_an_unsupported_fingerprint_format_keeps_every_object() {
     let repo = RegistryRepo::with_binaries(&hive);
     cargo_json(&hive, &repo.main, &["test", "--no-run"]);
     let debug = repo.main.join("target/debug");
-    let deps = debug.join("deps");
+    let plant = orphan_object_dir(&debug);
     let unit = newest_fingerprint_unit(&repo.main.join("target"));
-    let dir = debug.join(".fingerprint").join(&unit);
+    let dir = fingerprint_dir_for(&repo.main.join("target"), &unit);
     fs::write(dir.join("extra-corrupt.json"), b"{}").unwrap();
-    let orphan = deps.join("orphan-unsupported01.0.rcgu.o");
+    let orphan = plant.join("orphan-unsupported01.0.rcgu.o");
     fs::write(&orphan, b"orphan").unwrap();
-    let objects_before = deps_rcgu_o(&deps);
+    let objects_before = deps_rcgu_o(&plant);
     assert!(!objects_before.is_empty());
     let (out, r) = checkout_gc(&hive, &repo.main);
     assert_eq!(out.status.code(), Some(0), "{r}");
     assert!(orphan.is_file(), "unsupported profile lost an object: {r}");
     assert_eq!(
-        deps_rcgu_o(&deps).len(),
+        deps_rcgu_o(&plant).len(),
         objects_before.len(),
         "unsupported profile deleted objects: {r}"
     );
@@ -1363,8 +1426,8 @@ fn a_profile_with_an_unsupported_fingerprint_format_keeps_every_object() {
 fn the_receipt_counts_objects_deleted_kept_and_binaries_read() {
     let hive = Hive::ready();
     let repo = aged_binaries(&hive);
-    let deps = repo.main.join("target/debug/deps");
-    fs::write(deps.join("orphan-countcount0001.0.rcgu.o"), b"orphan").unwrap();
+    let plant = orphan_object_dir(&repo.main.join("target/debug"));
+    fs::write(plant.join("orphan-countcount0001.0.rcgu.o"), b"orphan").unwrap();
     let (out, r) = checkout_gc(&hive, &repo.main);
     assert!(out.status.success(), "{r}");
     assert!(count(&r, "objects_deleted") >= 1, "{r}");
@@ -1435,17 +1498,17 @@ fn a_binary_whose_read_fails_keeps_every_object_in_its_profile() {
     let repo = RegistryRepo::with_binaries(&hive);
     cargo_json(&hive, &repo.main, &["test", "--no-run"]);
     let debug = repo.main.join("target/debug");
-    let deps = debug.join("deps");
+    let plant = orphan_object_dir(&debug);
     let bin = debug.join("app");
     assert!(bin.is_file(), "app binary missing");
-    let orphan = deps.join("orphan-failread00001.0.rcgu.o");
+    let orphan = plant.join("orphan-failread00001.0.rcgu.o");
     fs::write(&orphan, b"orphan").unwrap();
-    let before = deps_rcgu_o(&deps);
+    let before = deps_rcgu_o(&plant);
     let (_fs, scan, checkout, nested) = library_scan(&hive, &repo);
     let rec = Recording::over_real().fail_read_at(&bin);
     let report = run_library(&rec, &scan, &checkout, &nested);
     assert!(orphan.is_file(), "read failure still deleted objects");
-    assert_eq!(deps_rcgu_o(&deps).len(), before.len());
+    assert_eq!(deps_rcgu_o(&plant).len(), before.len());
     assert_eq!(report.totals.objects_deleted, 0, "{report:?}");
     assert!(
         report
@@ -1999,50 +2062,197 @@ fn receipts_mention(hive: &Hive, command: &str) -> bool {
 }
 
 fn fingerprint_dirs(target: &Path) -> Vec<String> {
-    let fp = target.join("debug/.fingerprint");
-    let mut out = Vec::new();
-    for entry in fs::read_dir(&fp).unwrap() {
-        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-        if name.contains('-') {
-            out.push(name);
+    let profile = target.join("debug");
+    let mut out = std::collections::BTreeSet::new();
+    let build = profile.join("build");
+    let mut saw_unit_dir = false;
+    if let Ok(pkgs) = fs::read_dir(&build) {
+        for pkg in pkgs {
+            let pkg = pkg.unwrap().path();
+            if !pkg.is_dir() {
+                continue;
+            }
+            let pkg_name = pkg.file_name().unwrap().to_string_lossy();
+            if let Ok(hexes) = fs::read_dir(&pkg) {
+                for hex in hexes {
+                    let hex = hex.unwrap().path();
+                    if !hex.is_dir() {
+                        continue;
+                    }
+                    let hex_name = hex.file_name().unwrap().to_string_lossy();
+                    if hex_name.len() == 16 && hex_name.chars().all(|c| c.is_ascii_hexdigit()) {
+                        saw_unit_dir = true;
+                        out.insert(format!("{pkg_name}-{hex_name}"));
+                    }
+                }
+            }
         }
     }
-    out.sort();
-    out
+    if !saw_unit_dir {
+        let fp = profile.join(".fingerprint");
+        if let Ok(entries) = fs::read_dir(&fp) {
+            for entry in entries {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                if name.contains('-') {
+                    out.insert(name);
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+fn unit_loc_for(target: &Path, name_meta: &str) -> unit_path::UnitLoc {
+    unit_path::UnitLoc {
+        layout: layout_of(target),
+        name_meta: name_meta.to_string(),
+    }
+}
+
+fn fingerprint_dir_for(target: &Path, name_meta: &str) -> PathBuf {
+    unit_path::fingerprint_dir(&target.join("debug"), &unit_loc_for(target, name_meta))
+}
+
+fn stamp_for(target: &Path, name_meta: &str) -> PathBuf {
+    unit_path::stamp(
+        &target.join("debug"),
+        &unit_loc_for(target, name_meta),
+        cargo_hive_core::fingerprint::UnitKind::Lib,
+    )
+}
+
+/// Directory where a planted unreferenced `.rcgu.o` is visible to checkout GC.
+fn orphan_object_dir(debug: &Path) -> PathBuf {
+    let target = debug.parent().expect("profile under target");
+    match layout_of(target) {
+        UnitLayout::Flat => {
+            let deps = debug.join("deps");
+            let _ = fs::create_dir_all(&deps);
+            deps
+        }
+        UnitLayout::UnitDir => {
+            let fs = cargo_hive_platform::current().unwrap().fs;
+            let listing =
+                cargo_hive_gc::checkout::list_profile(fs.as_ref(), debug, 1_000_000, 100_000)
+                    .unwrap();
+            if let Some(out) = listing
+                .objects
+                .iter()
+                .map(|(p, _, _)| p.parent().unwrap().to_path_buf())
+                .next()
+            {
+                return out;
+            }
+            for pkg in fs::read_dir(debug.join("build")).unwrap() {
+                let pkg = pkg.unwrap().path();
+                if !pkg.is_dir() {
+                    continue;
+                }
+                for hex in fs::read_dir(&pkg).unwrap() {
+                    let hex = hex.unwrap().path();
+                    let out = hex.join("out");
+                    if out.is_dir() {
+                        return out;
+                    }
+                }
+            }
+            panic!("no out/ dir to plant orphans under {}", debug.display());
+        }
+    }
+}
+
+fn object_paths_named(debug: &Path, names: &std::collections::BTreeSet<String>) -> Vec<PathBuf> {
+    let fs = cargo_hive_platform::current().unwrap().fs;
+    let listing =
+        cargo_hive_gc::checkout::list_profile(fs.as_ref(), debug, 1_000_000, 100_000).unwrap();
+    names
+        .iter()
+        .flat_map(|name| {
+            listing
+                .objects
+                .iter()
+                .map(|(p, _, _)| p)
+                .filter(|p| p.file_name().is_some_and(|n| n == name.as_str()))
+                .cloned()
+        })
+        .collect()
+}
+
+fn find_linked_named(debug: &Path, prefix: &str) -> Option<PathBuf> {
+    let target = debug.parent()?;
+    match layout_of(target) {
+        UnitLayout::Flat => {
+            named_under(&debug.join("deps"), prefix).filter(|p| is_linked_binary(p))
+        }
+        UnitLayout::UnitDir => {
+            let fs = cargo_hive_platform::current().unwrap().fs;
+            let listing =
+                cargo_hive_gc::checkout::list_profile(fs.as_ref(), debug, 1_000_000, 100_000)
+                    .ok()?;
+            listing.candidates.into_iter().find(|p| {
+                p.file_name().is_some_and(|n| {
+                    let name = n.to_string_lossy();
+                    name.starts_with(prefix) && !name.contains('.')
+                }) && is_linked_binary(p)
+            })
+        }
+    }
 }
 
 fn oldest_fingerprint_unit(target: &Path) -> String {
-    let fp = target.join("debug/.fingerprint");
+    let profile = target.join("debug");
+    let report = cargo_hive_core::fingerprint::read_profile(&profile);
     let mut best: Option<(SystemTime, String)> = None;
-    for entry in fs::read_dir(&fp).unwrap() {
-        let dir = entry.unwrap().path();
-        let stamp = dir.join("invoked.timestamp");
-        if !stamp.exists() {
-            continue;
-        }
-        let t = fs::metadata(&stamp).unwrap().modified().unwrap();
-        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let mut consider = |loc: &unit_path::UnitLoc, kind: cargo_hive_core::fingerprint::UnitKind| {
+        let stamp = unit_path::stamp(&profile, loc, kind);
+        let Ok(meta) = fs::metadata(&stamp) else {
+            return;
+        };
+        let t = meta.modified().unwrap();
         if best.as_ref().is_none_or(|(b, _)| t < *b) {
-            best = Some((t, name));
+            best = Some((t, loc.name_meta.clone()));
         }
+    };
+    if let Some(graph) = &report.graph {
+        for unit in &graph.units {
+            consider(&unit.loc, unit.kind);
+        }
+    }
+    for nc in &report.not_current_units {
+        let kind = nc.stem.as_deref().map_or(
+            cargo_hive_core::fingerprint::UnitKind::Other,
+            cargo_hive_core::fingerprint::UnitKind::of,
+        );
+        consider(&nc.loc, kind);
     }
     best.expect("a fingerprint unit").1
 }
 
 fn newest_fingerprint_unit(target: &Path) -> String {
-    let fp = target.join("debug/.fingerprint");
+    let profile = target.join("debug");
+    let report = cargo_hive_core::fingerprint::read_profile(&profile);
     let mut best: Option<(SystemTime, String)> = None;
-    for entry in fs::read_dir(&fp).unwrap() {
-        let dir = entry.unwrap().path();
-        let stamp = dir.join("invoked.timestamp");
-        if !stamp.exists() {
-            continue;
-        }
-        let t = fs::metadata(&stamp).unwrap().modified().unwrap();
-        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let mut consider = |loc: &unit_path::UnitLoc, kind: cargo_hive_core::fingerprint::UnitKind| {
+        let stamp = unit_path::stamp(&profile, loc, kind);
+        let Ok(meta) = fs::metadata(&stamp) else {
+            return;
+        };
+        let t = meta.modified().unwrap();
         if best.as_ref().is_none_or(|(b, _)| t > *b) {
-            best = Some((t, name));
+            best = Some((t, loc.name_meta.clone()));
         }
+    };
+    if let Some(graph) = &report.graph {
+        for unit in &graph.units {
+            consider(&unit.loc, unit.kind);
+        }
+    }
+    for nc in &report.not_current_units {
+        let kind = nc.stem.as_deref().map_or(
+            cargo_hive_core::fingerprint::UnitKind::Other,
+            cargo_hive_core::fingerprint::UnitKind::of,
+        );
+        consider(&nc.loc, kind);
     }
     best.expect("a fingerprint unit").1
 }
@@ -2190,8 +2400,17 @@ fn candidate_binaries(debug: &Path) -> Vec<PathBuf> {
     if let Ok(entries) = fs::read_dir(debug.join("build")) {
         for entry in entries {
             let child = entry.unwrap().path();
-            if child.is_dir() {
-                push_dir(&child);
+            if !child.is_dir() {
+                continue;
+            }
+            push_dir(&child);
+            if let Ok(hexes) = fs::read_dir(&child) {
+                for hex in hexes {
+                    let hex = hex.unwrap().path();
+                    if hex.is_dir() {
+                        push_dir(&hex.join("out"));
+                    }
+                }
             }
         }
     }
@@ -2244,6 +2463,26 @@ fn build_script_under(build: &Path) -> Option<PathBuf> {
         let script = dir.join("build-script-build");
         if script.is_file() {
             return Some(script);
+        }
+    }
+    None
+}
+
+fn build_script_under_unit_dir(build: &Path) -> Option<PathBuf> {
+    for pkg in fs::read_dir(build).ok()? {
+        let pkg = pkg.ok()?.path();
+        if !pkg.is_dir() {
+            continue;
+        }
+        for hex in fs::read_dir(&pkg).ok()? {
+            let hex = hex.ok()?.path();
+            if !hex.is_dir() {
+                continue;
+            }
+            let script = hex.join("out").join("build_script_build");
+            if script.is_file() {
+                return Some(script);
+            }
         }
     }
     None

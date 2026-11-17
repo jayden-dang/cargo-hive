@@ -77,15 +77,20 @@ With the roster above the band is **Solo**.
 Run in this order; all must pass before any completion claim. Every run of a development build
 sets `HIVE_HOME` to a scratch dir under `/private/tmp`, never `~/.hive`.
 
-The merge gate is `scripts/gate.sh` (the same script CI's `gate` job runs). It runs, in order and
-stopping at the first failure: `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings`;
+The merge gate is `scripts/gate.sh` (the same script CI's `gate (1.97.1)` and
+`gate (1.100.0)` jobs run). It runs, in order and stopping at the first failure:
+`cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings`;
 `cargo test --workspace`; `cargo check --workspace --target x86_64-unknown-linux-gnu`.
+Both toolchains are required: `RUSTUP_TOOLCHAIN=1.97.1 scripts/gate.sh` (flat) and
+`RUSTUP_TOOLCHAIN=1.100.0 scripts/gate.sh` (unit-dir). Locally, when the named
+`1.100.0` toolchain lacks rustfmt/clippy/linux std, `RUSTUP_TOOLCHAIN=stable` is
+the same rustc 1.100.0 compiler with those components already installed.
 
 | Check | Command |
 |---|---|
-| Typecheck | `cargo check --workspace --all-targets` and `cargo check --workspace --target x86_64-unknown-linux-gnu` |
-| Lint | `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings` |
-| Unit tests | `cargo test --workspace` |
+| Typecheck | `RUSTUP_TOOLCHAIN=1.97.1` and `RUSTUP_TOOLCHAIN=1.100.0` (or local `stable` for 1.100): `cargo check --workspace --all-targets` and `cargo check --workspace --target x86_64-unknown-linux-gnu` |
+| Lint | same toolchains: `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings` |
+| Unit tests | same toolchains: `cargo test --workspace` |
 | E2E / smoke | none — the integration tests in `crates/cargo-hive/tests/` already drive the real binary |
 
 `cargo check --workspace --target x86_64-unknown-linux-gnu` needs that rustup target installed. On a

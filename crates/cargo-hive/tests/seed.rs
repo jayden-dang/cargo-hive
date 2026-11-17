@@ -35,18 +35,39 @@ fn the_fixture_builds_a_registry_crate_with_a_build_script_offline() {
         built.registry_recompiled
     );
     assert!(built.registry_recompiled.iter().any(|n| n == "leafcrate"));
-    let deps = repo.main.join("target/debug/deps");
-    let dep_info = std::fs::read_dir(&deps)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| {
-            p.extension().is_some_and(|x| x == "d")
-                && p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("depcrate-")
-        })
-        .unwrap();
+    let target = repo.main.join("target");
+    let profile = target.join("debug");
+    let layout = common::cargo_fixture::layout_of(&target);
+    let dep_info = match layout {
+        UnitLayout::Flat => std::fs::read_dir(profile.join("deps"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| {
+                p.extension().is_some_and(|x| x == "d")
+                    && p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("depcrate-")
+            })
+            .expect("depcrate-*.d under deps/"),
+        UnitLayout::UnitDir => {
+            let report = cargo_hive_core::fingerprint::read_profile(&profile);
+            let loc = report
+                .graph
+                .as_ref()
+                .unwrap()
+                .units
+                .iter()
+                .find(|u| u.loc.name_meta.starts_with("depcrate-"))
+                .map(|u| u.loc.clone())
+                .expect("depcrate unit");
+            std::fs::read_dir(unit_path::outputs(&profile, &loc))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| p.extension().is_some_and(|x| x == "d"))
+                .expect("depcrate *.d under out/")
+        }
+    };
     let first = std::fs::read_to_string(dep_info).unwrap();
     let cargo_home = hive.cargo_home.path.join("registry/src");
     assert!(first.contains(&*cargo_home.to_string_lossy()), "{first}");

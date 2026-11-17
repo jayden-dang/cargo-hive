@@ -14,25 +14,31 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The toolchain the gate is verified on. Cargo 1.100 moved build output to a new
-  # layout hive does not read yet (#33); gate-latest-stable watches the newest stable.
+  # package and capabilities stay on the flat-layout pin. The gate job matrix
+  # covers rustc 1.97.1 (flat) and 1.100.0 (unit-dir).
   RUST_TOOLCHAIN: "1.97.1"
 
 jobs:
   gate:
-    name: gate
+    name: gate (${{ matrix.toolchain }})
     runs-on: macos-15
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.97.1", "1.100.0"]
     steps:
       - uses: actions/checkout@v5
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
+          rustup toolchain install "${{ matrix.toolchain }}" --profile minimal \
             --component rustfmt --component clippy \
             --target x86_64-unknown-linux-gnu
-          rustup default "$RUST_TOOLCHAIN"
+          rustup default "${{ matrix.toolchain }}"
           rustc --version
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: gate-${{ matrix.toolchain }}
       - name: Merge gate
         run: scripts/gate.sh
 

@@ -6,7 +6,7 @@ use super::{Scratch, prove, wait_within};
 use cargo_hive_core::fingerprint::{self, Format};
 use cargo_hive_core::liveness::{DeadUnit, Liveness, UnitRef};
 use cargo_hive_core::target::TargetDir;
-use cargo_hive_core::unit_path::UnitLayout;
+use cargo_hive_core::unit_path::{self, UnitLayout};
 use cargo_hive_gc::liveness::liveness;
 use cargo_hive_platform as platform;
 use std::collections::{BTreeMap, BTreeSet};
@@ -157,15 +157,23 @@ pub fn set_mtime(path: &Path, time: SystemTime) {
 pub fn backdate_all(target: &Path, age: Duration) {
     let old = SystemTime::now() - age;
     for profile in profile_dirs(target) {
-        for sub in [".fingerprint", "build"] {
-            let Ok(entries) = fs::read_dir(profile.join(sub)) else {
-                continue;
-            };
-            for entry in entries {
-                let stamp = entry.unwrap().path().join("invoked.timestamp");
+        let report = fingerprint::read_profile(&profile);
+        if let Some(graph) = &report.graph {
+            for unit in &graph.units {
+                let stamp = unit_path::stamp(&profile, &unit.loc, unit.kind);
                 if stamp.exists() {
                     set_mtime(&stamp, old);
                 }
+            }
+        }
+        for nc in &report.not_current_units {
+            let kind = nc
+                .stem
+                .as_deref()
+                .map_or(fingerprint::UnitKind::Other, fingerprint::UnitKind::of);
+            let stamp = unit_path::stamp(&profile, &nc.loc, kind);
+            if stamp.exists() {
+                set_mtime(&stamp, old);
             }
         }
     }

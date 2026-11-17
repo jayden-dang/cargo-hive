@@ -17,7 +17,7 @@ use cargo_hive_core::ledger::{Footprint, measure};
 use cargo_hive_core::liveness::{Liveness, unit_timestamp};
 use cargo_hive_core::receipt::Outcome;
 use cargo_hive_core::target::{self, Owner, TargetDir};
-use cargo_hive_core::unit_path::UnitLoc;
+use cargo_hive_core::unit_path::{self, UnitLayout, UnitLoc};
 use cargo_hive_gc::liveness::liveness;
 use cargo_hive_gc::plan_tier::apply::{self, ResolvedTarget};
 use cargo_hive_gc::plan_tier::build::{self, TargetPlan};
@@ -729,6 +729,15 @@ fn clone_target<'a>(
     Ok(guard)
 }
 
+fn profile_expects_build_lock(profile: &Path) -> bool {
+    // Flat: any `.fingerprint` dir (even empty) still needs the lock.
+    // Unit-dir: no profile-root `.fingerprint`; layouts reports UnitDir.
+    profile.join(".fingerprint").is_dir()
+        || fingerprint::read_profile(profile)
+            .layouts
+            .contains(&UnitLayout::UnitDir)
+}
+
 pub fn profile_dirs_of(path: &Path) -> Result<Vec<PathBuf>, String> {
     match target::identify(path) {
         None => Err(format!("{}: not a Cargo target dir", path.display())),
@@ -1039,57 +1048,40 @@ fn backdate_dead_stamps(
         .ok_or("the clock is too early to backdate dead units")?;
     for profile in profile_dirs_of(clone)? {
         let rel_profile = rel(&profile, clone);
-        backdate_stamp_tree(
-            fs,
-            &profile.join(".fingerprint"),
-            &rel_profile,
-            live,
-            when,
-            true,
-        )?;
-        backdate_stamp_tree(fs, &profile.join("build"), &rel_profile, live, when, false)?;
-    }
-    Ok(())
-}
-
-fn backdate_stamp_tree(
-    fs: &dyn Fs,
-    root: &Path,
-    rel_profile: &Path,
-    live: &BTreeSet<(PathBuf, String)>,
-    when: SystemTime,
-    fingerprint: bool,
-) -> Result<(), String> {
-    let listed = match fs.read_dir_bounded(root, 100_000) {
-        Ok(listed) => listed,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(format!("{}: {err}", root.display())),
-    };
-    for (name, kind) in listed {
-        if kind != EntryKind::Dir {
-            continue;
+        let report = fingerprint::read_profile(&profile);
+        let mut units: Vec<(UnitLoc, fingerprint::UnitKind)> = Vec::new();
+        if let Some(graph) = &report.graph {
+            for unit in &graph.units {
+                units.push((unit.loc.clone(), unit.kind));
+            }
         }
-        if live.contains(&(rel_profile.to_path_buf(), name.clone())) {
-            continue;
+        for nc in &report.not_current_units {
+            let kind = nc
+                .stem
+                .as_deref()
+                .map_or(fingerprint::UnitKind::Other, fingerprint::UnitKind::of);
+            units.push((nc.loc.clone(), kind));
         }
-        let dir = root.join(&name);
-        set_stamp(fs, &dir.join("invoked.timestamp"), when)?;
-        if !fingerprint {
-            continue;
-        }
-        let inner = match fs.read_dir_bounded(&dir, 100_000) {
-            Ok(inner) => inner,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(format!("{}: {err}", dir.display())),
-        };
-        for (child, child_kind) in inner {
-            if child_kind != EntryKind::File
-                || child.ends_with(".json")
-                || child == "invoked.timestamp"
-            {
+        for (loc, kind) in units {
+            if live.contains(&(rel_profile.to_path_buf(), loc.name_meta.clone())) {
                 continue;
             }
-            set_stamp(fs, &dir.join(child), when)?;
+            set_stamp(fs, &unit_path::stamp(&profile, &loc, kind), when)?;
+            let fp = unit_path::fingerprint_dir(&profile, &loc);
+            let inner = match fs.read_dir_bounded(&fp, 100_000) {
+                Ok(inner) => inner,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(format!("{}: {err}", fp.display())),
+            };
+            for (child, child_kind) in inner {
+                if child_kind != EntryKind::File
+                    || child.ends_with(".json")
+                    || child == "invoked.timestamp"
+                {
+                    continue;
+                }
+                set_stamp(fs, &fp.join(child), when)?;
+            }
         }
     }
     Ok(())
@@ -1285,7 +1277,7 @@ pub fn prove_with_cloner(
     for profile in &profile_dirs {
         match fs.try_lock_exclusive(&profile.join(".cargo-build-lock")) {
             TryLock::Acquired(guard) => locks.push(guard),
-            TryLock::Gone if profile.join(".fingerprint").is_dir() => {
+            TryLock::Gone if profile_expects_build_lock(profile) => {
                 return Err(format!(
                     "{}: no build lock file; cannot prove the target idle",
                     profile.display()

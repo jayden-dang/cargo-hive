@@ -2,7 +2,7 @@
 //! whose earlier builds are older than the window. `Planned` runs `gc --plan` and reads the
 //! receipt. Directory listings stop at a fixed bound.
 
-use super::cargo_fixture::{backdate_all, set_mtime};
+use super::cargo_fixture::{backdate_all, layout_of, set_mtime};
 use super::{Hive, Scratch, git, init_repo, register};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -10,6 +10,8 @@ use std::time::{Duration, SystemTime};
 
 use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_cargo::registry::{FILE as REGISTRY_FILE, Registry};
+use cargo_hive_core::fingerprint::{self, UnitKind};
+use cargo_hive_core::unit_path::{self, UnitLoc};
 use cargo_hive_platform::Fs;
 use cargo_hive_state::{Config, State};
 
@@ -133,27 +135,33 @@ impl Planned {
             .to_string()
     }
 
-    /// The hash tail of the `.fingerprint/fixture-*` unit whose `invoked.timestamp` is oldest
-    /// in `target/debug`: the dead unit.
+    /// The hash tail of the oldest `fixture-*` unit stamp in `target/debug`: the dead unit.
     pub fn dead_unit_hash(&self, target: &Path) -> String {
-        let fp = target.join("debug/.fingerprint");
+        let profile = target.join("debug");
+        let report = fingerprint::read_profile(&profile);
         let mut best: Option<(SystemTime, String)> = None;
-        let mut seen = 0usize;
-        for e in std::fs::read_dir(&fp).unwrap() {
-            seen += 1;
-            assert!(seen < 100_000, "walk bound hit");
-            let dir = e.unwrap().path();
-            let name = dir.file_name().unwrap().to_str().unwrap().to_string();
-            if !name.starts_with("fixture-") {
-                continue;
+        let mut consider = |loc: &UnitLoc, kind: UnitKind| {
+            if !loc.name_meta.starts_with("fixture-") {
+                return;
             }
-            let t = std::fs::metadata(dir.join("invoked.timestamp"))
-                .unwrap()
-                .modified()
-                .unwrap();
+            let stamp = unit_path::stamp(&profile, loc, kind);
+            let Ok(meta) = std::fs::metadata(&stamp) else {
+                return;
+            };
+            let t = meta.modified().unwrap();
+            let hash = loc.name_meta.rsplit('-').next().unwrap().to_string();
             if best.as_ref().is_none_or(|(b, _)| t < *b) {
-                best = Some((t, name.rsplit('-').next().unwrap().to_string()));
+                best = Some((t, hash));
             }
+        };
+        if let Some(graph) = &report.graph {
+            for unit in &graph.units {
+                consider(&unit.loc, unit.kind);
+            }
+        }
+        for nc in &report.not_current_units {
+            let kind = nc.stem.as_deref().map_or(UnitKind::Other, UnitKind::of);
+            consider(&nc.loc, kind);
         }
         best.expect("a fixture unit").1
     }
@@ -208,9 +216,13 @@ impl Planned {
 
     /// Makes the dead unit `hash` of `target` live again by touching its stamp.
     pub fn revive(&self, target: &Path, hash: &str) {
-        let stamp = target.join(format!(
-            "debug/.fingerprint/fixture-{hash}/invoked.timestamp"
-        ));
+        let profile = target.join("debug");
+        let layout = layout_of(target);
+        let loc = UnitLoc {
+            layout,
+            name_meta: format!("fixture-{hash}"),
+        };
+        let stamp = unit_path::stamp(&profile, &loc, UnitKind::Lib);
         set_mtime(&stamp, SystemTime::now());
     }
 }
