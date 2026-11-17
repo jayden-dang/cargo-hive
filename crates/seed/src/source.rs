@@ -126,6 +126,7 @@ pub fn unit_key(unit: &Unit) -> StoreKey {
     StoreKey {
         variant: 0,
         toolchain_value: unit.toolchain_value,
+        unit_layout: cargo_hive_core::unit_path::UnitLayout::Flat,
         name_meta: unit.loc.name_meta.clone(),
         fingerprint_hash: unit.hash.to_string(),
     }

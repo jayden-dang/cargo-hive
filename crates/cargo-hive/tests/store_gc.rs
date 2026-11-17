@@ -15,6 +15,7 @@ use cargo_hive_core::fingerprint;
 use cargo_hive_core::ledger;
 use cargo_hive_core::receipt::Measured;
 use cargo_hive_core::target::{Owner, TAG_LINE, TargetDir};
+use cargo_hive_core::unit_path::UnitLayout;
 use cargo_hive_platform::Fs;
 use cargo_hive_platform::apfs::Apfs;
 use cargo_hive_seed::choose::{self, Choice};
@@ -22,8 +23,8 @@ use cargo_hive_seed::evict::{self, EvictCtx, Limits};
 use cargo_hive_seed::store::{self, MAX_STORE_BYTES, Row, STORE_FILE, StoreFile, store_dir};
 use cargo_hive_state::State;
 use common::store_fixture::{
-    count, drop_row, entry_dirs, has_finding, plant_rowless, rows, seeded_store, set_last_live_at,
-    synth_entry, synth_entry_at, tree_files,
+    count, drop_row, entry_dirs, has_finding, plant_rowless, plant_rowless_layout, rows,
+    seeded_store, set_last_live_at, synth_entry, synth_entry_at, synth_entry_layout, tree_files,
 };
 use common::{Hive, crate_dirs, plant_session, wait_within};
 
@@ -112,6 +113,69 @@ fn a_rowless_entry_dir_no_target_holds_is_evicted() {
             .iter()
             .all(|p| !p.to_string_lossy().contains("gonecrate-aaaaaaaaaaaaaaaa")),
         "{:?}",
+        entry_dirs(&hive)
+    );
+}
+
+#[test]
+fn store_gc_keeps_a_unit_dir_entry_its_row_holds_and_evicts_a_rowless_one() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let value = rows(&hive)[0]["toolchain_value"].as_u64().unwrap();
+    synth_entry_layout(
+        &hive,
+        (value, "udirhold-aaaaaaaaaaaaaaaa", "cccccccccccccccc"),
+        UnitLayout::UnitDir,
+        &[],
+        &[("blob", b"keep".to_vec())],
+        0,
+    );
+    plant_rowless_layout(
+        &hive,
+        value,
+        UnitLayout::UnitDir,
+        "udirgone-bbbbbbbbbbbbbbbb",
+        "dddddddddddddddd",
+    );
+    let held = entry_dirs(&hive)
+        .into_iter()
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("u.udirhold-aaaaaaaaaaaaaaaa")
+        })
+        .expect("unit-dir entry held by its row");
+    assert!(
+        entry_dirs(&hive).iter().any(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("u.udirgone-bbbbbbbbbbbbbbbb")
+        }),
+        "rowless unit-dir entry missing before gc: {:?}",
+        entry_dirs(&hive)
+    );
+    remove_all_targets(&repo);
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        held.is_dir(),
+        "unit-dir entry its row holds was removed: {}",
+        held.display()
+    );
+    assert!(
+        count(&receipt, "store_entries_evicted_rowless") >= 1,
+        "{receipt}"
+    );
+    assert!(
+        entry_dirs(&hive).iter().all(|p| {
+            !p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("u.udirgone-bbbbbbbbbbbbbbbb")
+        }),
+        "rowless unit-dir entry remained: {:?}",
         entry_dirs(&hive)
     );
 }
@@ -2290,6 +2354,7 @@ fn plant_many_aged(
             repos: Vec::new(),
             registry_deps: Vec::new(),
             variant: 0,
+            unit_layout: cargo_hive_core::unit_path::UnitLayout::Flat,
         });
     }
     state

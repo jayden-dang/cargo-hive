@@ -17,10 +17,15 @@ use serde::{Deserialize, Serialize};
 use cargo_hive_core::fingerprint::{self, DepEdge};
 use cargo_hive_core::liveness;
 use cargo_hive_core::target::TargetDir;
+use cargo_hive_core::unit_path::UnitLayout;
 use cargo_hive_state::{Layout, State, StateError};
 
 pub const SEEDS_FILE: &str = "seeds.json";
 pub const MAX_SEEDS_BYTES: u64 = 16 * 1024 * 1024;
+
+fn unit_layout_is_flat(layout: &UnitLayout) -> bool {
+    *layout == UnitLayout::Flat
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeededUnit {
@@ -29,6 +34,8 @@ pub struct SeededUnit {
     pub stamp: Option<(PathBuf, u64)>,
     pub has_build: bool,
     pub deps_files: u32,
+    #[serde(default, skip_serializing_if = "unit_layout_is_flat")]
+    pub unit_layout: UnitLayout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -456,6 +463,7 @@ mod tests {
                 )),
                 has_build: true,
                 deps_files: 1,
+                unit_layout: UnitLayout::Flat,
             }],
         }
     }
@@ -746,6 +754,7 @@ mod tests {
                     stamp,
                     has_build: spec.has_build,
                     deps_files: spec.recorded_files,
+                    unit_layout: UnitLayout::Flat,
                 });
             }
         }

@@ -442,6 +442,7 @@ fn place_unit(
             stamp,
             has_build,
             deps_files,
+            unit_layout: UnitLayout::Flat,
         },
         outside,
     ))

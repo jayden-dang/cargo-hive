@@ -166,6 +166,7 @@ mod tests {
     use crate::store::{Row, SourceRecord, SourceUnitRef, StoreFile};
 
     fn row(name_meta: &str, fp: &str, value: u64, repo: &str, variant: u32, deps: &[&str]) -> Row {
+        use cargo_hive_core::unit_path::UnitLayout;
         Row {
             toolchain_value: value,
             name_meta: name_meta.into(),
@@ -178,10 +179,12 @@ mod tests {
             repos: vec![repo.into()],
             registry_deps: deps.iter().map(|d| d.to_string()).collect(),
             variant,
+            unit_layout: UnitLayout::Flat,
         }
     }
 
     fn record(repo: &str, newest_at: u64, units: &[(&str, &str, u64, u32)]) -> SourceRecord {
+        use cargo_hive_core::unit_path::UnitLayout;
         SourceRecord {
             repo: repo.into(),
             checkout: format!("{repo}/checkout").into(),
@@ -193,6 +196,7 @@ mod tests {
                     name_meta: (*name_meta).into(),
                     fingerprint_hash: (*fp).into(),
                     variant: *variant,
+                    unit_layout: UnitLayout::Flat,
                 })
                 .collect(),
         }

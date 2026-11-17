@@ -133,6 +133,59 @@ fn each_fixture_capabilities_without_unit_layout_reads_as_flat_when_check_f_pass
 }
 
 #[test]
+fn each_fixture_store_and_seeds_read_every_row_and_seeded_unit_as_flat() {
+    use cargo_hive_core::unit_path::UnitLayout;
+    for home in fixture_homes() {
+        let state = State::open_at(home.clone()).unwrap();
+        let store: StoreFile = read_state_file(&state, STORE_FILE);
+        assert!(
+            !store.units.is_empty(),
+            "{} store.db has no rows",
+            home.display()
+        );
+        for row in &store.units {
+            assert_eq!(
+                row.unit_layout,
+                UnitLayout::Flat,
+                "{} store row {} layout",
+                home.display(),
+                row.name_meta
+            );
+        }
+        for (target, source) in &store.sources {
+            for unit in &source.units {
+                assert_eq!(
+                    unit.unit_layout,
+                    UnitLayout::Flat,
+                    "{} source {} unit {} layout",
+                    home.display(),
+                    target.display(),
+                    unit.name_meta
+                );
+            }
+        }
+        let seeds: SeedsFile = read_state_file(&state, SEEDS_FILE);
+        assert!(
+            !seeds.targets.is_empty(),
+            "{} seeds.json has no seed record",
+            home.display()
+        );
+        for (target, record) in &seeds.targets {
+            for unit in &record.units {
+                assert_eq!(
+                    unit.unit_layout,
+                    UnitLayout::Flat,
+                    "{} seeded unit {} at {} layout",
+                    home.display(),
+                    unit.dir_name,
+                    target.display()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn every_fixture_set_is_present_and_complete() {
     let homes = fixture_homes();
     assert!(!homes.is_empty(), "expected at least one fixtures/v*/home/");

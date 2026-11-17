@@ -3,11 +3,19 @@
 
 use super::Hive;
 use super::registry_fixture::{RegistryRepo, cargo_json};
+use cargo_hive_core::unit_path::UnitLayout;
 use cargo_hive_seed::store::{MAX_STORE_BYTES, Row, STORE_FILE, StoreFile, store_dir};
 use cargo_hive_state::State;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+fn entry_dir_name(layout: UnitLayout, name_meta: &str, fingerprint_hash: &str) -> String {
+    match layout {
+        UnitLayout::Flat => format!("{name_meta}-{fingerprint_hash}"),
+        UnitLayout::UnitDir => format!("u.{name_meta}-{fingerprint_hash}"),
+    }
+}
 
 pub fn seeded_store(hive: &Hive) -> RegistryRepo {
     fs::create_dir_all(hive.home.path.join("no-cache")).unwrap();
@@ -59,13 +67,33 @@ pub fn synth_entry(
     files: &[(&str, Vec<u8>)],
     last_live_secs_ago: u64,
 ) {
+    synth_entry_layout(
+        hive,
+        key,
+        UnitLayout::Flat,
+        registry_deps,
+        files,
+        last_live_secs_ago,
+    );
+}
+
+#[allow(dead_code)]
+pub fn synth_entry_layout(
+    hive: &Hive,
+    key: (u64, &str, &str),
+    unit_layout: UnitLayout,
+    registry_deps: &[&str],
+    files: &[(&str, Vec<u8>)],
+    last_live_secs_ago: u64,
+) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    synth_entry_at(
+    synth_entry_at_layout(
         hive,
         key,
+        unit_layout,
         registry_deps,
         files,
         now.saturating_sub(last_live_secs_ago),
@@ -81,10 +109,29 @@ pub fn synth_entry_at(
     files: &[(&str, Vec<u8>)],
     last_live_at: u64,
 ) {
+    synth_entry_at_layout(
+        hive,
+        key,
+        UnitLayout::Flat,
+        registry_deps,
+        files,
+        last_live_at,
+    );
+}
+
+#[allow(dead_code)]
+pub fn synth_entry_at_layout(
+    hive: &Hive,
+    key: (u64, &str, &str),
+    unit_layout: UnitLayout,
+    registry_deps: &[&str],
+    files: &[(&str, Vec<u8>)],
+    last_live_at: u64,
+) {
     let (toolchain_value, name_meta, fingerprint_hash) = key;
     let dir = store_dir_path(hive)
         .join(toolchain_value.to_string())
-        .join(format!("{name_meta}-{fingerprint_hash}"));
+        .join(entry_dir_name(unit_layout, name_meta, fingerprint_hash));
     fs::create_dir_all(&dir).unwrap();
     let mut size = 0u64;
     for (rel, bytes) in files {
@@ -107,6 +154,7 @@ pub fn synth_entry_at(
         repos: Vec::new(),
         registry_deps: registry_deps.iter().map(|s| (*s).to_string()).collect(),
         variant: 0,
+        unit_layout,
     };
     let state = State::open_at(hive.home.path.clone()).unwrap();
     state
@@ -119,6 +167,7 @@ pub fn synth_entry_at(
                 .or_insert(toolchain_value);
             file.units.retain(|existing| {
                 !(existing.toolchain_value == row.toolchain_value
+                    && existing.unit_layout == row.unit_layout
                     && existing.name_meta == row.name_meta
                     && existing.fingerprint_hash == row.fingerprint_hash)
             });
@@ -172,9 +221,25 @@ pub fn drop_row(hive: &Hive, name_meta_prefix: &str) {
 }
 
 pub fn plant_rowless(hive: &Hive, toolchain_value: u64, name_meta: &str, fingerprint_hash: &str) {
+    plant_rowless_layout(
+        hive,
+        toolchain_value,
+        UnitLayout::Flat,
+        name_meta,
+        fingerprint_hash,
+    );
+}
+
+pub fn plant_rowless_layout(
+    hive: &Hive,
+    toolchain_value: u64,
+    unit_layout: UnitLayout,
+    name_meta: &str,
+    fingerprint_hash: &str,
+) {
     let dir = store_dir_path(hive)
         .join(toolchain_value.to_string())
-        .join(format!("{name_meta}-{fingerprint_hash}"));
+        .join(entry_dir_name(unit_layout, name_meta, fingerprint_hash));
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("blob"), b"rowless").unwrap();
 }

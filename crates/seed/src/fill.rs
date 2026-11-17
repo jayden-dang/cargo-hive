@@ -319,6 +319,7 @@ fn unit_ref(row: &Row) -> store::SourceUnitRef {
         name_meta: row.name_meta.clone(),
         fingerprint_hash: row.fingerprint_hash.clone(),
         variant: row.variant,
+        unit_layout: row.unit_layout,
     }
 }
 
@@ -422,7 +423,12 @@ fn clone_unit(
         }
     }
     let files = &new.files;
-    let key = store::entry_name(&unit.dir_name, &unit.fingerprint_hash, new.variant);
+    let key = store::entry_name(
+        cargo_hive_core::unit_path::UnitLayout::Flat,
+        &unit.dir_name,
+        &unit.fingerprint_hash,
+        new.variant,
+    );
     let tmp = store::tmp_dir(ctx.state, &key);
     if let Err(stop) = reset_tmp(&tmp) {
         return match stop {
@@ -666,6 +672,7 @@ fn skeleton(unit: &SourceUnit) -> Row {
         repos: Vec::new(),
         registry_deps: unit.registry_deps.clone(),
         variant: 0,
+        unit_layout: cargo_hive_core::unit_path::UnitLayout::Flat,
     }
 }
 

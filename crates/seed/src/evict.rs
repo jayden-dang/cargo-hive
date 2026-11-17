@@ -1105,6 +1105,7 @@ mod tests {
         let key = StoreKey {
             variant: 0,
             toolchain_value: value,
+            unit_layout: cargo_hive_core::unit_path::UnitLayout::Flat,
             name_meta: "cap".into(),
             fingerprint_hash: "aaaaaaaaaaaaaaaa".into(),
         };

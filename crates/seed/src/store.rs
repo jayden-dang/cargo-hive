@@ -15,8 +15,13 @@ use serde::{Deserialize, Serialize};
 use cargo_hive_core::caps::CRATE_DIR_CAP;
 use cargo_hive_core::fingerprint;
 use cargo_hive_core::size::{MAX_DEPTH, SizeError, allocated_bytes};
+use cargo_hive_core::unit_path::UnitLayout;
 use cargo_hive_platform::{EntryKind, Fs};
 use cargo_hive_state::{Layout, State, StateError};
+
+fn unit_layout_is_flat(layout: &UnitLayout) -> bool {
+    *layout == UnitLayout::Flat
+}
 
 pub const STORE_FILE: &str = "store.db";
 pub const MAX_STORE_BYTES: u64 = 32 * 1024 * 1024;
@@ -25,6 +30,7 @@ const TMP_KEEP: Duration = Duration::from_secs(86_400);
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StoreKey {
     pub toolchain_value: u64,
+    pub unit_layout: UnitLayout,
     pub name_meta: String,
     pub fingerprint_hash: String,
     /// Which copy of the key: copies from two source targets whose bytes differ (a crate
@@ -46,6 +52,8 @@ pub struct Row {
     pub registry_deps: Vec<String>,
     #[serde(default)]
     pub variant: u32,
+    #[serde(default, skip_serializing_if = "unit_layout_is_flat")]
+    pub unit_layout: UnitLayout,
 }
 
 /// One unit a source target holds, at the variant whose bytes it has.
@@ -55,6 +63,8 @@ pub struct SourceUnitRef {
     pub name_meta: String,
     pub fingerprint_hash: String,
     pub variant: u32,
+    #[serde(default, skip_serializing_if = "unit_layout_is_flat")]
+    pub unit_layout: UnitLayout,
 }
 
 /// What one source target held at its last fill. Seed clones the units of one
@@ -107,19 +117,28 @@ pub(crate) fn key_dir(state: &State, key: &StoreKey) -> PathBuf {
     store_dir(state)
         .join(key.toolchain_value.to_string())
         .join(entry_name(
+            key.unit_layout,
             &key.name_meta,
             &key.fingerprint_hash,
             key.variant,
         ))
 }
 
-/// `<name-meta>-<hash>` for variant 0, as older stores name it, and `<name-meta>-<hash>~<n>`
-/// for a later variant.
-pub(crate) fn entry_name(name_meta: &str, fingerprint_hash: &str, variant: u32) -> String {
-    if variant == 0 {
+/// Flat: `{name-meta}-{hash}[~n]`. Unit-dir: `u.{name-meta}-{hash}[~n]`.
+pub(crate) fn entry_name(
+    unit_layout: UnitLayout,
+    name_meta: &str,
+    fingerprint_hash: &str,
+    variant: u32,
+) -> String {
+    let base = if variant == 0 {
         format!("{name_meta}-{fingerprint_hash}")
     } else {
         format!("{name_meta}-{fingerprint_hash}~{variant}")
+    };
+    match unit_layout {
+        UnitLayout::Flat => base,
+        UnitLayout::UnitDir => format!("u.{base}"),
     }
 }
 
@@ -586,6 +605,7 @@ pub fn commit_eviction(
 
 fn same_key(left: &Row, right: &Row) -> bool {
     left.toolchain_value == right.toolchain_value
+        && left.unit_layout == right.unit_layout
         && left.name_meta == right.name_meta
         && left.fingerprint_hash == right.fingerprint_hash
         && left.variant == right.variant
@@ -594,6 +614,7 @@ fn same_key(left: &Row, right: &Row) -> bool {
 pub(crate) fn row_key(row: &Row) -> StoreKey {
     StoreKey {
         toolchain_value: row.toolchain_value,
+        unit_layout: row.unit_layout,
         name_meta: row.name_meta.clone(),
         fingerprint_hash: row.fingerprint_hash.clone(),
         variant: row.variant,
@@ -602,12 +623,17 @@ pub(crate) fn row_key(row: &Row) -> StoreKey {
 
 pub(crate) fn row_matches(row: &Row, key: &StoreKey) -> bool {
     row.toolchain_value == key.toolchain_value
+        && row.unit_layout == key.unit_layout
         && row.name_meta == key.name_meta
         && row.fingerprint_hash == key.fingerprint_hash
         && row.variant == key.variant
 }
 
 fn parse_entry_key(toolchain_value: u64, name: &str) -> Option<StoreKey> {
+    let (unit_layout, name) = match name.strip_prefix("u.") {
+        Some(rest) => (UnitLayout::UnitDir, rest),
+        None => (UnitLayout::Flat, name),
+    };
     let (base, variant) = match name.rsplit_once('~') {
         Some((base, n)) => (base, n.parse::<u32>().ok().filter(|v| *v > 0)?),
         None => (name, 0),
@@ -617,6 +643,7 @@ fn parse_entry_key(toolchain_value: u64, name: &str) -> Option<StoreKey> {
     let name_meta = base[..base.len() - hash_text.len() - 1].to_string();
     Some(StoreKey {
         toolchain_value,
+        unit_layout,
         name_meta,
         fingerprint_hash: hash_text,
         variant,
@@ -780,6 +807,7 @@ fn discard_tmp(tmp: &Path) -> Result<(), PublishFailed> {
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
+    use cargo_hive_core::unit_path::UnitLayout;
     use cargo_hive_state::{State, StateError};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -812,6 +840,7 @@ mod tests {
             repos: vec![PathBuf::from("/private/tmp/hive-it-repo")],
             registry_deps: Vec::new(),
             variant: 0,
+            unit_layout: UnitLayout::Flat,
         }
     }
 
@@ -1248,6 +1277,7 @@ mod tests {
         StoreKey {
             variant: 0,
             toolchain_value: value,
+            unit_layout: UnitLayout::Flat,
             name_meta: meta.into(),
             fingerprint_hash: hash.into(),
         }
@@ -1266,6 +1296,7 @@ mod tests {
             repos: Vec::new(),
             registry_deps: Vec::new(),
             variant: 0,
+            unit_layout: key.unit_layout,
         }
     }
 
@@ -1666,6 +1697,7 @@ mod tests {
                         stamp: None,
                         has_build: false,
                         deps_files: 0,
+                        unit_layout: UnitLayout::Flat,
                     }],
                 },
             )]),
@@ -1790,6 +1822,7 @@ mod tests {
                 name_meta: keep.name_meta.clone(),
                 fingerprint_hash: keep.fingerprint_hash.clone(),
                 variant: 0,
+                unit_layout: keep.unit_layout,
             }],
         };
         write_store(
@@ -1881,6 +1914,99 @@ mod tests {
         );
         assert!(!entry_path(&state, &drop).exists());
         assert!(entry_path(&state, &keep).is_dir());
+        finish(&state);
+    }
+
+    #[test]
+    fn entry_name_and_parse_entry_key_round_trip_both_layouts_and_every_variant() {
+        let meta = "pkg-0123456789abcdef";
+        let hash = "fedcba9876543210";
+        for layout in [UnitLayout::Flat, UnitLayout::UnitDir] {
+            for variant in [0u32, 1, 7] {
+                let name = entry_name(layout, meta, hash, variant);
+                if layout == UnitLayout::UnitDir {
+                    assert!(
+                        name.starts_with("u."),
+                        "unit-dir entry name must use the u. prefix: {name}"
+                    );
+                } else {
+                    assert!(
+                        !name.starts_with("u."),
+                        "flat entry name must stay unprefixed: {name}"
+                    );
+                }
+                let key = parse_entry_key(9, &name).expect("entry name must parse");
+                assert_eq!(key.toolchain_value, 9);
+                assert_eq!(key.unit_layout, layout);
+                assert_eq!(key.name_meta, meta);
+                assert_eq!(key.fingerprint_hash, hash);
+                assert_eq!(key.variant, variant);
+                assert_eq!(
+                    entry_name(
+                        key.unit_layout,
+                        &key.name_meta,
+                        &key.fingerprint_hash,
+                        key.variant
+                    ),
+                    name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_flat_and_unit_dir_row_with_the_same_identity_are_two_keys_and_two_entry_dirs() {
+        let (state, _) = scratch_state("two-layouts");
+        let meta = "pkg-0123456789abcdef";
+        let hash = "aaaaaaaaaaaaaaaa";
+        let flat = StoreKey {
+            toolchain_value: 3,
+            unit_layout: UnitLayout::Flat,
+            name_meta: meta.into(),
+            fingerprint_hash: hash.into(),
+            variant: 0,
+        };
+        let unit_dir = StoreKey {
+            toolchain_value: 3,
+            unit_layout: UnitLayout::UnitDir,
+            name_meta: meta.into(),
+            fingerprint_hash: hash.into(),
+            variant: 0,
+        };
+        assert_ne!(flat, unit_dir);
+        let flat_dir = plant_entry(&state, &flat);
+        let unit_dir_dir = plant_entry(&state, &unit_dir);
+        assert_ne!(flat_dir, unit_dir_dir);
+        assert!(flat_dir.is_dir());
+        assert!(unit_dir_dir.is_dir());
+        assert_eq!(
+            flat_dir.file_name().unwrap().to_string_lossy(),
+            format!("{meta}-{hash}")
+        );
+        assert_eq!(
+            unit_dir_dir.file_name().unwrap().to_string_lossy(),
+            format!("u.{meta}-{hash}")
+        );
+
+        write_store(
+            &state,
+            &StoreFile {
+                layout: Layout::NEWEST,
+                units: vec![row_for(&flat, 10), row_for(&unit_dir, 10)],
+                toolchains: BTreeMap::from([("t\n".into(), 3u64)]),
+                sources: BTreeMap::new(),
+            },
+        );
+        let got = read(&state).unwrap();
+        assert_eq!(got.units.len(), 2);
+        assert!(got.units.iter().any(|r| r.unit_layout == UnitLayout::Flat));
+        assert!(
+            got.units
+                .iter()
+                .any(|r| r.unit_layout == UnitLayout::UnitDir)
+        );
+        let inv = inventory(&*cargo_hive_platform::current().unwrap().fs, &state).unwrap();
+        assert!(inv.rowless.is_empty(), "{:?}", inv.rowless);
         finish(&state);
     }
 }
