@@ -1004,6 +1004,7 @@ mod tests {
         Coverage, Format, ProfileReport, Unit, UnitGraph, UnitHash,
     };
     use cargo_hive_core::target::{Owner, TargetDir};
+    use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1071,7 +1072,10 @@ mod tests {
 
     fn sample_unit(value: u64) -> Unit {
         Unit {
-            dir_name: "dep-0000000000000001".to_string(),
+            loc: UnitLoc {
+                layout: UnitLayout::Flat,
+                name_meta: "dep-0000000000000001".to_string(),
+            },
             kind: cargo_hive_core::fingerprint::UnitKind::Lib,
             hash: UnitHash::parse("0123456789abcdef").unwrap(),
             deps: Vec::new(),

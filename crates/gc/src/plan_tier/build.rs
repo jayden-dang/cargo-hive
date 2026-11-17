@@ -459,7 +459,7 @@ fn add_target(plan: &mut Plan, target: PlannedTarget) {
 
 fn unit_label(target: &Path, unit: &UnitRef) -> String {
     let rel = unit.profile.strip_prefix(target).unwrap_or(&unit.profile);
-    format!("{}/{}", rel.display(), unit.dir_name)
+    format!("{}/{}", rel.display(), unit.loc.name_meta)
 }
 
 fn mint_id() -> String {

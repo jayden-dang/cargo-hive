@@ -6,6 +6,7 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 use cargo_hive_core::liveness::{Liveness, Uncertain, UnitRef};
+
 use cargo_hive_platform as platform;
 use common::Scratch;
 use common::cargo_fixture::*;
@@ -300,7 +301,7 @@ fn not_current(target: &Path, prefix: &str, keep: impl Fn(&Path) -> bool) -> Vec
             if name.starts_with(prefix) {
                 out.push(UnitRef {
                     profile: profile.path.clone(),
-                    dir_name: name,
+                    loc: unit.loc.clone(),
                 });
             }
         }
@@ -309,7 +310,7 @@ fn not_current(target: &Path, prefix: &str, keep: impl Fn(&Path) -> bool) -> Vec
 }
 
 fn hash_file(unit: &UnitRef) -> PathBuf {
-    let dir = unit.profile.join(".fingerprint").join(&unit.dir_name);
+    let dir = unit.profile.join(".fingerprint").join(&unit.loc.name_meta);
     fs::read_dir(dir)
         .unwrap()
         .take(DIR_CAP)
@@ -363,12 +364,12 @@ fn edge_packages(ws: &Busy, unit: &UnitRef) -> BTreeSet<u64> {
         .graph
         .into_iter()
         .flat_map(|g| g.units)
-        .filter(|u| u.dir_name == unit.dir_name)
+        .filter(|u| u.loc.name_meta == unit.loc.name_meta)
         .flat_map(|u| u.deps);
     let not_current = profile
         .not_current_units
         .into_iter()
-        .filter(|u| u.dir.file_name().is_some_and(|n| *n == *unit.dir_name))
+        .filter(|u| u.loc.name_meta == unit.loc.name_meta)
         .flat_map(|u| u.deps);
     current.chain(not_current).map(|d| d.package).collect()
 }

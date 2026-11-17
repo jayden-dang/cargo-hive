@@ -2,6 +2,7 @@
 //! and a sibling `<H>` with 16 lowercase hex chars. Its JSON must have exactly the 11
 //! known keys with known types. Any deviation makes the whole profile dir unsupported.
 
+use crate::unit_path::{UnitLayout, UnitLoc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -177,32 +178,38 @@ impl Serialize for UnitHash {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unit {
-    pub dir_name: String,
+    pub loc: UnitLoc,
     pub kind: UnitKind,
-    #[serde(rename = "hash_hex")]
     pub hash: UnitHash,
     pub deps: Vec<DepEdge>,
-    #[serde(skip)]
     pub stem: String,
-    #[serde(skip)]
     pub features: Arc<str>,
-    #[serde(skip)]
     pub coverage: Coverage,
-    #[serde(skip)]
     pub profile: u64,
-    #[serde(skip)]
     pub target: u64,
-    #[serde(skip)]
     pub path: u64,
-    #[serde(skip)]
     pub toolchain_value: u64,
+}
+
+impl Serialize for Unit {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Unit", 5)?;
+        state.serialize_field("name_meta", &self.loc.name_meta)?;
+        state.serialize_field("unit_layout", &self.loc.layout)?;
+        state.serialize_field("kind", &self.kind)?;
+        state.serialize_field("hash_hex", &self.hash)?;
+        state.serialize_field("deps", &self.deps)?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotCurrentUnit {
     pub dir: PathBuf,
+    pub loc: UnitLoc,
     pub stem: Option<String>,
     pub features: Option<Arc<str>>,
     pub outputs: Vec<String>,
@@ -397,11 +404,15 @@ fn read_unit(
         });
     }
     let hash_text = String::from_utf8(hash).expect("checked ASCII hex");
+    let name_meta = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     Ok(ParsedUnit::Current(Unit {
-        dir_name: dir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default(),
+        loc: UnitLoc {
+            layout: UnitLayout::Flat,
+            name_meta,
+        },
         kind: UnitKind::of(&stem),
         hash: UnitHash::parse(&hash_text).expect("checked hex"),
         deps,
@@ -509,6 +520,16 @@ fn never_compiled(names: &[String]) -> bool {
             .all(|n| n == INVOKED_TIMESTAMP || n.starts_with("output-"))
 }
 
+fn flat_loc_for(dir: &Path) -> UnitLoc {
+    UnitLoc {
+        layout: UnitLayout::Flat,
+        name_meta: dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
+    }
+}
+
 pub fn read_profile(profile_dir: &Path) -> ProfileReport {
     let path = profile_dir.to_path_buf();
     let unsupported = |units: usize, reason: String| ProfileReport {
@@ -579,6 +600,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
         if never_compiled(&names) {
             not_current_units.push(NotCurrentUnit {
                 dir: dir.clone(),
+                loc: flat_loc_for(&dir),
                 stem: None,
                 features: None,
                 outputs: names
@@ -611,6 +633,7 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
             }) => {
                 not_current_units.push(NotCurrentUnit {
                     dir: dir.clone(),
+                    loc: flat_loc_for(&dir),
                     stem: Some(stem),
                     features: Some(features),
                     outputs: names
@@ -1317,6 +1340,10 @@ mod tests {
             r.not_current_units,
             vec![NotCurrentUnit {
                 dir: failed,
+                loc: UnitLoc {
+                    layout: UnitLayout::Flat,
+                    name_meta: "failed-0000000000000002".into(),
+                },
                 stem: None,
                 features: None,
                 outputs: vec!["output-lib-failed".to_string()],
@@ -1338,6 +1365,10 @@ mod tests {
             r.not_current_units,
             vec![NotCurrentUnit {
                 dir: dep,
+                loc: UnitLoc {
+                    layout: UnitLayout::Flat,
+                    name_meta: "dep-0000000000000001".into(),
+                },
                 stem: Some("lib-dep".to_string()),
                 features: Some(Arc::from("[]")),
                 outputs: vec![],

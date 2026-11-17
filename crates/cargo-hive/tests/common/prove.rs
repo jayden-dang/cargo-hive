@@ -17,6 +17,7 @@ use cargo_hive_core::ledger::{Footprint, measure};
 use cargo_hive_core::liveness::{Liveness, unit_timestamp};
 use cargo_hive_core::receipt::Outcome;
 use cargo_hive_core::target::{self, Owner, TargetDir};
+use cargo_hive_core::unit_path::UnitLoc;
 use cargo_hive_gc::liveness::liveness;
 use cargo_hive_gc::plan_tier::apply::{self, ResolvedTarget};
 use cargo_hive_gc::plan_tier::build::{self, TargetPlan};
@@ -300,29 +301,32 @@ pub fn stamps(fs: &dyn Fs, target: &TargetDir) -> Result<Stamps, String> {
     let mut out = Stamps::new();
     for profile in &target.profiles {
         let rel = rel(&profile.path, &target.path);
-        let stamp = |dir: &str, kind: fingerprint::UnitKind| {
-            fs.mtime(&unit_timestamp(&profile.path, dir, kind)).ok()
+        let stamp = |loc: &UnitLoc, kind: fingerprint::UnitKind| {
+            fs.mtime(&unit_timestamp(&profile.path, loc, kind)).ok()
         };
         if let Some(graph) = &profile.graph {
             for unit in &graph.units {
                 out.insert(
-                    (rel.clone(), unit.dir_name.clone()),
-                    stamp(&unit.dir_name, unit.kind),
+                    (rel.clone(), unit.loc.name_meta.clone()),
+                    stamp(&unit.loc, unit.kind),
                 );
             }
         }
         for nc in &profile.not_current_units {
-            let Some(dir) = nc.dir.file_name().and_then(|n| n.to_str()) else {
+            if nc.dir.file_name().and_then(|n| n.to_str()).is_none() {
                 return Err(format!(
                     "{}: directory name is not UTF-8, so it has no unit hash",
                     nc.dir.display()
                 ));
-            };
+            }
             let kind = nc
                 .stem
                 .as_deref()
                 .map_or(fingerprint::UnitKind::Other, fingerprint::UnitKind::of);
-            out.insert((rel.clone(), dir.to_string()), stamp(dir, kind));
+            out.insert(
+                (rel.clone(), nc.loc.name_meta.clone()),
+                stamp(&nc.loc, kind),
+            );
         }
     }
     Ok(out)
@@ -944,7 +948,7 @@ pub fn trial_through_execute(fx: &super::cargo_fixture::Fixture) -> Result<Execu
         Liveness::Decided { live, dead } => {
             let mut keys = BTreeSet::new();
             for unit in live {
-                keys.insert((rel(&unit.profile, &target.path), unit.dir_name.clone()));
+                keys.insert((rel(&unit.profile, &target.path), unit.loc.name_meta.clone()));
             }
             let has_dead_file = dead.iter().any(|unit| !unit.files.is_empty());
             (keys, has_dead_file)
@@ -1338,7 +1342,10 @@ pub fn prove_with_cloner(
         let mut dead_files = Vec::new();
         if let Liveness::Decided { live: l, dead } = &result {
             for unit in l {
-                live.insert((rel(&unit.profile, &input.target), unit.dir_name.clone()));
+                live.insert((
+                    rel(&unit.profile, &input.target),
+                    unit.loc.name_meta.clone(),
+                ));
             }
             for d in dead {
                 dead_files.extend(d.files.iter().cloned());

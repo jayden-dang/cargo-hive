@@ -126,7 +126,7 @@ pub fn unit_key(unit: &Unit) -> StoreKey {
     StoreKey {
         variant: 0,
         toolchain_value: unit.toolchain_value,
-        name_meta: unit.dir_name.clone(),
+        name_meta: unit.loc.name_meta.clone(),
         fingerprint_hash: unit.hash.to_string(),
     }
 }
@@ -199,13 +199,13 @@ pub fn holds(
                             graph
                                 .units
                                 .iter()
-                                .find(|unit| unit.dir_name == uref.dir_name)
+                                .find(|unit| unit.loc.name_meta == uref.loc.name_meta)
                                 .map(unit_key)
                         });
                     if let Some(key) = key {
                         record_key(&mut out, &mut local, key, "live");
                     } else {
-                        record_name_meta(&mut out, &mut local, uref.dir_name);
+                        record_name_meta(&mut out, &mut local, uref.loc.name_meta.clone());
                     }
                 }
                 if !local.keys.is_empty() || !local.name_metas.is_empty() {
@@ -341,7 +341,7 @@ pub fn live_registry_units(
     };
     let live_keys: HashSet<(PathBuf, String)> = live
         .into_iter()
-        .map(|unit| (unit.profile, unit.dir_name))
+        .map(|unit| (unit.profile, unit.loc.name_meta))
         .collect();
 
     let mut deps_of: HashMap<PathBuf, Vec<(String, EntryKind)>> = HashMap::new();
@@ -1273,11 +1273,15 @@ mod tests {
     #[test]
     fn a_unit_key_carries_the_toolchain_value_directory_name_and_fingerprint() {
         use cargo_hive_core::fingerprint::{Coverage, Unit, UnitHash};
+        use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
         use std::sync::Arc;
 
         let fingerprint = 0x0102_0304_0506_0708u64;
         let unit = Unit {
-            dir_name: format!("serde-{}", le_hex(fingerprint)),
+            loc: UnitLoc {
+                layout: UnitLayout::Flat,
+                name_meta: format!("serde-{}", le_hex(fingerprint)),
+            },
             kind: fingerprint::UnitKind::Lib,
             hash: UnitHash::parse(&le_hex(fingerprint)).unwrap(),
             deps: Vec::new(),
@@ -1291,7 +1295,7 @@ mod tests {
         };
         let key = unit_key(&unit);
         assert_eq!(key.toolchain_value, 42);
-        assert_eq!(key.name_meta, unit.dir_name);
+        assert_eq!(key.name_meta, unit.loc.name_meta);
         assert_eq!(key.fingerprint_hash, le_hex(fingerprint));
     }
 }

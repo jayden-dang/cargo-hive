@@ -55,11 +55,11 @@ fn report() {
         Liveness::Decided { live, dead } => {
             let live: Vec<(String, String)> = live
                 .into_iter()
-                .map(|u| pair(&u.profile, &u.dir_name))
+                .map(|u| pair(&u.profile, &u.loc.name_meta))
                 .collect();
             let dead: Vec<(String, String)> = dead
                 .into_iter()
-                .map(|d| pair(&d.unit.profile, &d.unit.dir_name))
+                .map(|d| pair(&d.unit.profile, &d.unit.loc.name_meta))
                 .collect();
             (live, dead, Vec::new())
         }

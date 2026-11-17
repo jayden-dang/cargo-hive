@@ -13,6 +13,7 @@ use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive_core::fingerprint::read_profile;
 use cargo_hive_core::liveness::unit_timestamp;
 use cargo_hive_core::target::{Owner, TargetDir};
+use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
 use cargo_hive_platform::apfs::Apfs;
 use cargo_hive_platform::{
     CompressOutcome, EntryKind, EntryStat, Fs, LockHolder, LockKind, LockState, Sharing, TempDir,
@@ -692,7 +693,14 @@ fn plant_unit(
     )
     .unwrap();
     let kind = cargo_hive_core::fingerprint::UnitKind::of(stem);
-    let stamp = cargo_hive_core::liveness::unit_timestamp(profile, name, kind);
+    let stamp = cargo_hive_core::liveness::unit_timestamp(
+        profile,
+        &UnitLoc {
+            layout: UnitLayout::Flat,
+            name_meta: name.to_string(),
+        },
+        kind,
+    );
     std::fs::write(&stamp, b"").unwrap();
     let when = SystemTime::now() - age;
     std::fs::File::options()
@@ -1536,8 +1544,22 @@ fn an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it() {
         assert_eq!(unit.deps_files, deps, "{}", row.name_meta);
         assert_eq!(unit.has_build, has_build, "{}", row.name_meta);
         let kind = cargo_hive_core::fingerprint::UnitKind::of(&row.kind);
-        let stored = unit_timestamp(&entry.join(&row.rel_profile), &row.name_meta, kind);
-        let expected_path = unit_timestamp(Path::new(&row.rel_profile), &row.name_meta, kind);
+        let stored = unit_timestamp(
+            &entry.join(&row.rel_profile),
+            &UnitLoc {
+                layout: UnitLayout::Flat,
+                name_meta: row.name_meta.clone(),
+            },
+            kind,
+        );
+        let expected_path = unit_timestamp(
+            Path::new(&row.rel_profile),
+            &UnitLoc {
+                layout: UnitLayout::Flat,
+                name_meta: row.name_meta.clone(),
+            },
+            kind,
+        );
         match std::fs::symlink_metadata(&stored) {
             Ok(meta) => {
                 let (path, ns) = unit.stamp.clone().unwrap_or_else(|| {
@@ -1959,7 +1981,10 @@ fn units_outside_the_window_are_counted() {
     let row = &filled.rows[0];
     let stored = unit_timestamp(
         &store::entry_dir(&state, row).join(&row.rel_profile),
-        &row.name_meta,
+        &UnitLoc {
+            layout: UnitLayout::Flat,
+            name_meta: row.name_meta.clone(),
+        },
         cargo_hive_core::fingerprint::UnitKind::of(&row.kind),
     );
     assert!(
@@ -1980,7 +2005,10 @@ fn units_outside_the_window_are_counted() {
     for row in &filled.rows {
         let stamp = unit_timestamp(
             &store::entry_dir(&state, row).join(&row.rel_profile),
-            &row.name_meta,
+            &UnitLoc {
+                layout: UnitLayout::Flat,
+                name_meta: row.name_meta.clone(),
+            },
             cargo_hive_core::fingerprint::UnitKind::of(&row.kind),
         );
         match std::fs::symlink_metadata(&stamp) {

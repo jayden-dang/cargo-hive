@@ -221,7 +221,7 @@ fn analyse(inputs: &[ProfileInput], limits: Limits, failed: &FailedUnits) -> Exp
 fn groups_in<'a>(input: &'a ProfileInput, index: Option<&'a ModeIndex>) -> Vec<Group<'a>> {
     let mut buckets: BTreeMap<(&str, &str, u64, u64), Vec<&Unit>> = BTreeMap::new();
     for unit in &input.units {
-        let dir_crate = directory_crate(&unit.dir_name, &unit.hash);
+        let dir_crate = directory_crate(&unit.loc.name_meta, &unit.hash);
         buckets
             .entry((dir_crate, unit.stem.as_str(), unit.target, unit.path))
             .or_default()
@@ -248,7 +248,7 @@ fn divergent_modes(group: &Group<'_>) -> Vec<(Mode, usize)> {
     let mut features_by_mode: BTreeMap<Mode, BTreeSet<&str>> = BTreeMap::new();
     for unit in &group.units {
         features_by_mode
-            .entry(unit_mode(&unit.dir_name, &unit.hash, deps))
+            .entry(unit_mode(&unit.loc.name_meta, &unit.hash, deps))
             .or_default()
             .insert(unit.features.as_ref());
     }
@@ -381,7 +381,7 @@ fn group_finding(
         let mut check = 0_u64;
         let mut unknown = 0_u64;
         for unit in &group.units {
-            match unit_mode(&unit.dir_name, &unit.hash, deps) {
+            match unit_mode(&unit.loc.name_meta, &unit.hash, deps) {
                 Mode::Build => build += 1,
                 Mode::Check => check += 1,
                 Mode::Unknown => unknown += 1,
@@ -447,7 +447,7 @@ fn feature_rows<'a>(group: &'a Group<'a>) -> Vec<FeatureRow<'a>> {
     for unit in &group.units {
         let mode = group
             .deps
-            .map(|deps| unit_mode(&unit.dir_name, &unit.hash, deps));
+            .map(|deps| unit_mode(&unit.loc.name_meta, &unit.hash, deps));
         let rank = mode.map(Mode::rank).unwrap_or(3);
         buckets
             .entry((rank, unit.features.as_ref()))
@@ -820,6 +820,7 @@ mod tests {
     use super::{DIVERGENCE_DETAIL, FailedUnits, Limits, NotCurrentInput, ProfileInput, analyse};
     use cargo_hive_core::fingerprint::{Coverage, NotCurrentUnit, UnitHash, UnitKind};
     use cargo_hive_core::receipt::{Finding, Measured};
+    use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -835,7 +836,10 @@ mod tests {
     ) -> cargo_hive_core::fingerprint::Unit {
         let (profile, target, path) = place;
         cargo_hive_core::fingerprint::Unit {
-            dir_name: format!("{dir_crate}-{hash}"),
+            loc: UnitLoc {
+                layout: UnitLayout::Flat,
+                name_meta: format!("{dir_crate}-{hash}"),
+            },
             kind: UnitKind::of(stem),
             hash: UnitHash::parse(hash).unwrap(),
             deps: Vec::new(),
@@ -1039,6 +1043,10 @@ mod tests {
         primary.not_current.push(NotCurrentInput {
             unit: NotCurrentUnit {
                 dir: PathBuf::from("/profile/a/not-current"),
+                loc: UnitLoc {
+                    layout: UnitLayout::Flat,
+                    name_meta: "not-current".into(),
+                },
                 stem: None,
                 features: None,
                 outputs: Vec::new(),
@@ -2465,6 +2473,14 @@ mod tests {
         NotCurrentInput {
             unit: NotCurrentUnit {
                 dir: PathBuf::from(dir),
+                loc: UnitLoc {
+                    layout: UnitLayout::Flat,
+                    name_meta: Path::new(dir)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                },
                 stem: stem.map(str::to_string),
                 features: features.map(Arc::from),
                 outputs: output_names
@@ -3174,6 +3190,14 @@ mod tests {
                 not_current_units: vec![
                     NotCurrentUnit {
                         dir: ok_dir.clone(),
+                        loc: UnitLoc {
+                            layout: UnitLayout::Flat,
+                            name_meta: ok_dir
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        },
                         stem: Some("lib-widget".to_string()),
                         features: Some(Arc::from("[]")),
                         outputs: vec!["output-lib-widget".to_string()],
@@ -3181,6 +3205,14 @@ mod tests {
                     },
                     NotCurrentUnit {
                         dir: big_dir.clone(),
+                        loc: UnitLoc {
+                            layout: UnitLayout::Flat,
+                            name_meta: big_dir
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        },
                         stem: Some("lib-widget".to_string()),
                         features: Some(Arc::from("[]")),
                         outputs: vec!["output-lib-widget".to_string()],

@@ -4,6 +4,7 @@ mod common;
 use cargo_hive_core::fingerprint;
 use cargo_hive_core::liveness::{Liveness, UnitRef};
 use cargo_hive_core::target::{self, TargetDir};
+use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
 use cargo_hive_platform as platform;
 use clap::CommandFactory;
 use common::cargo_fixture::*;
@@ -61,9 +62,14 @@ fn a_backdated_check_variant_is_dead_with_its_rmeta_and_dep_info() {
         .collect();
     assert_eq!(check.len(), 1, "{dead:#?}");
     let check = check[0];
-    let hash = fingerprint::unit_hash(&check.dir_name).unwrap();
+    let hash = fingerprint::unit_hash(&check.loc.name_meta).unwrap();
     let deps_dir = check.profile.join("deps");
-    let mut expected: Vec<PathBuf> = vec![check.profile.join(".fingerprint").join(&check.dir_name)];
+    let mut expected: Vec<PathBuf> = vec![
+        check
+            .profile
+            .join(".fingerprint")
+            .join(&check.loc.name_meta),
+    ];
     let mut owned: Vec<PathBuf> = fs::read_dir(&deps_dir)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -117,7 +123,7 @@ fn a_dead_example_lists_its_examples_entries() {
             .filter(|u| !live.contains(u))
             .collect(),
     );
-    let hash = fingerprint::unit_hash(&old_example.dir_name).unwrap();
+    let hash = fingerprint::unit_hash(&old_example.loc.name_meta).unwrap();
     let examples_dir = old_example.profile.join("examples");
     let mut owned: Vec<PathBuf> = fs::read_dir(&examples_dir)
         .unwrap()
@@ -135,7 +141,7 @@ fn a_dead_example_lists_its_examples_entries() {
         old_example
             .profile
             .join(".fingerprint")
-            .join(&old_example.dir_name),
+            .join(&old_example.loc.name_meta),
     ];
     expected.extend(owned);
     let files = &dead
@@ -164,7 +170,7 @@ fn a_build_script_unit_is_never_dead_and_its_run_timestamp_in_build_is_a_root() 
     assert!(
         run.profile
             .join("build")
-            .join(&run.dir_name)
+            .join(&run.loc.name_meta)
             .join("invoked.timestamp")
             .exists()
     );
@@ -879,7 +885,10 @@ fn a_rebuilt_live_unit_fails_the_window() {
 fn a_window_is_vacuous_when_undecided_empty_failed_or_silent() {
     let unit = UnitRef {
         profile: PathBuf::from("/t/debug"),
-        dir_name: "a-0123456789abcdef".into(),
+        loc: UnitLoc {
+            layout: UnitLayout::Flat,
+            name_meta: "a-0123456789abcdef".into(),
+        },
     };
     let dead = |files: Vec<PathBuf>| cargo_hive_core::liveness::DeadUnit {
         unit: unit.clone(),
@@ -2278,6 +2287,10 @@ fn a_not_current_unit_dir_that_is_not_utf8_is_an_error_not_a_skip() {
     let mut profile = profile_report(&root.join("debug"));
     profile.not_current_units.push(fingerprint::NotCurrentUnit {
         dir: odd.clone(),
+        loc: UnitLoc {
+            layout: UnitLayout::Flat,
+            name_meta: String::new(),
+        },
         stem: None,
         features: None,
         outputs: Vec::new(),

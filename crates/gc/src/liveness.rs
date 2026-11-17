@@ -9,6 +9,7 @@ use cargo_hive_core::liveness::{
     DeadUnit, Liveness, Uncertain, UnitRef, embedded_hashes, unit_timestamp,
 };
 use cargo_hive_core::target::TargetDir;
+use cargo_hive_core::unit_path::{self, UnitLoc};
 use cargo_hive_platform::Fs;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
@@ -46,22 +47,22 @@ fn invoked_in_window(
 /// command wanted it inside the window.
 struct NotCurrentNode<'a> {
     profile: &'a Path,
-    dir_name: &'a str,
+    loc: &'a UnitLoc,
     stem: &'a str,
     deps: &'a [DepEdge],
 }
 
 impl NotCurrentNode<'_> {
     fn unit_ref(&self) -> UnitRef {
-        make_unit_ref(self.profile, self.dir_name)
+        make_unit_ref(self.profile, self.loc)
     }
 
     /// The later of the unit timestamp's and the emptied hash file's mtimes. Both files are read
     /// even when the first fails, so every unreadable one is reported.
     fn last_wanted(&self, fs: &dyn Fs, reasons: &mut Vec<Uncertain>) -> Option<SystemTime> {
         let kind = UnitKind::of(self.stem);
-        let stamp = unit_timestamp(self.profile, self.dir_name, kind);
-        let hash = fingerprint_dir(self.profile, self.dir_name).join(self.stem);
+        let stamp = unit_timestamp(self.profile, self.loc, kind);
+        let hash = unit_path::fingerprint_dir(self.profile, self.loc).join(self.stem);
         let mut latest = None;
         for path in [stamp, hash] {
             match file_time(fs, &path) {
@@ -142,25 +143,25 @@ fn collect_units<'a>(
             continue;
         }
         for nc in &profile.not_current_units {
-            let Some(dir_name) = nc.dir.file_name().and_then(|n| n.to_str()) else {
+            if nc.dir.file_name().and_then(|n| n.to_str()).is_none() {
                 reasons.push(Uncertain::NoUnitHash {
                     dir: nc.dir.clone(),
                 });
                 continue;
-            };
-            if let Some(hash) = fingerprint::unit_hash(dir_name) {
+            }
+            if let Some(hash) = fingerprint::unit_hash(&nc.loc.name_meta) {
                 not_current_hashes.push((profile.path.as_path(), hash));
             }
             if let Some(stem) = nc.stem.as_deref() {
                 nodes.push(NotCurrentNode {
                     profile: profile.path.as_path(),
-                    dir_name,
+                    loc: &nc.loc,
                     stem,
                     deps: &nc.deps,
                 });
                 continue;
             }
-            let stamp = unit_timestamp(&profile.path, dir_name, UnitKind::Other);
+            let stamp = unit_timestamp(&profile.path, &nc.loc, UnitKind::Other);
             match invoked_in_window(fs, &stamp, now, window) {
                 Ok(true) => reasons.push(Uncertain::NotCurrentInWindow {
                     dir: nc.dir.clone(),
@@ -185,14 +186,14 @@ fn index_units(
     let mut by_unit_hash: HashMap<(&Path, UnitHash), usize> = HashMap::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
         index.entry(unit.hash).or_default().push(i);
-        let dir = fingerprint_dir(profile, &unit.dir_name);
-        match fingerprint::unit_hash(&unit.dir_name) {
+        let dir = unit_path::fingerprint_dir(profile, &unit.loc);
+        match fingerprint::unit_hash(&unit.loc.name_meta) {
             None => reasons.push(Uncertain::NoUnitHash { dir }),
             Some(hash) => {
                 if let Some(&first) = by_unit_hash.get(&(*profile, hash)) {
                     let (_, other) = units[first];
                     reasons.push(Uncertain::DuplicateUnitHash {
-                        a: fingerprint_dir(profile, &other.dir_name),
+                        a: unit_path::fingerprint_dir(profile, &other.loc),
                         b: dir,
                     });
                 } else {
@@ -238,7 +239,7 @@ fn learn_packages(
     for edge in edges {
         let key = UnitHash::from_fingerprint(edge.fingerprint);
         for &hit in index.get(&key).into_iter().flatten() {
-            if let Some(name) = package_name(&units[hit].1.dir_name) {
+            if let Some(name) = package_name(&units[hit].1.loc.name_meta) {
                 learned.entry(edge.package).or_default().insert(name);
             }
         }
@@ -269,7 +270,7 @@ fn mark_live(
     let mut node_live = BitSet::with_len(nodes.len());
     let mut queue: Vec<Walk> = Vec::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
-        let stamp = unit_timestamp(profile, &unit.dir_name, unit.kind);
+        let stamp = unit_timestamp(profile, &unit.loc, unit.kind);
         match invoked_in_window(fs, &stamp, now, window) {
             Ok(true) => enqueue(&mut live, &mut queue, i, Walk::Unit(i)),
             Ok(false) => {}
@@ -292,7 +293,7 @@ fn mark_live(
     };
     let mut nodes_of: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, node) in nodes.iter().enumerate() {
-        if let Some(name) = package_name(node.dir_name) {
+        if let Some(name) = package_name(&node.loc.name_meta) {
             nodes_of.entry(name).or_default().push(i);
         }
     }
@@ -300,19 +301,14 @@ fn mark_live(
     while cursor < queue.len() {
         let walk = queue[cursor];
         cursor += 1;
-        let (profile, dir_name, deps, stem) = match walk {
+        let (profile, loc, deps, stem) = match walk {
             Walk::Unit(i) => (
                 units[i].0,
-                units[i].1.dir_name.as_str(),
+                &units[i].1.loc,
                 units[i].1.deps.as_slice(),
                 units[i].1.stem.as_str(),
             ),
-            Walk::Node(i) => (
-                nodes[i].profile,
-                nodes[i].dir_name,
-                nodes[i].deps,
-                nodes[i].stem,
-            ),
+            Walk::Node(i) => (nodes[i].profile, nodes[i].loc, nodes[i].deps, nodes[i].stem),
         };
         for &dep in deps {
             let key = UnitHash::from_fingerprint(dep.fingerprint);
@@ -336,11 +332,11 @@ fn mark_live(
                     }
                 }
                 None => {
-                    let fp_dir = fingerprint_dir(profile, dir_name);
+                    let fp_dir = unit_path::fingerprint_dir(profile, loc);
                     reasons.push(Uncertain::Unresolved {
                         dependency: fingerprint::dep_name(&fp_dir, stem, dep.fingerprint)
                             .unwrap_or_else(|| le_hex(dep.fingerprint)),
-                        unit: make_unit_ref(profile, dir_name),
+                        unit: make_unit_ref(profile, loc),
                     });
                 }
             }
@@ -371,7 +367,7 @@ fn dead_indices(units: &[ProfileUnit], live: &BitSet) -> Vec<usize> {
                         | UnitKind::DocBin
                         | UnitKind::Other
                 )
-                && fingerprint::unit_hash(&units[i].1.dir_name).is_some()
+                && fingerprint::unit_hash(&units[i].1.loc.name_meta).is_some()
         })
         .collect()
 }
@@ -421,7 +417,7 @@ fn assemble(
     let mut kept_hashes: HashMap<&Path, HashSet<UnitHash>> = HashMap::new();
     for (i, (profile, unit)) in units.iter().enumerate() {
         if !dead_set.contains(&i)
-            && let Some(hash) = fingerprint::unit_hash(&unit.dir_name)
+            && let Some(hash) = fingerprint::unit_hash(&unit.loc.name_meta)
         {
             kept_hashes.entry(profile).or_default().insert(hash);
         }
@@ -433,7 +429,7 @@ fn assemble(
     let mut dead_by_hash: HashMap<&Path, HashMap<UnitHash, Vec<usize>>> = HashMap::new();
     for &i in dead_idx {
         let (profile, unit) = units[i];
-        if let Some(hash) = fingerprint::unit_hash(&unit.dir_name) {
+        if let Some(hash) = fingerprint::unit_hash(&unit.loc.name_meta) {
             dead_by_hash
                 .entry(profile)
                 .or_default()
@@ -461,7 +457,7 @@ fn assemble(
         let (profile, unit) = units[i];
         let mut files = Vec::new();
         if let Some(matching) = claimed.remove(&i) {
-            files.push(fingerprint_dir(profile, &unit.dir_name));
+            files.push(unit_path::fingerprint_dir(profile, &unit.loc));
             files.extend(matching.into_iter().cloned());
         }
         dead_units.insert(unit_ref(&units[i]), files);
@@ -499,18 +495,14 @@ fn claimants(
     owners
 }
 
-fn fingerprint_dir(profile: &Path, dir_name: &str) -> PathBuf {
-    profile.join(".fingerprint").join(dir_name)
-}
-
 fn unit_ref((profile, unit): &ProfileUnit) -> UnitRef {
-    make_unit_ref(profile, &unit.dir_name)
+    make_unit_ref(profile, &unit.loc)
 }
 
-fn make_unit_ref(profile: &Path, dir_name: &str) -> UnitRef {
+fn make_unit_ref(profile: &Path, loc: &UnitLoc) -> UnitRef {
     UnitRef {
         profile: profile.to_path_buf(),
-        dir_name: dir_name.to_string(),
+        loc: loc.clone(),
     }
 }
 
@@ -521,9 +513,17 @@ mod tests {
     use cargo_hive_core::fingerprint::{UnitId, le_hex, read_profile};
     use cargo_hive_core::liveness::DEFAULT_WINDOW;
     use cargo_hive_core::target::Owner;
+    use cargo_hive_core::unit_path::UnitLayout;
     use std::fs;
     use std::io;
     use std::time::UNIX_EPOCH;
+
+    fn flat_loc(name_meta: &str) -> UnitLoc {
+        UnitLoc {
+            layout: UnitLayout::Flat,
+            name_meta: name_meta.to_string(),
+        }
+    }
 
     struct Scratch(PathBuf);
 
@@ -600,7 +600,7 @@ mod tests {
         )
         .unwrap();
         if let Some(age) = age {
-            let stamp = unit_timestamp(profile, name, UnitKind::of(stem));
+            let stamp = unit_timestamp(profile, &flat_loc(name), UnitKind::of(stem));
             touch(&stamp, age);
         }
     }
@@ -692,7 +692,7 @@ mod tests {
     }
 
     fn names(units: &[UnitRef]) -> Vec<&str> {
-        units.iter().map(|u| u.dir_name.as_str()).collect()
+        units.iter().map(|u| u.loc.name_meta.as_str()).collect()
     }
 
     fn decided(l: Liveness) -> (Vec<UnitRef>, Vec<DeadUnit>) {
@@ -721,7 +721,7 @@ mod tests {
         let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
         assert_eq!(names(&live), [A, B, C]);
         assert_eq!(dead.len(), 1);
-        assert_eq!(dead[0].unit.dir_name, D);
+        assert_eq!(dead[0].unit.loc.name_meta, D);
         assert!(dead[0].files.is_empty());
     }
 
@@ -762,7 +762,7 @@ mod tests {
         let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
         assert_eq!(names(&live), [A, B, C]);
         assert_eq!(dead.len(), 1);
-        assert_eq!(dead[0].unit.dir_name, D);
+        assert_eq!(dead[0].unit.loc.name_meta, D);
     }
 
     #[test]
@@ -772,7 +772,7 @@ mod tests {
         write_unit(&p, A, "lib-a", 101, &[], None);
         let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
         assert!(live.is_empty());
-        assert_eq!(dead[0].unit.dir_name, A);
+        assert_eq!(dead[0].unit.loc.name_meta, A);
     }
 
     #[test]
@@ -780,7 +780,7 @@ mod tests {
         let s = Scratch::new("future");
         let p = s.0.join("debug");
         write_unit(&p, A, "lib-a", 101, &[], None);
-        let stamp = unit_timestamp(&p, A, UnitKind::Lib);
+        let stamp = unit_timestamp(&p, &flat_loc(A), UnitKind::Lib);
         fs::create_dir_all(stamp.parent().unwrap()).unwrap();
         fs::File::create(&stamp)
             .unwrap()
@@ -818,7 +818,7 @@ mod tests {
             let p = s.0.join("debug");
             write_unit(&p, A, stem, 101, &[("b", 102)], Some(HOUR));
             write_unit(&p, B, "lib-b", 102, &[], Some(30 * DAY));
-            let stamp = unit_timestamp(&p, A, kind);
+            let stamp = unit_timestamp(&p, &flat_loc(A), kind);
             assert!(stamp.exists(), "{kind}: timestamp at {}", stamp.display());
             let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
             assert_eq!(names(&live), [A, B], "{kind}");
@@ -842,7 +842,7 @@ mod tests {
         let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), DEFAULT_WINDOW));
         assert_eq!(names(&live), [A]);
         assert_eq!(dead.len(), 1);
-        assert_eq!(dead[0].unit.dir_name, B);
+        assert_eq!(dead[0].unit.loc.name_meta, B);
     }
 
     #[test]
@@ -1011,7 +1011,7 @@ mod tests {
         );
         let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
         assert!(live.is_empty());
-        let dead: Vec<&str> = dead.iter().map(|d| d.unit.dir_name.as_str()).collect();
+        let dead: Vec<&str> = dead.iter().map(|d| d.unit.loc.name_meta.as_str()).collect();
         assert_eq!(dead, [D]);
     }
 
@@ -1025,7 +1025,7 @@ mod tests {
         emptied_hash_wanting(&p, A, "lib-a", 101, &[("c", 103)], Some(2 * DAY), HOUR);
         let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
         assert_eq!(names(&live), [A, C]);
-        let dead: Vec<&str> = dead.iter().map(|d| d.unit.dir_name.as_str()).collect();
+        let dead: Vec<&str> = dead.iter().map(|d| d.unit.loc.name_meta.as_str()).collect();
         assert_eq!(dead, [D]);
     }
 
@@ -1163,7 +1163,7 @@ mod tests {
         let mut got = names(&live);
         got.sort();
         assert_eq!(got, [A, C, D, LIBA_1, LIBA_2]);
-        let dead: Vec<&str> = dead.iter().map(|d| d.unit.dir_name.as_str()).collect();
+        let dead: Vec<&str> = dead.iter().map(|d| d.unit.loc.name_meta.as_str()).collect();
         assert_eq!(dead, [B]);
     }
 
@@ -1177,7 +1177,7 @@ mod tests {
         let (live, _) = decided(decide(&target_of(&s.0, &[&host, &cross]), 6 * HOUR));
         assert!(
             live.iter()
-                .any(|u| u.dir_name == LIBA_2 && u.profile == host)
+                .any(|u| u.loc.name_meta == LIBA_2 && u.profile == host)
         );
     }
 
@@ -1290,7 +1290,7 @@ mod tests {
         write_unit(&p, A, "lib-a", 101, &[("ghost", 999)], Some(HOUR));
         let unit = UnitRef {
             profile: p.clone(),
-            dir_name: A.to_string(),
+            loc: flat_loc(A),
         };
         let target = target_of(&s.0, &[&p]);
         let reasons = undecided(decide(&target, 6 * HOUR));
@@ -1321,7 +1321,7 @@ mod tests {
         write_unit(&p, B, "lib-b", 102, &[], Some(HOUR));
         let (live, dead) = decided(decide(&target_of(&s.0, &[&p]), 6 * HOUR));
         assert_eq!(names(&live), [B]);
-        assert_eq!(dead[0].unit.dir_name, A);
+        assert_eq!(dead[0].unit.loc.name_meta, A);
     }
 
     #[test]
@@ -1418,7 +1418,7 @@ mod tests {
         decided(l)
             .1
             .into_iter()
-            .find(|d| d.unit.dir_name == dir_name)
+            .find(|d| d.unit.loc.name_meta == dir_name)
             .unwrap_or_else(|| panic!("{dir_name} is not dead"))
     }
 
@@ -1756,7 +1756,7 @@ mod tests {
         let fake = mtime_fails_with(io::ErrorKind::NotFound);
         let (live, dead) = decided(liveness(&fake, &target, now(), 6 * HOUR));
         assert!(live.is_empty());
-        assert_eq!(dead[0].unit.dir_name, A);
+        assert_eq!(dead[0].unit.loc.name_meta, A);
     }
 
     #[test]
@@ -1769,7 +1769,7 @@ mod tests {
             let reasons = undecided(liveness(&mtime_fails_with(kind), &target, now(), 6 * HOUR));
             assert!(
                 matches!(&reasons[..], [Uncertain::TimestampUnreadable { path, .. }]
-                    if *path == unit_timestamp(&p, A, UnitKind::Lib)),
+                    if *path == unit_timestamp(&p, &flat_loc(A), UnitKind::Lib)),
                 "{kind:?}: {reasons:?}"
             );
         }
@@ -1779,7 +1779,7 @@ mod tests {
             now(),
             6 * HOUR,
         ));
-        let stamp = unit_timestamp(&p, A, UnitKind::Lib);
+        let stamp = unit_timestamp(&p, &flat_loc(A), UnitKind::Lib);
         assert!(
             reasons[0].to_string().starts_with(&format!(
                 "{}: invocation timestamp unreadable: ",
@@ -1830,6 +1830,7 @@ mod tests {
             .not_current_units
             .push(cargo_hive_core::fingerprint::NotCurrentUnit {
                 dir: odd.clone(),
+                loc: flat_loc(""),
                 stem: None,
                 features: None,
                 outputs: Vec::new(),

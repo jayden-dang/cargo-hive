@@ -18,6 +18,7 @@ use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_core::fingerprint;
 use cargo_hive_core::liveness;
 use cargo_hive_core::size::{MAX_DEPTH, allocated_bytes};
+use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
 use cargo_hive_platform::{EntryKind, Fs};
 
 use super::Error;
@@ -564,9 +565,13 @@ fn ensure_dirs(
 }
 
 fn read_stamp(fs: &dyn Fs, target: &Path, row: &Row) -> Option<(PathBuf, u64)> {
+    let loc = UnitLoc {
+        layout: UnitLayout::Flat,
+        name_meta: row.name_meta.clone(),
+    };
     let absolute = liveness::unit_timestamp(
         &target.join(&row.rel_profile),
-        &row.name_meta,
+        &loc,
         fingerprint::UnitKind::of(&row.kind),
     );
     let mtime = fs.mtime(&absolute).ok()?;

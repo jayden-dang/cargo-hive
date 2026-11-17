@@ -7,6 +7,7 @@ use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_core::caps::DEPS_CAP;
 use cargo_hive_core::fingerprint::{self, Format, le_hex, read_profile};
 use cargo_hive_core::target::{Owner, TargetDir};
+use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
 use cargo_hive_seed::source::{Skip, SourceUnit, holds, live_registry_units, unit_key};
 use cargo_hive_state::{Config, State};
 use std::fs;
@@ -106,8 +107,14 @@ fn write_unit(
         ),
     )
     .unwrap();
-    let stamp =
-        cargo_hive_core::liveness::unit_timestamp(profile, name, fingerprint::UnitKind::of(stem));
+    let stamp = cargo_hive_core::liveness::unit_timestamp(
+        profile,
+        &UnitLoc {
+            layout: UnitLayout::Flat,
+            name_meta: name.to_string(),
+        },
+        fingerprint::UnitKind::of(stem),
+    );
     touch(&stamp, now, age);
 }
 
@@ -483,7 +490,7 @@ fn an_undecided_target_holds_every_graph_unit_key_and_not_current_name_meta() {
             .unwrap()
             .units
             .iter()
-            .find(|u| u.dir_name == current)
+            .find(|u| u.loc.name_meta == current)
             .unwrap(),
     );
     assert!(got.keys.contains(&graph_key), "{got:?}");

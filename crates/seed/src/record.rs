@@ -311,7 +311,7 @@ fn reached_units(target: &TargetDir, record: &SeedRecord) -> BTreeSet<(PathBuf, 
             by_hash.entry(unit.hash.to_string()).or_default().push(idx);
             nodes.push(GraphNode {
                 rel: rel.clone(),
-                dir_name: unit.dir_name.clone(),
+                dir_name: unit.loc.name_meta.clone(),
                 deps: unit.deps.clone(),
             });
         }
@@ -407,6 +407,7 @@ mod tests {
         Coverage, DepEdge, Format, ProfileReport, Unit, UnitGraph, UnitHash,
     };
     use cargo_hive_core::target::{Owner, TargetDir};
+    use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
     use cargo_hive_state::State;
 
     /// A scratch root under /private/tmp, removed when the test drops it.
@@ -703,7 +704,10 @@ mod tests {
             }
             if spec.in_graph {
                 graph_units.push(Unit {
-                    dir_name: dir_name.clone(),
+                    loc: UnitLoc {
+                        layout: UnitLayout::Flat,
+                        name_meta: dir_name.clone(),
+                    },
                     kind: cargo_hive_core::fingerprint::UnitKind::Lib,
                     hash: UnitHash::parse(&hex).unwrap(),
                     deps: spec

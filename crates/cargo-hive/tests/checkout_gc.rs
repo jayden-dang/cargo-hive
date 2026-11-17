@@ -1200,7 +1200,7 @@ fn objects_named_only_by_a_dead_units_binary_go_in_the_same_run() {
     let dead_hash = dead
         .iter()
         .find_map(|unit| {
-            unit.unit.dir_name.rsplit('-').next().and_then(|h| {
+            unit.unit.loc.name_meta.rsplit('-').next().and_then(|h| {
                 (h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit())).then_some(h.to_string())
             })
         })
