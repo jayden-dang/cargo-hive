@@ -147,7 +147,7 @@ gate). The spine is `docs/architecture/INDEX.md` `f63f7b97d2f8`. Every task inhe
 
 **Depends-on:** none
 
-- [ ] **Step 1: Failing tests** in `unit_path::tests`. They give, for a flat and a unit-dir `UnitLoc` of the same `probe-0123456789abcdef`:
+- [x] **Step 1: Failing tests** in `unit_path::tests`. They give, for a flat and a unit-dir `UnitLoc` of the same `probe-0123456789abcdef`:
   - the fingerprint dir;
   - the hash file;
   - the stamp of a lib and of a run-build-script unit (`build/probe-…/invoked.timestamp` versus `build/probe/0123456789abcdef/run/invoked.timestamp`);
@@ -159,9 +159,9 @@ gate). The spine is `docs/architecture/INDEX.md` `f63f7b97d2f8`. Every task inhe
   - `is_fingerprint_dir` on `.fingerprint/x-<hex>` and `<hex>/fingerprint`, and false on `fingerprint/` outside `build/<pkg>/<hex>`.
 
   Run `cargo test -p cargo-hive-core --lib unit_path::`; expect a compile failure.
-- [ ] **Step 2:** Implement `unit_path.rs`. Rename the fields and port every reader to `loc.name_meta` or a `unit_path` call, with flat behavior unchanged: every `Unit` built today gets `UnitLayout::Flat`. `unit_timestamp` becomes a thin call to `stamp`.
-- [ ] **Step 3:** Run the whole suite under `RUSTUP_TOOLCHAIN=1.97.1` (`scripts/gate.sh`). Expect green with no assertion changed: only fixture literals change, from `dir_name` to `loc`. Run `grep -rn '"\.fingerprint"\|"deps"' crates/*/src | grep -v unit_path.rs` and list each remaining hit in the task report (Task 14 closes them).
-- [ ] **Step 4: Commit.** `refactor(core): carry a unit's layout in UnitLoc and join its paths in unit_path`
+- [x] **Step 2:** Implement `unit_path.rs`. Rename the fields and port every reader to `loc.name_meta` or a `unit_path` call, with flat behavior unchanged: every `Unit` built today gets `UnitLayout::Flat`. `unit_timestamp` becomes a thin call to `stamp`.
+- [x] **Step 3:** Run the whole suite under `RUSTUP_TOOLCHAIN=1.97.1` (`scripts/gate.sh`). Expect green with no assertion changed: only fixture literals change, from `dir_name` to `loc`. Run `grep -rn '"\.fingerprint"\|"deps"' crates/*/src | grep -v unit_path.rs` and list each remaining hit in the task report (Task 14 closes them).
+- [x] **Step 4: Commit.** `refactor(core): carry a unit's layout in UnitLoc and join its paths in unit_path`
 
 _Requirements: BUILDDIR-1.9, BUILDDIR-1.10_
 
@@ -594,7 +594,7 @@ _Requirements: BUILDDIR-9.3_
 
 **Depends-on:** none
 
-- [ ] **Step 1:** Write ADR-0005:
+- [x] **Step 1:** Write ADR-0005:
   - **Context:** 1.100 stabilised the build-dir layout, cargo issue 15010.
   - **Decision:** one reader for both layouts and one graph, `UnitLoc` and `unit_path`, and unit-dir units deleted whole with the fingerprint last.
   - **Rejected:**
@@ -603,8 +603,8 @@ _Requirements: BUILDDIR-9.3_
     - refusing mixed profile dirs;
     - pinning users to 1.99.
   - **Revisit:** when Cargo changes either layout again.
-- [ ] **Step 2:** Edit the spine, the glossary and the two struck requirements. Run audit-trace; expect 0 errors and no new warning.
-- [ ] **Step 3: Commit.** `docs: ARCH-22 and ADR-0005 for Cargo 1.100 unit dirs`
+- [x] **Step 2:** Edit the spine, the glossary and the two struck requirements. Run audit-trace; expect 0 errors and no new warning.
+- [x] **Step 3: Commit.** `docs: ARCH-22 and ADR-0005 for Cargo 1.100 unit dirs`
 
 _Requirements: BUILDDIR-1.7, BUILDDIR-3.4, BUILDDIR-6.7_
 
