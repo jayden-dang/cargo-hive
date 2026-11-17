@@ -7,10 +7,10 @@
 > for tracking.
 
 Feature code: BUILDDIR
-Status: Approved
+Status: In-progress
 Approved: 2026-11-17, by the operator (Jayden), in session: "duyet plan"
 Date: 2026-11-17
-Execution-mode: unset
+Execution-mode: continuous
 Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md

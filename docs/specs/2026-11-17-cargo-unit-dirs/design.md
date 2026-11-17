@@ -1,7 +1,7 @@
 # Design: Cargo 1.100 unit dirs
 
 Feature code: BUILDDIR
-Status: Approved
+Status: In-progress
 Approved: 2026-11-17, by the operator (Jayden), in session: "duyet" (with the BUILDDIR-1.8 and 3.6 rewordings)
 Date: 2026-11-17
 Requirements: ./requirements.md
