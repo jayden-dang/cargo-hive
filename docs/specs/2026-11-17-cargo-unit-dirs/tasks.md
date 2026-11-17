@@ -422,13 +422,13 @@ _Requirements: BUILDDIR-5.1, BUILDDIR-5.2_
 
 **Depends-on:** Task 4
 
-- [ ] **Step 1: Failing tests.**
+- [x] **Step 1: Failing tests.**
   - `entry_name` and `parse_entry_key` round-trip both layouts and every variant.
   - A flat and a unit-dir row with the same toolchain value, name-meta and fingerprint hash are two keys and two entry dirs.
   - Store gc keeps a `u.` entry that a row holds, and evicts a rowless `u.` entry as it does a flat one.
   - The v0.1.0–v0.1.2 `store.db` and `seeds.json` fixtures read every row and seeded unit as Flat.
-- [ ] **Step 2: Implement.** Run the seed and cargo-hive task gates; expect pass.
-- [ ] **Step 3: Commit.** `feat(seed): key store entries and seed records by unit layout`
+- [x] **Step 2: Implement.** Run the seed and cargo-hive task gates; expect pass.
+- [x] **Step 3: Commit.** `feat(seed): key store entries and seed records by unit layout`
 
 _Requirements: BUILDDIR-6.4, BUILDDIR-6.6, BUILDDIR-6.7_
 
