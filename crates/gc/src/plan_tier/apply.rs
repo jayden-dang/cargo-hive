@@ -22,6 +22,7 @@ use cargo_hive_core::liveness::Liveness;
 use cargo_hive_core::locks::{self, Acquired, Locked, Reason};
 use cargo_hive_core::receipt::{Outcome, Unmeasured};
 use cargo_hive_core::target::{self, Owner, TargetDir};
+use cargo_hive_core::unit_path;
 use cargo_hive_platform::Fs;
 use cargo_hive_state::StateError;
 
@@ -445,6 +446,9 @@ pub fn execute(
                 cancelled = true;
                 break;
             }
+            let stop_on_failure = unit
+                .iter()
+                .any(|entry| unit_path::unit_dir_of(&entry.path).is_some());
             let mut unit_failed = false;
             for entry in unit {
                 match delete_entry(ctx, &mut ledger, &target.path, entry) {
@@ -462,6 +466,9 @@ pub fn execute(
                         unit_failed = true;
                         target_failed = true;
                         failed = true;
+                        if stop_on_failure {
+                            break;
+                        }
                     }
                 }
             }
@@ -933,10 +940,19 @@ fn removal_order(entries: &[PlannedEntry]) -> Vec<Vec<&PlannedEntry>> {
     }
     let mut ordered = Vec::new();
     for unit in &units {
+        let group: Vec<&PlannedEntry> =
+            entries.iter().filter(|entry| &entry.unit == unit).collect();
+        if group
+            .iter()
+            .any(|entry| unit_path::unit_dir_of(&entry.path).is_some())
+        {
+            ordered.push(group);
+            continue;
+        }
         let mut deps = Vec::new();
         let mut others = Vec::new();
         let mut prints = Vec::new();
-        for entry in entries.iter().filter(|entry| &entry.unit == unit) {
+        for entry in group {
             if is_dep_info(entry) {
                 deps.push(entry);
             } else if is_fingerprint_dir(entry) {
@@ -948,16 +964,16 @@ fn removal_order(entries: &[PlannedEntry]) -> Vec<Vec<&PlannedEntry>> {
         if deps.is_empty() && others.is_empty() {
             continue;
         }
-        let mut group = Vec::new();
+        let mut ordered_group = Vec::new();
         if deps.is_empty() {
-            group.extend(prints);
-            group.extend(others);
+            ordered_group.extend(prints);
+            ordered_group.extend(others);
         } else {
-            group.extend(deps);
-            group.extend(others);
-            group.extend(prints);
+            ordered_group.extend(deps);
+            ordered_group.extend(others);
+            ordered_group.extend(prints);
         }
-        ordered.push(group);
+        ordered.push(ordered_group);
     }
     ordered
 }
@@ -984,11 +1000,7 @@ fn is_dep_info(entry: &PlannedEntry) -> bool {
 }
 
 fn is_fingerprint_dir(entry: &PlannedEntry) -> bool {
-    entry
-        .path
-        .parent()
-        .and_then(|parent| parent.file_name())
-        .is_some_and(|name| name == ".fingerprint")
+    unit_path::is_fingerprint_dir(&entry.path)
 }
 
 fn lists_examples(target: &PlannedTarget) -> bool {
