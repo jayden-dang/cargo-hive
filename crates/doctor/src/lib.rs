@@ -689,7 +689,7 @@ fn judge_format(report: &cargo_hive_core::fingerprint::ProfileReport) -> Check {
         if report.units == 0 {
             measured.insert(
                 "reason".into(),
-                Measured::Text("probe wrote no unit".into()),
+                Measured::Text("probe wrote no current unit".into()),
             );
         }
         return fail(measured);
@@ -1751,10 +1751,19 @@ mod tests {
             Some(Measured::Text(text)) => text.as_str(),
             other => panic!("expected reason text, got {other:?}"),
         };
-        assert!(
-            reason.contains("no unit") || reason.contains("units"),
-            "{reason}"
-        );
+        assert_eq!(reason, "probe wrote no current unit");
+    }
+
+    #[test]
+    fn an_empty_layouts_probe_report_fails_check_f_as_no_unit() {
+        let report = profile_report([], 0, 0, 0, 0);
+        let check = judge_format(&report);
+        assert_eq!(check.verdict, Verdict::Fail, "{:?}", check.measured);
+        let reason = match check.measured.get("reason") {
+            Some(Measured::Text(text)) => text.as_str(),
+            other => panic!("expected reason text, got {other:?}"),
+        };
+        assert_eq!(reason, "probe wrote no unit");
     }
 
     #[test]
