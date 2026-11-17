@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Cargo unit dirs beside the flat layout
+
+- Rewriting a state file stamps layout 2. cargo-hive 0.1.2 and earlier refuse a rewritten file; downgrade is unsupported.
+- `cargo hive doctor` records `unit_layout` when check (f) passes.
+- A capabilities file with no `unit_layout` and fingerprint reading still enabled is treated as flat until doctor runs again.
+
 ## 0.1.2 — 2026-11-16
 
 ### Upgrading keeps hive's state (UPGRADE)

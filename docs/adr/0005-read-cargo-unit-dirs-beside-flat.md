@@ -1,8 +1,8 @@
-# ADR-0005: Read Cargo unit dirs beside the flat fingerprint layout
+# ADR-0005: Read Cargo unit dirs beside the flat layout
 
 Status: Accepted (2026-11-17, with BUILDDIR Decision 7)
 
-Cargo 1.100 stabilised the build-dir layout (cargo issue 15010): each unit lives under
+Cargo 1.100 stabilised the unit-dir layout (cargo issue 15010): each unit lives under
 `build/<package>/<hash>/` with its own `fingerprint/`, `out/` and optional `run/`, and a profile
 dir may hold that layout alone or mixed with the flat `.fingerprint/` layout. ADR-0001's note that
 the format "already differs on nightly" is now the stable case. Hive keeps one reader for both

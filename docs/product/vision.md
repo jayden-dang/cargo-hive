@@ -62,7 +62,8 @@ Receipts are also the data Cargo lacks for a default target-dir GC policy (cargo
 
 **Deferred.**
 - A per-checkout "protect" marker.
-- Cargo's new build-dir layout: reported, never acted on.
+
+This tree reads Cargo unit dirs beside the flat layout.
 
 **Hard constraints.**
 - macOS only. The declared floor is macOS 27; older versions are supported where `cargo hive doctor` passes.
