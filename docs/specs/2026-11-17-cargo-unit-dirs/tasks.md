@@ -482,14 +482,14 @@ _Requirements: BUILDDIR-6.1, BUILDDIR-6.2, BUILDDIR-6.5_
 
 **Depends-on:** Task 4, Task 10
 
-- [ ] **Step 1: Failing tests.**
+- [x] **Step 1: Failing tests.**
   - With capabilities recording `unit-dir`, seed into a fresh secondary checkout places only `u.` entries.
   - With `flat`, it places only flat entries from the same store.
   - A placement cut short by a failing clone leaves no `fingerprint/` without its `out/` files, and a package named `out` ranks correctly.
   - `status` counts a seeded unit-dir unit fresh, then missing after its unit dir is removed.
   - Under `RUSTUP_TOOLCHAIN=1.100.0`, a real-cargo seed then build reuses every placed unit (`seeded_recompiled` = 0).
-- [ ] **Step 2: Implement.** Run the seed and cargo-hive task gates; expect pass.
-- [ ] **Step 3: Commit.** `feat(seed): place only store entries in the checkout toolchain's unit layout`
+- [x] **Step 2: Implement.** Run the seed and cargo-hive task gates; expect pass.
+- [x] **Step 3: Commit.** `feat(seed): place only store entries in the checkout toolchain's unit layout`
 
 _Requirements: BUILDDIR-6.3, BUILDDIR-6.8_
 
