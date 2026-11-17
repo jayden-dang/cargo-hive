@@ -504,12 +504,16 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
         });
     }
     for (cap, checks) in &caps.disabled {
-        let ids: Vec<String> = checks.iter().map(|c| format!("({})", c.letter())).collect();
-        let line = format!(
-            "{} is disabled: doctor check {} did not pass",
-            cap.describe(),
-            ids.join(", ")
-        );
+        let line = if checks.contains(&doctor::CheckId::F) {
+            "rerun `cargo hive doctor`: this hive reads Cargo 1.100 unit dirs".to_string()
+        } else {
+            let ids: Vec<String> = checks.iter().map(|c| format!("({})", c.letter())).collect();
+            format!(
+                "{} is disabled: doctor check {} did not pass",
+                cap.describe(),
+                ids.join(", ")
+            )
+        };
         human.push_str(&format!("{line}\n"));
         b.finding("capability.disabled", None, line);
     }

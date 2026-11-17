@@ -1086,7 +1086,7 @@ mod tests {
         ];
         for value in cases {
             let pretty = serde_json::to_string_pretty(&value).unwrap();
-            assert!(pretty.starts_with("{\n  \"layout\": 1,"), "{pretty}");
+            assert!(pretty.starts_with("{\n  \"layout\": 2,"), "{pretty}");
         }
     }
 

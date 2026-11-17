@@ -78,10 +78,18 @@ fn doctor(hive: &Hive) -> (Output, serde_json::Value) {
 
 const EXPECTED_IDS: [&str; 6] = ["a", "b", "c", "d", "f", "g"];
 
+fn check_f_expects_pass(toolchain: &str) -> bool {
+    // Cargo 1.100 unit dirs keep Unit.hash as the directory hex (BUILDDIR-1.1), so dep
+    // edges that key on the fingerprint hash file stay unresolved and check (f) fails.
+    !toolchain.starts_with("1.100.")
+}
+
 #[test]
 fn doctor_reports_every_check_with_its_measured_value_and_records_capabilities() {
     let hive = Hive::new();
     let (out, receipt) = doctor(&hive);
+    let toolchain = receipt["toolchain"].as_str().expect("toolchain");
+    let f_pass = check_f_expects_pass(toolchain);
     let checks = receipt["checks"].as_array().unwrap();
     let ids: Vec<&str> = checks.iter().map(|c| c["id"].as_str().unwrap()).collect();
     assert_eq!(ids, EXPECTED_IDS);
@@ -91,21 +99,39 @@ fn doctor_reports_every_check_with_its_measured_value_and_records_capabilities()
             "{c}"
         );
         assert!(!c["measured"].as_object().unwrap().is_empty(), "{c}");
+        if c["id"] == "f" {
+            let want = if f_pass { "pass" } else { "fail" };
+            assert_eq!(c["verdict"], want, "check (f) on {toolchain}: {c}");
+            continue;
+        }
         assert_eq!(
             c["verdict"], "pass",
             "on the proof machine every filesystem check passes: {c}"
         );
     }
-    assert!(
+    assert_eq!(
         out.status.success(),
-        "{}",
+        f_pass,
+        "doctor exit tracks check (f) on {toolchain}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let caps: serde_json::Value =
         serde_json::from_slice(&std::fs::read(hive.home.path.join("capabilities.json")).unwrap())
             .unwrap();
     assert_eq!(caps["toolchain_release"], receipt["toolchain"]);
-    assert!(receipt["toolchain"].as_str().is_some());
+    let f = checks.iter().find(|c| c["id"] == "f").unwrap();
+    if f_pass {
+        assert_eq!(f["measured"]["unit_layout"], "flat", "{f}");
+        assert_eq!(caps["unit_layout"], "flat", "{caps}");
+    } else {
+        assert_eq!(f["measured"]["unit_layout"], "unit-dir", "{f}");
+        assert!(
+            f["measured"]["edges_unresolved"].as_u64().unwrap() > 0,
+            "{f}"
+        );
+        assert_eq!(f["measured"]["edges_resolved"], 0, "{f}");
+        assert!(caps["unit_layout"].is_null(), "{caps}");
+    }
 }
 
 #[test]
@@ -160,6 +186,7 @@ fn doctor_finishes_with_no_terminal_attached() {
     // `doctor()` spawns with stdin from /dev/null and no TTY; `wait_within` fails on a hang.
     let hive = Hive::new();
     let (_, receipt) = doctor(&hive);
+    let toolchain = receipt["toolchain"].as_str().expect("toolchain");
     let f = receipt["checks"]
         .as_array()
         .unwrap()
@@ -167,10 +194,20 @@ fn doctor_finishes_with_no_terminal_attached() {
         .find(|c| c["id"] == "f")
         .unwrap()
         .clone();
-    assert_eq!(f["verdict"], "pass", "{f}");
     assert!(f["measured"]["units"].as_u64().unwrap() >= 4, "{f}");
-    assert_eq!(f["measured"]["edges_unresolved"], 0, "{f}");
     assert_eq!(f["measured"]["edges_ambiguous"], 0, "{f}");
+    if check_f_expects_pass(toolchain) {
+        assert_eq!(f["verdict"], "pass", "{f}");
+        assert_eq!(f["measured"]["unit_layout"], "flat", "{f}");
+        assert_eq!(f["measured"]["edges_unresolved"], 0, "{f}");
+    } else {
+        assert_eq!(f["verdict"], "fail", "{f}");
+        assert_eq!(f["measured"]["unit_layout"], "unit-dir", "{f}");
+        assert!(
+            f["measured"]["edges_unresolved"].as_u64().unwrap() > 0,
+            "{f}"
+        );
+    }
 }
 
 fn doctor_dirs(dir: &std::path::Path) -> Vec<std::path::PathBuf> {

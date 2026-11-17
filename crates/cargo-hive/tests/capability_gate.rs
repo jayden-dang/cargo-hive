@@ -73,7 +73,7 @@ fn a_disabled_capability_names_the_failing_doctor_check() {
     assert_eq!(out.status.code(), Some(1));
     let why = refusal(&receipt);
     assert!(
-        why.contains("(f)") && why.contains("fingerprint graph reading"),
+        why.contains("rerun `cargo hive doctor`") && why.contains("1.100 unit dirs"),
         "{why}"
     );
 }

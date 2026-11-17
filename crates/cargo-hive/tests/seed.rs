@@ -1106,7 +1106,7 @@ fn damaged_state_bytes(damage: FileDamage, existing: Option<&[u8]>, empty_shape:
             value
                 .as_object_mut()
                 .expect("state file is an object")
-                .insert("layout".into(), serde_json::Value::from(2));
+                .insert("layout".into(), serde_json::Value::from(3));
             serde_json::to_vec(&value).unwrap()
         }
     }
@@ -1154,7 +1154,7 @@ fn seed_stops_on_each_damaged_seeds_or_store_file_and_leaves_it_untouched() {
                     "missing seeds recovery: {detail}"
                 ),
                 FileDamage::LayoutTwo => assert!(
-                    detail.contains("records layout 2")
+                    detail.contains("records layout 3")
                         && detail.contains("cargo install cargo-hive"),
                     "missing newer-layout text: {detail}"
                 ),
@@ -1193,7 +1193,7 @@ fn seed_stops_on_each_damaged_seeds_or_store_file_and_leaves_it_untouched() {
                     "missing store recovery: {detail}"
                 ),
                 FileDamage::LayoutTwo => assert!(
-                    detail.contains("records layout 2")
+                    detail.contains("records layout 3")
                         && detail.contains("cargo install cargo-hive"),
                     "missing newer-layout text: {detail}"
                 ),

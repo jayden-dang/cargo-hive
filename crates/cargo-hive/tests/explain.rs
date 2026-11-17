@@ -256,7 +256,7 @@ fn explain_refuses_without_fingerprint_reading() {
         .map(|finding| finding["detail"].as_str().unwrap().to_string())
         .unwrap_or_default();
     assert!(
-        why.contains("(f)") && why.contains("fingerprint graph reading"),
+        why.contains("rerun `cargo hive doctor`") && why.contains("1.100 unit dirs"),
         "{why}"
     );
     assert!(findings(&receipt, "copies.group").is_empty(), "{receipt}");

@@ -2649,7 +2649,7 @@ fn damaged_store_bytes(damage: FileDamage, existing: &[u8]) -> Vec<u8> {
             value
                 .as_object_mut()
                 .expect("store.db is an object")
-                .insert("layout".into(), serde_json::Value::from(2));
+                .insert("layout".into(), serde_json::Value::from(3));
             serde_json::to_vec(&value).unwrap()
         }
     }
@@ -2688,7 +2688,7 @@ fn bare_gc_and_dry_run_keep_store_write_failed_on_a_damaged_store_db() {
                     "missing store recovery: {detail}"
                 ),
                 FileDamage::LayoutTwo => assert!(
-                    detail.contains("records layout 2")
+                    detail.contains("records layout 3")
                         && detail.contains("cargo install cargo-hive"),
                     "missing newer-layout text: {detail}"
                 ),

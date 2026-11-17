@@ -132,6 +132,24 @@ pub struct Capabilities {
     /// has not run.
     #[serde(default)]
     pub failed_marker_check: u32,
+    /// Unit layout the probe wrote when check (f) passed. Absent on records from older hives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_layout: Option<cargo_hive_core::unit_path::UnitLayout>,
+}
+
+impl Capabilities {
+    /// The stored unit layout; else `Flat` when check (f) has not disabled fingerprint reading;
+    /// else `None`.
+    pub fn unit_layout_or_flat(&self) -> Option<cargo_hive_core::unit_path::UnitLayout> {
+        if let Some(layout) = self.unit_layout {
+            return Some(layout);
+        }
+        if self.disabled.contains_key(&Capability::FingerprintReading) {
+            None
+        } else {
+            Some(cargo_hive_core::unit_path::UnitLayout::Flat)
+        }
+    }
 }
 
 pub struct DoctorEnv {
@@ -220,6 +238,10 @@ impl fmt::Display for CapabilityRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CapabilityRefusal::RunDoctor(why) => write!(f, "run `cargo hive doctor` first: {why}"),
+            CapabilityRefusal::Disabled { checks, .. } if checks.contains(&CheckId::F) => write!(
+                f,
+                "rerun `cargo hive doctor`: this hive reads Cargo 1.100 unit dirs"
+            ),
             CapabilityRefusal::Disabled { capability, checks } => {
                 let ids: Vec<String> = checks.iter().map(|c| format!("({})", c.letter())).collect();
                 write!(
@@ -272,6 +294,7 @@ pub fn require(
 pub fn capabilities_for(report: &DoctorReport) -> Capabilities {
     let mut disabled: BTreeMap<Capability, BTreeSet<CheckId>> = BTreeMap::new();
     let mut failed_marker_check = 0;
+    let mut unit_layout = None;
     for check in &report.checks {
         if check.id == CheckId::G {
             match check.verdict {
@@ -286,6 +309,12 @@ pub fn capabilities_for(report: &DoctorReport) -> Capabilities {
             }
             continue;
         }
+        if check.id == CheckId::F && check.verdict == Verdict::Pass {
+            unit_layout = check.measured.get("unit_layout").and_then(|m| match m {
+                Measured::Text(text) => parse_unit_layout_measure(text),
+                _ => None,
+            });
+        }
         if check.verdict != Verdict::Pass {
             for cap in check.id.disables() {
                 disabled.entry(*cap).or_default().insert(check.id);
@@ -298,6 +327,7 @@ pub fn capabilities_for(report: &DoctorReport) -> Capabilities {
         disabled,
         lock_check: LOCK_CHECK_VERSION,
         failed_marker_check,
+        unit_layout,
     }
 }
 
@@ -579,6 +609,98 @@ fn tail(text: &str, max: usize) -> String {
     text[start..].trim().to_string()
 }
 
+fn unit_layout_label(layout: cargo_hive_core::unit_path::UnitLayout) -> &'static str {
+    match layout {
+        cargo_hive_core::unit_path::UnitLayout::Flat => "flat",
+        cargo_hive_core::unit_path::UnitLayout::UnitDir => "unit-dir",
+    }
+}
+
+fn parse_unit_layout_measure(text: &str) -> Option<cargo_hive_core::unit_path::UnitLayout> {
+    match text {
+        "flat" => Some(cargo_hive_core::unit_path::UnitLayout::Flat),
+        "unit-dir" => Some(cargo_hive_core::unit_path::UnitLayout::UnitDir),
+        _ => None,
+    }
+}
+
+/// Judges check (f) from a probe profile report.
+fn judge_format(report: &cargo_hive_core::fingerprint::ProfileReport) -> Check {
+    use cargo_hive_core::fingerprint::Format;
+    use cargo_hive_core::unit_path::UnitLayout;
+
+    let mut measured = Measures::from([("units".to_string(), Measured::Int(report.units as u64))]);
+    let fail = |measured: Measures| Check {
+        id: CheckId::F,
+        verdict: Verdict::Fail,
+        measured,
+    };
+
+    match &report.format {
+        Format::Unsupported(why) => {
+            measured.insert(
+                "format".into(),
+                Measured::Text(format!("unsupported: {why}")),
+            );
+            return fail(measured);
+        }
+        Format::Supported => {
+            measured.insert("format".into(), Measured::Text("supported".into()));
+        }
+    }
+
+    if report.layouts.len() != 1 {
+        let reason = if report.layouts.is_empty() {
+            "probe wrote no unit".to_string()
+        } else {
+            let names: Vec<&str> = report
+                .layouts
+                .iter()
+                .copied()
+                .map(unit_layout_label)
+                .collect();
+            format!("probe wrote both {} units", names.join(" and "))
+        };
+        measured.insert("reason".into(), Measured::Text(reason));
+        return fail(measured);
+    }
+
+    let layout = report
+        .layouts
+        .iter()
+        .next()
+        .copied()
+        .unwrap_or(UnitLayout::Flat);
+    measured.insert(
+        "unit_layout".into(),
+        Measured::Text(unit_layout_label(layout).into()),
+    );
+
+    let ok = match &report.edges {
+        Some(e) => {
+            measured.insert("edges_resolved".into(), Measured::Int(e.resolved));
+            measured.insert("edges_unresolved".into(), Measured::Int(e.unresolved));
+            measured.insert("edges_ambiguous".into(), Measured::Int(e.ambiguous));
+            report.units > 0 && e.resolved > 0 && e.unresolved == 0 && e.ambiguous == 0
+        }
+        None => false,
+    };
+    if !ok {
+        if report.units == 0 {
+            measured.insert(
+                "reason".into(),
+                Measured::Text("probe wrote no unit".into()),
+            );
+        }
+        return fail(measured);
+    }
+    Check {
+        id: CheckId::F,
+        verdict: Verdict::Pass,
+        measured,
+    }
+}
+
 /// (f) The fingerprints the active toolchain writes match the supported signature.
 fn check_format(
     fs: &dyn Fs,
@@ -642,32 +764,11 @@ fn check_format(
             }));
         }
         let report = cargo_hive_core::fingerprint::read_profile(&target.join("debug"));
-        let mut measured = Measures::from([
-            ("toolchain".to_string(), Measured::Text(tc.release.clone())),
-            ("units".to_string(), Measured::Int(report.units as u64)),
-        ]);
-        let ok = match (&report.format, &report.edges) {
-            (cargo_hive_core::fingerprint::Format::Supported, Some(e)) => {
-                measured.insert("format".into(), Measured::Text("supported".into()));
-                measured.insert("edges_resolved".into(), Measured::Int(e.resolved));
-                measured.insert("edges_unresolved".into(), Measured::Int(e.unresolved));
-                measured.insert("edges_ambiguous".into(), Measured::Int(e.ambiguous));
-                report.units > 0 && e.resolved > 0 && e.unresolved == 0 && e.ambiguous == 0
-            }
-            (cargo_hive_core::fingerprint::Format::Unsupported(why), _) => {
-                measured.insert(
-                    "format".into(),
-                    Measured::Text(format!("unsupported: {why}")),
-                );
-                false
-            }
-            (cargo_hive_core::fingerprint::Format::Supported, None) => false,
-        };
-        Ok(Ok(Check {
-            id: CheckId::F,
-            verdict: verdict(ok),
-            measured,
-        }))
+        let mut check = judge_format(&report);
+        check
+            .measured
+            .insert("toolchain".to_string(), Measured::Text(tc.release.clone()));
+        Ok(Ok(check))
     };
     match attempt() {
         Ok(result) => result,
@@ -701,29 +802,37 @@ fn judge_failed_marker(exit_ok: bool, outputs: &[String]) -> Verdict {
     }
 }
 
-fn probe_output_texts(fs: &dyn Fs, fingerprint: &Path) -> Result<Vec<String>, String> {
-    if !fingerprint.is_dir() {
-        return Ok(Vec::new());
+fn probe_output_texts(
+    fs: &dyn Fs,
+    profile: &Path,
+    report: &cargo_hive_core::fingerprint::ProfileReport,
+) -> Result<Vec<String>, String> {
+    use cargo_hive_core::unit_path;
+
+    let mut dirs = Vec::new();
+    if let Some(graph) = &report.graph {
+        for unit in &graph.units {
+            dirs.push(unit_path::fingerprint_dir(profile, &unit.loc));
+        }
     }
+    for nc in &report.not_current_units {
+        dirs.push(unit_path::fingerprint_dir(profile, &nc.loc));
+    }
+    dirs.sort();
+    dirs.dedup();
+
     let mut paths = Vec::new();
-    let root = fs
-        .read_dir_bounded(fingerprint, PROBE_LISTING_CAP)
-        .map_err(|e| e.to_string())?;
-    for (name, kind) in root {
-        match kind {
-            EntryKind::File if name.starts_with("output-") => paths.push(fingerprint.join(name)),
-            EntryKind::Dir => {
-                let dir = fingerprint.join(&name);
-                let children = fs
-                    .read_dir_bounded(&dir, PROBE_LISTING_CAP)
-                    .map_err(|e| e.to_string())?;
-                for (child, child_kind) in children {
-                    if child_kind == EntryKind::File && child.starts_with("output-") {
-                        paths.push(dir.join(child));
-                    }
-                }
+    for dir in dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        let children = fs
+            .read_dir_bounded(&dir, PROBE_LISTING_CAP)
+            .map_err(|e| e.to_string())?;
+        for (name, kind) in children {
+            if kind == EntryKind::File && name.starts_with("output-") {
+                paths.push(dir.join(name));
             }
-            _ => {}
         }
     }
     paths.sort();
@@ -783,7 +892,9 @@ fn check_failed_marker(
         }
         Ok(output) => output,
     };
-    let texts = match probe_output_texts(fs, &target.join("debug/.fingerprint")) {
+    let profile = target.join("debug");
+    let report = cargo_hive_core::fingerprint::read_profile(&profile);
+    let texts = match probe_output_texts(fs, &profile, &report) {
         Ok(texts) => texts,
         Err(reason) => return Ok(unavailable_g(reason)),
     };
@@ -1290,6 +1401,7 @@ mod tests {
             disabled: BTreeMap::new(),
             lock_check: 0,
             failed_marker_check: 0,
+            unit_layout: None,
         };
         let e = require(&other, Capability::FingerprintReading, Some("1.97.1"))
             .unwrap_err()
@@ -1310,11 +1422,15 @@ mod tests {
             disabled,
             lock_check: 0,
             failed_marker_check: 0,
+            unit_layout: None,
         };
         let e = require(&off, Capability::FingerprintReading, Some("1.97.1"))
             .unwrap_err()
             .to_string();
-        assert!(e.contains("(f)"), "{e}");
+        assert!(
+            e.contains("rerun `cargo hive doctor`") && e.contains("1.100 unit dirs"),
+            "{e}"
+        );
         assert_eq!(require(&off, Capability::Seeding, Some("1.97.1")), Ok(()));
     }
 
@@ -1352,6 +1468,7 @@ mod tests {
             disabled: BTreeMap::new(),
             lock_check: 0,
             failed_marker_check: 0,
+            unit_layout: None,
         };
         let e = require(&old, Capability::Deletion, Some("1.97.1")).unwrap_err();
         assert!(matches!(e, CapabilityRefusal::RunDoctor(_)), "{e}");
@@ -1382,7 +1499,7 @@ mod tests {
     fn capabilities_write_layout_first() {
         let caps = capabilities_for(&report_with(vec![]));
         let text = serde_json::to_string_pretty(&caps).unwrap();
-        assert!(text.starts_with("{\n  \"layout\": 1,\n"), "{text}");
+        assert!(text.starts_with("{\n  \"layout\": 2,\n"), "{text}");
     }
 
     fn report_with(checks: Vec<Check>) -> DoctorReport {
@@ -1566,6 +1683,164 @@ mod tests {
         assert!(!stale.exists() && live.exists() && odd.exists() && file.exists());
         alive.kill().unwrap();
         alive.wait().unwrap();
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    fn profile_report(
+        layouts: impl IntoIterator<Item = cargo_hive_core::unit_path::UnitLayout>,
+        units: usize,
+        resolved: u64,
+        unresolved: u64,
+        ambiguous: u64,
+    ) -> cargo_hive_core::fingerprint::ProfileReport {
+        use cargo_hive_core::fingerprint::{EdgeCounts, Format, ProfileReport};
+        use cargo_hive_core::unit_path::UnitLayout;
+        let layouts: BTreeSet<UnitLayout> = layouts.into_iter().collect();
+        ProfileReport {
+            path: PathBuf::from("debug"),
+            format: Format::Supported,
+            units,
+            not_current: 0,
+            not_current_units: Vec::new(),
+            edges: Some(EdgeCounts {
+                resolved,
+                unresolved,
+                ambiguous,
+            }),
+            graph: None,
+            layouts,
+            partial_unit_dirs: 0,
+        }
+    }
+
+    #[test]
+    fn a_unit_dir_probe_report_passes_check_f_and_measures_unit_layout() {
+        use cargo_hive_core::unit_path::UnitLayout;
+        let report = profile_report([UnitLayout::UnitDir], 4, 3, 0, 0);
+        let check = judge_format(&report);
+        assert_eq!(check.verdict, Verdict::Pass, "{:?}", check.measured);
+        assert_eq!(
+            check.measured.get("unit_layout"),
+            Some(&Measured::Text("unit-dir".into()))
+        );
+    }
+
+    #[test]
+    fn a_mixed_probe_report_fails_check_f_naming_both_layouts() {
+        use cargo_hive_core::unit_path::UnitLayout;
+        let report = profile_report([UnitLayout::Flat, UnitLayout::UnitDir], 4, 3, 0, 0);
+        let check = judge_format(&report);
+        assert_eq!(check.verdict, Verdict::Fail, "{:?}", check.measured);
+        let reason = match check.measured.get("reason") {
+            Some(Measured::Text(text)) => text.as_str(),
+            other => panic!("expected reason text, got {other:?}"),
+        };
+        assert!(
+            reason.contains("flat") && reason.contains("unit-dir"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_probe_report_with_no_unit_fails_check_f_naming_that() {
+        use cargo_hive_core::unit_path::UnitLayout;
+        let report = profile_report([UnitLayout::Flat], 0, 0, 0, 0);
+        let check = judge_format(&report);
+        assert_eq!(check.verdict, Verdict::Fail, "{:?}", check.measured);
+        let reason = match check.measured.get("reason") {
+            Some(Measured::Text(text)) => text.as_str(),
+            other => panic!("expected reason text, got {other:?}"),
+        };
+        assert!(
+            reason.contains("no unit") || reason.contains("units"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_passing_check_f_is_recorded_as_unit_layout_in_capabilities() {
+        use cargo_hive_core::unit_path::UnitLayout;
+        let check = judge_format(&profile_report([UnitLayout::UnitDir], 2, 1, 0, 0));
+        assert_eq!(check.verdict, Verdict::Pass, "{:?}", check.measured);
+        let caps = capabilities_for(&report_with(vec![check]));
+        assert_eq!(caps.unit_layout, Some(UnitLayout::UnitDir));
+        let text = serde_json::to_string_pretty(&caps).unwrap();
+        assert!(text.contains("\"unit_layout\": \"unit-dir\""), "{text}");
+    }
+
+    #[test]
+    fn unit_layout_or_flat_covers_stored_absent_passed_and_absent_failed() {
+        use cargo_hive_core::unit_path::UnitLayout;
+        let stored = Capabilities {
+            unit_layout: Some(UnitLayout::UnitDir),
+            ..Capabilities::default()
+        };
+        assert_eq!(stored.unit_layout_or_flat(), Some(UnitLayout::UnitDir));
+
+        let passed = Capabilities {
+            toolchain_release: Some("1.97.1".into()),
+            disabled: BTreeMap::new(),
+            unit_layout: None,
+            ..Capabilities::default()
+        };
+        assert_eq!(passed.unit_layout_or_flat(), Some(UnitLayout::Flat));
+
+        let failed = Capabilities {
+            toolchain_release: Some("1.97.1".into()),
+            disabled: BTreeMap::from([(
+                Capability::FingerprintReading,
+                BTreeSet::from([CheckId::F]),
+            )]),
+            unit_layout: None,
+            ..Capabilities::default()
+        };
+        assert_eq!(failed.unit_layout_or_flat(), None);
+    }
+
+    #[test]
+    fn check_g_reads_output_from_a_unit_dir_not_current_fingerprint() {
+        use cargo_hive_core::fingerprint::{Format, NotCurrentUnit, ProfileReport};
+        use cargo_hive_core::unit_path::{self, UnitLayout, UnitLoc};
+
+        let parent = scratch("g-unit-dir");
+        let profile = parent.join("debug");
+        let loc = UnitLoc {
+            layout: UnitLayout::UnitDir,
+            name_meta: "gf_lib-0123456789abcdef".into(),
+        };
+        let fp = unit_path::fingerprint_dir(&profile, &loc);
+        std::fs::create_dir_all(&fp).unwrap();
+        std::fs::write(fp.join("invoked.timestamp"), b"").unwrap();
+        let e0308 = concat!(
+            r#"{"$message_type":"diagnostic","message":"mismatched types","code":{"code":"E0308","explanation":null},"level":"error","spans":[]}"#,
+            "\n",
+            r#"{"$message_type":"diagnostic","message":"aborting due to 1 previous error","code":null,"level":"error","spans":[]}"#,
+            "\n",
+        );
+        std::fs::write(fp.join("output-lib-gf_lib"), e0308.as_bytes()).unwrap();
+
+        let report = ProfileReport {
+            path: profile.clone(),
+            format: Format::Supported,
+            units: 0,
+            not_current: 1,
+            not_current_units: vec![NotCurrentUnit {
+                dir: fp.clone(),
+                loc,
+                stem: None,
+                features: None,
+                outputs: vec!["output-lib-gf_lib".into()],
+                deps: Vec::new(),
+            }],
+            edges: None,
+            graph: None,
+            layouts: BTreeSet::from([UnitLayout::UnitDir]),
+            partial_unit_dirs: 0,
+        };
+        let texts = probe_output_texts(&FakeFs::new(Knobs::default()), &profile, &report).unwrap();
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        assert!(texts[0].contains("E0308"), "{}", texts[0]);
+        assert_eq!(summary_line_count(&texts), 1);
         std::fs::remove_dir_all(parent).unwrap();
     }
 }

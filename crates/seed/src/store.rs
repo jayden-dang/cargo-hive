@@ -1646,7 +1646,7 @@ mod tests {
         assert!(
             store_bytes.starts_with(
                 br#"{
-  "layout": 1,
+  "layout": 2,
 "#
             ),
             "{}",
@@ -1677,7 +1677,7 @@ mod tests {
         assert!(
             seeds_bytes.starts_with(
                 br#"{
-  "layout": 1,
+  "layout": 2,
 "#
             ),
             "{}",
