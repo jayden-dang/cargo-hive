@@ -269,20 +269,20 @@ _Requirements: BUILDDIR-1.8, BUILDDIR-1.4, BUILDDIR-1.10_
 
 **Depends-on:** Task 2, Task 3
 
-- [ ] **Step 1: Failing unit tests.**
+- [x] **Step 1: Failing unit tests.**
   - On a synthetic unit-dir probe report, (f) passes and measures `unit_layout="unit-dir"`.
   - On a mixed report, (f) fails with a reason naming both layouts. On a report with no unit, it fails naming that.
   - After a passing (f), the written `capabilities.json` holds `"unit_layout": "unit-dir"` (or `"flat"`).
   - Check (g) reads `output-*` from a unit-dir not-current unit's `fingerprint/`, using the probed shape: `output-lib-gf_lib` with an E0308 line.
   - `unit_layout_or_flat` covers stored, absent with (f) passed, and absent with (f) failed.
-- [ ] **Step 2: Failing upgrade tests.**
+- [x] **Step 2: Failing upgrade tests.**
   - Each v0.1.0–v0.1.2 `capabilities.json` reads with `unit_layout_or_flat() == Some(Flat)` when its (f) passed.
   - The first write of every state file adds `"layout": 2`.
   - 0.1.2's reader refusal stays as tested (UPGRADE-3.2).
 
   Run `cargo test -p cargo-hive --test upgrade`; expect failures.
-- [ ] **Step 3: Implement.** Under `RUSTUP_TOOLCHAIN=1.100.0`, `cargo test -p cargo-hive --test doctor` passes (f) and (g) on the real probe. Under 1.97.1 it records `unit_layout="flat"`. Run the doctor and state task gates; expect pass.
-- [ ] **Step 4: Commit.** `feat(doctor): pass checks f and g on Cargo 1.100 unit dirs and record the unit layout`
+- [x] **Step 3: Implement.** Under `RUSTUP_TOOLCHAIN=1.100.0`, `cargo test -p cargo-hive --test doctor` passes (f) and (g) on the real probe. Under 1.97.1 it records `unit_layout="flat"`. Run the doctor and state task gates; expect pass.
+- [x] **Step 4: Commit.** `feat(doctor): pass checks f and g on Cargo 1.100 unit dirs and record the unit layout`
 
 _Requirements: BUILDDIR-2.1, BUILDDIR-2.2, BUILDDIR-2.3, BUILDDIR-2.4, BUILDDIR-2.5, BUILDDIR-2.6_
 
@@ -332,7 +332,7 @@ _Requirements: BUILDDIR-3.1, BUILDDIR-3.2, BUILDDIR-3.4_
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1: Failing tests** on synthetic registered targets, through `gc --plan` then `apply`:
+- [x] **Step 1: Failing tests** on synthetic registered targets, through `gc --plan` then `apply`:
   - the unit dir is gone and its package dir stays;
   - entries are deleted in plan order, checked with `tests/common/recording_fs.rs` or the `Fs` the existing apply tests use to fail a removal;
   - a failed `out/` removal leaves `fingerprint/` present;
@@ -340,11 +340,11 @@ _Requirements: BUILDDIR-3.1, BUILDDIR-3.2, BUILDDIR-3.4_
   - a unit revived after the plan (a fresh stamp) is refused;
   - `paths_deleted` and freed bytes count the entries;
   - a 0.1.2 flat plan fixture applies as before.
-- [ ] **Step 2: Failing lock tests.**
+- [x] **Step 2: Failing lock tests.**
   - A synthetic unit-dir apply, through the recording `Fs`, try-locks `.cargo-build-lock` and `.cargo-lock` and not `.cargo-artifact-lock`.
   - Under `RUSTUP_TOOLCHAIN=1.100.0` only (skipped by name otherwise), a real-cargo build held open by a slow `build.rs` makes `apply` report `targets_skipped_held` and delete nothing.
-- [ ] **Step 3: Implement.** Run the gc and cargo-hive task gates; expect pass.
-- [ ] **Step 4: Commit.** `feat(gc): plan and apply delete dead unit dirs whole, fingerprint last`
+- [x] **Step 3: Implement.** Run the gc and cargo-hive task gates; expect pass.
+- [x] **Step 4: Commit.** `feat(gc): plan and apply delete dead unit dirs whole, fingerprint last`
 
 _Requirements: BUILDDIR-3.3, BUILDDIR-3.5, BUILDDIR-3.6, BUILDDIR-3.7, BUILDDIR-3.8, BUILDDIR-3.9_
 
@@ -364,14 +364,14 @@ _Requirements: BUILDDIR-3.3, BUILDDIR-3.5, BUILDDIR-3.6, BUILDDIR-3.7, BUILDDIR-
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1: Failing tests.**
+- [x] **Step 1: Failing tests.**
   - On a synthetic unit-dir target, a dead unit dir is deleted in order and `unit_files_deleted` counts its files.
   - On a 1.100 real-cargo fixture, gated on the layout the fixture got, `gc --checkout` deletes the unreferenced `out/*.rcgu.o` of a lib unit. It keeps every object a test or example binary in `out/` names, and counts `binaries_read` > 0.
   - An `out/` listing past `DEPS_CAP`, and an unreadable package dir, each give `gc.objects_undecided` naming the dir and delete no object.
   - A missing `deps/` with unit dirs present still cleans objects.
   - A flat target behaves as the existing checkout_gc tests assert.
-- [ ] **Step 2: Implement.** Run the gc and cargo-hive task gates; expect pass.
-- [ ] **Step 3: Commit.** `feat(gc): clean a checkout's unit dirs and their unreferenced debug objects`
+- [x] **Step 2: Implement.** Run the gc and cargo-hive task gates; expect pass.
+- [x] **Step 3: Commit.** `feat(gc): clean a checkout's unit dirs and their unreferenced debug objects`
 
 _Requirements: BUILDDIR-4.1, BUILDDIR-4.2, BUILDDIR-4.3, BUILDDIR-4.4, BUILDDIR-4.5, BUILDDIR-3.3, BUILDDIR-3.6_
 
