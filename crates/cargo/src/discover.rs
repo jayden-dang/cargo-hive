@@ -20,6 +20,39 @@ pub const CACHE_ROOT_UNJUDGED: &str = "a cache-root target is judged against eve
 
 pub const SKIP_DIRS: [&str; 3] = ["node_modules", "target", ".git"];
 
+pub fn unit_layout_counts(report: &fingerprint::ProfileReport) -> (u64, u64) {
+    use cargo_hive_core::unit_path::UnitLayout;
+    let mut flat = 0u64;
+    let mut unit_dir = 0u64;
+    if let Some(graph) = &report.graph {
+        for u in &graph.units {
+            match u.loc.layout {
+                UnitLayout::Flat => flat += 1,
+                UnitLayout::UnitDir => unit_dir += 1,
+            }
+        }
+    }
+    (flat, unit_dir)
+}
+
+pub fn status_layout_suffix(report: &fingerprint::ProfileReport) -> String {
+    use cargo_hive_core::unit_path::UnitLayout;
+    let layout = match (
+        report.layouts.contains(&UnitLayout::Flat),
+        report.layouts.contains(&UnitLayout::UnitDir),
+    ) {
+        (true, true) => " (flat + unit-dir)",
+        (true, false) => " (flat)",
+        (false, true) => " (unit-dir)",
+        (false, false) => "",
+    };
+    if report.partial_unit_dirs == 0 {
+        layout.to_string()
+    } else {
+        format!("{layout}, {} partial", report.partial_unit_dirs)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Checkout {
     pub path: PathBuf,

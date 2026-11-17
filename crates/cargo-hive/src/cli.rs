@@ -796,6 +796,7 @@ fn report_targets(
     scan: &cargo_hive_cargo::discover::TargetScan,
     seeds: Option<&cargo_hive_seed::record::SeedsFile>,
 ) {
+    use cargo_hive_cargo::discover::{status_layout_suffix, unit_layout_counts};
     use cargo_hive_core::fingerprint::Format;
     use cargo_hive_core::target::Owner;
     let (mut owned, mut orphans, mut unresolved, mut unreadable, mut unsupported) =
@@ -846,8 +847,22 @@ fn report_targets(
                     resolved += e.resolved;
                     dangling += e.unresolved;
                     ambiguous += e.ambiguous;
+                    let (flat, unit_dir) = unit_layout_counts(p);
+                    if flat > 0 {
+                        b.count(&format!("units_flat:{key}"), flat);
+                    }
+                    if unit_dir > 0 {
+                        b.count(&format!("units_unit_dir:{key}"), unit_dir);
+                    }
+                    if p.partial_unit_dirs > 0 {
+                        b.count(
+                            &format!("partial_unit_dirs:{key}"),
+                            p.partial_unit_dirs as u64,
+                        );
+                    }
+                    let suffix = status_layout_suffix(p);
                     human.push_str(&format!(
-                        "    {key}  {} units, edges {} resolved / {} unresolved / {} ambiguous\n",
+                        "    {key}  {} units, edges {} resolved / {} unresolved / {} ambiguous{suffix}\n",
                         p.units, e.resolved, e.unresolved, e.ambiguous
                     ));
                 }
