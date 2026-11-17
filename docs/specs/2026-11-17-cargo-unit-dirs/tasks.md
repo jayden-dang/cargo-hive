@@ -7,7 +7,8 @@
 > for tracking.
 
 Feature code: BUILDDIR
-Status: Draft
+Status: Approved
+Approved: 2026-11-17, by the operator (Jayden), in session: "duyet plan"
 Date: 2026-11-17
 Execution-mode: unset
 Max-concurrency: auto
