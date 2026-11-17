@@ -10,9 +10,11 @@ use cargo_hive_core::fingerprint::{
 };
 use cargo_hive_core::receipt::{Finding, Measured};
 use cargo_hive_core::target::TargetDir;
+use cargo_hive_core::unit_path::{self, UnitLayout};
 use cargo_hive_platform::Fs;
 use cargo_hive_platform::clock::utc_timestamp;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -598,15 +600,10 @@ fn failed_crate(item: &NotCurrentInput) -> String {
     if let Some(stem) = &item.unit.stem {
         return crate_and_kind(stem).0;
     }
-    let name = item
-        .unit
-        .dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    match cargo_hive_core::fingerprint::unit_hash(&name) {
-        Some(_) => name[..name.len() - UnitHash::HEX_LEN - 1].to_string(),
-        None => name,
+    let name = &item.unit.loc.name_meta;
+    match cargo_hive_core::fingerprint::unit_hash(name) {
+        Some(hash) => directory_crate(name, &hash).to_string(),
+        None => name.clone(),
     }
 }
 
@@ -718,7 +715,7 @@ fn profile_inputs(
                 if cancelled() {
                     return Err(Cancelled);
                 }
-                input.deps = list_deps(fs, &profile.path.join("deps"), deps_cap);
+                input.deps = list_mode_files(fs, &profile.path, &input.units, deps_cap);
             }
             input.not_current = read_not_current(&profile.not_current_units);
             inputs.push(input);
@@ -727,10 +724,57 @@ fn profile_inputs(
     Ok(inputs)
 }
 
-fn list_deps(fs: &dyn Fs, dir: &Path, cap: usize) -> Option<Vec<String>> {
-    fs.read_dir_bounded(dir, cap)
-        .ok()
-        .map(|entries| entries.into_iter().map(|(name, _kind)| name).collect())
+/// Names that feed `mode_index`: flat `deps/` plus each unit-dir unit's `out/`.
+fn list_mode_files(fs: &dyn Fs, profile: &Path, units: &[Unit], cap: usize) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    let mut remaining = cap;
+    let mut listed_a_dir = false;
+    let mut has_unit_dir = false;
+
+    match list_deps(fs, &unit_path::flat_deps_dir(profile), remaining) {
+        DirList::Missing => {}
+        DirList::Failed => return None,
+        DirList::Names(listed) => {
+            listed_a_dir = true;
+            remaining = remaining.saturating_sub(listed.len());
+            names.extend(listed);
+        }
+    }
+
+    for unit in units {
+        if unit.loc.layout != UnitLayout::UnitDir {
+            continue;
+        }
+        has_unit_dir = true;
+        match list_deps(fs, &unit_path::outputs(profile, &unit.loc), remaining) {
+            DirList::Missing => {}
+            DirList::Failed => return None,
+            DirList::Names(listed) => {
+                listed_a_dir = true;
+                remaining = remaining.saturating_sub(listed.len());
+                names.extend(listed);
+            }
+        }
+    }
+
+    if !listed_a_dir && !has_unit_dir {
+        return None;
+    }
+    Some(names)
+}
+
+enum DirList {
+    Missing,
+    Failed,
+    Names(Vec<String>),
+}
+
+fn list_deps(fs: &dyn Fs, dir: &Path, cap: usize) -> DirList {
+    match fs.read_dir_bounded(dir, cap) {
+        Ok(entries) => DirList::Names(entries.into_iter().map(|(name, _kind)| name).collect()),
+        Err(err) if err.kind() == ErrorKind::NotFound => DirList::Missing,
+        Err(_) => DirList::Failed,
+    }
 }
 
 fn read_not_current(units: &[NotCurrentUnit]) -> Vec<NotCurrentInput> {
