@@ -192,7 +192,7 @@ _Requirements: BUILDDIR-1.9, BUILDDIR-1.10_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Failing unit tests**, one behavior each:
+- [x] **Step 1: Failing unit tests**, one behavior each:
   - a unit-dir profile reads its units and resolves an edge between two packages;
   - a mixed profile reads both layouts into one graph, with an edge from a unit-dir unit to a flat one resolved;
   - a unit-dir `fingerprint/` with only `invoked.timestamp` and `output-*` is not current;
@@ -208,9 +208,9 @@ _Requirements: BUILDDIR-1.9, BUILDDIR-1.10_
   - `layouts` is `{Flat}`, `{UnitDir}` or both.
 
   Invert `a_profile_without_a_fingerprint_dir_is_unsupported`, which is now supported with one unit. Run `cargo test -p cargo-hive-core --lib fingerprint::`; expect failures.
-- [ ] **Step 2: Failing lock test** in `locks::tests`: a unit-dir profile with no lock files is `Skipped(Missing)`. Expect failure.
-- [ ] **Step 3: Implement** `read_profile` as flat dirs plus unit dirs feeding one shared per-dir reader and one graph build. Implement the lock predicate from the identified `Layout`. Run the core task gate; expect pass.
-- [ ] **Step 4: Commit.** `feat(core): read Cargo 1.100 unit dirs beside flat fingerprints in one profile`
+- [x] **Step 2: Failing lock test** in `locks::tests`: a unit-dir profile with no lock files is `Skipped(Missing)`. Expect failure.
+- [x] **Step 3: Implement** `read_profile` as flat dirs plus unit dirs feeding one shared per-dir reader and one graph build. Implement the lock predicate from the identified `Layout`. Run the core task gate; expect pass.
+- [x] **Step 4: Commit.** `feat(core): read Cargo 1.100 unit dirs beside flat fingerprints in one profile`
 
 _Requirements: BUILDDIR-1.1, BUILDDIR-1.2, BUILDDIR-1.3, BUILDDIR-1.4, BUILDDIR-1.5, BUILDDIR-1.6, BUILDDIR-1.7_
 
