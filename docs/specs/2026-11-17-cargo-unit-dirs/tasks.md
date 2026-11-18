@@ -7,7 +7,7 @@
 > for tracking.
 
 Feature code: BUILDDIR
-Status: In-progress
+Status: Implemented
 Approved: 2026-11-17, by the operator (Jayden), in session: "duyet plan"
 Date: 2026-11-17
 Execution-mode: continuous
@@ -568,7 +568,7 @@ _Requirements: BUILDDIR-8.1, BUILDDIR-8.2_
 - [x] **Step 2:** Run `grep -rn '"\.fingerprint"\|"deps"\|join("out")\|join("run")' crates/*/src | grep -v unit_path.rs`. Expect only the profile-wide listings that `unit_path::flat_deps_dir` cannot express, each named in the report, or nothing.
 - [x] **Step 3:** Run `scripts/gate.sh` under 1.97.1 and under 1.100.0; expect both green.
 - [x] **Step 4:** Update `ci.yml` to the matrix, push the branch, and confirm both jobs pass on the PR. (PR #35, run 44238028008: `gate (1.97.1)`, `gate (1.100.0)`, `package` and `capabilities` pass, and so does the non-blocking latest-stable job. The first run failed on 1.100.0 because Cargo 1.100 writes no incremental dir while `CI` is set; `scripts/gate.sh` now sets `CARGO_INCREMENTAL=1`.)
-- [ ] **Step 5:** After merge, the operator approves `gh api` branch protection with `contexts: ["gate (1.97.1)", "gate (1.100.0)"]`.
+- [x] **Step 5:** After merge, the operator approves `gh api` branch protection with `contexts: ["gate (1.97.1)", "gate (1.100.0)"]`. (Applied 2026-11-18 on the operator's approval: required checks on `main` are now `gate (1.97.1)` and `gate (1.100.0)`; the old `gate` context named a job that no longer exists.)
 - [x] **Step 6: Commit.** `ci: require the gate on rustc 1.97.1 and 1.100.0`
 
 _Requirements: BUILDDIR-9.3_
@@ -634,7 +634,7 @@ _Requirements: BUILDDIR-1.7, BUILDDIR-3.4, BUILDDIR-6.7_
   - Record units deleted, objects deleted and freed bytes.
   - Rerun `cargo +1.100.0 test --no-run -v` in `a` and `b` and count `Compiling` lines. Expect equal counts, which means 0 gc-caused recompiles.
 - [x] **Step 3:** Seed a fresh secondary copy `c` from `a`'s repo and build it; record `seeded_recompiled` = 0. Then run `gc --plan` and `apply` on a further backdated copy, and rerun its build; expect 0 gc-caused recompiles.
-- [x] **Step 4:** Write PLAN.md with every number and command, and summarise it on #33 without naming any other tool.
+- [x] **Step 4:** Write PLAN.md with every number and command, and summarise it on #33 without naming any other tool. Rerun 2026-11-18 on the fixed binary (the first run, before the hash fix, only recorded refusals): doctor check (f) passes, `gc --checkout` 1.56 s deleting 32 units and 5,018 objects, 0 gc-caused recompiles, `seeded_recompiled` 0, `apply` then a rebuild with no edit compiled 0.
 
 _Requirements: BUILDDIR-9.1, BUILDDIR-9.2_
 
