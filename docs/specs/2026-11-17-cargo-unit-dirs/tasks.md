@@ -567,7 +567,7 @@ _Requirements: BUILDDIR-8.1, BUILDDIR-8.2_
 - [x] **Step 1:** Run `RUSTUP_TOOLCHAIN=1.100.0 scripts/gate.sh` and list each failure. Port each real-cargo assertion to `cargo_fixture::layout_of` (Task 2), never weakening what it checks on flat.
 - [x] **Step 2:** Run `grep -rn '"\.fingerprint"\|"deps"\|join("out")\|join("run")' crates/*/src | grep -v unit_path.rs`. Expect only the profile-wide listings that `unit_path::flat_deps_dir` cannot express, each named in the report, or nothing.
 - [x] **Step 3:** Run `scripts/gate.sh` under 1.97.1 and under 1.100.0; expect both green.
-- [ ] **Step 4:** Update `ci.yml` to the matrix, push the branch, and confirm both jobs pass on the PR.
+- [x] **Step 4:** Update `ci.yml` to the matrix, push the branch, and confirm both jobs pass on the PR. (PR #35, run 44238028008: `gate (1.97.1)`, `gate (1.100.0)`, `package` and `capabilities` pass, and so does the non-blocking latest-stable job. The first run failed on 1.100.0 because Cargo 1.100 writes no incremental dir while `CI` is set; `scripts/gate.sh` now sets `CARGO_INCREMENTAL=1`.)
 - [ ] **Step 5:** After merge, the operator approves `gh api` branch protection with `contexts: ["gate (1.97.1)", "gate (1.100.0)"]`.
 - [x] **Step 6: Commit.** `ci: require the gate on rustc 1.97.1 and 1.100.0`
 
@@ -662,6 +662,6 @@ _Requirements: BUILDDIR-9.1, BUILDDIR-9.2_
 - [x] **Step 2: Implement.** `read_unit` keys the unit by its hash file for both layouts and only checks that a unit dir's name is 16 lowercase hex. Expect the test to pass and the core, gc, seed, doctor and cargo crates to stay green.
 - [x] **Step 3:** Run `RUSTUP_TOOLCHAIN=1.100.0 cargo test --workspace --no-fail-fast`. Expect the failures the flat assumptions caused (187 on `main` before the fix) to be listed. Adapt each test to `layout_of` or `machine_unit_layout()` without weakening what it asserts.
 - [x] **Step 4:** Run `scripts/gate.sh` under 1.100.0 (exit 0). Under 1.97.1 every test passes; four toolchain-resolution tests in `capability_gate` and `status_targets` need the machine's rustup default to be 1.97.1, and passed with it.
-- [ ] **Step 5:** Push the branch and confirm `gate (1.97.1)` and `gate (1.100.0)` pass on the PR, then close #33.
+- [x] **Step 5:** Push the branch and confirm `gate (1.97.1)` and `gate (1.100.0)` pass on the PR (PR #35, run 44238028008). Closing #33 follows the merge of PR #35.
 
 _Requirements: BUILDDIR-1.11_
