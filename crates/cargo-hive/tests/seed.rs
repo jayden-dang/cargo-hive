@@ -1596,10 +1596,12 @@ fn after_the_first_build_liveness_keeps_every_unit_that_build_needed() {
         built.registry_fresh
     );
     let mut used = seeded;
-    used.extend(dirs_stamped_within(
-        &target,
-        Duration::from_secs(7 * 86_400),
-    ));
+    let stamped = dirs_stamped_within(&target, Duration::from_secs(7 * 86_400));
+    assert!(
+        !stamped.is_empty(),
+        "the build stamped no unit inside the window, so the check below would be vacuous"
+    );
+    used.extend(stamped);
     let target = target.canonicalize().unwrap();
     let (out, planned) = hive.json(&["gc", "--plan"]);
     assert!(out.status.success(), "{planned}");
@@ -1802,6 +1804,19 @@ fn rcgu_objects(dir: &Path) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+#[test]
+fn source_target_is_built_sees_a_built_unit_in_either_layout_and_nothing_in_an_empty_target() {
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    assert!(!source_target_is_built(&repo.main), "nothing is built yet");
+    cargo_json(&hive, &repo.main, &["build"]);
+    assert!(
+        source_target_is_built(&repo.main),
+        "a {} target holds built units",
+        common::machine_unit_layout()
+    );
 }
 
 #[test]
@@ -2348,12 +2363,17 @@ fn path_under(path: &str, root: &Path) -> bool {
     Path::new(path).starts_with(&root)
 }
 
+/// Whether `path` lies in one of the named units: a flat unit is one path component
+/// (`<package>-<hex>`), a unit-dir unit is two (`<package>/<hex>`).
 fn path_names_unit(path: &str, dir_names: &[String]) -> bool {
-    Path::new(path).components().any(|part| {
-        dir_names
-            .iter()
-            .any(|dir_name| part.as_os_str() == dir_name.as_str())
-    })
+    let parts: Vec<String> = Path::new(path)
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    parts.iter().any(|part| dir_names.contains(part))
+        || parts
+            .windows(2)
+            .any(|pair| dir_names.contains(&format!("{}-{}", pair[0], pair[1])))
 }
 
 fn dirs_stamped_within(target: &Path, window: Duration) -> Vec<String> {
@@ -2370,12 +2390,26 @@ fn dirs_stamped_within(target: &Path, window: Duration) -> Vec<String> {
                 seen += 1;
                 assert!(seen < 100_000, "walk bound hit");
                 let path = entry.unwrap().path();
-                let stamp = path.join("invoked.timestamp");
-                let Ok(meta) = fs::metadata(&stamp) else {
-                    continue;
+                let stamped = |dir: &Path| {
+                    fs::metadata(dir.join("invoked.timestamp"))
+                        .is_ok_and(|meta| meta.modified().unwrap() >= cutoff)
                 };
-                if meta.modified().unwrap() >= cutoff {
-                    names.push(path.file_name().unwrap().to_string_lossy().into_owned());
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if stamped(&path) {
+                    names.push(name.clone());
+                }
+                // A unit-dir package dir holds `<hex>/{fingerprint,run}/invoked.timestamp`.
+                if sub == "build"
+                    && let Ok(hexes) = fs::read_dir(&path)
+                {
+                    for hex in hexes.flatten().map(|e| e.path()) {
+                        let hex_name = hex.file_name().unwrap().to_string_lossy().into_owned();
+                        if hex.is_dir()
+                            && (stamped(&hex.join("fingerprint")) || stamped(&hex.join("run")))
+                        {
+                            names.push(format!("{name}-{hex_name}"));
+                        }
+                    }
                 }
             }
         }
@@ -2898,6 +2932,8 @@ struct CargoArtifacts {
     cloned_recompiled: Vec<String>,
 }
 
+/// Whether a profile dir under `checkout/target` holds a built unit, in either layout:
+/// `.fingerprint/<unit>` (flat) or `build/<package>/<hex>/fingerprint` (unit dir).
 fn source_target_is_built(checkout: &Path) -> bool {
     let Ok(profiles) = fs::read_dir(checkout.join("target")) else {
         return false;
@@ -2909,14 +2945,22 @@ fn source_target_is_built(checkout: &Path) -> bool {
         let Ok(profile) = profile else {
             continue;
         };
-        let Ok(units) = fs::read_dir(profile.path().join(".fingerprint")) else {
+        let flat = fs::read_dir(profile.path().join(".fingerprint"))
+            .is_ok_and(|mut units| units.any(|unit| unit.is_ok()));
+        if flat {
+            return true;
+        }
+        let Ok(packages) = fs::read_dir(profile.path().join("build")) else {
             continue;
         };
-        let mut units_seen = 0usize;
-        for unit in units {
-            units_seen += 1;
-            assert!(units_seen < 100_000, "walk bound hit");
-            if unit.is_ok() {
+        let mut packages_seen = 0usize;
+        for package in packages.flatten() {
+            packages_seen += 1;
+            assert!(packages_seen < 100_000, "walk bound hit");
+            let unit_dir = fs::read_dir(package.path()).is_ok_and(|mut hexes| {
+                hexes.any(|hex| hex.is_ok_and(|h| h.path().join("fingerprint").is_dir()))
+            });
+            if unit_dir {
                 return true;
             }
         }
