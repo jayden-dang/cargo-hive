@@ -637,3 +637,31 @@ _Requirements: BUILDDIR-1.7, BUILDDIR-3.4, BUILDDIR-6.7_
 - [x] **Step 4:** Write PLAN.md with every number and command, and summarise it on #33 without naming any other tool.
 
 _Requirements: BUILDDIR-9.1, BUILDDIR-9.2_
+
+---
+
+### Task 17: Unit-dir edges resolve by the hash file (issue #33)
+
+**Files:**
+- Modify:
+  - `crates/core/src/fingerprint.rs` (`read_unit`: `Unit.hash` is the hash file's content in both layouts);
+  - `crates/cargo-hive/tests/common/mod.rs` (`machine_unit_layout`, and `capabilities.json` records `unit_layout`);
+  - `crates/cargo-hive/tests/doctor.rs` (check (f) passes on every toolchain);
+  - every integration test under `crates/cargo-hive/tests/` that assumed the flat layout (`.fingerprint/`, `deps/`, store entry names without `u.`).
+- Test: the whole suite under both toolchains
+
+**Reuse:** rung 2. It reuses `unit_path::{fingerprint_dir, outputs, run_dir}` and `cargo_fixture::{layout_of, fingerprint_dir_of}`.
+
+**Interfaces:**
+- Consumes: Task 2's reader and Task 14's gate.
+- Produces: BUILDDIR-1.11. A real Cargo 1.100 target resolves its dependency edges.
+
+**Depends-on:** Task 14
+
+- [x] **Step 1: Failing test.** `a_unit_dir_edge_resolves_by_the_hash_file_when_the_dir_name_differs` uses values read from a real Cargo 1.100.0 build (dir `5c0d43421562aa29`, hash file `c33088e25b0468c9`, edge `c968045be28830c3`). Expect `unresolved: 1` before the fix.
+- [x] **Step 2: Implement.** `read_unit` keys the unit by its hash file for both layouts and only checks that a unit dir's name is 16 lowercase hex. Expect the test to pass and the core, gc, seed, doctor and cargo crates to stay green.
+- [x] **Step 3:** Run `RUSTUP_TOOLCHAIN=1.100.0 cargo test --workspace --no-fail-fast`. Expect the failures the flat assumptions caused (187 on `main` before the fix) to be listed. Adapt each test to `layout_of` or `machine_unit_layout()` without weakening what it asserts.
+- [x] **Step 4:** Run `scripts/gate.sh` under 1.100.0 (exit 0). Under 1.97.1 every test passes; four toolchain-resolution tests in `capability_gate` and `status_targets` need the machine's rustup default to be 1.97.1, and passed with it.
+- [ ] **Step 5:** Push the branch and confirm `gate (1.97.1)` and `gate (1.100.0)` pass on the PR, then close #33.
+
+_Requirements: BUILDDIR-1.11_

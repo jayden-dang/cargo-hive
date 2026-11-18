@@ -197,7 +197,8 @@ handles each kind of directory:
   - With `fingerprint/`, it is read with the same per-dir rules as a flat unit dir, so the JSON,
     hash file and not-current checks are one function over a dir path.
 
-Unit hash and `name_meta` come from `<package>-<hex>`.
+`name_meta` comes from `<package>-<hex>`. The edge key, `Unit.hash`, is the hash file's content in
+both layouts (BUILDDIR-1.11): a 1.100 unit dir's name is a different hex.
 Depth: n/a — extends `read_profile`.
 Locality: extend `fingerprint.rs` (`read_profile` split into `read_flat` + `read_unit_dirs` feeding
 one graph build); `target.rs` leave; `locks.rs` extend one predicate.

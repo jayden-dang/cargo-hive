@@ -47,7 +47,8 @@ targets and their edges, so that I can see hive reads them instead of calling th
 - **BUILDDIR-1.1** WHEN hive reads a profile dir THE SYSTEM SHALL read as a unit each unit dir
   whose `fingerprint/` holds exactly one fingerprint JSON in the fingerprint format signature
   beside a non-empty hash file of the same stem, and SHALL take its unit hash from the unit dir's
-  name and its package from the package dir's name.
+  name and its package from the package dir's name (the dir names give the unit's name-meta; the
+  edge key is BUILDDIR-1.11's).
 - **BUILDDIR-1.2** WHEN a profile dir is a mixed profile dir THE SYSTEM SHALL read the units of
   both layouts, resolving edges over all of them and across every profile dir of the target as for
   flat units.
@@ -76,6 +77,12 @@ targets and their edges, so that I can see hive reads them instead of calling th
   otherwise, and the hash file inside `fingerprint/`.
 - **BUILDDIR-1.10** (guard) WHEN a profile dir holds only flat units THE SYSTEM SHALL CONTINUE TO
   read, count and resolve them as 0.1.2 does (CORE-4.7, CORE-4.8, CORE-4.16, CORE-4.17).
+- **BUILDDIR-1.11** WHEN hive resolves a dependency edge to a unit-dir unit THE SYSTEM SHALL match
+  the edge to the unit's hash file content, as it does for a flat unit, and SHALL NOT require the
+  unit dir's name to equal it. Cargo 1.100 writes a different hex as the dir name and in the hash
+  file (reproduced 2026-11-18 on rustc 1.100.0: dir `5c0d43421562aa29`, hash file
+  `c33088e25b0468c9`, edge `c968045be28830c3`); the first design took the dir name as the edge key,
+  so on a real 1.100 target every edge stayed unresolved (issue #33). Guard: BUILDDIR-1.10.
 
 ## 2. Doctor passes on Cargo 1.100 and names the layout
 
