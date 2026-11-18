@@ -287,6 +287,7 @@ fn a_profile_dir_that_appears_after_the_locks_are_taken_skips_the_target() {
 fn locks_are_all_held_before_the_first_removal_and_each_unit_is_removed_dot_d_first_fingerprint_last()
  {
     let p = Planned::new("apply-order");
+    let layout = common::cargo_fixture::layout_of(&p.worktree_target());
     let id = Planned::id_of(&p.plan(), "secondary");
     let rec = Recording::over_real();
     let lib = p.library_ctx_with(rec.fs());
@@ -301,9 +302,14 @@ fn locks_are_all_held_before_the_first_removal_and_each_unit_is_removed_dot_d_fi
         .iter()
         .rposition(|l| l.ends_with(".d"))
         .expect("a .d file is removed");
+    // Flat: fingerprint dirs are `.fingerprint/<name-meta>`; unit-dir: `<hex>/fingerprint`.
+    let is_fingerprint = |l: &str| match layout {
+        UnitLayout::Flat => l.contains("/.fingerprint/"),
+        UnitLayout::UnitDir => l.ends_with("/fingerprint"),
+    };
     let first_other = removes
         .iter()
-        .position(|l| !l.ends_with(".d") && !l.contains("/.fingerprint/"))
+        .position(|l| !l.ends_with(".d") && !is_fingerprint(l))
         .expect("an artifact other than .d is removed");
     assert!(
         last_d < first_other,
@@ -311,17 +317,40 @@ fn locks_are_all_held_before_the_first_removal_and_each_unit_is_removed_dot_d_fi
     );
     let fingerprint = removes
         .iter()
-        .position(|l| l.contains("/.fingerprint/"))
+        .position(|l| is_fingerprint(l))
         .expect("the fingerprint dir is removed");
-    assert_eq!(
-        fingerprint,
-        removes.len() - 1,
-        "the fingerprint directory goes last: {removes:?}"
-    );
+    match layout {
+        UnitLayout::Flat => assert_eq!(
+            fingerprint,
+            removes.len() - 1,
+            "the fingerprint directory goes last: {removes:?}"
+        ),
+        UnitLayout::UnitDir => {
+            // BUILDDIR-3.3: fingerprint/ goes after out/ and run/, and only the unit dir itself follows.
+            let fp = removes[fingerprint];
+            let unit = fp.strip_suffix("/fingerprint").unwrap();
+            assert_eq!(
+                fingerprint,
+                removes.len() - 2,
+                "only the unit dir follows fingerprint/: {removes:?}"
+            );
+            assert_eq!(removes[removes.len() - 1], unit, "{removes:?}");
+            assert!(
+                removes[..fingerprint]
+                    .iter()
+                    .any(|l| l.as_str() == format!("{unit}/out")),
+                "out/ goes before fingerprint/: {removes:?}"
+            );
+        }
+    }
     let first_unit_read = log
         .iter()
         .position(|l| {
-            l.starts_with("read ") && (l.contains("/.fingerprint/") || l.contains("/deps/"))
+            l.starts_with("read ")
+                && match layout {
+                    UnitLayout::Flat => l.contains("/.fingerprint/") || l.contains("/deps/"),
+                    UnitLayout::UnitDir => l.contains("/fingerprint/") || l.contains("/out/"),
+                }
         })
         .expect("liveness reads unit files through the Fs");
     assert!(
@@ -443,12 +472,28 @@ fn an_orphan_plan_copies_each_unmeasured_path_and_counts_only_measured_bytes() {
     );
 }
 
+/// Where the fixture's unit outputs live under `target/debug`: the shared `deps/` for a flat
+/// layout, the `fixture` unit's own `out/` for a unit-dir layout (whose hash dir is `hash`).
+fn outputs_dir_of(target: &std::path::Path, hash: Option<&str>) -> std::path::PathBuf {
+    match common::cargo_fixture::layout_of(target) {
+        UnitLayout::Flat => target.join("debug/deps"),
+        UnitLayout::UnitDir => match hash {
+            Some(hash) => target.join("debug/build/fixture").join(hash).join("out"),
+            None => common::cargo_fixture::fingerprint_dir_of(target, Some("fixture"))
+                .parent()
+                .unwrap()
+                .join("out"),
+        },
+    }
+}
+
 fn rlib_of(target: &std::path::Path, hash: &str) -> std::path::PathBuf {
-    let deps = target.join("debug/deps");
+    let deps = outputs_dir_of(target, Some(hash));
+    let flat = common::cargo_fixture::layout_of(target) == UnitLayout::Flat;
     for entry in std::fs::read_dir(&deps).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_str().unwrap();
-        if name.contains(hash) && name.ends_with(".rlib") {
+        if (!flat || name.contains(hash)) && name.ends_with(".rlib") {
             return path;
         }
     }
@@ -478,16 +523,20 @@ fn a_dead_path_whose_stat_fails_stores_no_plan_and_names_the_path() {
     let p = Planned::new("stat-fail-plan");
     let target = p.worktree_target();
     let hash = p.dead_unit_hash(&target);
+    // A flat unit plans each of its files in the shared `deps/`, so its rlib is stat'd. A unit-dir
+    // unit plans its `.d` files, then `out/` whole: the `.d` file is its stat'd dead path.
+    let flat = common::cargo_fixture::layout_of(&target) == UnitLayout::Flat;
+    let suffix = if flat { ".rlib" } else { ".d" };
     let mut artifact = None;
-    let deps = target.join("debug/deps");
+    let deps = outputs_dir_of(&target, Some(&hash));
     for entry in std::fs::read_dir(&deps).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_str().unwrap();
-        if name.contains(&hash) && name.ends_with(".rlib") {
+        if (!flat || name.contains(&hash)) && name.ends_with(suffix) {
             artifact = Some(path);
         }
     }
-    let artifact = artifact.expect("the dead unit has an rlib");
+    let artifact = artifact.expect("the dead unit has a planned file to stat");
     let rec = Recording::over_real().fail_stat(&artifact);
     let lib = p.library_ctx_with(rec.fs());
     let made = cargo_hive_gc::plan_tier::build::make(&lib.ctx(), &[], &|| false).unwrap();
@@ -684,7 +733,7 @@ fn an_orphan_plan_removes_the_whole_target_dir_after_taking_every_lock() {
 #[test]
 fn a_file_whose_sharing_cannot_be_read_is_named_after_the_orphan_is_removed() {
     let (p, orphan) = Planned::with_orphan("orphan-unmeasured");
-    let missed = orphan.join("debug/deps/missed.rlib");
+    let missed = outputs_dir_of(&orphan, None).join("missed.rlib");
     std::fs::write(&missed, b"xxxx").unwrap();
     let missed = missed.canonicalize().unwrap();
     let id = p.orphan_plan_id(&orphan);

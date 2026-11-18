@@ -287,16 +287,26 @@ fn an_unsupported_profile_is_named_and_skipped() {
     let repo = init_repo(&s.path.join("app"), "");
     hive.build_crate(&repo, None);
     let profile = repo.join("target/debug");
-    let unit = fs::read_dir(profile.join(".fingerprint"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .find(|path| {
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("fixture-")
-        })
-        .unwrap();
+    // The fixture crate's fingerprint dir: `.fingerprint/fixture-<hex>` (flat) or
+    // `build/fixture/<hex>/fingerprint` (unit dir).
+    let unit = if profile.join(".fingerprint").is_dir() {
+        fs::read_dir(profile.join(".fingerprint"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("fixture-")
+            })
+            .unwrap()
+    } else {
+        fs::read_dir(profile.join("build/fixture"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("fingerprint"))
+            .find(|path| path.is_dir())
+            .unwrap()
+    };
     let json = fs::read_dir(&unit)
         .unwrap()
         .map(|entry| entry.unwrap().path())

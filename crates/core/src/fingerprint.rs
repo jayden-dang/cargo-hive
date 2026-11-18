@@ -409,11 +409,12 @@ fn read_unit(
         });
     }
     let hash_text = String::from_utf8(hash).expect("checked ASCII hex");
-    let unit_hash = match loc.layout {
-        UnitLayout::Flat => UnitHash::parse(&hash_text).expect("checked hex"),
-        UnitLayout::UnitDir => UnitHash::parse(loc.hex())
-            .ok_or_else(|| "unit dir name is not 16 lowercase hex".to_string())?,
-    };
+    // Both layouts key a unit by its hash file: a dep edge carries that value. A unit dir's own
+    // name is a different hex in Cargo 1.100, so it only has to be well-formed.
+    if loc.layout == UnitLayout::UnitDir && UnitHash::parse(loc.hex()).is_none() {
+        return Err("unit dir name is not 16 lowercase hex".to_string());
+    }
+    let unit_hash = UnitHash::parse(&hash_text).expect("checked hex");
     Ok(ParsedUnit::Current(Unit {
         loc,
         kind: UnitKind::of(&stem),
@@ -1491,6 +1492,31 @@ mod tests {
                 .units
                 .iter()
                 .any(|u| u.loc.name_meta == format!("app-{}", le_hex(a)))
+        );
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    /// Cargo 1.100 names a unit dir with one hex and writes another in the hash file; a dep edge
+    /// carries the hash file's value, never the directory's.
+    #[test]
+    fn a_unit_dir_edge_resolves_by_the_hash_file_when_the_dir_name_differs() {
+        let p = scratch();
+        fs::remove_dir_all(p.join(".fingerprint")).unwrap();
+        // Values read from a real Cargo 1.100.0 build: edge c968045be28830c3 is the little-endian
+        // reading of depcrate's hash file c33088e25b0468c9 under dir 5c0d43421562aa29.
+        let dep = 0xc968_045b_e288_30c3u64;
+        assert_eq!(le_hex(dep), "c33088e25b0468c9");
+        write_unit_dir(&p, "depcrate", "5c0d43421562aa29", "lib-depcrate", dep, &[]);
+        write_unit_dir(&p, "app", "2ec6ba8b5b9de2ba", "lib-app", 7, &[dep]);
+        let r = read_profile(&p);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!(
+            r.edges,
+            Some(EdgeCounts {
+                resolved: 1,
+                unresolved: 0,
+                ambiguous: 0
+            })
         );
         fs::remove_dir_all(p).unwrap();
     }

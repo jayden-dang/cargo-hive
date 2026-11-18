@@ -62,6 +62,17 @@ fn tree(root: &Path) -> BTreeMap<PathBuf, (u64, std::time::SystemTime)> {
     out
 }
 
+/// `build_with_sessions`, then a superseded session planted in any crate dir that rustc left with
+/// one only: Rust 1.100 sweeps the older sessions itself when the next build finishes.
+fn build_with_superseded_sessions(hive: &Hive, repo: &Path, target: &Path) {
+    hive.build_with_sessions(repo, None);
+    for dir in crate_dirs(target) {
+        if sessions_in(&dir).len() < 2 {
+            plant_session(&dir, 3600, "svh0", false);
+        }
+    }
+}
+
 fn fresh_build_compiles_nothing(hive: &Hive, repo: &Path) -> bool {
     let child = Command::new("cargo")
         .args(["build", "--offline"])
@@ -83,7 +94,7 @@ fn gc_deletes_superseded_sessions_and_the_next_build_compiles_nothing() {
     let hive = Hive::ready();
     let s = Scratch::new("gc-basic");
     let repo = init_repo(&s.path.join("app"), "");
-    hive.build_with_sessions(&repo, None);
+    build_with_superseded_sessions(&hive, &repo, &repo.join("target"));
     register(&hive, &repo);
     let target = repo.join("target");
     assert!(
@@ -193,9 +204,9 @@ fn unit_dir_out_temp_entries_go_under_the_build_lock_and_look_alikes_stay() {
     let hive = Hive::ready();
     let s = Scratch::new("gc-unit-temps");
     let repo = init_repo(&s.path.join("app"), "");
-    hive.build_with_sessions(&repo, None);
-    register(&hive, &repo);
     let target = repo.join("target");
+    build_with_superseded_sessions(&hive, &repo, &target);
+    register(&hive, &repo);
     let profile = target.join("debug");
     let loc = plant_unit(
         &profile,
@@ -609,7 +620,7 @@ fn without_check_c_gc_still_deletes_and_records_the_byte_counts_as_unmeasured() 
     let hive = Hive::ready();
     let s = Scratch::new("gc-nocheckc");
     let repo = init_repo(&s.path.join("app"), "");
-    hive.build_with_sessions(&repo, None);
+    build_with_superseded_sessions(&hive, &repo, &repo.join("target"));
     register(&hive, &repo);
     let path = hive.home.path.join("capabilities.json");
     let mut caps: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -680,7 +691,7 @@ fn a_target_two_repositories_share_is_cleaned_by_either() {
         )
         .unwrap();
     }
-    hive.build_with_sessions(&a, None);
+    build_with_superseded_sessions(&hive, &a, &shared);
     register(&hive, &a);
     register(&hive, &b);
     assert!(session_counts(&shared).values().any(|n| *n > 1));

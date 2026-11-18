@@ -196,6 +196,8 @@ fn status_counts_a_seeded_unit_dir_unit_fresh_then_missing_after_its_unit_dir_is
         &[],
         &["libreg.rlib", "libreg.rmeta", "reg.d"],
     );
+    let rustc = machine_rustc(&hive);
+    use_machine_rustc(&profile, &loc, "lib-reg", rustc);
     fs::write(
         unit_path::outputs(&profile, &loc).join("reg.d"),
         format!("reg.d: {registry}\n"),
@@ -215,7 +217,7 @@ fn status_counts_a_seeded_unit_dir_unit_fresh_then_missing_after_its_unit_dir_is
     let lane_profile = lane.join("target/debug");
     let ws_hex = "bbbbbbbbbbbbbbbb";
     let ws_fp = u64::from_str_radix(ws_hex, 16).unwrap();
-    common::unit_dirs::plant_unit(
+    let app = common::unit_dirs::plant_unit(
         &lane_profile,
         UnitLayout::UnitDir,
         "app",
@@ -225,6 +227,7 @@ fn status_counts_a_seeded_unit_dir_unit_fresh_then_missing_after_its_unit_dir_is
         &[(fp, "reg")],
         &["libapp.rlib"],
     );
+    use_machine_rustc(&lane_profile, &app, "lib-app", rustc);
     let target = lane.join("target").canonicalize().unwrap();
     let key = |name: &str| format!("{name}:{}", target.display());
     let (_, status) = hive.json(&["status", repo.main.to_str().unwrap()]);
@@ -245,6 +248,27 @@ fn status_counts_a_seeded_unit_dir_unit_fresh_then_missing_after_its_unit_dir_is
         after["counts"][&key("seeded_missing")].as_u64().unwrap() > 0,
         "{after}"
     );
+}
+
+/// The rustc value the machine's Cargo wrote into the real units the seed stored.
+fn machine_rustc(hive: &Hive) -> u64 {
+    let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
+    cargo_hive_seed::store::read(&state).unwrap().units[0].toolchain_value
+}
+
+/// `plant_unit` writes a fixed rustc value into the fingerprint JSON; give it the machine's own so
+/// the planted unit shares a toolchain value with the units the machine's Cargo wrote.
+fn use_machine_rustc(profile: &Path, loc: &unit_path::UnitLoc, stem: &str, rustc: u64) {
+    let json = unit_path::fingerprint_dir(profile, loc).join(format!("{stem}.json"));
+    let text = fs::read_to_string(&json).unwrap();
+    fs::write(
+        &json,
+        text.replace(
+            "\"rustc\":11722972603611519644",
+            &format!("\"rustc\":{rustc}"),
+        ),
+    )
+    .unwrap();
 }
 
 fn set_recorded_unit_layout(hive: &Hive, layout: &str) {

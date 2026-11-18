@@ -13,7 +13,7 @@ use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive_core::fingerprint::read_profile;
 use cargo_hive_core::liveness::unit_timestamp;
 use cargo_hive_core::target::{Owner, TargetDir};
-use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
+use cargo_hive_core::unit_path::{self, UnitLayout, UnitLoc};
 use cargo_hive_platform::apfs::Apfs;
 use cargo_hive_platform::{
     CompressOutcome, EntryKind, EntryStat, Fs, LockHolder, LockKind, LockState, Sharing, TempDir,
@@ -133,6 +133,28 @@ fn registry_units(hive: &Hive, target: &TargetDir) -> Vec<SourceUnit> {
     units
 }
 
+/// The fingerprint dir of one source unit in its own layout: `.fingerprint/<name-meta>` or
+/// `build/<package>/<hex>/fingerprint`.
+fn fingerprint_dir_of(target: &Path, unit: &SourceUnit) -> PathBuf {
+    unit_path::fingerprint_dir(
+        &target.join(&unit.rel_profile),
+        &UnitLoc {
+            layout: unit.layout,
+            name_meta: unit.dir_name.clone(),
+        },
+    )
+}
+
+/// The store entry name of a unit's first copy: `<name-meta>-<hash>`, or `u.<name-meta>-<hash>`
+/// for a unit-dir unit.
+fn entry_key(unit: &SourceUnit) -> String {
+    let base = format!("{}-{}", unit.dir_name, unit.fingerprint_hash);
+    match unit.layout {
+        UnitLayout::Flat => base,
+        UnitLayout::UnitDir => format!("u.{base}"),
+    }
+}
+
 fn first_clone_dst(hive: &Hive, target: &TargetDir) -> (SourceUnit, PathBuf) {
     let units = registry_units(hive, target);
     let unit = units[0].clone();
@@ -147,7 +169,7 @@ fn first_clone_dst(hive: &Hive, target: &TargetDir) -> (SourceUnit, PathBuf) {
         .unwrap_or_else(|err| panic!("files: {err}"));
     assert!(!files.is_empty(), "a unit has at least one file");
     let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
-    let key = format!("{}-{}", unit.dir_name, unit.fingerprint_hash);
+    let key = entry_key(&unit);
     let dst = store::tmp_dir(&state, &key).join(&files[0]);
     (unit, dst)
 }
@@ -296,11 +318,14 @@ fn a_new_unit_is_cloned_under_the_locks_and_never_compressed() {
         assert!(row.filled_at.abs_diff(now) < 180, "{}", row.filled_at);
         assert_eq!(row.rel_profile, PathBuf::from("debug"));
         assert!(
-            built
-                .target_path
-                .join("debug/.fingerprint")
-                .join(&row.name_meta)
-                .is_dir(),
+            unit_path::fingerprint_dir(
+                &built.target_path.join("debug"),
+                &UnitLoc {
+                    layout: row.unit_layout,
+                    name_meta: row.name_meta.clone(),
+                },
+            )
+            .is_dir(),
             "name-meta is the unit directory {}",
             row.name_meta
         );
@@ -418,11 +443,7 @@ fn a_symlink_in_a_source_unit_fills_nothing_for_it() {
     let unit = &units[0];
     let outside = built.hive.home.path.join("outside-the-target");
     std::fs::write(&outside, b"not-for-the-store").unwrap();
-    let link = built
-        .target_path
-        .join("debug/.fingerprint")
-        .join(&unit.dir_name)
-        .join("linked");
+    let link = fingerprint_dir_of(&built.target_path, unit).join("linked");
     std::os::unix::fs::symlink(&outside, &link).unwrap();
     let recording = Recording::over_real();
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
@@ -562,11 +583,7 @@ fn a_hash_reread_longer_than_64_bytes_names_the_path_and_skips_the_unit() {
     let built = built();
     let units = registry_units(&built.hive, &built.target);
     let unit = units[0].clone();
-    let hash_path = built
-        .target_path
-        .join("debug/.fingerprint")
-        .join(&unit.dir_name)
-        .join(&unit.stem);
+    let hash_path = fingerprint_dir_of(&built.target_path, &unit).join(&unit.stem);
     std::fs::write(&hash_path, vec![b'a'; 65]).unwrap();
     let recording = Recording::over_real();
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
@@ -1252,11 +1269,7 @@ fn a_file_that_is_not_regular_when_cloned_fills_nothing_for_that_unit() {
     let unit = units[0].clone();
     let outside = built.hive.home.path.join("outside-the-target");
     std::fs::write(&outside, b"not-for-the-store").unwrap();
-    let extra = built
-        .target_path
-        .join("debug/.fingerprint")
-        .join(&unit.dir_name)
-        .join("extra");
+    let extra = fingerprint_dir_of(&built.target_path, &unit).join("extra");
     std::fs::write(&extra, b"regular-at-listing").unwrap();
     let recording = Recording::over_real().symlink_after_stat(&extra, &outside);
     let lib = narrowed(&built.hive, recording.fs(), &built.repo.main);
@@ -1283,11 +1296,7 @@ fn toolchains(lib: &LibCtx) -> BTreeMap<String, u64> {
 }
 
 fn unit_json_path(target: &Path, unit: &SourceUnit) -> PathBuf {
-    target
-        .join(&unit.rel_profile)
-        .join(".fingerprint")
-        .join(&unit.dir_name)
-        .join(format!("{}.json", unit.stem))
+    fingerprint_dir_of(target, unit).join(format!("{}.json", unit.stem))
 }
 
 fn plant_rustc_info(target: &Path, checkout: &Path) {
@@ -1774,24 +1783,46 @@ fn an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it() {
             .unwrap_or_else(|| panic!("missing {}", row.name_meta));
         let entry = store::entry_dir(&state, row);
         let bodies = file_bodies(&entry);
-        let deps = bodies
-            .keys()
-            .filter(|rel| {
-                rel.components()
-                    .any(|component| component.as_os_str() == "deps")
-            })
-            .count() as u32;
-        let has_build = bodies.keys().any(|rel| {
-            rel.components()
-                .any(|component| component.as_os_str() == "build")
-        });
+        // Flat counts files under `deps/` and notes a `build/` dir; a unit dir counts the files
+        // of its `out/` and never records a build dir (its `run/` is part of the unit dir).
+        let (deps, has_build) = match row.unit_layout {
+            UnitLayout::Flat => (
+                bodies
+                    .keys()
+                    .filter(|rel| {
+                        rel.components()
+                            .any(|component| component.as_os_str() == "deps")
+                    })
+                    .count() as u32,
+                bodies.keys().any(|rel| {
+                    rel.components()
+                        .any(|component| component.as_os_str() == "build")
+                }),
+            ),
+            UnitLayout::UnitDir => (
+                bodies
+                    .keys()
+                    .filter(|rel| {
+                        unit_path::unit_dir_of(rel)
+                            .and_then(|root| {
+                                rel.strip_prefix(root)
+                                    .ok()
+                                    .and_then(|rest| rest.components().next())
+                                    .map(|first| first.as_os_str() == "out")
+                            })
+                            .unwrap_or(false)
+                    })
+                    .count() as u32,
+                false,
+            ),
+        };
         assert_eq!(unit.deps_files, deps, "{}", row.name_meta);
         assert_eq!(unit.has_build, has_build, "{}", row.name_meta);
         let kind = cargo_hive_core::fingerprint::UnitKind::of(&row.kind);
         let stored = unit_timestamp(
             &entry.join(&row.rel_profile),
             &UnitLoc {
-                layout: UnitLayout::Flat,
+                layout: row.unit_layout,
                 name_meta: row.name_meta.clone(),
             },
             kind,
@@ -1799,7 +1830,7 @@ fn an_absent_target_gets_directories_tag_and_units_and_identify_accepts_it() {
         let expected_path = unit_timestamp(
             Path::new(&row.rel_profile),
             &UnitLoc {
-                layout: UnitLayout::Flat,
+                layout: row.unit_layout,
                 name_meta: row.name_meta.clone(),
             },
             kind,
@@ -2226,7 +2257,7 @@ fn units_outside_the_window_are_counted() {
     let stored = unit_timestamp(
         &store::entry_dir(&state, row).join(&row.rel_profile),
         &UnitLoc {
-            layout: UnitLayout::Flat,
+            layout: row.unit_layout,
             name_meta: row.name_meta.clone(),
         },
         cargo_hive_core::fingerprint::UnitKind::of(&row.kind),
@@ -2250,7 +2281,7 @@ fn units_outside_the_window_are_counted() {
         let stamp = unit_timestamp(
             &store::entry_dir(&state, row).join(&row.rel_profile),
             &UnitLoc {
-                layout: UnitLayout::Flat,
+                layout: row.unit_layout,
                 name_meta: row.name_meta.clone(),
             },
             cargo_hive_core::fingerprint::UnitKind::of(&row.kind),

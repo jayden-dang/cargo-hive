@@ -4,7 +4,7 @@ mod common;
 use cargo_hive_core::fingerprint;
 use cargo_hive_core::liveness::{Liveness, UnitRef};
 use cargo_hive_core::target::{self, TargetDir};
-use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
+use cargo_hive_core::unit_path::{self, UnitLayout, UnitLoc};
 use cargo_hive_platform as platform;
 use clap::CommandFactory;
 use common::cargo_fixture::*;
@@ -43,6 +43,30 @@ fn a_proc_macro_in_the_host_profile_stays_live_for_a_target_triple_build() {
     assert_eq!(dead, vec![]);
 }
 
+/// The files a dead unit lists: flat is the fingerprint dir then its owned files; a unit dir is
+/// its `out/` `.d` files, `out/`, `run/` when present, `fingerprint/`, then the unit dir.
+fn expected_dead_files(profile: &Path, loc: &UnitLoc, owned: Vec<PathBuf>) -> Vec<PathBuf> {
+    let fingerprint = unit_path::fingerprint_dir(profile, loc);
+    let Some(unit) = unit_path::unit_dir(profile, loc) else {
+        let mut files = vec![fingerprint];
+        files.extend(owned);
+        return files;
+    };
+    let mut files: Vec<PathBuf> = owned
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "d"))
+        .collect();
+    files.sort();
+    files.push(unit_path::outputs(profile, loc));
+    let run = unit_path::run_dir(profile, loc).unwrap();
+    if run.is_dir() {
+        files.push(run);
+    }
+    files.push(fingerprint);
+    files.push(unit);
+    files
+}
+
 #[test]
 fn a_backdated_check_variant_is_dead_with_its_rmeta_and_dep_info() {
     let fx = fixture("liveness-check");
@@ -63,32 +87,34 @@ fn a_backdated_check_variant_is_dead_with_its_rmeta_and_dep_info() {
     assert_eq!(check.len(), 1, "{dead:#?}");
     let check = check[0];
     let hash = fingerprint::unit_hash(&check.loc.name_meta).unwrap();
-    let deps_dir = check.profile.join("deps");
-    let mut expected: Vec<PathBuf> = vec![
-        check
-            .profile
-            .join(".fingerprint")
-            .join(&check.loc.name_meta),
-    ];
-    let mut owned: Vec<PathBuf> = fs::read_dir(&deps_dir)
+    let flat = check.loc.layout == UnitLayout::Flat;
+    let outputs = unit_path::outputs(&check.profile, &check.loc);
+    let mut owned: Vec<PathBuf> = fs::read_dir(&outputs)
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| {
             let name = p.file_name().unwrap().to_string_lossy().into_owned();
-            name.contains(&format!("-{hash}"))
+            // `deps/` is shared by every unit, so flat files are told apart by hash; a unit
+            // dir's `out/` holds only this unit's files.
+            !flat || name.contains(&format!("-{hash}"))
         })
         .collect();
     owned.sort();
+    let (rmeta_tail, dep_info_tail) = if flat {
+        (format!("-{hash}.rmeta"), format!("-{hash}.d"))
+    } else {
+        (".rmeta".to_string(), ".d".to_string())
+    };
     assert!(
         owned.iter().all(|p| {
             let name = p.file_name().unwrap().to_string_lossy().into_owned();
-            (name.starts_with("lib") && name.ends_with(&format!("-{hash}.rmeta")))
-                || name.ends_with(&format!("-{hash}.d"))
+            (name.starts_with("lib") && name.ends_with(&rmeta_tail))
+                || name.ends_with(&dep_info_tail)
         }),
         "a check unit owns only rmeta and dep-info: {owned:?}"
     );
     assert_eq!(owned.len(), 2, "{owned:?}");
-    expected.extend(owned);
+    let expected = expected_dead_files(&check.profile, &check.loc, owned);
     let files = &dead.iter().find(|d| &d.unit == check).unwrap().files;
     assert_eq!(files, &expected);
     assert!(!live.contains(check), "the check variant must not be live");
@@ -124,26 +150,27 @@ fn a_dead_example_lists_its_examples_entries() {
             .collect(),
     );
     let hash = fingerprint::unit_hash(&old_example.loc.name_meta).unwrap();
-    let examples_dir = old_example.profile.join("examples");
-    let mut owned: Vec<PathBuf> = fs::read_dir(&examples_dir)
+    let flat = old_example.loc.layout == UnitLayout::Flat;
+    let entries_dir = if flat {
+        old_example.profile.join("examples")
+    } else {
+        unit_path::outputs(&old_example.profile, &old_example.loc)
+    };
+    let mut owned: Vec<PathBuf> = fs::read_dir(&entries_dir)
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with(&format!("ex-{hash}"))
+            // `examples/` is shared; a unit dir's `out/` holds only this unit's files.
+            !flat
+                || p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(&format!("ex-{hash}"))
         })
         .collect();
     owned.sort();
     assert!(!owned.is_empty());
-    let mut expected = vec![
-        old_example
-            .profile
-            .join(".fingerprint")
-            .join(&old_example.loc.name_meta),
-    ];
-    expected.extend(owned);
+    let expected = expected_dead_files(&old_example.profile, &old_example.loc, owned);
     let files = &dead
         .iter()
         .find(|d| d.unit == old_example)
@@ -167,13 +194,12 @@ fn a_build_script_unit_is_never_dead_and_its_run_timestamp_in_build_is_a_root() 
     assert!(dead.iter().all(|d| d.unit != script && d.unit != run));
 
     set_mtime(&timestamp_of(&run, "run-build-script"), SystemTime::now());
-    assert!(
-        run.profile
-            .join("build")
-            .join(&run.loc.name_meta)
-            .join("invoked.timestamp")
-            .exists()
-    );
+    let invoked = match unit_path::run_dir(&run.profile, &run.loc) {
+        Some(run_dir) => run_dir,
+        None => run.profile.join("build").join(&run.loc.name_meta),
+    }
+    .join("invoked.timestamp");
+    assert!(invoked.exists(), "{}", invoked.display());
 
     let (live, dead) = decide(&fx.target);
     assert_eq!(live, BTreeSet::from([run.clone(), script.clone()]));
@@ -1722,11 +1748,28 @@ fn touching_an_unlisted_file_of_the_original_during_the_run_does_not_fail() {
     let scratch = Scratch::new("prove-scratch");
     let fs_ = platform::current().unwrap().fs;
     let listed = listed_files(&fx);
-    let unlisted = fs::read_dir(fx.target.join("debug/deps"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| !listed.contains(p))
-        .unwrap();
+    let unlisted = match layout_of(&fx.target) {
+        UnitLayout::Flat => fs::read_dir(fx.target.join("debug/deps"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| !listed.contains(p))
+            .unwrap(),
+        UnitLayout::UnitDir => {
+            let mut pending = vec![fx.target.join("debug/build")];
+            let mut found = None;
+            while let Some(dir) = pending.pop() {
+                for entry in fs::read_dir(&dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        pending.push(path);
+                    } else if !listed.contains(&path) && found.is_none() {
+                        found = Some(path);
+                    }
+                }
+            }
+            found.expect("a file in a live unit dir that no dead unit lists")
+        }
+    };
     let touch_unlisted = unlisted.clone();
     let new_file = fx.target.join("debug/new-by-the-owner.txt");
     let touch = move || {
@@ -1996,7 +2039,11 @@ fn a_symlinked_directory_inside_the_target_is_refused_and_the_outside_survives()
     let fx = proof_fixture("prove-linkdir");
     let scratch = Scratch::new("prove-scratch");
     let outside = fx._scratch.path.join("outside-deps");
-    let deps = fx.target.join("debug/deps");
+    // The directory holding the units' files: `deps/` when flat, `build/` for unit dirs.
+    let deps = fx.target.join(match layout_of(&fx.target) {
+        UnitLayout::Flat => "debug/deps",
+        UnitLayout::UnitDir => "debug/build",
+    });
     fs::rename(&deps, &outside).unwrap();
     std::os::unix::fs::symlink(&outside, &deps).unwrap();
     let before = tree_of(&outside);

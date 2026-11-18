@@ -26,6 +26,36 @@ pub fn repo_root() -> PathBuf {
     }
 }
 
+/// The unit layout the proof machine's Cargo writes, found by building an empty crate once:
+/// a flat layout has a `.fingerprint/` beside the units, a unit-dir layout does not.
+pub fn machine_unit_layout() -> &'static str {
+    static LAYOUT: OnceLock<&'static str> = OnceLock::new();
+    LAYOUT.get_or_init(|| {
+        let dir = Scratch::new("layout-probe");
+        fs::create_dir_all(dir.path.join("src")).unwrap();
+        fs::write(
+            dir.path.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(dir.path.join("src/lib.rs"), "").unwrap();
+        let built = Command::new("cargo")
+            .args(["build", "--offline", "--quiet", "--target-dir"])
+            .arg(dir.path.join("target"))
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_BUILD_DIR")
+            .current_dir(&dir.path)
+            .status()
+            .expect("cargo runs");
+        assert!(built.success(), "the layout probe builds");
+        if dir.path.join("target/debug/.fingerprint").is_dir() {
+            "flat"
+        } else {
+            "unit-dir"
+        }
+    })
+}
+
 /// A scratch directory under /private/tmp, canonicalized, removed on drop.
 pub struct Scratch {
     pub path: PathBuf,
@@ -120,7 +150,8 @@ impl Hive {
             "toolchain_release": release,
             "disabled": disabled,
             "lock_check": 1,
-            "failed_marker_check": 1
+            "failed_marker_check": 1,
+            "unit_layout": machine_unit_layout()
         });
         fs::write(self.home.path.join("capabilities.json"), caps.to_string()).unwrap();
     }

@@ -297,8 +297,7 @@ fn not_current(target: &Path, prefix: &str, keep: impl Fn(&Path) -> bool) -> Vec
             continue;
         }
         for unit in profile.not_current_units {
-            let name = unit.dir.file_name().unwrap().to_string_lossy().into_owned();
-            if name.starts_with(prefix) {
+            if unit.loc.name_meta.starts_with(prefix) {
                 out.push(UnitRef {
                     profile: profile.path.clone(),
                     loc: unit.loc.clone(),
@@ -310,7 +309,7 @@ fn not_current(target: &Path, prefix: &str, keep: impl Fn(&Path) -> bool) -> Vec
 }
 
 fn hash_file(unit: &UnitRef) -> PathBuf {
-    let dir = unit.profile.join(".fingerprint").join(&unit.loc.name_meta);
+    let dir = cargo_hive_core::unit_path::fingerprint_dir(&unit.profile, &unit.loc);
     fs::read_dir(dir)
         .unwrap()
         .take(DIR_CAP)

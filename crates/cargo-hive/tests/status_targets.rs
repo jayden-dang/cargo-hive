@@ -405,17 +405,7 @@ fn a_corrupted_fingerprint_makes_its_profile_unsupported() {
     let s = Scratch::new("corrupt");
     let repo = init_repo(&s.path.join("app"), "");
     hive.build_crate(&repo, None);
-    let fp = repo.join("target/debug/.fingerprint");
-    let unit = fs::read_dir(&fp)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("fixture-")
-        })
-        .unwrap();
+    let unit = common::cargo_fixture::fingerprint_dir_of(&repo.join("target"), Some("fixture"));
     let json = fs::read_dir(&unit)
         .unwrap()
         .map(|e| e.unwrap().path())

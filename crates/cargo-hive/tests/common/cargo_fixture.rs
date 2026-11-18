@@ -240,3 +240,16 @@ pub fn timestamp_of(unit: &UnitRef, kind: &str) -> PathBuf {
         cargo_hive_core::fingerprint::UnitKind::of(kind),
     )
 }
+
+/// The fingerprint dir of one unit of `package` in either layout: `.fingerprint/<name-meta>` or
+/// `build/<package>/<hex>/fingerprint`. `package` of `None` takes any unit.
+pub fn fingerprint_dir_of(target: &Path, package: Option<&str>) -> PathBuf {
+    for profile in read_target(target).profiles {
+        for unit in profile.graph.expect("a supported profile").units {
+            if package.is_none_or(|name| unit.loc.package() == name) {
+                return cargo_hive_core::unit_path::fingerprint_dir(&profile.path, &unit.loc);
+            }
+        }
+    }
+    panic!("no unit of {package:?} under {}", target.display());
+}

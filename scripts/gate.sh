@@ -10,8 +10,10 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # The tests build fixtures with Cargo's defaults and need its incremental sessions (gc's auto
-# tier deletes superseded ones). CI caches such as Swatinem/rust-cache export CARGO_INCREMENTAL=0.
-unset CARGO_INCREMENTAL CARGO_BUILD_INCREMENTAL
+# tier deletes superseded ones). CI caches such as Swatinem/rust-cache export CARGO_INCREMENTAL=0,
+# and Cargo 1.100 writes no incremental dir at all while `CI` is set, so ask for it outright.
+unset CARGO_BUILD_INCREMENTAL
+export CARGO_INCREMENTAL=1
 
 scratch_root="${RUNNER_TEMP:-/private/tmp}"
 HIVE_HOME="$(mktemp -d "$scratch_root/hive-gate.XXXXXX")"

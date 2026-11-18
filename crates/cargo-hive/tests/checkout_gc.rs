@@ -154,13 +154,18 @@ fn nothing_under_build_is_touched() {
             assert_eq!(tree(&build), before, "build/ changed: {r}");
         }
         UnitLayout::UnitDir => {
-            // Object GC removes unreferenced out/*.rcgu.o under build/; unit dirs stay.
-            assert_eq!(
-                fingerprint_dirs(&target),
-                before_units,
-                "unit dirs under build/ changed: {r}"
+            // Units live under build/ here, so dead unit dirs go (BUILDDIR-4.1) and nothing else
+            // does: every unit dir that remains was there before, and the count says how many left.
+            let after_units = fingerprint_dirs(&target);
+            assert!(
+                after_units.iter().all(|dir| before_units.contains(dir)),
+                "a unit dir appeared under build/: {r}"
             );
-            assert_eq!(count(&r, "units_deleted"), 0, "{r}");
+            assert_eq!(
+                count(&r, "units_deleted"),
+                (before_units.len() - after_units.len()) as u64,
+                "{r}"
+            );
         }
     }
 }
@@ -747,11 +752,7 @@ fn a_stop_after_each_position_in_a_unit_leaves_no_unit_fresh_with_a_file_missing
         );
         let fingerprint = ordered
             .iter()
-            .find(|p| {
-                p.parent()
-                    .and_then(|parent| parent.file_name())
-                    .is_some_and(|name| name == ".fingerprint")
-            })
+            .find(|p| is_fingerprint_entry(p))
             .cloned()
             .expect("fingerprint dir in the ordered unit");
         let siblings: Vec<_> = ordered
@@ -773,14 +774,33 @@ fn a_stop_after_each_position_in_a_unit_leaves_no_unit_fresh_with_a_file_missing
         };
         let report = cargo_hive_gc::checkout::run(&input, &|| false);
         assert!(report.failed, "stop {stop_after}: {report:?}");
-        if fingerprint.exists() {
-            for sibling in &siblings {
-                assert!(
-                    sibling.exists(),
-                    "fingerprint {} outlived deleted sibling {} (stop {stop_after})",
-                    fingerprint.display(),
-                    sibling.display()
-                );
+        match layout_of(&target) {
+            // Flat: the fingerprint dir goes first, so while it stands every sibling stands.
+            UnitLayout::Flat => {
+                if fingerprint.exists() {
+                    for sibling in &siblings {
+                        assert!(
+                            sibling.exists(),
+                            "fingerprint {} outlived deleted sibling {} (stop {stop_after})",
+                            fingerprint.display(),
+                            sibling.display()
+                        );
+                    }
+                }
+            }
+            // Unit dir (BUILDDIR-3.3): out/ and run/ go before fingerprint/, so once the
+            // fingerprint dir is gone, every sibling inside the unit dir is gone too.
+            UnitLayout::UnitDir => {
+                if !fingerprint.exists() {
+                    for sibling in siblings.iter().filter(|p| !fingerprint.starts_with(p)) {
+                        assert!(
+                            !sibling.exists(),
+                            "fingerprint {} is gone but sibling {} remains (stop {stop_after})",
+                            fingerprint.display(),
+                            sibling.display()
+                        );
+                    }
+                }
             }
         }
     }
@@ -1211,14 +1231,15 @@ fn unreferenced_objects_are_deleted_and_every_object_a_binary_names_is_kept() {
             .iter()
             .flat_map(|unit| unit.files.iter().cloned())
             .collect(),
-        // Hash-rule undecided on 1.100: treat every candidate as live for the keep check.
-        Liveness::Undecided { .. } => std::collections::BTreeSet::new(),
+        Liveness::Undecided { reasons } => panic!("liveness was undecided: {reasons:#?}"),
     };
+    // A dead unit-dir unit goes whole, so every object inside it goes with it.
+    let doomed_path = |path: &Path| doomed.iter().any(|gone| path.starts_with(gone));
     let listing =
         cargo_hive_gc::checkout::list_profile(fs.as_ref(), &debug, 1_000_000, 100_000).unwrap();
     let mut kept_names = std::collections::BTreeSet::new();
     for path in &listing.candidates {
-        if doomed.contains(path) {
+        if doomed_path(path) {
             continue;
         }
         if let Ok(Some(map)) = cargo_hive_gc::debug_map::read(fs.as_ref(), path) {
@@ -1229,7 +1250,10 @@ fn unreferenced_objects_are_deleted_and_every_object_a_binary_names_is_kept() {
         !kept_names.is_empty(),
         "expected live binaries to name loose objects"
     );
-    let before_named = object_paths_named(&debug, &kept_names);
+    let before_named: Vec<_> = object_paths_named(&debug, &kept_names)
+        .into_iter()
+        .filter(|path| !doomed_path(path))
+        .collect();
     assert!(!before_named.is_empty(), "named objects must exist on disk");
     let orphan = orphan_object_dir(&debug).join("orphan-deadbeefdeadbeef.0.rcgu.o");
     fs::write(&orphan, b"orphan").unwrap();
@@ -1293,16 +1317,21 @@ fn objects_named_only_by_a_dead_units_binary_go_in_the_same_run() {
     let repo = aged_binaries(&hive);
     let target = repo.main.join("target");
     let debug = target.join("debug");
-    let plant = orphan_object_dir(&debug);
     let (_live, dead) = decide(&target);
-    let dead_hash = dead
+    let dead_unit = dead
         .iter()
-        .find_map(|unit| {
-            unit.unit.loc.name_meta.rsplit('-').next().and_then(|h| {
-                (h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit())).then_some(h.to_string())
-            })
+        .find(|unit| {
+            unit.unit.loc.hex().len() == 16
+                && (unit.unit.loc.layout == UnitLayout::Flat
+                    || unit_path::outputs(&unit.unit.profile, &unit.unit.loc).is_dir())
         })
         .expect("a dead unit with a 16-hex hash");
+    let dead_hash = dead_unit.unit.loc.hex().to_string();
+    // A flat unit's outputs share deps/ with every other unit; a unit-dir unit owns its out/.
+    let plant = match dead_unit.unit.loc.layout {
+        UnitLayout::Flat => orphan_object_dir(&debug),
+        UnitLayout::UnitDir => unit_path::outputs(&dead_unit.unit.profile, &dead_unit.unit.loc),
+    };
     let object_name = "only-dead-unit-object.0.rcgu.o";
     let object = plant.join(object_name);
     fs::write(&object, b"only-dead").unwrap();
@@ -1312,7 +1341,7 @@ fn objects_named_only_by_a_dead_units_binary_go_in_the_same_run() {
         decide(&target)
             .1
             .iter()
-            .any(|unit| unit.files.iter().any(|p| p == &binary)),
+            .any(|unit| unit.files.iter().any(|p| binary.starts_with(p))),
         "planted binary must belong to a dead unit"
     );
     let (out, r) = checkout_gc(&hive, &repo.main);
@@ -1982,15 +2011,8 @@ fn first_fingerprint_first_unit(target: &Path) -> Vec<PathBuf> {
         .iter()
         .enumerate()
         .find(|(_, unit)| {
-            unit.files.iter().any(|p| {
-                p.parent()
-                    .and_then(|parent| parent.file_name())
-                    .is_some_and(|name| name == ".fingerprint")
-            }) && unit.files.iter().any(|p| {
-                p.parent()
-                    .and_then(|parent| parent.file_name())
-                    .is_some_and(|name| name != ".fingerprint")
-            })
+            unit.files.iter().any(|p| is_fingerprint_entry(p))
+                && unit.files.iter().any(|p| !is_fingerprint_entry(p))
         })
         .expect("a dead unit with a fingerprint dir and at least one other file");
     let now = SystemTime::now();
@@ -2001,11 +2023,7 @@ fn first_fingerprint_first_unit(target: &Path) -> Vec<PathBuf> {
         let stamp = other
             .files
             .iter()
-            .find(|p| {
-                p.parent()
-                    .and_then(|parent| parent.file_name())
-                    .is_some_and(|name| name == ".fingerprint")
-            })
+            .find(|p| is_fingerprint_entry(p))
             .map(|dir| dir.join("invoked.timestamp"));
         if let Some(stamp) = stamp
             && stamp.exists()
@@ -2026,6 +2044,14 @@ fn first_fingerprint_first_unit(target: &Path) -> Vec<PathBuf> {
         .cloned()
         .collect();
     cargo_hive_gc::checkout::unit_order(&files)
+}
+
+/// A unit's fingerprint dir: `.fingerprint/<name-meta>` (flat) or `<unit dir>/fingerprint`.
+fn is_fingerprint_entry(p: &Path) -> bool {
+    p.file_name().is_some_and(|name| name == "fingerprint")
+        || p.parent()
+            .and_then(|parent| parent.file_name())
+            .is_some_and(|name| name == ".fingerprint")
 }
 
 fn aged_binaries(hive: &Hive) -> RegistryRepo {
