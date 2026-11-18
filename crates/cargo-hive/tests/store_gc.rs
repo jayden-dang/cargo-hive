@@ -186,15 +186,7 @@ fn a_rowless_entry_dir_a_target_holds_is_left_for_fill() {
     let _repo = seeded_store(&hive);
     let sample = rows(&hive)[0].clone();
     let name_meta = sample["name_meta"].as_str().unwrap().to_string();
-    let dir_before = entry_dirs(&hive)
-        .into_iter()
-        .find(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with(&name_meta)
-        })
-        .expect("entry dir for held row");
+    let dir_before = entry_dir_of_row(&hive, &sample);
     drop_row(&hive, &name_meta);
     assert!(dir_before.is_dir(), "{}", dir_before.display());
     let (out, receipt) = hive.json(&["gc"]);
@@ -454,12 +446,7 @@ fn a_live_unit_in_a_target_gc_skips_for_an_unsupported_profile_still_holds_its_k
     let repo = seeded_store(&hive);
     let before = rows(&hive).len();
     assert!(before > 0);
-    let fp = repo.main.join("target/debug/.fingerprint");
-    let unit_dir = fs::read_dir(&fp)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| p.is_dir())
-        .expect("fingerprint unit dir");
+    let unit_dir = common::cargo_fixture::fingerprint_dir_of(&repo.main.join("target"), None);
     let json = fs::read_dir(&unit_dir)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -1139,6 +1126,26 @@ fn outcome_count(outcome: &evict::EvictOutcome, name: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// The store entry dir a seeded row lives in: `<name-meta>-<hash>`, or `u.<name-meta>-<hash>` for
+/// a unit-dir row.
+fn entry_dir_of_row(hive: &Hive, row: &serde_json::Value) -> PathBuf {
+    let want = format!(
+        "{}-{}",
+        row["name_meta"].as_str().unwrap(),
+        row["fingerprint_hash"].as_str().unwrap()
+    );
+    entry_dirs(hive)
+        .into_iter()
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .trim_start_matches("u.")
+                == want
+        })
+        .unwrap_or_else(|| panic!("entry dir for row {want}"))
+}
+
 fn entry_path(
     hive: &Hive,
     toolchain_value: u64,
@@ -1357,8 +1364,7 @@ fn held_entries_over_the_cap_are_kept_and_reported() {
     let sample = rows(&hive)[0].clone();
     let value = sample["toolchain_value"].as_u64().unwrap();
     let key_meta = sample["name_meta"].as_str().unwrap().to_string();
-    let key_fp = sample["fingerprint_hash"].as_str().unwrap().to_string();
-    let key_dir = entry_path(&hive, value, &key_meta, &key_fp);
+    let key_dir = entry_dir_of_row(&hive, &sample);
     fs::write(key_dir.join("cap-pad"), kib256(9)).unwrap();
 
     let shared_meta = "sharemeta-aaaaaaaaaaaaaaaa";
@@ -1419,9 +1425,7 @@ fn held_entries_over_the_cap_are_kept_and_reported() {
         if meta == shared_meta || meta == only_meta {
             continue;
         }
-        let tv = row["toolchain_value"].as_u64().unwrap();
-        let fp = row["fingerprint_hash"].as_str().unwrap();
-        decided_bytes += freeable_of(&fs, &entry_path(&hive, tv, meta, fp));
+        decided_bytes += freeable_of(&fs, &entry_dir_of_row(&hive, &row));
     }
     let undecided_bytes = key_free + shared_free + only_free;
     let held_total = decided_bytes + shared_free + only_free;

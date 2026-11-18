@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
+use cargo_hive_core::unit_path::UnitLayout;
 use cargo_hive_platform::Fs;
 use cargo_hive_platform::apfs::Apfs;
 use common::{Hive, Scratch, crate_dirs, init_repo, plant_session, sessions_in};
@@ -235,7 +236,16 @@ fn freed_bytes_never_exceed_the_space_the_volume_gains() {
     let repo = init_repo(&image.mount.join("app"), "");
     hive.build_with_sessions(&repo, None);
     let target = repo.join("target");
-    let deps = target.join("debug/deps");
+    // Where a live unit's outputs live, so files there are held outside the sessions: the shared
+    // `deps/` for a flat layout, the first unit's own `out/` for a unit-dir layout.
+    let deps = match common::cargo_fixture::layout_of(&target) {
+        UnitLayout::Flat => target.join("debug/deps"),
+        UnitLayout::UnitDir => common::cargo_fixture::fingerprint_dir_of(&target, None)
+            .parent()
+            .unwrap()
+            .join("out"),
+    };
+    fs::create_dir_all(&deps).unwrap();
     for (i, d) in crate_dirs(&target).iter().enumerate() {
         let kept = sessions_in(d)
             .into_iter()

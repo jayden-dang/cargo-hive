@@ -1711,30 +1711,97 @@ fn gc_still_lists_rcgu_objects_of_a_dead_unit() {
         "{planned}"
     );
     let stored = plans_stored(&hive);
-    let rcgu: Vec<StoredEntry> = stored_entries(&stored)
-        .into_iter()
-        .filter(|entry| path_under(&entry.path, &target) && entry.path.ends_with(".rcgu.o"))
-        .collect();
-    assert!(
-        rcgu.iter().any(|entry| {
-            label_hash(&entry.unit).is_some_and(|hash| left.contains(&hash))
-                && file_embeds_any(&entry.path, &left)
-        }),
-        "stored plan listed no .rcgu.o of a unit the version bump left behind ({left:?}) among {:?}",
-        rcgu.iter().map(|entry| &entry.path).collect::<Vec<_>>()
-    );
-    let live: Vec<&str> = rcgu
-        .iter()
-        .filter(|entry| {
-            label_hash(&entry.unit).is_some_and(|hash| fresh_hashes.contains(&hash))
-                || file_embeds_any(&entry.path, &fresh_hashes)
-        })
-        .map(|entry| entry.path.as_str())
-        .collect();
-    assert!(
-        live.is_empty(),
-        "plan listed a .rcgu.o of a unit still fresh: {live:?}"
-    );
+    match common::cargo_fixture::layout_of(&target) {
+        UnitLayout::Flat => {
+            let rcgu: Vec<StoredEntry> = stored_entries(&stored)
+                .into_iter()
+                .filter(|entry| path_under(&entry.path, &target) && entry.path.ends_with(".rcgu.o"))
+                .collect();
+            assert!(
+                rcgu.iter().any(|entry| {
+                    label_hash(&entry.unit).is_some_and(|hash| left.contains(&hash))
+                        && file_embeds_any(&entry.path, &left)
+                }),
+                "stored plan listed no .rcgu.o of a unit the version bump left behind ({left:?}) among {:?}",
+                rcgu.iter().map(|entry| &entry.path).collect::<Vec<_>>()
+            );
+            let live: Vec<&str> = rcgu
+                .iter()
+                .filter(|entry| {
+                    label_hash(&entry.unit).is_some_and(|hash| fresh_hashes.contains(&hash))
+                        || file_embeds_any(&entry.path, &fresh_hashes)
+                })
+                .map(|entry| entry.path.as_str())
+                .collect();
+            assert!(
+                live.is_empty(),
+                "plan listed a .rcgu.o of a unit still fresh: {live:?}"
+            );
+        }
+        // A dead unit dir goes whole (BUILDDIR-3.1, 3.3): its objects are listed through the
+        // `out/` entry that holds them, so an object counts as listed when an entry of the plan
+        // is that object or a directory above it.
+        UnitLayout::UnitDir => {
+            let entries: Vec<StoredEntry> = stored_entries(&stored)
+                .into_iter()
+                .filter(|entry| path_under(&entry.path, &target))
+                .collect();
+            let listed = |object: &Path| {
+                entries
+                    .iter()
+                    .any(|entry| object.starts_with(Path::new(&entry.path)))
+            };
+            let objects = rcgu_objects(&target.canonicalize().unwrap().join("debug/build"));
+            let dead: Vec<&PathBuf> = objects
+                .iter()
+                .filter(|object| file_embeds_any(&object.to_string_lossy(), &left))
+                .collect();
+            assert!(
+                !dead.is_empty(),
+                "the version bump left no .rcgu.o of a dead unit ({left:?}) among {objects:?}"
+            );
+            let unlisted: Vec<&&PathBuf> = dead.iter().filter(|object| !listed(object)).collect();
+            assert!(
+                unlisted.is_empty(),
+                "stored plan listed no entry holding the .rcgu.o of a dead unit: {unlisted:?} among {:?}",
+                entries.iter().map(|entry| &entry.path).collect::<Vec<_>>()
+            );
+            let live: Vec<&PathBuf> = objects
+                .iter()
+                .filter(|object| {
+                    file_embeds_any(&object.to_string_lossy(), &fresh_hashes) && listed(object)
+                })
+                .collect();
+            assert!(
+                live.is_empty(),
+                "plan listed a .rcgu.o of a unit still fresh: {live:?}"
+            );
+        }
+    }
+}
+
+/// Every `*.rcgu.o` regular file under `dir`.
+fn rcgu_objects(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    let mut seen = 0usize;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            seen += 1;
+            assert!(seen < 100_000, "walk bound hit");
+            let path = entry.unwrap().path();
+            let meta = fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() && path.to_string_lossy().ends_with(".rcgu.o") {
+                found.push(path);
+            }
+        }
+    }
+    found
 }
 
 #[test]
@@ -1975,9 +2042,26 @@ fn stamp_under_build(unit: &cargo_hive_seed::record::SeededUnit) -> bool {
     let Some((rel, _)) = &unit.stamp else {
         return false;
     };
-    let text = rel.to_string_lossy();
-    text.contains(&format!("/build/{}/", unit.dir_name))
-        || text.starts_with(&format!("build/{}/", unit.dir_name))
+    match unit.unit_layout {
+        UnitLayout::Flat => {
+            let text = rel.to_string_lossy();
+            text.contains(&format!("/build/{}/", unit.dir_name))
+                || text.starts_with(&format!("build/{}/", unit.dir_name))
+        }
+        // A unit-dir run-build-script unit stamps under its own `build/<package>/<hex>/run/`.
+        UnitLayout::UnitDir => {
+            let loc = unit_path::UnitLoc {
+                layout: UnitLayout::UnitDir,
+                name_meta: unit.dir_name.clone(),
+            };
+            let run = unit_path::stamp(
+                Path::new(""),
+                &loc,
+                cargo_hive_core::fingerprint::UnitKind::RunBuildScript,
+            );
+            rel.ends_with(&run)
+        }
+    }
 }
 
 fn is_seed_count(key: &str) -> bool {
@@ -2143,18 +2227,49 @@ fn store_holding_flat_and_unit_dir(hive: &Hive) -> RegistryRepo {
     let registry = registry.display().to_string();
     let hex = "aaaaaaaaaaaaaaaa";
     let fp = u64::from_str_radix(hex, 16).unwrap();
+    // The machine's Cargo wrote one layout; plant a unit of the other so the store holds both.
+    let (planted, rlib, rmeta, dep_info) = match machine_layout() {
+        UnitLayout::Flat => (
+            UnitLayout::UnitDir,
+            "libreg.rlib".to_string(),
+            "libreg.rmeta".to_string(),
+            "reg.d".to_string(),
+        ),
+        UnitLayout::UnitDir => (
+            UnitLayout::Flat,
+            format!("libreg-{hex}.rlib"),
+            format!("libreg-{hex}.rmeta"),
+            format!("reg-{hex}.d"),
+        ),
+    };
     let loc = common::unit_dirs::plant_unit(
         &profile,
-        UnitLayout::UnitDir,
+        planted,
         "reg",
         hex,
         "lib-reg",
         fp,
         &[],
-        &["libreg.rlib", "libreg.rmeta", "reg.d"],
+        &[&rlib, &rmeta, &dep_info],
     );
+    // The planted unit's fingerprint JSON carries a fixed rustc value; give it the machine's own
+    // so the target holds one toolchain value.
+    let rustc = cargo_hive_seed::store::read(&State::open_at(hive.home.path.clone()).unwrap())
+        .unwrap()
+        .units[0]
+        .toolchain_value;
+    let json = unit_path::fingerprint_dir(&profile, &loc).join("lib-reg.json");
+    let text = fs::read_to_string(&json).unwrap();
+    fs::write(
+        &json,
+        text.replace(
+            "\"rustc\":11722972603611519644",
+            &format!("\"rustc\":{rustc}"),
+        ),
+    )
+    .unwrap();
     let out_dir = unit_path::outputs(&profile, &loc);
-    fs::write(out_dir.join("reg.d"), format!("reg.d: {registry}\n")).unwrap();
+    fs::write(out_dir.join(&dep_info), format!("reg.d: {registry}\n")).unwrap();
     let refill = repo.worktree("refill-udir");
     let (out, receipt) = hive.json(&["seed", refill.to_str().unwrap()]);
     assert!(out.status.success(), "{receipt}");
@@ -2280,26 +2395,60 @@ fn fingerprint_units(target: &Path) -> Vec<FingerprintUnit> {
         .unwrap_or(UNIX_EPOCH);
     let mut units = Vec::new();
     for profile in common::cargo_fixture::profile_dirs(target) {
-        let dir = profile.join(".fingerprint");
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut seen = 0usize;
-        for entry in entries {
-            seen += 1;
-            assert!(seen < 100_000, "walk bound hit");
-            let path = entry.unwrap().path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            let fresh = fs::metadata(path.join("invoked.timestamp"))
+        for (name, dir) in unit_fingerprint_dirs(&profile) {
+            let fresh = fs::metadata(dir.join("invoked.timestamp"))
                 .and_then(|meta| meta.modified())
                 .is_ok_and(|modified| modified >= cutoff);
             units.push(FingerprintUnit { name, fresh });
         }
     }
     units
+}
+
+/// Every unit's `(<package>-<hex>, fingerprint dir)` under one profile dir, in either layout:
+/// `.fingerprint/<name-meta>` or `build/<package>/<hex>/fingerprint`.
+fn unit_fingerprint_dirs(profile: &Path) -> Vec<(String, PathBuf)> {
+    let mut found = Vec::new();
+    let mut seen = 0usize;
+    if let Ok(entries) = fs::read_dir(profile.join(".fingerprint")) {
+        for entry in entries {
+            seen += 1;
+            assert!(seen < 100_000, "walk bound hit");
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                found.push((
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    path,
+                ));
+            }
+        }
+    }
+    let Ok(packages) = fs::read_dir(profile.join("build")) else {
+        return found;
+    };
+    for package in packages {
+        seen += 1;
+        assert!(seen < 100_000, "walk bound hit");
+        let package = package.unwrap().path();
+        let Ok(units) = fs::read_dir(&package) else {
+            continue;
+        };
+        for unit in units {
+            seen += 1;
+            assert!(seen < 100_000, "walk bound hit");
+            let unit = unit.unwrap().path();
+            let fingerprint = unit.join("fingerprint");
+            if fingerprint.is_dir() {
+                let name = format!(
+                    "{}-{}",
+                    package.file_name().unwrap().to_string_lossy(),
+                    unit.file_name().unwrap().to_string_lossy()
+                );
+                found.push((name, fingerprint));
+            }
+        }
+    }
+    found
 }
 
 fn package_name(dir_name: &str) -> Option<String> {
@@ -2417,6 +2566,14 @@ fn file_count(root: &Path) -> usize {
     let mut count = 0usize;
     walk(root, &mut count, 0);
     count
+}
+
+/// The unit layout the machine's Cargo writes, as the capability a seed run is handed.
+fn machine_layout() -> UnitLayout {
+    match common::machine_unit_layout() {
+        "flat" => UnitLayout::Flat,
+        _ => UnitLayout::UnitDir,
+    }
 }
 
 fn store_units(hive: &Hive) -> Vec<serde_json::Value> {
@@ -2611,7 +2768,7 @@ fn run_seed_until(
         &repos[0],
         &checkout,
         &toolchain,
-        Some(UnitLayout::Flat),
+        Some(machine_layout()),
         cancel,
     )
 }
@@ -2639,7 +2796,7 @@ fn seeding_through_the_fill_and_clone_halves_reports_what_one_run_reports() {
                 &checkout,
                 &toolchain,
                 filled,
-                Some(UnitLayout::Flat),
+                Some(machine_layout()),
                 &|| false,
             )
             .unwrap(),
@@ -2683,7 +2840,7 @@ fn a_fill_half_holds_the_store_lock_until_clone_finishes() {
         &checkout,
         &toolchain,
         filled,
-        Some(UnitLayout::Flat),
+        Some(machine_layout()),
         &|| false,
     )
     .unwrap();
