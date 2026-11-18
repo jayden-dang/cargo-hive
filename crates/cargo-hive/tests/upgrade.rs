@@ -11,7 +11,7 @@ use cargo_hive_gc::plan_tier::record::{MAX_PLANS_BYTES, PLANS_FILE, PlansFile};
 use cargo_hive_platform::clock::utc_date;
 use cargo_hive_seed::record::{MAX_SEEDS_BYTES, SEEDS_FILE, SeedsFile};
 use cargo_hive_seed::store::{MAX_STORE_BYTES, STORE_FILE, StoreFile};
-use cargo_hive_state::{CONFIG_FILE, State, StateError};
+use cargo_hive_state::{CONFIG_FILE, Layout, State, StateError};
 use common::{Hive, Scratch, init_repo, register};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -57,7 +57,7 @@ fn insert_layout_line(fixture: &[u8]) -> Vec<u8> {
     let mut lines = fixture.split_inclusive(|b| *b == b'\n');
     let first = lines.next().expect("fixture has a first line");
     out.extend_from_slice(first);
-    out.extend_from_slice(b"  \"layout\": 1,\n");
+    out.extend_from_slice(b"  \"layout\": 2,\n");
     for line in lines {
         out.extend_from_slice(line);
     }
@@ -107,6 +107,81 @@ fn for_each_state_file(home: &Path, mut body: impl FnMut(&str, &[u8])) {
     for name in STATE_FILES {
         let bytes = fs::read(home.join(name)).unwrap();
         body(name, &bytes);
+    }
+}
+
+#[test]
+fn each_fixture_capabilities_without_unit_layout_reads_as_flat_when_check_f_passed() {
+    use cargo_hive_core::unit_path::UnitLayout;
+    for home in fixture_homes() {
+        let state = State::open_at(home.clone()).unwrap();
+        let caps: Capabilities = read_state_file(&state, CAPABILITIES_FILE);
+        assert!(
+            !caps
+                .disabled
+                .contains_key(&cargo_hive_doctor::Capability::FingerprintReading),
+            "{}: check (f) did not pass in the fixture",
+            home.display()
+        );
+        assert_eq!(
+            caps.unit_layout_or_flat(),
+            Some(UnitLayout::Flat),
+            "{} capabilities unit layout",
+            home.display()
+        );
+    }
+}
+
+#[test]
+fn each_fixture_store_and_seeds_read_every_row_and_seeded_unit_as_flat() {
+    use cargo_hive_core::unit_path::UnitLayout;
+    for home in fixture_homes() {
+        let state = State::open_at(home.clone()).unwrap();
+        let store: StoreFile = read_state_file(&state, STORE_FILE);
+        assert!(
+            !store.units.is_empty(),
+            "{} store.db has no rows",
+            home.display()
+        );
+        for row in &store.units {
+            assert_eq!(
+                row.unit_layout,
+                UnitLayout::Flat,
+                "{} store row {} layout",
+                home.display(),
+                row.name_meta
+            );
+        }
+        for (target, source) in &store.sources {
+            for unit in &source.units {
+                assert_eq!(
+                    unit.unit_layout,
+                    UnitLayout::Flat,
+                    "{} source {} unit {} layout",
+                    home.display(),
+                    target.display(),
+                    unit.name_meta
+                );
+            }
+        }
+        let seeds: SeedsFile = read_state_file(&state, SEEDS_FILE);
+        assert!(
+            !seeds.targets.is_empty(),
+            "{} seeds.json has no seed record",
+            home.display()
+        );
+        for (target, record) in &seeds.targets {
+            for unit in &record.units {
+                assert_eq!(
+                    unit.unit_layout,
+                    UnitLayout::Flat,
+                    "{} seeded unit {} at {} layout",
+                    home.display(),
+                    unit.dir_name,
+                    target.display()
+                );
+            }
+        }
     }
 }
 
@@ -207,39 +282,57 @@ fn each_state_files_first_write_adds_only_the_layout_line() {
             let scratch = Scratch::new(&format!("upgrade-first-{name}"));
             fs::write(scratch.path.join(name), fixture).unwrap();
             let state = State::open_at(scratch.path.clone()).unwrap();
+            let has_layout = serde_json::from_slice::<Value>(fixture)
+                .unwrap()
+                .get("layout")
+                .is_some();
             match name {
                 registry::FILE => {
-                    let v: Registry = read_state_file(&state, name);
+                    let mut v: Registry = read_state_file(&state, name);
+                    if !has_layout {
+                        v.layout = Layout::NEWEST;
+                    }
                     write_state_file(&state, name, &v);
                 }
                 SNAPSHOT_FILE => {
-                    let v: Snapshot = read_state_file(&state, name);
+                    let mut v: Snapshot = read_state_file(&state, name);
+                    if !has_layout {
+                        v.layout = Layout::NEWEST;
+                    }
                     write_state_file(&state, name, &v);
                 }
                 CAPABILITIES_FILE => {
-                    let v: Capabilities = read_state_file(&state, name);
+                    let mut v: Capabilities = read_state_file(&state, name);
+                    if !has_layout {
+                        v.layout = Layout::NEWEST;
+                    }
                     write_state_file(&state, name, &v);
                 }
                 PLANS_FILE => {
-                    let v: PlansFile = read_state_file(&state, name);
+                    let mut v: PlansFile = read_state_file(&state, name);
+                    if !has_layout {
+                        v.layout = Layout::NEWEST;
+                    }
                     write_state_file(&state, name, &v);
                 }
                 STORE_FILE => {
-                    let v: StoreFile = read_state_file(&state, name);
+                    let mut v: StoreFile = read_state_file(&state, name);
+                    if !has_layout {
+                        v.layout = Layout::NEWEST;
+                    }
                     write_state_file(&state, name, &v);
                 }
                 SEEDS_FILE => {
-                    let v: SeedsFile = read_state_file(&state, name);
+                    let mut v: SeedsFile = read_state_file(&state, name);
+                    if !has_layout {
+                        v.layout = Layout::NEWEST;
+                    }
                     write_state_file(&state, name, &v);
                 }
                 other => panic!("unexpected state file {other}"),
             }
             let got = fs::read(scratch.path.join(name)).unwrap();
-            // A file that already records its layout comes back unchanged (UPGRADE-2.4).
-            let has_layout = serde_json::from_slice::<Value>(fixture)
-                .unwrap()
-                .get("layout")
-                .is_some();
+            // A file that already records its layout comes back unchanged.
             let want = if has_layout {
                 fixture.to_vec()
             } else {
@@ -426,13 +519,13 @@ fn config_json_is_read_without_a_layout_key_and_refused_with_one() {
 #[derive(Clone, Copy)]
 enum FileDamage {
     Unparseable,
-    LayoutTwo,
+    LayoutNewer,
 }
 
 fn damaged_state_bytes(damage: FileDamage, existing: Option<&[u8]>, empty_shape: &str) -> Vec<u8> {
     match damage {
         FileDamage::Unparseable => b"{not json".to_vec(),
-        FileDamage::LayoutTwo => {
+        FileDamage::LayoutNewer => {
             let base = match existing {
                 Some(bytes) => bytes.to_vec(),
                 None => empty_shape.as_bytes().to_vec(),
@@ -442,7 +535,7 @@ fn damaged_state_bytes(damage: FileDamage, existing: Option<&[u8]>, empty_shape:
             value
                 .as_object_mut()
                 .expect("state file is an object")
-                .insert("layout".into(), Value::from(2));
+                .insert("layout".into(), Value::from(3));
             serde_json::to_vec(&value).unwrap()
         }
     }
@@ -479,7 +572,7 @@ fn status_stops_on_each_damaged_state_file_and_leaves_it_untouched() {
         ),
     ];
     for (name, empty_shape, recovery) in cases {
-        for damage in [FileDamage::Unparseable, FileDamage::LayoutTwo] {
+        for damage in [FileDamage::Unparseable, FileDamage::LayoutNewer] {
             let hive = Hive::ready();
             let scratch = Scratch::new(&format!("upgrade-status-{name}"));
             let repo = init_repo(&scratch.path.join("app"), "");
@@ -506,8 +599,8 @@ fn status_stops_on_each_damaged_state_file_and_leaves_it_untouched() {
                     detail.contains(recovery),
                     "{name}: detail missing recovery: {detail}"
                 ),
-                FileDamage::LayoutTwo => assert!(
-                    detail.contains("records layout 2")
+                FileDamage::LayoutNewer => assert!(
+                    detail.contains("records layout 3")
                         && detail.contains("cargo install cargo-hive"),
                     "{name}: detail missing newer-layout text: {detail}"
                 ),
@@ -522,7 +615,7 @@ fn status_stops_on_each_damaged_state_file_and_leaves_it_untouched() {
 fn gc_plan_stops_on_a_damaged_plans_file_and_leaves_it_untouched() {
     let recovery =
         "remove it; unapplied plans are lost, so make new ones with `cargo hive gc --plan`";
-    for damage in [FileDamage::Unparseable, FileDamage::LayoutTwo] {
+    for damage in [FileDamage::Unparseable, FileDamage::LayoutNewer] {
         let hive = Hive::ready();
         let path = hive.home.path.join(PLANS_FILE);
         let damaged = damaged_state_bytes(damage, None, r#"{"plans":[]}"#);
@@ -540,8 +633,8 @@ fn gc_plan_stops_on_a_damaged_plans_file_and_leaves_it_untouched() {
                 detail.ends_with(recovery),
                 "detail missing plans recovery: {detail}"
             ),
-            FileDamage::LayoutTwo => assert!(
-                detail.contains("records layout 2") && detail.contains("cargo install cargo-hive"),
+            FileDamage::LayoutNewer => assert!(
+                detail.contains("records layout 3") && detail.contains("cargo install cargo-hive"),
                 "detail missing newer-layout text: {detail}"
             ),
         }

@@ -13,6 +13,7 @@ use cargo_hive_core::liveness::{self, Liveness, LivenessFn, Uncertain};
 use cargo_hive_core::receipt::Finding;
 use cargo_hive_core::size::MAX_DEPTH;
 use cargo_hive_core::target::{Owner, TargetDir};
+use cargo_hive_core::unit_path::{self, UnitLayout, UnitLoc};
 use cargo_hive_platform::{EntryKind, Fs};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -30,6 +31,7 @@ pub struct SourceUnit {
     pub fingerprint_hash: String,
     pub toolchain_value: u64,
     pub registry_deps: Vec<String>,
+    pub layout: UnitLayout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,7 +128,8 @@ pub fn unit_key(unit: &Unit) -> StoreKey {
     StoreKey {
         variant: 0,
         toolchain_value: unit.toolchain_value,
-        name_meta: unit.dir_name.clone(),
+        unit_layout: unit.loc.layout,
+        name_meta: unit.loc.name_meta.clone(),
         fingerprint_hash: unit.hash.to_string(),
     }
 }
@@ -199,13 +202,13 @@ pub fn holds(
                             graph
                                 .units
                                 .iter()
-                                .find(|unit| unit.dir_name == uref.dir_name)
+                                .find(|unit| unit.loc.name_meta == uref.loc.name_meta)
                                 .map(unit_key)
                         });
                     if let Some(key) = key {
                         record_key(&mut out, &mut local, key, "live");
                     } else {
-                        record_name_meta(&mut out, &mut local, uref.dir_name);
+                        record_name_meta(&mut out, &mut local, uref.loc.name_meta.clone());
                     }
                 }
                 if !local.keys.is_empty() || !local.name_metas.is_empty() {
@@ -260,8 +263,8 @@ fn hold_undecided(fs: &dyn Fs, target: &TargetDir, reasons: &[Uncertain], out: &
                     }
                 }
                 for nc in &profile.not_current_units {
-                    if let Some(name) = nc.dir.file_name().and_then(|n| n.to_str()) {
-                        record_name_meta(out, &mut local, name.to_string());
+                    if !nc.loc.name_meta.is_empty() {
+                        record_name_meta(out, &mut local, nc.loc.name_meta.clone());
                     }
                 }
             }
@@ -286,11 +289,42 @@ fn hold_unsupported_fingerprint(
                     record_name_meta(out, local, name);
                 }
             }
-            true
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => true,
-        Err(_) => false,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return false,
     }
+    hold_unsupported_unit_dirs(fs, profile, out, local)
+}
+
+fn hold_unsupported_unit_dirs(
+    fs: &dyn Fs,
+    profile: &Path,
+    out: &mut Holds,
+    local: &mut TargetHolds,
+) -> bool {
+    let build = profile.join("build");
+    let packages = match fs.read_dir_bounded(&build, CRATE_DIR_CAP) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    for (pkg_name, kind) in packages {
+        if kind != EntryKind::Dir || fingerprint::unit_hash(&pkg_name).is_some() {
+            continue;
+        }
+        let pkg_dir = build.join(&pkg_name);
+        let children = match fs.read_dir_bounded(&pkg_dir, CRATE_DIR_CAP) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return false,
+        };
+        for (hex, kind) in children {
+            if kind == EntryKind::Dir && fingerprint::UnitHash::parse(&hex).is_some() {
+                record_name_meta(out, local, format!("{pkg_name}-{hex}"));
+            }
+        }
+    }
+    true
 }
 
 fn record_key(out: &mut Holds, local: &mut TargetHolds, key: StoreKey, reason: &'static str) {
@@ -341,7 +375,7 @@ pub fn live_registry_units(
     };
     let live_keys: HashSet<(PathBuf, String)> = live
         .into_iter()
-        .map(|unit| (unit.profile, unit.dir_name))
+        .map(|unit| (unit.profile, unit.loc.name_meta))
         .collect();
 
     let mut deps_of: HashMap<PathBuf, Vec<(String, EntryKind)>> = HashMap::new();
@@ -361,7 +395,7 @@ pub fn live_registry_units(
             let class = dep_class(
                 ctx.fs,
                 &profile.path,
-                &key.name_meta,
+                &unit.loc,
                 &unit.stem,
                 listing,
                 cargo_home,
@@ -378,6 +412,7 @@ pub fn live_registry_units(
                 kind: unit.kind.as_str().to_string(),
                 fingerprint_hash: key.fingerprint_hash,
                 toolchain_value: key.toolchain_value,
+                layout: unit.loc.layout,
                 deps: unit.deps.iter().map(|dep| dep.fingerprint).collect(),
                 live: live_keys.contains(&(profile.path.clone(), key.name_meta)),
                 known,
@@ -414,6 +449,7 @@ pub fn live_registry_units(
             fingerprint_hash: cand.fingerprint_hash.clone(),
             toolchain_value: cand.toolchain_value,
             registry_deps: registry_dep_hashes(cand, &cands, &by_hash),
+            layout: cand.layout,
         });
     }
     units.sort_by(|a, b| (&a.rel_profile, &a.dir_name).cmp(&(&b.rel_profile, &b.dir_name)));
@@ -431,36 +467,51 @@ pub fn unit_files(
 ) -> Result<Vec<PathBuf>, Refused> {
     let profile = target.join(&unit.rel_profile);
     let mut files = Vec::new();
-    for sub in [".fingerprint", "build"] {
-        walk(
-            fs,
-            target,
-            &profile.join(sub).join(&unit.dir_name),
-            dir_cap,
-            0,
-            &mut files,
-        )?;
-    }
-    let meta = fingerprint::unit_hash(&unit.dir_name)
-        .map(|h| h.to_string())
-        .unwrap_or_default();
-    let mut names: Vec<&str> = deps_listing
-        .iter()
-        .filter(|(name, _)| {
-            !name.ends_with(".rcgu.o") && liveness::embedded_hashes(name).any(|hash| hash == meta)
-        })
-        .map(|(name, _)| name.as_str())
-        .collect();
-    names.sort_unstable();
-    for name in names {
-        take_entry(
-            fs,
-            target,
-            &profile.join("deps").join(name),
-            dir_cap,
-            0,
-            &mut files,
-        )?;
+    match unit.layout {
+        UnitLayout::Flat => {
+            let loc = UnitLoc {
+                layout: UnitLayout::Flat,
+                name_meta: unit.dir_name.clone(),
+            };
+            walk(
+                fs,
+                target,
+                &unit_path::fingerprint_dir(&profile, &loc),
+                dir_cap,
+                0,
+                false,
+                &mut files,
+            )?;
+            let run_stamp = unit_path::stamp(&profile, &loc, fingerprint::UnitKind::RunBuildScript);
+            let build_dir = run_stamp.parent().expect("stamp path has a parent");
+            walk(fs, target, build_dir, dir_cap, 0, false, &mut files)?;
+            let meta = fingerprint::unit_hash(&unit.dir_name)
+                .map(|h| h.to_string())
+                .unwrap_or_default();
+            let mut names: Vec<&str> = deps_listing
+                .iter()
+                .filter(|(name, _)| {
+                    !name.ends_with(".rcgu.o")
+                        && liveness::embedded_hashes(name).any(|hash| hash == meta)
+                })
+                .map(|(name, _)| name.as_str())
+                .collect();
+            names.sort_unstable();
+            let deps = unit_path::flat_deps_dir(&profile);
+            for name in names {
+                take_entry(fs, target, &deps.join(name), dir_cap, 0, false, &mut files)?;
+            }
+        }
+        UnitLayout::UnitDir => {
+            let loc = UnitLoc {
+                layout: UnitLayout::UnitDir,
+                name_meta: unit.dir_name.clone(),
+            };
+            let Some(root) = unit_path::unit_dir(&profile, &loc) else {
+                return Ok(files);
+            };
+            walk(fs, target, &root, dir_cap, 0, true, &mut files)?;
+        }
     }
     files.sort();
     Ok(files)
@@ -473,6 +524,7 @@ struct Cand {
     kind: String,
     fingerprint_hash: String,
     toolchain_value: u64,
+    layout: UnitLayout,
     deps: Vec<u64>,
     live: bool,
     known: bool,
@@ -487,7 +539,7 @@ enum DepClass {
 }
 
 fn list_deps(fs: &dyn Fs, profile: &Path) -> Result<Vec<(String, EntryKind)>, Skip> {
-    let dir = profile.join("deps");
+    let dir = unit_path::flat_deps_dir(profile);
     match fs.read_dir_bounded(&dir, DEPS_CAP) {
         Ok(entries) => Ok(entries),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -499,10 +551,26 @@ fn list_deps(fs: &dyn Fs, profile: &Path) -> Result<Vec<(String, EntryKind)>, Sk
     }
 }
 
-/// `deps/<crate>-<metadata>.d`: `<crate>` is the fingerprint stem with its kind
-/// prefix removed (`lib-depcrate` → `depcrate`), not the stem itself. `<metadata>`
-/// is `unit_hash` of the unit directory. `fingerprint_hash` is the hash-file text.
+/// Flat: `deps/<crate>-<metadata>.d` or a hash-named `.d` under `build/<dir>/`.
+/// Unit-dir: every `.d` in the unit's `out/`. `<crate>` is the fingerprint stem
+/// with its kind prefix removed (`lib-depcrate` → `depcrate`).
 fn dep_class(
+    fs: &dyn Fs,
+    profile: &Path,
+    loc: &UnitLoc,
+    stem: &str,
+    deps_listing: &[(String, EntryKind)],
+    cargo_home: &Path,
+) -> Result<DepClass, Skip> {
+    match loc.layout {
+        UnitLayout::Flat => {
+            flat_dep_class(fs, profile, &loc.name_meta, stem, deps_listing, cargo_home)
+        }
+        UnitLayout::UnitDir => unit_dir_dep_class(fs, profile, loc, cargo_home),
+    }
+}
+
+fn flat_dep_class(
     fs: &dyn Fs,
     profile: &Path,
     dir_name: &str,
@@ -519,7 +587,7 @@ fn dep_class(
         .iter()
         .any(|(name, kind)| name == &dep_name && *kind == EntryKind::File)
     {
-        Some(profile.join("deps").join(dep_name))
+        Some(unit_path::flat_deps_dir(profile).join(dep_name))
     } else {
         build_dep_info(fs, profile, dir_name, &meta_text)?
     };
@@ -536,13 +604,67 @@ fn dep_class(
     })
 }
 
+fn unit_dir_dep_class(
+    fs: &dyn Fs,
+    profile: &Path,
+    loc: &UnitLoc,
+    cargo_home: &Path,
+) -> Result<DepClass, Skip> {
+    let out = unit_path::outputs(profile, loc);
+    let entries = match fs.read_dir_bounded(&out, CRATE_DIR_CAP) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(DepClass::Absent),
+        Err(err) => {
+            return Err(Skip::Bound(super::directory_listing(
+                &out,
+                &err,
+                "build the target again",
+            )));
+        }
+    };
+    let mut names: Vec<String> = entries
+        .into_iter()
+        .filter(|(name, kind)| *kind == EntryKind::File && name.ends_with(".d"))
+        .map(|(name, _)| name)
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        return Ok(DepClass::Absent);
+    }
+    let mut saw_registry = false;
+    for name in names {
+        let path = out.join(name);
+        let Some(line) = read_dep_info(&path)? else {
+            continue;
+        };
+        if is_registry_dep_info(&line, cargo_home) {
+            saw_registry = true;
+        } else {
+            return Ok(DepClass::Workspace);
+        }
+    }
+    Ok(if saw_registry {
+        DepClass::Registry
+    } else {
+        DepClass::Absent
+    })
+}
+
 fn build_dep_info(
     fs: &dyn Fs,
     profile: &Path,
     dir_name: &str,
     meta: &str,
 ) -> Result<Option<PathBuf>, Skip> {
-    let dir = profile.join("build").join(dir_name);
+    let loc = UnitLoc {
+        layout: UnitLayout::Flat,
+        name_meta: dir_name.to_string(),
+    };
+    let run_stamp = unit_path::stamp(profile, &loc, fingerprint::UnitKind::RunBuildScript);
+    let dir = run_stamp
+        .parent()
+        .expect("stamp path has a parent")
+        .to_path_buf();
     let entries = match fs.read_dir_bounded(&dir, CRATE_DIR_CAP) {
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -694,6 +816,7 @@ fn walk(
     dir: &Path,
     dir_cap: usize,
     depth: usize,
+    skip_rcgu_under_out: bool,
     files: &mut Vec<PathBuf>,
 ) -> Result<(), Refused> {
     if depth > MAX_DEPTH {
@@ -710,8 +833,20 @@ fn walk(
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(Refused(dir.to_path_buf(), err.to_string())),
     };
+    let skip_rcgu = skip_rcgu_under_out && dir.file_name().is_some_and(|name| name == "out");
     for (name, _) in entries {
-        take_entry(fs, target, &dir.join(name), dir_cap, depth + 1, files)?;
+        if skip_rcgu && name.ends_with(".rcgu.o") {
+            continue;
+        }
+        take_entry(
+            fs,
+            target,
+            &dir.join(name),
+            dir_cap,
+            depth + 1,
+            skip_rcgu_under_out,
+            files,
+        )?;
     }
     Ok(())
 }
@@ -722,6 +857,7 @@ fn take_entry(
     path: &Path,
     dir_cap: usize,
     depth: usize,
+    skip_rcgu_under_out: bool,
     files: &mut Vec<PathBuf>,
 ) -> Result<(), Refused> {
     let stat = fs
@@ -732,7 +868,7 @@ fn take_entry(
             files.push(relative_to(target, path));
             Ok(())
         }
-        EntryKind::Dir => walk(fs, target, path, dir_cap, depth, files),
+        EntryKind::Dir => walk(fs, target, path, dir_cap, depth, skip_rcgu_under_out, files),
         EntryKind::Symlink => Err(Refused(
             path.to_path_buf(),
             "symbolic link; remove it and build the unit again".to_string(),
@@ -892,6 +1028,7 @@ mod tests {
             fingerprint_hash: "0a00000000000000".into(),
             toolchain_value: 1,
             registry_deps: Vec::new(),
+            layout: UnitLayout::Flat,
         }
     }
 
@@ -1273,11 +1410,15 @@ mod tests {
     #[test]
     fn a_unit_key_carries_the_toolchain_value_directory_name_and_fingerprint() {
         use cargo_hive_core::fingerprint::{Coverage, Unit, UnitHash};
+        use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
         use std::sync::Arc;
 
         let fingerprint = 0x0102_0304_0506_0708u64;
         let unit = Unit {
-            dir_name: format!("serde-{}", le_hex(fingerprint)),
+            loc: UnitLoc {
+                layout: UnitLayout::Flat,
+                name_meta: format!("serde-{}", le_hex(fingerprint)),
+            },
             kind: fingerprint::UnitKind::Lib,
             hash: UnitHash::parse(&le_hex(fingerprint)).unwrap(),
             deps: Vec::new(),
@@ -1291,7 +1432,7 @@ mod tests {
         };
         let key = unit_key(&unit);
         assert_eq!(key.toolchain_value, 42);
-        assert_eq!(key.name_meta, unit.dir_name);
+        assert_eq!(key.name_meta, unit.loc.name_meta);
         assert_eq!(key.fingerprint_hash, le_hex(fingerprint));
     }
 }

@@ -19,6 +19,7 @@ use cargo_hive_core::caps::{CRATE_DIR_CAP, DEPS_CAP};
 use cargo_hive_core::locks::{self, Acquired, Locked};
 use cargo_hive_core::size::MAX_DEPTH;
 use cargo_hive_core::target::{Owner, TargetDir};
+use cargo_hive_core::unit_path::{self, UnitLoc};
 use cargo_hive_platform::{EntryKind, Fs};
 use cargo_hive_state::{StateError, window_days};
 
@@ -170,10 +171,14 @@ fn fill_target(
     let mut newest_at = 0u64;
     for unit in units {
         let profile = target.path.join(&unit.rel_profile);
-        let hash_path = profile
-            .join(".fingerprint")
-            .join(&unit.dir_name)
-            .join(&unit.stem);
+        let hash_path = unit_path::hash_file(
+            &profile,
+            &UnitLoc {
+                layout: unit.layout,
+                name_meta: unit.dir_name.clone(),
+            },
+            &unit.stem,
+        );
         newest_at = newest_at.max(mtime_nanos(&hash_path));
         let listing = listings.get(&profile).map(Vec::as_slice).unwrap_or(&[]);
         let files =
@@ -266,6 +271,7 @@ struct NewUnit {
     files: Vec<PathBuf>,
 }
 
+#[derive(Debug)]
 enum Holding {
     Held(u32),
     New(u32),
@@ -281,11 +287,13 @@ fn holding_variant(
     target_root: &Path,
     files: &[PathBuf],
 ) -> Result<Holding, String> {
+    let layout = skeleton(unit).unit_layout;
     let known = stored
         .units
         .iter()
         .filter(|row| {
             row.toolchain_value == unit.toolchain_value
+                && row.unit_layout == layout
                 && row.name_meta == unit.dir_name
                 && row.fingerprint_hash == unit.fingerprint_hash
         })
@@ -319,6 +327,7 @@ fn unit_ref(row: &Row) -> store::SourceUnitRef {
         name_meta: row.name_meta.clone(),
         fingerprint_hash: row.fingerprint_hash.clone(),
         variant: row.variant,
+        unit_layout: row.unit_layout,
     }
 }
 
@@ -405,10 +414,14 @@ fn clone_unit(
 ) -> Result<ClonedUnit, String> {
     let unit = &new.unit;
     let profile = target.path.join(&unit.rel_profile);
-    let hash_path = profile
-        .join(".fingerprint")
-        .join(&unit.dir_name)
-        .join(&unit.stem);
+    let hash_path = unit_path::hash_file(
+        &profile,
+        &UnitLoc {
+            layout: unit.layout,
+            name_meta: unit.dir_name.clone(),
+        },
+        &unit.stem,
+    );
     match hash_unchanged(&hash_path, &unit.fingerprint_hash) {
         Ok(true) => {}
         Ok(false) => return Ok(ClonedUnit::Skip),
@@ -422,7 +435,12 @@ fn clone_unit(
         }
     }
     let files = &new.files;
-    let key = store::entry_name(&unit.dir_name, &unit.fingerprint_hash, new.variant);
+    let key = store::entry_name(
+        unit.layout,
+        &unit.dir_name,
+        &unit.fingerprint_hash,
+        new.variant,
+    );
     let tmp = store::tmp_dir(ctx.state, &key);
     if let Err(stop) = reset_tmp(&tmp) {
         return match stop {
@@ -643,7 +661,11 @@ fn held_row(
     row.filled_at = now;
     row.last_live_at = now;
     row.repos = vec![repo.main.clone()];
-    if let Some(existing) = stored.units.iter().find(|kept| same_key(kept, &row)) {
+    if let Some(existing) = stored
+        .units
+        .iter()
+        .find(|kept| store::row_matches(kept, &store::row_key(&row)))
+    {
         row.size = existing.size;
         row.filled_at = existing.filled_at;
         return Ok(row);
@@ -666,14 +688,8 @@ fn skeleton(unit: &SourceUnit) -> Row {
         repos: Vec::new(),
         registry_deps: unit.registry_deps.clone(),
         variant: 0,
+        unit_layout: unit.layout,
     }
-}
-
-fn same_key(left: &Row, right: &Row) -> bool {
-    left.toolchain_value == right.toolchain_value
-        && left.name_meta == right.name_meta
-        && left.fingerprint_hash == right.fingerprint_hash
-        && left.variant == right.variant
 }
 
 fn profile_listings(
@@ -682,7 +698,7 @@ fn profile_listings(
 ) -> Result<HashMap<PathBuf, Vec<(String, EntryKind)>>, String> {
     let mut listings = HashMap::new();
     for profile in &target.profiles {
-        let dir = profile.path.join("deps");
+        let dir = unit_path::flat_deps_dir(&profile.path);
         let listing = match fs.read_dir_bounded(&dir, DEPS_CAP) {
             Ok(listing) => listing,
             Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -1004,6 +1020,8 @@ mod tests {
         Coverage, Format, ProfileReport, Unit, UnitGraph, UnitHash,
     };
     use cargo_hive_core::target::{Owner, TargetDir};
+    use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
+    use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1071,7 +1089,10 @@ mod tests {
 
     fn sample_unit(value: u64) -> Unit {
         Unit {
-            dir_name: "dep-0000000000000001".to_string(),
+            loc: UnitLoc {
+                layout: UnitLayout::Flat,
+                name_meta: "dep-0000000000000001".to_string(),
+            },
             kind: cargo_hive_core::fingerprint::UnitKind::Lib,
             hash: UnitHash::parse("0123456789abcdef").unwrap(),
             deps: Vec::new(),
@@ -1105,6 +1126,8 @@ mod tests {
                     offsets: vec![0, 0],
                     targets: Vec::new(),
                 }),
+                layouts: BTreeSet::from([UnitLayout::Flat]),
+                partial_unit_dirs: 0,
             }],
             size: None,
             unreadable: None,
@@ -1213,5 +1236,157 @@ mod tests {
     fn a_permission_denied_clone_takes_the_non_cross_device_branch() {
         let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
         assert_eq!(super::clone_io_branch(&err), super::CloneIoBranch::Skip);
+    }
+
+    fn sample_source(value: u64) -> crate::source::SourceUnit {
+        crate::source::SourceUnit {
+            rel_profile: PathBuf::from("debug"),
+            dir_name: "dep-0000000000000001".into(),
+            stem: "lib-dep".into(),
+            kind: "lib".into(),
+            fingerprint_hash: "0123456789abcdef".into(),
+            toolchain_value: value,
+            registry_deps: Vec::new(),
+            layout: UnitLayout::Flat,
+        }
+    }
+
+    #[test]
+    fn a_flat_held_row_does_not_take_size_or_filled_at_from_a_unit_dir_row() {
+        use cargo_hive_cargo::ctx::Ctx;
+        use cargo_hive_cargo::registry::Repo;
+        use cargo_hive_state::{Config, Layout, State};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let scratch = Scratch::new("held-layout");
+        let state = State::open_at(scratch.0.join("home")).unwrap();
+        let platform = cargo_hive_platform::current().unwrap();
+        let cfg = Config {
+            secondary_roots: Vec::new(),
+            cache_roots: Vec::new(),
+            gc_window_days: None,
+        };
+        let repos = [];
+        let mains = [];
+        let ctx = Ctx {
+            state: &state,
+            fs: platform.fs.as_ref(),
+            cfg: &cfg,
+            now: SystemTime::now(),
+            account_bytes: false,
+            repos: &repos,
+            mains: &mains,
+            liveness: crate::no_liveness,
+        };
+        let unit = sample_source(7);
+        let mut flat = super::skeleton(&unit);
+        flat.variant = 0;
+        let flat_dir = crate::store::entry_dir(&state, &flat);
+        std::fs::create_dir_all(&flat_dir).unwrap();
+        std::fs::write(flat_dir.join("blob"), b"flat-bytes").unwrap();
+
+        let unit_dir_row = super::Row {
+            toolchain_value: 7,
+            name_meta: unit.dir_name.clone(),
+            fingerprint_hash: unit.fingerprint_hash.clone(),
+            kind: "lib".into(),
+            rel_profile: PathBuf::from("debug"),
+            size: 9_999,
+            filled_at: 42,
+            last_live_at: 42,
+            repos: Vec::new(),
+            registry_deps: Vec::new(),
+            variant: 0,
+            unit_layout: UnitLayout::UnitDir,
+        };
+        let stored = crate::store::StoreFile {
+            layout: Layout::NEWEST,
+            units: vec![unit_dir_row],
+            toolchains: BTreeMap::new(),
+            sources: BTreeMap::new(),
+        };
+        let repo = Repo {
+            main: scratch.0.join("repo"),
+            root_commits: BTreeSet::new(),
+        };
+        let got = super::held_row(&ctx, &stored, &unit, 0, &repo, 1_700_000_000).unwrap();
+        assert_eq!(got.unit_layout, UnitLayout::Flat);
+        assert_ne!(
+            got.size, 9_999,
+            "flat held row took unit-dir size {}",
+            got.size
+        );
+        assert_ne!(
+            got.filled_at, 42,
+            "flat held row took unit-dir filled_at {}",
+            got.filled_at
+        );
+        assert_eq!(got.filled_at, 1_700_000_000);
+        assert!(got.size > 0, "flat entry dir was not sized");
+    }
+
+    #[test]
+    fn a_flat_fill_does_not_take_its_variant_ceiling_from_a_unit_dir_row() {
+        use cargo_hive_cargo::ctx::Ctx;
+        use cargo_hive_state::{Config, Layout, State};
+        use std::collections::BTreeMap;
+
+        let scratch = Scratch::new("variant-layout");
+        let state = State::open_at(scratch.0.join("home")).unwrap();
+        let platform = cargo_hive_platform::current().unwrap();
+        let cfg = Config {
+            secondary_roots: Vec::new(),
+            cache_roots: Vec::new(),
+            gc_window_days: None,
+        };
+        let repos = [];
+        let mains = [];
+        let ctx = Ctx {
+            state: &state,
+            fs: platform.fs.as_ref(),
+            cfg: &cfg,
+            now: SystemTime::now(),
+            account_bytes: false,
+            repos: &repos,
+            mains: &mains,
+            liveness: crate::no_liveness,
+        };
+        let unit = sample_source(7);
+        let rel = PathBuf::from("debug/deps/libdep.rlib");
+        let target_root = scratch.0.join("target");
+        std::fs::create_dir_all(target_root.join(rel.parent().unwrap())).unwrap();
+        std::fs::write(target_root.join(&rel), b"unit-bytes").unwrap();
+
+        let mut orphan = super::skeleton(&unit);
+        orphan.variant = 2;
+        let orphan_dir = crate::store::entry_dir(&state, &orphan);
+        std::fs::create_dir_all(orphan_dir.join(rel.parent().unwrap())).unwrap();
+        std::fs::write(orphan_dir.join(&rel), b"unit-bytes").unwrap();
+
+        let unit_dir_row = super::Row {
+            toolchain_value: 7,
+            name_meta: unit.dir_name.clone(),
+            fingerprint_hash: unit.fingerprint_hash.clone(),
+            kind: "lib".into(),
+            rel_profile: PathBuf::from("debug"),
+            size: 1,
+            filled_at: 1,
+            last_live_at: 1,
+            repos: Vec::new(),
+            registry_deps: Vec::new(),
+            variant: 3,
+            unit_layout: UnitLayout::UnitDir,
+        };
+        let stored = crate::store::StoreFile {
+            layout: Layout::NEWEST,
+            units: vec![unit_dir_row],
+            toolchains: BTreeMap::new(),
+            sources: BTreeMap::new(),
+        };
+        let got = super::holding_variant(&ctx, &stored, &unit, &target_root, &[rel]).unwrap();
+        assert!(
+            matches!(got, super::Holding::New(0)),
+            "flat fill used a unit-dir variant ceiling: {got:?}"
+        );
     }
 }

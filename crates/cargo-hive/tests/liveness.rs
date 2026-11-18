@@ -4,6 +4,7 @@ mod common;
 use cargo_hive_core::fingerprint;
 use cargo_hive_core::liveness::{Liveness, UnitRef};
 use cargo_hive_core::target::{self, TargetDir};
+use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
 use cargo_hive_platform as platform;
 use clap::CommandFactory;
 use common::cargo_fixture::*;
@@ -61,9 +62,14 @@ fn a_backdated_check_variant_is_dead_with_its_rmeta_and_dep_info() {
         .collect();
     assert_eq!(check.len(), 1, "{dead:#?}");
     let check = check[0];
-    let hash = fingerprint::unit_hash(&check.dir_name).unwrap();
+    let hash = fingerprint::unit_hash(&check.loc.name_meta).unwrap();
     let deps_dir = check.profile.join("deps");
-    let mut expected: Vec<PathBuf> = vec![check.profile.join(".fingerprint").join(&check.dir_name)];
+    let mut expected: Vec<PathBuf> = vec![
+        check
+            .profile
+            .join(".fingerprint")
+            .join(&check.loc.name_meta),
+    ];
     let mut owned: Vec<PathBuf> = fs::read_dir(&deps_dir)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -117,7 +123,7 @@ fn a_dead_example_lists_its_examples_entries() {
             .filter(|u| !live.contains(u))
             .collect(),
     );
-    let hash = fingerprint::unit_hash(&old_example.dir_name).unwrap();
+    let hash = fingerprint::unit_hash(&old_example.loc.name_meta).unwrap();
     let examples_dir = old_example.profile.join("examples");
     let mut owned: Vec<PathBuf> = fs::read_dir(&examples_dir)
         .unwrap()
@@ -135,7 +141,7 @@ fn a_dead_example_lists_its_examples_entries() {
         old_example
             .profile
             .join(".fingerprint")
-            .join(&old_example.dir_name),
+            .join(&old_example.loc.name_meta),
     ];
     expected.extend(owned);
     let files = &dead
@@ -164,7 +170,7 @@ fn a_build_script_unit_is_never_dead_and_its_run_timestamp_in_build_is_a_root() 
     assert!(
         run.profile
             .join("build")
-            .join(&run.dir_name)
+            .join(&run.loc.name_meta)
             .join("invoked.timestamp")
             .exists()
     );
@@ -879,7 +885,10 @@ fn a_rebuilt_live_unit_fails_the_window() {
 fn a_window_is_vacuous_when_undecided_empty_failed_or_silent() {
     let unit = UnitRef {
         profile: PathBuf::from("/t/debug"),
-        dir_name: "a-0123456789abcdef".into(),
+        loc: UnitLoc {
+            layout: UnitLayout::Flat,
+            name_meta: "a-0123456789abcdef".into(),
+        },
     };
     let dead = |files: Vec<PathBuf>| cargo_hive_core::liveness::DeadUnit {
         unit: unit.clone(),
@@ -2232,6 +2241,8 @@ fn profile_report(path: &Path) -> fingerprint::ProfileReport {
         not_current_units: Vec::new(),
         edges: None,
         graph: None,
+        layouts: Default::default(),
+        partial_unit_dirs: 0,
     }
 }
 
@@ -2278,6 +2289,10 @@ fn a_not_current_unit_dir_that_is_not_utf8_is_an_error_not_a_skip() {
     let mut profile = profile_report(&root.join("debug"));
     profile.not_current_units.push(fingerprint::NotCurrentUnit {
         dir: odd.clone(),
+        loc: UnitLoc {
+            layout: UnitLayout::Flat,
+            name_meta: String::new(),
+        },
         stem: None,
         features: None,
         outputs: Vec::new(),
@@ -2332,4 +2347,137 @@ fn deleting_through_execute_on_a_fixture_clone_rebuilds_no_live_unit() {
         "a trial that deletes nothing proves nothing"
     );
     assert_eq!(report.rebuilt_live_units, 0, "{report:?}");
+}
+
+fn synthetic_target(root: &Path, profile: &Path) -> TargetDir {
+    TargetDir {
+        path: root.to_path_buf(),
+        owner: target::Owner::Unresolved {
+            reason: "test".into(),
+        },
+        profiles: vec![fingerprint::read_profile(profile)],
+        size: None,
+        unreadable: None,
+    }
+}
+
+fn age_stamp(profile: &Path, loc: &UnitLoc, stem: &str, age: Duration) {
+    let stamp =
+        cargo_hive_core::liveness::unit_timestamp(profile, loc, fingerprint::UnitKind::of(stem));
+    fs::File::open(&stamp)
+        .unwrap()
+        .set_modified(SystemTime::now() - age)
+        .unwrap();
+}
+
+#[test]
+fn a_dead_unit_dir_lists_out_d_files_then_out_run_fingerprint_and_the_unit_dir() {
+    let s = Scratch::new("liveness-udir-order");
+    let profile = s.path.join("debug");
+    fs::create_dir_all(&profile).unwrap();
+    let loc = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "d",
+        "4444444444444444",
+        "lib-d",
+        104,
+        &[],
+        &["libd.rmeta", "z.d", "a.d", "m.d", "libd.rlib"],
+    );
+    let unit = cargo_hive_core::unit_path::unit_dir(&profile, &loc).unwrap();
+    fs::create_dir_all(unit.join("run")).unwrap();
+    age_stamp(&profile, &loc, "lib-d", THIRTY_DAYS);
+    let fs_ = platform::current().unwrap().fs;
+    let Liveness::Decided { dead, .. } = cargo_hive_gc::liveness::liveness(
+        fs_.as_ref(),
+        &synthetic_target(&s.path, &profile),
+        SystemTime::now(),
+        WINDOW,
+    ) else {
+        panic!("expected Decided");
+    };
+    let dead = dead
+        .into_iter()
+        .find(|d| d.unit.loc.name_meta == loc.name_meta)
+        .expect("unit-dir lib is dead");
+    assert_eq!(
+        dead.files,
+        [
+            unit.join("out").join("a.d"),
+            unit.join("out").join("m.d"),
+            unit.join("out").join("z.d"),
+            unit.join("out"),
+            unit.join("run"),
+            unit.join("fingerprint"),
+            unit.clone(),
+        ]
+    );
+}
+
+#[test]
+fn a_mixed_profile_keeps_flat_dead_files_and_unit_dir_order() {
+    let s = Scratch::new("liveness-udir-mixed");
+    let profile = s.path.join("debug");
+    fs::create_dir_all(profile.join(".fingerprint")).unwrap();
+    let flat = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::Flat,
+        "d",
+        "4444444444444444",
+        "lib-d",
+        104,
+        &[],
+        &["dep-4444444444444444.o"],
+    );
+    age_stamp(&profile, &flat, "lib-d", THIRTY_DAYS);
+    let ud = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "u",
+        "5555555555555555",
+        "lib-u",
+        105,
+        &[],
+        &["u.d"],
+    );
+    age_stamp(&profile, &ud, "lib-u", THIRTY_DAYS);
+    fs::create_dir_all(profile.join("examples")).unwrap();
+    fs::write(profile.join("examples").join("ex-4444444444444444.d"), "").unwrap();
+    let fs_ = platform::current().unwrap().fs;
+    let Liveness::Decided { dead, .. } = cargo_hive_gc::liveness::liveness(
+        fs_.as_ref(),
+        &synthetic_target(&s.path, &profile),
+        SystemTime::now(),
+        WINDOW,
+    ) else {
+        panic!("expected Decided");
+    };
+    assert_eq!(dead.len(), 2);
+    let flat_dead = dead
+        .iter()
+        .find(|d| d.unit.loc.name_meta == flat.name_meta)
+        .unwrap();
+    assert_eq!(
+        flat_dead.files,
+        [
+            profile.join(".fingerprint").join(&flat.name_meta),
+            profile.join("deps").join("dep-4444444444444444.o"),
+            profile.join("examples").join("ex-4444444444444444.d"),
+        ]
+    );
+    let unit = cargo_hive_core::unit_path::unit_dir(&profile, &ud).unwrap();
+    let ud_dead = dead
+        .iter()
+        .find(|d| d.unit.loc.name_meta == ud.name_meta)
+        .unwrap();
+    assert_eq!(
+        ud_dead.files,
+        [
+            unit.join("out").join("u.d"),
+            unit.join("out"),
+            unit.join("fingerprint"),
+            unit.clone(),
+        ]
+    );
 }

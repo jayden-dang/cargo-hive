@@ -635,7 +635,7 @@ mod tests {
         .unwrap();
         let text = std::fs::read_to_string(s.root().join(PLANS_FILE)).unwrap();
         assert!(
-            text.starts_with("{\n  \"layout\": 1,\n"),
+            text.starts_with("{\n  \"layout\": 2,\n"),
             "layout must be the first key: {text}"
         );
     }

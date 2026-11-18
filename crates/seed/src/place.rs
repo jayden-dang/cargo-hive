@@ -18,6 +18,7 @@ use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_core::fingerprint;
 use cargo_hive_core::liveness;
 use cargo_hive_core::size::{MAX_DEPTH, allocated_bytes};
+use cargo_hive_core::unit_path::{self, UnitLayout, UnitLoc};
 use cargo_hive_platform::{EntryKind, Fs};
 
 use super::Error;
@@ -385,7 +386,11 @@ fn place_unit(
             ),
         ));
     }
-    files.sort_by(|left, right| area(left).cmp(&area(right)).then(left.cmp(right)));
+    files.sort_by(|left, right| {
+        area(left, row.unit_layout)
+            .cmp(&area(right, row.unit_layout))
+            .then(left.cmp(right))
+    });
     let mut deps_files = 0u32;
     let mut has_build = false;
     for rel in &files {
@@ -413,9 +418,11 @@ fn place_unit(
                 if ctx.account_bytes {
                     charge(ctx.fs, added, &src, &dst);
                 }
-                match area(rel) {
-                    0 => deps_files = deps_files.saturating_add(1),
-                    1 => has_build = true,
+                match (row.unit_layout, area(rel, row.unit_layout)) {
+                    (UnitLayout::Flat, 0) => deps_files = deps_files.saturating_add(1),
+                    (UnitLayout::Flat, 1) => has_build = true,
+                    (UnitLayout::UnitDir, 0) => deps_files = deps_files.saturating_add(1),
+                    (UnitLayout::UnitDir, _) => {}
                     _ => {}
                 }
             }
@@ -432,6 +439,9 @@ fn place_unit(
             }
         }
     }
+    if row.unit_layout == UnitLayout::UnitDir {
+        has_build = false;
+    }
     let stamp = read_stamp(ctx.fs, target, row);
     let outside = stamp_outside(stamp.as_ref(), ctx.now, window);
     Ok(UnitOutcome::Cloned(
@@ -441,6 +451,7 @@ fn place_unit(
             stamp,
             has_build,
             deps_files,
+            unit_layout: row.unit_layout,
         },
         outside,
     ))
@@ -564,9 +575,13 @@ fn ensure_dirs(
 }
 
 fn read_stamp(fs: &dyn Fs, target: &Path, row: &Row) -> Option<(PathBuf, u64)> {
+    let loc = UnitLoc {
+        layout: row.unit_layout,
+        name_meta: row.name_meta.clone(),
+    };
     let absolute = liveness::unit_timestamp(
         &target.join(&row.rel_profile),
-        &row.name_meta,
+        &loc,
         fingerprint::UnitKind::of(&row.kind),
     );
     let mtime = fs.mtime(&absolute).ok()?;
@@ -597,16 +612,38 @@ fn normal_only(path: &Path) -> bool {
         .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn area(rel: &Path) -> u8 {
-    for component in rel.components() {
-        match component.as_os_str().to_str() {
-            Some("deps") => return 0,
-            Some("build") => return 1,
-            Some(".fingerprint") => return 2,
-            _ => {}
+fn area(rel: &Path, layout: UnitLayout) -> u8 {
+    match layout {
+        UnitLayout::Flat => {
+            for component in rel.components() {
+                match component.as_os_str().to_str() {
+                    Some("deps") => return 0,
+                    Some("build") => return 1,
+                    Some(".fingerprint") => return 2,
+                    _ => {}
+                }
+            }
+            3
+        }
+        UnitLayout::UnitDir => {
+            let Some(root) = unit_path::unit_dir_of(rel) else {
+                return 3;
+            };
+            let Ok(rest) = rel.strip_prefix(&root) else {
+                return 3;
+            };
+            match rest
+                .components()
+                .next()
+                .and_then(|c| c.as_os_str().to_str())
+            {
+                Some("out") => 0,
+                Some("run") => 1,
+                Some("fingerprint") => 2,
+                _ => 3,
+            }
         }
     }
-    3
 }
 
 fn is_full(err: &io::Error) -> bool {

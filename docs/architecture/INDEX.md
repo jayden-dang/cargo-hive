@@ -41,10 +41,11 @@ package (A1-A6, D2-D5, D7, S1-S2, C1), the F9 amendment and SPIKES.md.
 - **ARCH-15** Keep macOS-specific code (anything under `cfg(target_os = "macos")`, APFS) behind the `crates/platform` `Fs` trait.
 - **ARCH-16** Write hive's metadata files (registry, capabilities, snapshot, plans, `store.db`) only through the `state` module, atomically, under its one lock.
 - **ARCH-17** Never compile or replay a build to decide liveness or ownership; ownership comes only from `cargo metadata --no-deps --locked --offline`.
-- **ARCH-18** A deletion inside a Cargo target dir never removes a fingerprint dir on its own and never touches `build/`; only a plan that deletes a whole orphan target removes the target entire.
+- ~~**ARCH-18**~~ retired 2026-11-17: it forbade any touch of `build/` and any lone fingerprint removal, which cannot hold for Cargo 1.100 unit dirs. Superseded by ARCH-22.
 - **ARCH-19** Never delete from, or fill out of, a Cargo target dir while another process holds the lock guarding that entry; the lock is tried without waiting and the entry is skipped when held.
 - **ARCH-20** A plan is applied only after rechecking liveness, locks and format at apply time; a stale plan is refused.
 - **ARCH-21** Never compress a store file; a clone placed from the store shares every block with its store entry.
+- **ARCH-22** A deletion inside a Cargo target dir removes a unit's fingerprint only in the same run as all of that unit's outputs and after them. In the flat layout these are its hash-keyed `deps/` and `examples/` files, never anything under `build/`. In the unit-dir layout they are its whole `build/<package>/<hash>/` dir. Build-script units are never deleted, and only a plan that deletes a whole orphan target removes the target entire.
 
 ## Domains
 

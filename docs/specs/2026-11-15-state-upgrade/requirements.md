@@ -258,7 +258,7 @@ Every file this feature changes, with the guard that protects it:
 - `crates/cargo/src/registry.rs`, `crates/doctor/src/lib.rs`, `crates/cargo/src/discover.rs`,
   `crates/gc/src/plan_tier/record.rs`, `crates/seed/src/store.rs`, `crates/seed/src/record.rs`: the persisted
   types gain the layout key.
-  - Field names, order and values are at risk. Guarded by UPGRADE-2.1, UPGRADE-2.8 and **UPGRADE-7.1**.
+  - Field names, order and values are at risk. Guarded by UPGRADE-2.1, UPGRADE-2.8 and UPGRADE-7.1.
   - `deny_unknown_fields` still refuses other unknown keys. Guarded by **UPGRADE-7.2**.
 - `crates/seed/src/record.rs`, `crates/seed/src/lib.rs`: the seed-record write changes from replace to refuse
   (UPGRADE-3.4), surfacing through the existing `record.failed` finding. Its other
@@ -281,8 +281,8 @@ Every file this feature changes, with the guard that protects it:
 
 Guards:
 
-- **UPGRADE-7.1** (guard) WHEN hive writes `store.db`, `seeds.json` or `plans.json` THE SYSTEM SHALL CONTINUE TO
-  use the same fields as before this feature, with `layout` as the only addition (STOREGC-10.5).
+- ~~**UPGRADE-7.1**~~ superseded by BUILDDIR-6.7 (unit layouts add fields beyond `layout` on `store.db` and `seeds.json`) — was: ~~(guard) WHEN hive writes `store.db`, `seeds.json` or `plans.json` THE SYSTEM SHALL CONTINUE TO
+  use the same fields as before this feature, with `layout` as the only addition (STOREGC-10.5).~~
 - **UPGRADE-7.2** (guard) IF `registry.json`, `capabilities.json`, `snapshot.json` or `config.json` holds a key
   this hive does not define, other than `layout` in the first three, THEN THE SYSTEM SHALL CONTINUE TO refuse it
   as malformed.

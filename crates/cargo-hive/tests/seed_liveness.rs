@@ -3,10 +3,13 @@
 
 #![allow(clippy::disallowed_types, clippy::disallowed_methods, reason = "test fixtures")]
 
+mod common;
+
 use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_core::caps::DEPS_CAP;
 use cargo_hive_core::fingerprint::{self, Format, le_hex, read_profile};
 use cargo_hive_core::target::{Owner, TargetDir};
+use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
 use cargo_hive_seed::source::{Skip, SourceUnit, holds, live_registry_units, unit_key};
 use cargo_hive_state::{Config, State};
 use std::fs;
@@ -106,8 +109,14 @@ fn write_unit(
         ),
     )
     .unwrap();
-    let stamp =
-        cargo_hive_core::liveness::unit_timestamp(profile, name, fingerprint::UnitKind::of(stem));
+    let stamp = cargo_hive_core::liveness::unit_timestamp(
+        profile,
+        &UnitLoc {
+            layout: UnitLayout::Flat,
+            name_meta: name.to_string(),
+        },
+        fingerprint::UnitKind::of(stem),
+    );
     touch(&stamp, now, age);
 }
 
@@ -355,6 +364,124 @@ fn a_not_current_unit_is_not_filled() {
 }
 
 #[test]
+fn a_unit_dir_build_script_with_registry_out_dep_info_is_a_registry_unit() {
+    let scratch = Scratch::new("udir-bs-reg");
+    let env = Env::new(&scratch.0);
+    let home = scratch.0.join("cargo-home");
+    let profile = scratch.0.join("debug");
+    let hex = "bbbbbbbbbbbbbbbb";
+    let fp = u64::from_str_radix(hex, 16).unwrap();
+    let loc = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "withbs",
+        hex,
+        "build-script-build",
+        fp,
+        &[],
+        &["build_script_build", "build_script_build.d"],
+    );
+    let out = cargo_hive_core::unit_path::outputs(&profile, &loc);
+    fs::write(
+        out.join("build_script_build.d"),
+        format!("build_script_build.d: {}\n", registry_src(&home)),
+    )
+    .unwrap();
+    let (units, left_out) = read_units(&env, &scratch.0, &[&profile], &home).unwrap();
+    assert!(left_out.is_empty(), "{left_out:?}");
+    assert_eq!(units.len(), 1, "{units:?}");
+    assert_eq!(units[0].dir_name, loc.name_meta);
+    assert_eq!(units[0].kind, "build-script");
+    assert_eq!(units[0].layout, UnitLayout::UnitDir);
+}
+
+#[test]
+fn a_unit_dir_workspace_unit_is_left_out_of_registry_units() {
+    let scratch = Scratch::new("udir-ws");
+    let env = Env::new(&scratch.0);
+    let home = scratch.0.join("cargo-home");
+    let profile = scratch.0.join("debug");
+    let reg_hex = "aaaaaaaaaaaaaaaa";
+    let ws_hex = "bbbbbbbbbbbbbbbb";
+    let reg_fp = u64::from_str_radix(reg_hex, 16).unwrap();
+    let ws_fp = u64::from_str_radix(ws_hex, 16).unwrap();
+    let reg = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "reg",
+        reg_hex,
+        "lib-reg",
+        reg_fp,
+        &[],
+        &["reg.d"],
+    );
+    let ws = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "workpkg",
+        ws_hex,
+        "lib-workpkg",
+        ws_fp,
+        &[(reg_fp, "reg")],
+        &["workpkg.d"],
+    );
+    fs::write(
+        cargo_hive_core::unit_path::outputs(&profile, &reg).join("reg.d"),
+        format!("reg.d: {}\n", registry_src(&home)),
+    )
+    .unwrap();
+    fs::write(
+        cargo_hive_core::unit_path::outputs(&profile, &ws).join("workpkg.d"),
+        "workpkg.d: src/lib.rs\n",
+    )
+    .unwrap();
+    let (units, left_out) = read_units(&env, &scratch.0, &[&profile], &home).unwrap();
+    assert!(left_out.is_empty(), "{left_out:?}");
+    let got = by_dir(&units);
+    assert!(got.contains_key(reg.name_meta.as_str()), "{got:?}");
+    assert!(!got.contains_key(ws.name_meta.as_str()), "{got:?}");
+}
+
+#[test]
+fn a_partial_unit_dir_is_never_emitted_as_a_registry_unit() {
+    let scratch = Scratch::new("udir-partial");
+    let env = Env::new(&scratch.0);
+    let home = scratch.0.join("cargo-home");
+    let profile = scratch.0.join("debug");
+    let ok_hex = "aaaaaaaaaaaaaaaa";
+    let ok_fp = u64::from_str_radix(ok_hex, 16).unwrap();
+    let ok = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "ok",
+        ok_hex,
+        "lib-ok",
+        ok_fp,
+        &[],
+        &["ok.d"],
+    );
+    fs::write(
+        cargo_hive_core::unit_path::outputs(&profile, &ok).join("ok.d"),
+        format!("ok.d: {}\n", registry_src(&home)),
+    )
+    .unwrap();
+    common::unit_dirs::plant_partial(&profile, "partial", "bbbbbbbbbbbbbbbb");
+    let report = read_profile(&profile);
+    assert_eq!(report.partial_unit_dirs, 1, "{report:?}");
+    assert_eq!(report.units, 1, "{report:?}");
+    let (units, left_out) = read_units(&env, &scratch.0, &[&profile], &home).unwrap();
+    assert!(left_out.is_empty(), "{left_out:?}");
+    assert_eq!(units.len(), 1, "{units:?}");
+    assert_eq!(units[0].dir_name, ok.name_meta);
+    assert!(
+        units
+            .iter()
+            .all(|u| u.dir_name != "partial-bbbbbbbbbbbbbbbb"),
+        "{units:?}"
+    );
+}
+
+#[test]
 fn an_undecided_or_unsupported_target_is_a_skip_with_its_reason() {
     let scratch = Scratch::new("skip");
     let env = Env::new(&scratch.0);
@@ -483,7 +610,7 @@ fn an_undecided_target_holds_every_graph_unit_key_and_not_current_name_meta() {
             .unwrap()
             .units
             .iter()
-            .find(|u| u.dir_name == current)
+            .find(|u| u.loc.name_meta == current)
             .unwrap(),
     );
     assert!(got.keys.contains(&graph_key), "{got:?}");

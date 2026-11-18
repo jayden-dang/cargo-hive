@@ -20,6 +20,7 @@ use cargo_hive_cargo::discover::Checkout;
 use cargo_hive_cargo::registry::Repo;
 use cargo_hive_cargo::toolchain::Toolchain;
 use cargo_hive_core::caps::CRATE_DIR_CAP;
+use cargo_hive_core::unit_path::UnitLayout;
 use cargo_hive_state::window_days;
 
 use choose::Choice;
@@ -257,6 +258,7 @@ pub fn run_clone(
     checkout: &Checkout,
     toolchain: &Toolchain,
     filled: Filled,
+    unit_layout: Option<UnitLayout>,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Outcome, Error> {
     let Filled {
@@ -289,8 +291,21 @@ pub fn run_clone(
     let order = choose::source_order(&stored, &repo.main, &|record| {
         lane_lock.is_some() && read_lock_file(&record.checkout) == lane_lock
     });
-    let (rows, dropped) = match choose::choose(&stored, &repo.main, &toolchain.version_text, &order)
-    {
+    let (rows, dropped) = match choose::choose(
+        &stored,
+        &repo.main,
+        &toolchain.version_text,
+        &order,
+        unit_layout,
+    ) {
+        Choice::NoUnitLayout => {
+            findings.push((
+                "unit_layout.missing".to_string(),
+                None,
+                "no unit layout is recorded for this toolchain, so nothing was cloned; run `cargo hive doctor`".to_string(),
+            ));
+            return Ok(from_fill(ctx, &filled, findings, false, 0));
+        }
         Choice::NoSource => {
             findings.push((
                 "source.none".to_string(),
@@ -346,11 +361,14 @@ pub fn run(
     repo: &Repo,
     checkout: &Checkout,
     toolchain: &Toolchain,
+    unit_layout: Option<UnitLayout>,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Outcome, Error> {
     match run_fill(ctx, repo, cancel)? {
         Fill::Stopped(outcome) => Ok(outcome),
-        Fill::Continue(filled) => run_clone(ctx, repo, checkout, toolchain, filled, cancel),
+        Fill::Continue(filled) => {
+            run_clone(ctx, repo, checkout, toolchain, filled, unit_layout, cancel)
+        }
     }
 }
 

@@ -8,8 +8,100 @@ mod common;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+use cargo_hive_core::target::TAG_LINE;
+use cargo_hive_core::unit_path::{self, UnitLayout, UnitLoc};
+use common::cargo_fixture::layout_of;
 use common::plan_fixture::{Planned, tree};
+use common::unit_dirs;
 use common::{Hive, Scratch, init_repo, interrupt, register, wait_until_open, wait_within};
+
+const THIRTY_DAYS: Duration = Duration::from_secs(30 * 86_400);
+
+struct UnitDirTarget {
+    hive: Hive,
+    scratch: Scratch,
+    target: PathBuf,
+    profile: PathBuf,
+    loc: UnitLoc,
+    unit: PathBuf,
+}
+
+fn tag_target(target: &Path) {
+    std::fs::create_dir_all(target.join("debug")).unwrap();
+    std::fs::write(
+        target.join("CACHEDIR.TAG"),
+        format!("Signature: 8a477f597d28d172789f06886806bc55\n{TAG_LINE}\n"),
+    )
+    .unwrap();
+}
+
+fn age_stamp(profile: &Path, loc: &UnitLoc, stem: &str) {
+    let stamp = cargo_hive_core::liveness::unit_timestamp(
+        profile,
+        loc,
+        cargo_hive_core::fingerprint::UnitKind::of(stem),
+    );
+    std::fs::File::open(&stamp)
+        .unwrap()
+        .set_modified(SystemTime::now() - THIRTY_DAYS)
+        .unwrap();
+}
+
+fn write_profile_locks(profile: &Path) {
+    for name in [".cargo-build-lock", ".cargo-lock"] {
+        std::fs::write(profile.join(name), b"").unwrap();
+    }
+}
+
+/// A registered checkout whose only dead unit is a synthetic unit-dir lib.
+fn unit_dir_target(label: &str) -> UnitDirTarget {
+    let hive = Hive::ready();
+    let s = Scratch::new(label);
+    let repo = init_repo(&s.path.join("app"), "");
+    let target = repo.join("target");
+    let profile = target.join("debug");
+    tag_target(&target);
+    let loc = unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "widget",
+        "4444444444444444",
+        "lib-widget",
+        104,
+        &[],
+        &["libwidget.rmeta", "z.d", "a.d", "libwidget.rlib"],
+    );
+    let unit = unit_path::unit_dir(&profile, &loc).unwrap();
+    std::fs::create_dir_all(unit.join("run")).unwrap();
+    age_stamp(&profile, &loc, "lib-widget");
+    write_profile_locks(&profile);
+    register(&hive, &repo);
+    UnitDirTarget {
+        hive,
+        scratch: s,
+        target,
+        profile,
+        loc,
+        unit,
+    }
+}
+
+fn plan_id(hive: &Hive, class: &str) -> String {
+    let (out, r) = hive.json(&["gc", "--plan"]);
+    assert!(out.status.success(), "{r}");
+    r["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["class"] == class)
+        .unwrap_or_else(|| panic!("no {class} plan in {r}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
 
 fn write_caps(p: &Planned, disabled: serde_json::Value) {
     let release = cargo_hive_cargo::toolchain::resolve_toolchain(&p.hive.home.path)
@@ -293,9 +385,16 @@ fn without_the_accounting_capability_plans_are_made_and_the_bytes_are_unmeasured
 #[test]
 fn a_dead_unit_that_owns_no_artifact_is_never_planned_for_its_lone_fingerprint_dir() {
     let p = Planned::new("plan-no-artifact");
-    let hash = p.dead_unit_hash(&p.worktree_target());
+    let target = p.worktree_target();
+    // Flat: a unit whose only remaining files are under `.fingerprint/` is not planned.
+    // Unit-dir units are planned as the whole unit directory, so this guard is flat-only.
+    if layout_of(&target) != UnitLayout::Flat {
+        eprintln!("skip: lone-fingerprint guard is the flat layout rule");
+        return;
+    }
+    let hash = p.dead_unit_hash(&target);
     let mut seen = 0usize;
-    for e in std::fs::read_dir(p.worktree_target().join("debug/deps")).unwrap() {
+    for e in std::fs::read_dir(target.join("debug/deps")).unwrap() {
         seen += 1;
         assert!(seen < 100_000, "walk bound hit");
         let path = e.unwrap().path();
@@ -540,15 +639,24 @@ fn a_planned_unit_that_a_command_made_live_again_refuses_the_whole_plan() {
 #[test]
 fn a_planned_path_that_vanished_refuses_the_plan() {
     let p = Planned::new("stale-entry");
-    let hash = p.dead_unit_hash(&p.worktree_target());
     let id = Planned::id_of(&p.plan(), "secondary");
-    let deps = p.worktree_target().join("debug/deps");
-    let victim = std::fs::read_dir(&deps)
+    let stored = p.plans_json();
+    let plan = stored["plans"]
+        .as_array()
         .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|f| f.to_str().unwrap().contains(&hash) && f.extension().is_some_and(|e| e == "rlib"))
+        .iter()
+        .find(|x| x["id"] == id.as_str())
         .unwrap();
-    std::fs::remove_file(&victim).unwrap();
+    let victim = PathBuf::from(
+        plan["targets"][0]["entries"][0]["path"]
+            .as_str()
+            .expect("planned entry path"),
+    );
+    if victim.is_dir() {
+        std::fs::remove_dir_all(&victim).unwrap();
+    } else {
+        std::fs::remove_file(&victim).unwrap();
+    }
     refused(&p, &id, "entry_changed");
 }
 
@@ -680,11 +788,14 @@ fn a_changed_owner_refuses_the_plan() {
 #[test]
 fn a_profile_with_an_unknown_fingerprint_format_refuses_the_plan() {
     let p = Planned::new("stale-format");
-    let hash = p.dead_unit_hash(&p.worktree_target());
+    let target = p.worktree_target();
+    let hash = p.dead_unit_hash(&target);
     let id = Planned::id_of(&p.plan(), "secondary");
-    let unit = p
-        .worktree_target()
-        .join(format!("debug/.fingerprint/fixture-{hash}"));
+    let loc = UnitLoc {
+        layout: layout_of(&target),
+        name_meta: format!("fixture-{hash}"),
+    };
+    let unit = unit_path::fingerprint_dir(&target.join("debug"), &loc);
     for entry in std::fs::read_dir(&unit).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|e| e == "json") {
@@ -775,7 +886,9 @@ fn a_plan_whose_parent_is_a_symlink_is_refused_and_the_target_stays() {
     std::fs::create_dir_all(&outside).unwrap();
     let keep = outside.join("keep");
     std::fs::write(&keep, b"mine").unwrap();
-    let escape = p.worktree_target().join("debug/deps/escape");
+    let deps = p.worktree_target().join("debug/deps");
+    std::fs::create_dir_all(&deps).unwrap();
+    let escape = deps.join("escape");
     std::os::unix::fs::symlink(&outside, &escape).unwrap();
     let linked = escape.join("keep");
     let md = std::fs::metadata(&keep).unwrap();
@@ -1080,4 +1193,165 @@ fn an_interrupted_apply_waiting_for_the_state_lock_exits_130_without_waiting_for
     interrupt(child.id());
     let out = wait_within(child, std::time::Duration::from_secs(10));
     assert_eq!(out.status.code(), Some(130), "{out:?}");
+}
+
+#[test]
+fn applying_a_dead_unit_dir_removes_the_unit_and_leaves_its_package_dir() {
+    let fx = unit_dir_target("apply-udir-gone");
+    let package = fx.profile.join("build").join("widget");
+    assert!(fx.unit.is_dir());
+    assert!(package.is_dir());
+
+    let (out, planned) = fx.hive.json(&["gc", "--plan"]);
+    assert!(out.status.success(), "{planned}");
+    let plan = planned["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["class"] == "protected")
+        .expect("protected plan");
+    let id = plan["id"].as_str().unwrap();
+    let stored = fx.hive.home.path.join("plans.json");
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&stored).unwrap()).unwrap();
+    let entry = &stored["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == id)
+        .unwrap()["targets"][0]["entries"][0];
+    assert_eq!(
+        entry["unit"].as_str().unwrap(),
+        "debug/build/widget/4444444444444444",
+        "{entry}"
+    );
+
+    let (out, r) = fx.hive.json(&["apply", id]);
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    assert_eq!(r["plans"][0]["outcome"], "applied", "{r}");
+    assert!(!fx.unit.exists(), "unit dir should be gone");
+    assert!(package.is_dir(), "package dir must stay");
+    assert!(
+        std::fs::read_dir(&package).unwrap().next().is_none(),
+        "package dir should be empty after the unit is removed"
+    );
+}
+
+#[test]
+fn a_unit_dir_replaced_after_the_plan_is_refused_as_stale() {
+    let fx = unit_dir_target("apply-udir-inode");
+    let id = plan_id(&fx.hive, "protected");
+    // Replace the unit dir so every planned path gets a new inode.
+    let backup = fx.scratch.path.join("unit-backup");
+    std::fs::rename(&fx.unit, &backup).unwrap();
+    copy_tree(&backup, &fx.unit);
+    let before = tree(&fx.target);
+    let (out, r) = fx.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(1), "{r}");
+    assert_eq!(r["plans"][0]["outcome"], "refused", "{r}");
+    assert_eq!(r["plans"][0]["reason"], "entry_changed", "{r}");
+    assert_eq!(
+        tree(&fx.target),
+        before,
+        "a refused apply deleted something"
+    );
+    assert!(fx.unit.is_dir());
+}
+
+#[test]
+fn a_unit_dir_revived_after_the_plan_is_refused() {
+    let fx = unit_dir_target("apply-udir-revived");
+    let id = plan_id(&fx.hive, "protected");
+    let stamp = cargo_hive_core::liveness::unit_timestamp(
+        &fx.profile,
+        &fx.loc,
+        cargo_hive_core::fingerprint::UnitKind::of("lib-widget"),
+    );
+    std::fs::File::open(&stamp)
+        .unwrap()
+        .set_modified(SystemTime::now())
+        .unwrap();
+    let before = tree(&fx.target);
+    let (out, r) = fx.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(1), "{r}");
+    assert_eq!(r["plans"][0]["outcome"], "refused", "{r}");
+    assert_eq!(r["plans"][0]["reason"], "stale_item", "{r}");
+    assert_eq!(tree(&fx.target), before);
+}
+
+#[test]
+fn applying_a_dead_unit_dir_counts_paths_deleted_and_freed_bytes() {
+    let fx = unit_dir_target("apply-udir-counts");
+    let (out, planned) = fx.hive.json(&["gc", "--plan"]);
+    assert!(out.status.success(), "{planned}");
+    let plan = planned["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["class"] == "protected")
+        .unwrap();
+    let id = plan["id"].as_str().unwrap();
+    let listed = plan["paths"].as_u64().unwrap();
+    assert!(listed >= 4, "expected ordered unit-dir entries: {plan}");
+    let (out, r) = fx.hive.json(&["apply", id]);
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    let applied = &r["plans"][0];
+    assert_eq!(applied["outcome"], "applied", "{r}");
+    assert_eq!(
+        applied["counts"]["paths_deleted"].as_u64().unwrap(),
+        listed,
+        "{applied}"
+    );
+    assert!(
+        applied["counts"]["freed_bytes"].as_u64().is_some(),
+        "freed bytes are counted: {applied}"
+    );
+}
+
+#[test]
+fn a_flat_plan_from_today_still_applies_like_a_zero_one_two_plan() {
+    // 0.1.2 wrote only flat labels (`debug/<name_meta>`). Planned::new builds
+    // that shape under rustc 1.97.1; under 1.100 the fixture is unit-dir.
+    let p = Planned::new("apply-flat-guard");
+    if layout_of(&p.worktree_target()) != UnitLayout::Flat {
+        eprintln!("skip: flat plan label guard needs the flat layout");
+        return;
+    }
+    let planned = p.plan();
+    let id = Planned::id_of(&planned, "secondary");
+    let stored = p.plans_json();
+    let plan = stored["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == id.as_str())
+        .unwrap();
+    let unit = plan["targets"][0]["entries"][0]["unit"].as_str().unwrap();
+    assert!(
+        unit.starts_with("debug/fixture-"),
+        "flat label scheme must stay: {unit}"
+    );
+    assert!(
+        !unit.contains("/build/"),
+        "flat plans must not use unit-dir labels: {unit}"
+    );
+    let before = tree(&p.worktree_target());
+    let (out, r) = p.hive.json(&["apply", &id]);
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    assert_eq!(r["plans"][0]["outcome"], "applied", "{r}");
+    assert!(tree(&p.worktree_target()).len() < before.len());
+}
+
+fn copy_tree(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        let md = entry.metadata().unwrap();
+        if md.is_dir() {
+            copy_tree(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), &to).unwrap();
+        }
+    }
 }

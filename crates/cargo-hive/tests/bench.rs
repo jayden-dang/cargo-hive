@@ -78,7 +78,11 @@ fn run_bench_cfg(
         mains: &lib.mains,
         liveness: cargo_hive_gc::liveness::liveness,
     };
-    run(&ctx, plan, limits, cancel)
+    let caps: cargo_hive_doctor::Capabilities = lib
+        .state
+        .read(cargo_hive_doctor::CAPABILITIES_FILE)
+        .unwrap_or_default();
+    run(&ctx, plan, limits, caps.unit_layout_or_flat(), cancel)
 }
 
 fn prime_store(hive: &Hive, plan: &Plan) {

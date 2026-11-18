@@ -2,9 +2,10 @@
 //! and a sibling `<H>` with 16 lowercase hex chars. Its JSON must have exactly the 11
 //! known keys with known types. Any deviation makes the whole profile dir unsupported.
 
+use crate::unit_path::{UnitLayout, UnitLoc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
 use std::io::Read;
@@ -177,32 +178,38 @@ impl Serialize for UnitHash {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unit {
-    pub dir_name: String,
+    pub loc: UnitLoc,
     pub kind: UnitKind,
-    #[serde(rename = "hash_hex")]
     pub hash: UnitHash,
     pub deps: Vec<DepEdge>,
-    #[serde(skip)]
     pub stem: String,
-    #[serde(skip)]
     pub features: Arc<str>,
-    #[serde(skip)]
     pub coverage: Coverage,
-    #[serde(skip)]
     pub profile: u64,
-    #[serde(skip)]
     pub target: u64,
-    #[serde(skip)]
     pub path: u64,
-    #[serde(skip)]
     pub toolchain_value: u64,
+}
+
+impl Serialize for Unit {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Unit", 5)?;
+        state.serialize_field("name_meta", &self.loc.name_meta)?;
+        state.serialize_field("unit_layout", &self.loc.layout)?;
+        state.serialize_field("kind", &self.kind)?;
+        state.serialize_field("hash_hex", &self.hash)?;
+        state.serialize_field("deps", &self.deps)?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotCurrentUnit {
     pub dir: PathBuf,
+    pub loc: UnitLoc,
     pub stem: Option<String>,
     pub features: Option<Arc<str>>,
     pub outputs: Vec<String>,
@@ -251,6 +258,10 @@ pub struct ProfileReport {
     pub edges: Option<EdgeCounts>,
     #[serde(skip)]
     pub graph: Option<UnitGraph>,
+    /// Unit layouts that contributed units or not-current units in this profile.
+    pub layouts: BTreeSet<UnitLayout>,
+    /// Hex unit dirs under package dirs with no or empty `fingerprint/`.
+    pub partial_unit_dirs: usize,
 }
 
 /// Cargo's `to_hex`: the u64's 8 bytes in little-endian order, as lowercase hex.
@@ -358,6 +369,7 @@ enum ParsedUnit {
 fn read_unit(
     dir: &Path,
     json_name: &str,
+    loc: UnitLoc,
     shared_features: &mut HashMap<String, Arc<str>>,
 ) -> Result<ParsedUnit, String> {
     let stem = json_name.trim_end_matches(".json");
@@ -397,13 +409,15 @@ fn read_unit(
         });
     }
     let hash_text = String::from_utf8(hash).expect("checked ASCII hex");
+    let unit_hash = match loc.layout {
+        UnitLayout::Flat => UnitHash::parse(&hash_text).expect("checked hex"),
+        UnitLayout::UnitDir => UnitHash::parse(loc.hex())
+            .ok_or_else(|| "unit dir name is not 16 lowercase hex".to_string())?,
+    };
     Ok(ParsedUnit::Current(Unit {
-        dir_name: dir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default(),
+        loc,
         kind: UnitKind::of(&stem),
-        hash: UnitHash::parse(&hash_text).expect("checked hex"),
+        hash: unit_hash,
         deps,
         stem,
         features,
@@ -509,7 +523,124 @@ fn never_compiled(names: &[String]) -> bool {
             .all(|n| n == INVOKED_TIMESTAMP || n.starts_with("output-"))
 }
 
+fn flat_loc_for(dir: &Path) -> UnitLoc {
+    UnitLoc {
+        layout: UnitLayout::Flat,
+        name_meta: dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+fn list_names(dir: &Path, problem: &mut Option<String>, cap: usize) -> Option<Vec<String>> {
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            let mut names = Vec::new();
+            for (seen, entry) in entries.enumerate() {
+                if seen >= cap {
+                    problem.get_or_insert(format!("{} has more than {cap} entries", dir.display()));
+                    return None;
+                }
+                match entry {
+                    Ok(entry) => names.push(entry.file_name().to_string_lossy().to_string()),
+                    Err(e) => {
+                        problem.get_or_insert(format!("{}: {e}", dir.display()));
+                    }
+                }
+            }
+            Some(names)
+        }
+        Err(e) => {
+            problem.get_or_insert(format!("{}: {e}", dir.display()));
+            None
+        }
+    }
+}
+
+struct ProfileAccum<'a> {
+    units: &'a mut Vec<Unit>,
+    counted: &'a mut usize,
+    not_current_units: &'a mut Vec<NotCurrentUnit>,
+    layouts: &'a mut BTreeSet<UnitLayout>,
+    shared_features: &'a mut HashMap<String, Arc<str>>,
+    problem: &'a mut Option<String>,
+}
+
+fn output_names(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|n| n.starts_with("output-"))
+        .cloned()
+        .collect()
+}
+
+fn absorb_fingerprint_dir(dir: &Path, loc: UnitLoc, names: &[String], acc: &mut ProfileAccum<'_>) {
+    if names.is_empty() {
+        return;
+    }
+    if never_compiled(names) {
+        acc.layouts.insert(loc.layout);
+        acc.not_current_units.push(NotCurrentUnit {
+            dir: dir.to_path_buf(),
+            loc,
+            stem: None,
+            features: None,
+            outputs: output_names(names),
+            deps: Vec::new(),
+        });
+        return;
+    }
+    let jsons: Vec<&String> = names.iter().filter(|n| n.ends_with(".json")).collect();
+    if jsons.len() != 1 {
+        acc.problem.get_or_insert(format!(
+            "{}: {} fingerprint JSON files",
+            dir.display(),
+            jsons.len()
+        ));
+        return;
+    }
+    match read_unit(dir, jsons[0], loc.clone(), acc.shared_features) {
+        Ok(ParsedUnit::Current(u)) => {
+            acc.layouts.insert(u.loc.layout);
+            *acc.counted += 1;
+            acc.units.push(u);
+        }
+        Ok(ParsedUnit::NotCurrent {
+            stem,
+            features,
+            deps,
+        }) => {
+            acc.layouts.insert(loc.layout);
+            acc.not_current_units.push(NotCurrentUnit {
+                dir: dir.to_path_buf(),
+                loc,
+                stem: Some(stem),
+                features: Some(features),
+                outputs: output_names(names),
+                deps,
+            });
+        }
+        Err(reason) => {
+            *acc.counted += 1;
+            acc.problem
+                .get_or_insert(format!("{}: {reason}", dir.display()));
+        }
+    }
+}
+
+fn is_package_dir_entries(names: &[String], paths: &[PathBuf]) -> bool {
+    names
+        .iter()
+        .zip(paths.iter())
+        .all(|(name, path)| UnitHash::parse(name).is_some() && path.is_dir())
+}
+
 pub fn read_profile(profile_dir: &Path) -> ProfileReport {
+    read_profile_capped(profile_dir, crate::caps::CRATE_DIR_CAP)
+}
+
+fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
     let path = profile_dir.to_path_buf();
     let unsupported = |units: usize, reason: String| ProfileReport {
         path: path.clone(),
@@ -519,116 +650,170 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
         not_current_units: Vec::new(),
         edges: None,
         graph: None,
-    };
-    let fp = profile_dir.join(".fingerprint");
-    if !fp.is_dir() {
-        return unsupported(
-            0,
-            "no .fingerprint/ directory (newer or unknown Cargo layout)".into(),
-        );
-    }
-    let entries = match fs::read_dir(&fp) {
-        Ok(e) => e,
-        Err(e) => return unsupported(0, format!("cannot read .fingerprint/: {e}")),
+        layouts: BTreeSet::new(),
+        partial_unit_dirs: 0,
     };
     let mut units = Vec::new();
     let mut counted = 0usize;
     let mut not_current_units = Vec::new();
+    let mut layouts = BTreeSet::new();
+    let mut partial_unit_dirs = 0usize;
     let mut shared_features: HashMap<String, Arc<str>> = HashMap::new();
     let mut problem: Option<String> = None;
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                problem.get_or_insert(format!("cannot read .fingerprint/: {e}"));
-                continue;
-            }
+    let mut saw_fingerprint = false;
+    let mut saw_package_dir = false;
+
+    let fp = profile_dir.join(".fingerprint");
+    if fp.is_dir() {
+        saw_fingerprint = true;
+        let entries = match fs::read_dir(&fp) {
+            Ok(e) => e,
+            Err(e) => return unsupported(0, format!("cannot read .fingerprint/: {e}")),
         };
-        match entry.file_type() {
-            Ok(kind) if kind.is_dir() => dirs.push(entry.path()),
-            Ok(_) => {}
-            Err(e) => {
-                problem.get_or_insert(format!("{}: {e}", entry.path().display()));
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        for (seen, entry) in entries.enumerate() {
+            if seen >= dir_cap {
+                return unsupported(
+                    0,
+                    format!("{} has more than {dir_cap} entries", fp.display()),
+                );
+            }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    problem.get_or_insert(format!("cannot read .fingerprint/: {e}"));
+                    continue;
+                }
+            };
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => dirs.push(entry.path()),
+                Ok(_) => {}
+                Err(e) => {
+                    problem.get_or_insert(format!("{}: {e}", entry.path().display()));
+                }
             }
         }
+        dirs.sort();
+        for dir in dirs {
+            let Some(names) = list_names(&dir, &mut problem, dir_cap) else {
+                continue;
+            };
+            absorb_fingerprint_dir(
+                &dir,
+                flat_loc_for(&dir),
+                &names,
+                &mut ProfileAccum {
+                    units: &mut units,
+                    counted: &mut counted,
+                    not_current_units: &mut not_current_units,
+                    layouts: &mut layouts,
+                    shared_features: &mut shared_features,
+                    problem: &mut problem,
+                },
+            );
+        }
     }
-    dirs.sort();
-    for dir in dirs {
-        let names: Vec<String> = match fs::read_dir(&dir) {
+
+    let build = profile_dir.join("build");
+    if build.is_dir() {
+        let mut children: Vec<PathBuf> = Vec::new();
+        match fs::read_dir(&build) {
             Ok(entries) => {
-                let mut names = Vec::new();
-                for entry in entries {
-                    match entry {
-                        Ok(entry) => names.push(entry.file_name().to_string_lossy().to_string()),
+                for (seen, entry) in entries.enumerate() {
+                    if seen >= dir_cap {
+                        return unsupported(
+                            counted,
+                            format!("{} has more than {dir_cap} entries", build.display()),
+                        );
+                    }
+                    let entry = match entry {
+                        Ok(entry) => entry,
                         Err(e) => {
-                            problem.get_or_insert(format!("{}: {e}", dir.display()));
+                            problem.get_or_insert(format!("cannot read build/: {e}"));
+                            continue;
+                        }
+                    };
+                    match entry.file_type() {
+                        Ok(kind) if kind.is_dir() => children.push(entry.path()),
+                        Ok(_) => {
+                            problem.get_or_insert(format!(
+                                "{}: not a package dir or flat build-script dir",
+                                entry.path().display()
+                            ));
+                        }
+                        Err(e) => {
+                            problem.get_or_insert(format!("{}: {e}", entry.path().display()));
                         }
                     }
                 }
-                names
             }
             Err(e) => {
-                problem.get_or_insert(format!("{}: {e}", dir.display()));
+                problem.get_or_insert(format!("cannot read build/: {e}"));
+            }
+        }
+        children.sort();
+        for pkg_path in children {
+            let pkg_name = pkg_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let Some(child_names) = list_names(&pkg_path, &mut problem, dir_cap) else {
                 continue;
-            }
-        };
-        if names.is_empty() {
-            continue;
-        }
-        if never_compiled(&names) {
-            not_current_units.push(NotCurrentUnit {
-                dir: dir.clone(),
-                stem: None,
-                features: None,
-                outputs: names
-                    .iter()
-                    .filter(|n| n.starts_with("output-"))
-                    .cloned()
-                    .collect(),
-                deps: Vec::new(),
-            });
-            continue;
-        }
-        let jsons: Vec<&String> = names.iter().filter(|n| n.ends_with(".json")).collect();
-        if jsons.len() != 1 {
-            problem.get_or_insert(format!(
-                "{}: {} fingerprint JSON files",
-                dir.display(),
-                jsons.len()
-            ));
-            continue;
-        }
-        match read_unit(&dir, jsons[0], &mut shared_features) {
-            Ok(ParsedUnit::Current(u)) => {
-                counted += 1;
-                units.push(u);
-            }
-            Ok(ParsedUnit::NotCurrent {
-                stem,
-                features,
-                deps,
-            }) => {
-                not_current_units.push(NotCurrentUnit {
-                    dir: dir.clone(),
-                    stem: Some(stem),
-                    features: Some(features),
-                    outputs: names
-                        .iter()
-                        .filter(|n| n.starts_with("output-"))
-                        .cloned()
-                        .collect(),
-                    deps,
-                });
-            }
-            Err(reason) => {
-                counted += 1;
-                problem.get_or_insert(format!("{}: {reason}", dir.display()));
+            };
+            let child_paths: Vec<PathBuf> =
+                child_names.iter().map(|name| pkg_path.join(name)).collect();
+            if is_package_dir_entries(&child_names, &child_paths) {
+                saw_package_dir = true;
+                let mut hexes = child_names.clone();
+                hexes.sort();
+                for hex in hexes {
+                    let unit_root = pkg_path.join(&hex);
+                    let fp_dir = unit_root.join("fingerprint");
+                    let loc = UnitLoc {
+                        layout: UnitLayout::UnitDir,
+                        name_meta: format!("{pkg_name}-{hex}"),
+                    };
+                    if !fp_dir.is_dir() {
+                        partial_unit_dirs += 1;
+                        continue;
+                    }
+                    let Some(names) = list_names(&fp_dir, &mut problem, dir_cap) else {
+                        continue;
+                    };
+                    if names.is_empty() {
+                        partial_unit_dirs += 1;
+                        continue;
+                    }
+                    absorb_fingerprint_dir(
+                        &fp_dir,
+                        loc,
+                        &names,
+                        &mut ProfileAccum {
+                            units: &mut units,
+                            counted: &mut counted,
+                            not_current_units: &mut not_current_units,
+                            layouts: &mut layouts,
+                            shared_features: &mut shared_features,
+                            problem: &mut problem,
+                        },
+                    );
+                }
+            } else if unit_hash(&pkg_name).is_some() {
+                // Flat build-script dir under build/; units live in .fingerprint/.
+            } else {
+                problem.get_or_insert(format!(
+                    "{}: not a package dir or flat build-script dir",
+                    pkg_path.display()
+                ));
             }
         }
     }
+
     if let Some(reason) = problem {
         return unsupported(counted, reason);
+    }
+    if !saw_fingerprint && !saw_package_dir {
+        return unsupported(0, "no .fingerprint/ directory and no unit dirs".into());
     }
     let mut index: HashMap<UnitHash, Vec<UnitId>> = HashMap::new();
     for (i, u) in units.iter().enumerate() {
@@ -665,6 +850,8 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
             offsets,
             targets,
         }),
+        layouts,
+        partial_unit_dirs,
     }
 }
 
@@ -1226,14 +1413,270 @@ mod tests {
     }
 
     #[test]
-    fn a_profile_without_a_fingerprint_dir_is_unsupported() {
+    fn a_profile_with_a_unit_dir_and_no_fingerprint_dir_is_supported() {
         let p = scratch();
         fs::remove_dir_all(p.join(".fingerprint")).unwrap();
         fs::create_dir_all(p.join("build/pkg/0123456789abcdef/fingerprint")).unwrap();
         let r = read_profile(&p);
-        assert!(matches!(r.format, Format::Unsupported(ref why) if why.contains(".fingerprint")));
-        assert_eq!((r.units, r.edges), (0, None));
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!((r.units, r.partial_unit_dirs), (0, 1));
+        assert_eq!(
+            r.edges,
+            Some(EdgeCounts {
+                resolved: 0,
+                unresolved: 0,
+                ambiguous: 0
+            })
+        );
         fs::remove_dir_all(p).unwrap();
+    }
+
+    fn write_unit_dir(
+        profile: &Path,
+        package: &str,
+        hex: &str,
+        stem: &str,
+        value: u64,
+        deps: &[u64],
+    ) {
+        let fp = profile
+            .join("build")
+            .join(package)
+            .join(hex)
+            .join("fingerprint");
+        fs::create_dir_all(&fp).unwrap();
+        fs::write(fp.join(stem), le_hex(value)).unwrap();
+        fs::write(fp.join(format!("{stem}.json")), unit_json(deps)).unwrap();
+        fs::write(
+            fp.join("invoked.timestamp"),
+            "This file has an mtime of when this was started.",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_unit_dir_profile_reads_its_units_and_resolves_an_edge_between_packages() {
+        let p = scratch();
+        fs::remove_dir_all(p.join(".fingerprint")).unwrap();
+        let (a, b) = (0x0102_0304_0506_0708u64, 17_112_352_188_342_185_299u64);
+        write_unit_dir(&p, "dep", &le_hex(b), "lib-dep", b, &[]);
+        write_unit_dir(&p, "app", &le_hex(a), "lib-app", a, &[b]);
+        let r = read_profile(&p);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!(r.units, 2);
+        assert_eq!(r.layouts, BTreeSet::from([UnitLayout::UnitDir]));
+        assert_eq!(
+            r.edges,
+            Some(EdgeCounts {
+                resolved: 1,
+                unresolved: 0,
+                ambiguous: 0
+            })
+        );
+        let graph = r.graph.as_ref().unwrap();
+        assert!(
+            graph
+                .units
+                .iter()
+                .all(|u| u.loc.layout == UnitLayout::UnitDir)
+        );
+        assert!(
+            graph
+                .units
+                .iter()
+                .any(|u| u.loc.name_meta == format!("dep-{}", le_hex(b)))
+        );
+        assert!(
+            graph
+                .units
+                .iter()
+                .any(|u| u.loc.name_meta == format!("app-{}", le_hex(a)))
+        );
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_mixed_profile_resolves_an_edge_from_a_unit_dir_unit_to_a_flat_unit() {
+        let p = scratch();
+        let (a, b) = (0x0102_0304_0506_0708u64, 17_112_352_188_342_185_299u64);
+        write_unit(&p, &format!("dep-{}", le_hex(b)), "lib-dep", b, &[]);
+        write_unit_dir(&p, "app", &le_hex(a), "lib-app", a, &[b]);
+        let r = read_profile(&p);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!(r.units, 2);
+        assert_eq!(
+            r.layouts,
+            BTreeSet::from([UnitLayout::Flat, UnitLayout::UnitDir])
+        );
+        assert_eq!(
+            r.edges,
+            Some(EdgeCounts {
+                resolved: 1,
+                unresolved: 0,
+                ambiguous: 0
+            })
+        );
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_unit_dir_with_only_a_start_stamp_and_cached_messages_is_not_current() {
+        let p = scratch();
+        fs::remove_dir_all(p.join(".fingerprint")).unwrap();
+        write_unit_dir(&p, "ok", "0123456789abcdef", "lib-ok", 1, &[]);
+        let failed = p.join("build/failed/fedcba9876543210/fingerprint");
+        fs::create_dir_all(&failed).unwrap();
+        fs::write(failed.join("invoked.timestamp"), "").unwrap();
+        fs::write(failed.join("output-lib-failed"), "{}").unwrap();
+        let r = read_profile(&p);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!((r.units, r.not_current), (1, 1));
+        assert_eq!(r.layouts, BTreeSet::from([UnitLayout::UnitDir]));
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_unit_dir_with_an_empty_hash_file_is_not_current() {
+        let p = scratch();
+        fs::remove_dir_all(p.join(".fingerprint")).unwrap();
+        write_unit_dir(&p, "dep", "0123456789abcdef", "lib-dep", 1, &[]);
+        write_unit_dir(&p, "user", "1123456789abcdef", "lib-user", 2, &[1]);
+        let dep = p.join("build/dep/0123456789abcdef/fingerprint");
+        fs::write(dep.join("lib-dep"), "").unwrap();
+        let r = read_profile(&p);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!((r.units, r.not_current), (1, 1));
+        assert_eq!(
+            r.edges,
+            Some(EdgeCounts {
+                resolved: 0,
+                unresolved: 1,
+                ambiguous: 0
+            })
+        );
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_hex_dir_with_no_or_empty_fingerprint_is_a_partial_unit_dir() {
+        let p = scratch();
+        fs::remove_dir_all(p.join(".fingerprint")).unwrap();
+        fs::create_dir_all(p.join("build/pkg/0123456789abcdef")).unwrap();
+        fs::create_dir_all(p.join("build/pkg/1123456789abcdef/fingerprint")).unwrap();
+        write_unit_dir(&p, "ok", "2123456789abcdef", "lib-ok", 1, &[]);
+        let r = read_profile(&p);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!((r.units, r.partial_unit_dirs), (1, 2));
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn two_jsons_in_a_unit_dir_fingerprint_make_the_profile_unsupported() {
+        let p = scratch();
+        fs::remove_dir_all(p.join(".fingerprint")).unwrap();
+        write_unit_dir(&p, "ok", "0123456789abcdef", "lib-ok", 1, &[]);
+        write_unit_dir(&p, "q", "1123456789abcdef", "lib-q", 2, &[]);
+        fs::write(
+            p.join("build/q/1123456789abcdef/fingerprint/lib-r.json"),
+            unit_json(&[]),
+        )
+        .unwrap();
+        let r = read_profile(&p);
+        assert!(matches!(r.format, Format::Unsupported(_)), "{:?}", r.format);
+        assert_eq!(r.edges, None);
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_file_directly_in_build_makes_the_profile_unsupported() {
+        let p = scratch();
+        fs::remove_dir_all(p.join(".fingerprint")).unwrap();
+        write_unit_dir(&p, "ok", "0123456789abcdef", "lib-ok", 1, &[]);
+        fs::write(p.join("build/stray"), b"x").unwrap();
+        let r = read_profile(&p);
+        assert!(matches!(r.format, Format::Unsupported(_)), "{:?}", r.format);
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_package_dir_holding_a_non_hex_dir_makes_the_profile_unsupported() {
+        let p = scratch();
+        fs::remove_dir_all(p.join(".fingerprint")).unwrap();
+        write_unit_dir(&p, "ok", "0123456789abcdef", "lib-ok", 1, &[]);
+        fs::create_dir_all(p.join("build/pkg/not-a-hash")).unwrap();
+        let r = read_profile(&p);
+        assert!(matches!(r.format, Format::Unsupported(_)), "{:?}", r.format);
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_build_dir_that_is_neither_a_package_nor_a_flat_build_script_is_unsupported() {
+        let p = scratch();
+        fs::remove_dir_all(p.join(".fingerprint")).unwrap();
+        write_unit_dir(&p, "ok", "0123456789abcdef", "lib-ok", 1, &[]);
+        fs::create_dir_all(p.join("build/weird-name/out")).unwrap();
+        let r = read_profile(&p);
+        assert!(matches!(r.format, Format::Unsupported(_)), "{:?}", r.format);
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn an_empty_package_dir_is_accepted() {
+        let p = scratch();
+        fs::remove_dir_all(p.join(".fingerprint")).unwrap();
+        write_unit_dir(&p, "ok", "0123456789abcdef", "lib-ok", 1, &[]);
+        fs::create_dir_all(p.join("build/empty-pkg")).unwrap();
+        let r = read_profile(&p);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!(r.units, 1);
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_flat_and_unit_dir_unit_with_the_same_hash_make_an_edge_ambiguous() {
+        let p = scratch();
+        let shared = 7u64;
+        write_unit(&p, "flat-0000000000000001", "lib-flat", shared, &[]);
+        write_unit_dir(&p, "udir", &le_hex(shared), "lib-udir", shared, &[]);
+        write_unit(&p, "user-0000000000000003", "lib-user", 9, &[shared]);
+        let r = read_profile(&p);
+        assert_eq!(r.format, Format::Supported);
+        assert_eq!(r.units, 3);
+        assert_eq!(
+            r.edges,
+            Some(EdgeCounts {
+                resolved: 0,
+                unresolved: 0,
+                ambiguous: 1
+            })
+        );
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn layouts_names_flat_unit_dir_or_both() {
+        let flat = scratch();
+        write_unit(&flat, "a-0000000000000001", "lib-a", 1, &[]);
+        let r = read_profile(&flat);
+        assert_eq!(r.layouts, BTreeSet::from([UnitLayout::Flat]));
+        fs::remove_dir_all(flat).unwrap();
+
+        let unit = scratch();
+        fs::remove_dir_all(unit.join(".fingerprint")).unwrap();
+        write_unit_dir(&unit, "a", "0123456789abcdef", "lib-a", 1, &[]);
+        let r = read_profile(&unit);
+        assert_eq!(r.layouts, BTreeSet::from([UnitLayout::UnitDir]));
+        fs::remove_dir_all(unit).unwrap();
+
+        let mixed = scratch();
+        write_unit(&mixed, "a-0000000000000001", "lib-a", 1, &[]);
+        write_unit_dir(&mixed, "b", "1123456789abcdef", "lib-b", 2, &[]);
+        let r = read_profile(&mixed);
+        assert_eq!(
+            r.layouts,
+            BTreeSet::from([UnitLayout::Flat, UnitLayout::UnitDir])
+        );
+        fs::remove_dir_all(mixed).unwrap();
     }
 
     #[test]
@@ -1317,6 +1760,10 @@ mod tests {
             r.not_current_units,
             vec![NotCurrentUnit {
                 dir: failed,
+                loc: UnitLoc {
+                    layout: UnitLayout::Flat,
+                    name_meta: "failed-0000000000000002".into(),
+                },
                 stem: None,
                 features: None,
                 outputs: vec!["output-lib-failed".to_string()],
@@ -1338,6 +1785,10 @@ mod tests {
             r.not_current_units,
             vec![NotCurrentUnit {
                 dir: dep,
+                loc: UnitLoc {
+                    layout: UnitLayout::Flat,
+                    name_meta: "dep-0000000000000001".into(),
+                },
                 stem: Some("lib-dep".to_string()),
                 features: Some(Arc::from("[]")),
                 outputs: vec![],
@@ -1429,6 +1880,44 @@ mod tests {
         let r = read_profile(&p);
         assert!(r.not_current_units[0].deps.is_empty());
         fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_profile_listing_past_the_entry_cap_is_unsupported() {
+        let p = scratch();
+        write_unit(&p, "a-0000000000000001", "lib-a", 1, &[]);
+        write_unit(&p, "b-0000000000000002", "lib-b", 2, &[]);
+        write_unit(&p, "c-0000000000000003", "lib-c", 3, &[]);
+        let r = read_profile_capped(&p, 2);
+        assert!(
+            matches!(
+                r.format,
+                Format::Unsupported(ref why) if why.contains("2") && why.contains("entries")
+            ),
+            "{:?}",
+            r.format
+        );
+        assert_eq!(r.edges, None);
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn a_profile_with_neither_fingerprint_nor_unit_dirs_names_both() {
+        let unsupported = scratch();
+        fs::remove_dir_all(unsupported.join(".fingerprint")).unwrap();
+        let r = read_profile(&unsupported);
+        assert!(
+            matches!(
+                r.format,
+                Format::Unsupported(ref why)
+                    if why.starts_with("no .fingerprint/")
+                        && why.contains("no unit dirs")
+                        && !why.contains("newer")
+            ),
+            "{:?}",
+            r.format
+        );
+        fs::remove_dir_all(unsupported).unwrap();
     }
 
     #[test]

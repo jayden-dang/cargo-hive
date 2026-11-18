@@ -8,6 +8,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use cargo_hive_core::unit_path::UnitLayout;
+
 use super::store::{Row, SourceRecord, StoreFile};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -21,6 +23,8 @@ pub enum Choice {
     },
     /// No source target of this repo has a record for this toolchain.
     NoSource,
+    /// The checkout has no recorded unit layout; run doctor first.
+    NoUnitLayout,
 }
 
 /// The source targets of `repo`, best first: those `lock_matches` accepts, then the one
@@ -60,7 +64,11 @@ pub fn choose(
     repo: &Path,
     version_text: &str,
     order: &[std::path::PathBuf],
+    unit_layout: Option<UnitLayout>,
 ) -> Choice {
+    let Some(layout) = unit_layout else {
+        return Choice::NoUnitLayout;
+    };
     let Some(&value) = store.toolchains.get(version_text) else {
         return Choice::NoRow {
             release: release_line(version_text),
@@ -78,7 +86,7 @@ pub fn choose(
         let wanted: BTreeSet<(&str, &str, u32)> = record
             .units
             .iter()
-            .filter(|unit| unit.toolchain_value == value)
+            .filter(|unit| unit.toolchain_value == value && unit.unit_layout == layout)
             .map(|unit| {
                 (
                     unit.name_meta.as_str(),
@@ -92,6 +100,7 @@ pub fn choose(
             .iter()
             .filter(|row| {
                 listed(row, value, repo)
+                    && row.unit_layout == layout
                     && wanted.contains(&(
                         row.name_meta.as_str(),
                         row.fingerprint_hash.as_str(),
@@ -162,10 +171,33 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
+    use cargo_hive_core::unit_path::UnitLayout;
+
     use super::{Choice, choose, source_order};
     use crate::store::{Row, SourceRecord, SourceUnitRef, StoreFile};
 
+    fn choose_flat(
+        store: &StoreFile,
+        repo: &Path,
+        version_text: &str,
+        order: &[std::path::PathBuf],
+    ) -> Choice {
+        choose(store, repo, version_text, order, Some(UnitLayout::Flat))
+    }
+
     fn row(name_meta: &str, fp: &str, value: u64, repo: &str, variant: u32, deps: &[&str]) -> Row {
+        row_layout(name_meta, fp, value, repo, variant, deps, UnitLayout::Flat)
+    }
+
+    fn row_layout(
+        name_meta: &str,
+        fp: &str,
+        value: u64,
+        repo: &str,
+        variant: u32,
+        deps: &[&str],
+        unit_layout: UnitLayout,
+    ) -> Row {
         Row {
             toolchain_value: value,
             name_meta: name_meta.into(),
@@ -178,22 +210,43 @@ mod tests {
             repos: vec![repo.into()],
             registry_deps: deps.iter().map(|d| d.to_string()).collect(),
             variant,
+            unit_layout,
         }
     }
 
     fn record(repo: &str, newest_at: u64, units: &[(&str, &str, u64, u32)]) -> SourceRecord {
+        record_layout(
+            repo,
+            newest_at,
+            units
+                .iter()
+                .map(|(name_meta, fp, value, variant)| {
+                    (*name_meta, *fp, *value, *variant, UnitLayout::Flat)
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn record_layout(
+        repo: &str,
+        newest_at: u64,
+        units: Vec<(&str, &str, u64, u32, UnitLayout)>,
+    ) -> SourceRecord {
         SourceRecord {
             repo: repo.into(),
             checkout: format!("{repo}/checkout").into(),
             newest_at,
             units: units
-                .iter()
-                .map(|(name_meta, fp, value, variant)| SourceUnitRef {
-                    toolchain_value: *value,
-                    name_meta: (*name_meta).into(),
-                    fingerprint_hash: (*fp).into(),
-                    variant: *variant,
-                })
+                .into_iter()
+                .map(
+                    |(name_meta, fp, value, variant, unit_layout)| SourceUnitRef {
+                        toolchain_value: value,
+                        name_meta: name_meta.into(),
+                        fingerprint_hash: fp.into(),
+                        variant,
+                        unit_layout,
+                    },
+                )
                 .collect(),
         }
     }
@@ -250,7 +303,7 @@ mod tests {
             )],
         );
         assert_eq!(
-            chosen(choose(&s, Path::new("/r"), "V1", &order(&["/t"]))),
+            chosen(choose_flat(&s, Path::new("/r"), "V1", &order(&["/t"]))),
             [("fa".to_string(), 0)]
         );
     }
@@ -260,7 +313,54 @@ mod tests {
         let s = store(vec![row("a-1", "fa", 1, "/r", 0, &[])], vec![]);
         let text = "rustc 9\nrelease: 9.9.9\n";
         assert!(
-            matches!(choose(&s, Path::new("/r"), text, &[]), Choice::NoRow { release } if release == "9.9.9")
+            matches!(choose_flat(&s, Path::new("/r"), text, &[]), Choice::NoRow { release } if release == "9.9.9")
+        );
+    }
+
+    #[test]
+    fn absent_unit_layout_refuses_without_choosing_rows() {
+        let s = store(
+            vec![row("a-1", "fa", 1, "/r", 0, &[])],
+            vec![("/t", record("/r", 5, &[("a-1", "fa", 1, 0)]))],
+        );
+        assert_eq!(
+            choose(&s, Path::new("/r"), "V1", &order(&["/t"]), None),
+            Choice::NoUnitLayout
+        );
+    }
+
+    #[test]
+    fn choose_keeps_only_rows_of_the_requested_layout() {
+        let s = store(
+            vec![
+                row_layout("a-1", "fa", 1, "/r", 0, &[], UnitLayout::Flat),
+                row_layout("b-1", "fb", 1, "/r", 0, &[], UnitLayout::UnitDir),
+            ],
+            vec![(
+                "/t",
+                record_layout(
+                    "/r",
+                    5,
+                    vec![
+                        ("a-1", "fa", 1, 0, UnitLayout::Flat),
+                        ("b-1", "fb", 1, 0, UnitLayout::UnitDir),
+                    ],
+                ),
+            )],
+        );
+        assert_eq!(
+            chosen(choose(
+                &s,
+                Path::new("/r"),
+                "V1",
+                &order(&["/t"]),
+                Some(UnitLayout::UnitDir)
+            )),
+            [("fb".to_string(), 0)]
+        );
+        assert_eq!(
+            chosen(choose_flat(&s, Path::new("/r"), "V1", &order(&["/t"]))),
+            [("fa".to_string(), 0)]
         );
     }
 
@@ -286,11 +386,21 @@ mod tests {
             ],
         );
         assert_eq!(
-            chosen(choose(&s, Path::new("/r"), "V1", &order(&["/t2", "/t1"]))),
+            chosen(choose_flat(
+                &s,
+                Path::new("/r"),
+                "V1",
+                &order(&["/t2", "/t1"])
+            )),
             [("fd".to_string(), 1), ("ft".to_string(), 0)]
         );
         assert_eq!(
-            chosen(choose(&s, Path::new("/r"), "V1", &order(&["/t1", "/t2"]))),
+            chosen(choose_flat(
+                &s,
+                Path::new("/r"),
+                "V1",
+                &order(&["/t1", "/t2"])
+            )),
             [("fd".to_string(), 0), ("fo".to_string(), 0)]
         );
     }
@@ -316,7 +426,7 @@ mod tests {
                 ),
             )],
         );
-        match choose(&s, Path::new("/r"), "V1", &order(&["/t"])) {
+        match choose_flat(&s, Path::new("/r"), "V1", &order(&["/t"])) {
             Choice::Units { rows, dropped } => {
                 let got: Vec<_> = rows.iter().map(|r| r.fingerprint_hash.as_str()).collect();
                 assert_eq!(got, ["fd"]);
@@ -333,7 +443,7 @@ mod tests {
             vec![("/t", record("/other", 5, &[("a-1", "fa", 1, 0)]))],
         );
         assert_eq!(
-            choose(&s, Path::new("/r"), "V1", &order(&["/t"])),
+            choose_flat(&s, Path::new("/r"), "V1", &order(&["/t"])),
             Choice::NoSource
         );
     }

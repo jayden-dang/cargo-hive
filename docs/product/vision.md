@@ -58,11 +58,10 @@ Receipts are also the data Cargo lacks for a default target-dir GC policy (cargo
 
 ## Scope boundaries
 
-**Now.** MILE-1 and MILE-2 closed 2026-11-12 and shipped in v0.1.0; MILE-3 is planned; MILE-4, upgrades that keep hive's state, is committed (2026-11-13); MILE-5, warm agent worktrees at stable paths that stay fast, is planned (2026-11-15) (`docs/roadmap/INDEX.md`). Slot mode left the non-goals on 2026-11-15 (`docs/product/pivot-ledger.md`). ROAD-4, the MCP server, dropped 2026-10-29; ROAD-7, owner approval, dropped 2026-11-02.
+**Now.** MILE-1 and MILE-2 closed 2026-11-12 and shipped in v0.1.0; MILE-3 is planned; MILE-4, upgrades that keep hive's state, is committed (2026-11-13); MILE-5, warm agent worktrees at stable paths that stay fast, is planned (2026-11-15) (`docs/roadmap/INDEX.md`). Slot mode left the non-goals on 2026-11-15 (`docs/product/pivot-ledger.md`). ROAD-4, the MCP server, dropped 2026-10-29; ROAD-7, owner approval, dropped 2026-11-02. This tree reads Cargo unit dirs beside the flat layout.
 
 **Deferred.**
 - A per-checkout "protect" marker.
-- Cargo's new build-dir layout: reported, never acted on.
 
 **Hard constraints.**
 - macOS only. The declared floor is macOS 27; older versions are supported where `cargo hive doctor` passes.

@@ -154,7 +154,7 @@ Locality: new file; `cli.rs` extends one loop.
 
 Satisfies: SEED-5.1, SEED-10.7, SEED-10.15
 Reuse: rung 2 — one condition at `src/gc/ledger.rs:66`
-Respects: ARCH-11, ARCH-18
+Respects: ARCH-11, ARCH-22
 Surface: `Ledger::file` result for a compressed file with `shares_all`: `gc::measure` and `plan_tier/build.rs` planned bytes — leave (smaller, truer numbers); `plan_tier/apply.rs` and `orphan.rs` — leave; `gc::run` — leave; bytes in plans already stored in `plans.json` — frozen, the design builds around them: they were measured before compressed clones existed, and a re-plan recomputes them. Test `compressed: private size is not trusted` (`ledger.rs:191`) — leave, it sets `shares_all: false`.
 Interface: unchanged.
 Depth: n/a — extends `Ledger`.

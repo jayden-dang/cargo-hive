@@ -14,7 +14,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cargo_hive_cargo::ctx::Ctx;
 use cargo_hive_cargo::discover::Checkout;
 use cargo_hive_cargo::registry::Repo;
+use cargo_hive_core::unit_path::{self, UnitLayout};
 use cargo_hive_seed::Error;
+use cargo_hive_state::State;
 use common::cargo_fixture::backdate_all;
 use common::plan_fixture::LibCtx;
 use common::recording_fs::Recording;
@@ -33,18 +35,39 @@ fn the_fixture_builds_a_registry_crate_with_a_build_script_offline() {
         built.registry_recompiled
     );
     assert!(built.registry_recompiled.iter().any(|n| n == "leafcrate"));
-    let deps = repo.main.join("target/debug/deps");
-    let dep_info = std::fs::read_dir(&deps)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| {
-            p.extension().is_some_and(|x| x == "d")
-                && p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("depcrate-")
-        })
-        .unwrap();
+    let target = repo.main.join("target");
+    let profile = target.join("debug");
+    let layout = common::cargo_fixture::layout_of(&target);
+    let dep_info = match layout {
+        UnitLayout::Flat => std::fs::read_dir(profile.join("deps"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| {
+                p.extension().is_some_and(|x| x == "d")
+                    && p.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("depcrate-")
+            })
+            .expect("depcrate-*.d under deps/"),
+        UnitLayout::UnitDir => {
+            let report = cargo_hive_core::fingerprint::read_profile(&profile);
+            let loc = report
+                .graph
+                .as_ref()
+                .unwrap()
+                .units
+                .iter()
+                .find(|u| u.loc.name_meta.starts_with("depcrate-"))
+                .map(|u| u.loc.clone())
+                .expect("depcrate unit");
+            std::fs::read_dir(unit_path::outputs(&profile, &loc))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| p.extension().is_some_and(|x| x == "d"))
+                .expect("depcrate *.d under out/")
+        }
+    };
     let first = std::fs::read_to_string(dep_info).unwrap();
     let cargo_home = hive.cargo_home.path.join("registry/src");
     assert!(first.contains(&*cargo_home.to_string_lossy()), "{first}");
@@ -180,6 +203,130 @@ fn a_second_lane_clones_without_filling_again() {
     assert_eq!(receipt["counts"]["fill_entries_added"], 0, "{receipt}");
     assert!(receipt["counts"]["fill_entries_held"].as_u64().unwrap() > 0);
     assert!(receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn seed_with_unit_dir_capabilities_places_only_u_entries() {
+    let hive = Hive::ready();
+    let repo = store_holding_flat_and_unit_dir(&hive);
+    set_recorded_unit_layout(&hive, "unit-dir");
+    let lane = repo.worktree("udir-only");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0,
+        "{receipt}"
+    );
+    let (flat, unit_dir) = placed_layout_markers(&lane.join("target"));
+    assert!(unit_dir, "expected unit-dir files under build/<pkg>/<hex>/");
+    assert!(
+        !flat,
+        "flat deps/.fingerprint files must not be placed: {receipt}"
+    );
+    let layouts = seeded_unit_layouts(&hive, &lane.join("target"));
+    assert!(
+        layouts.iter().all(|layout| layout == "unit-dir"),
+        "{layouts:?}"
+    );
+}
+
+#[test]
+fn seed_with_flat_capabilities_places_only_flat_entries() {
+    let hive = Hive::ready();
+    let repo = store_holding_flat_and_unit_dir(&hive);
+    set_recorded_unit_layout(&hive, "flat");
+    let lane = repo.worktree("flat-only");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0,
+        "{receipt}"
+    );
+    let (flat, unit_dir) = placed_layout_markers(&lane.join("target"));
+    assert!(flat, "expected flat deps/.fingerprint files");
+    assert!(
+        !unit_dir,
+        "unit-dir build/<pkg>/<hex>/ files must not be placed: {receipt}"
+    );
+    let layouts = seeded_unit_layouts(&hive, &lane.join("target"));
+    assert!(layouts.iter().all(|layout| layout == "flat"), "{layouts:?}");
+}
+
+#[test]
+fn a_cut_short_unit_dir_place_leaves_no_fingerprint_without_out_even_when_the_package_is_named_out()
+{
+    use cargo_hive_core::caps::CRATE_DIR_CAP;
+    use cargo_hive_seed::place;
+    use cargo_hive_seed::store;
+    use common::store_fixture::synth_entry_layout;
+    use std::time::Duration;
+
+    let hive = Hive::ready();
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    let prime = repo.worktree("prime-cut");
+    let (out, receipt) = hive.json(&["seed", prime.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let state = State::open_at(hive.home.path.clone()).unwrap();
+    let file = store::read(&state).unwrap();
+    let sample = file.units[0].clone();
+    let hex = "dddddddddddddddd";
+    let name_meta = format!("out-{hex}");
+    synth_entry_layout(
+        &hive,
+        (sample.toolchain_value, &name_meta, hex),
+        UnitLayout::UnitDir,
+        &[],
+        &[
+            (
+                &format!("debug/build/out/{hex}/out/libout.rlib"),
+                b"rlib".to_vec(),
+            ),
+            (
+                &format!("debug/build/out/{hex}/fingerprint/lib-out"),
+                b"fp".to_vec(),
+            ),
+            (
+                &format!("debug/build/out/{hex}/fingerprint/invoked.timestamp"),
+                b"stamp".to_vec(),
+            ),
+        ],
+        0,
+    );
+    let file = store::read(&state).unwrap();
+    let row = file
+        .units
+        .iter()
+        .find(|row| row.unit_layout == UnitLayout::UnitDir && row.name_meta == name_meta)
+        .cloned()
+        .expect("unit-dir row for package out");
+    let work = repo.worktree("cut-short");
+    let out_dst = work
+        .join("target")
+        .join(format!("debug/build/out/{hex}/out/libout.rlib"));
+    let recording = Recording::over_real().fail_clone(&out_dst, libc::EIO);
+    let lib = LibCtx::open(&hive, recording.fs());
+    let report = place::place(
+        &lib.ctx(),
+        &work,
+        &[row],
+        Duration::from_secs(30 * 86_400),
+        CRATE_DIR_CAP,
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(report.cloned, 0, "{report:?}");
+    assert_eq!(report.failed, 1, "{report:?}");
+    let unit_root = work.join("target").join(format!("debug/build/out/{hex}"));
+    let fp = unit_root.join("fingerprint");
+    let out_dir = unit_root.join("out");
+    assert!(
+        !(fp.is_dir() && !out_dir.join("libout.rlib").is_file()),
+        "fingerprint/ must not remain without its out/ files; fp={} out={:?} log={:?}",
+        fp.is_dir(),
+        out_dir.exists(),
+        recording.log()
+    );
 }
 
 #[test]
@@ -1090,13 +1237,13 @@ fn a_seed_with_an_unparseable_record_file_clones_reports_record_failed_and_exits
 #[derive(Clone, Copy)]
 enum FileDamage {
     Unparseable,
-    LayoutTwo,
+    LayoutNewer,
 }
 
 fn damaged_state_bytes(damage: FileDamage, existing: Option<&[u8]>, empty_shape: &str) -> Vec<u8> {
     match damage {
         FileDamage::Unparseable => b"{not json".to_vec(),
-        FileDamage::LayoutTwo => {
+        FileDamage::LayoutNewer => {
             let base = match existing {
                 Some(bytes) => bytes.to_vec(),
                 None => empty_shape.as_bytes().to_vec(),
@@ -1106,7 +1253,7 @@ fn damaged_state_bytes(damage: FileDamage, existing: Option<&[u8]>, empty_shape:
             value
                 .as_object_mut()
                 .expect("state file is an object")
-                .insert("layout".into(), serde_json::Value::from(2));
+                .insert("layout".into(), serde_json::Value::from(3));
             serde_json::to_vec(&value).unwrap()
         }
     }
@@ -1117,7 +1264,7 @@ fn seed_stops_on_each_damaged_seeds_or_store_file_and_leaves_it_untouched() {
     let seeds_recovery =
         "remove it; seed counts are lost, and the next `cargo hive seed` writes it again";
     let store_recovery = "remove it, build a checkout of the repository, then run `cargo hive seed`; store entries are kept and adopted";
-    for (case, damage) in [FileDamage::Unparseable, FileDamage::LayoutTwo]
+    for (case, damage) in [FileDamage::Unparseable, FileDamage::LayoutNewer]
         .into_iter()
         .enumerate()
     {
@@ -1153,8 +1300,8 @@ fn seed_stops_on_each_damaged_seeds_or_store_file_and_leaves_it_untouched() {
                     detail.contains(seeds_recovery),
                     "missing seeds recovery: {detail}"
                 ),
-                FileDamage::LayoutTwo => assert!(
-                    detail.contains("records layout 2")
+                FileDamage::LayoutNewer => assert!(
+                    detail.contains("records layout 3")
                         && detail.contains("cargo install cargo-hive"),
                     "missing newer-layout text: {detail}"
                 ),
@@ -1192,8 +1339,8 @@ fn seed_stops_on_each_damaged_seeds_or_store_file_and_leaves_it_untouched() {
                     detail.contains(store_recovery),
                     "missing store recovery: {detail}"
                 ),
-                FileDamage::LayoutTwo => assert!(
-                    detail.contains("records layout 2")
+                FileDamage::LayoutNewer => assert!(
+                    detail.contains("records layout 3")
                         && detail.contains("cargo install cargo-hive"),
                     "missing newer-layout text: {detail}"
                 ),
@@ -1971,6 +2118,116 @@ fn seeded_dir_names(hive: &Hive, target: &Path) -> Vec<String> {
         .collect()
 }
 
+fn set_recorded_unit_layout(hive: &Hive, layout: &str) {
+    let path = hive.home.path.join("capabilities.json");
+    let mut caps: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    caps["unit_layout"] = serde_json::json!(layout);
+    fs::write(&path, caps.to_string()).unwrap();
+}
+
+fn store_holding_flat_and_unit_dir(hive: &Hive) -> RegistryRepo {
+    let repo = RegistryRepo::new(hive);
+    cargo_json(hive, &repo.main, &["build"]);
+    let prime = repo.worktree("prime-both");
+    let (out, receipt) = hive.json(&["seed", prime.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        receipt["counts"]["fill_entries_added"].as_u64().unwrap() > 0,
+        "{receipt}"
+    );
+    let profile = repo.main.join("target/debug");
+    let registry = hive
+        .cargo_home
+        .path
+        .join("registry/src/index.crates.io-1/a-1.0.0/src/lib.rs");
+    let registry = registry.display().to_string();
+    let hex = "aaaaaaaaaaaaaaaa";
+    let fp = u64::from_str_radix(hex, 16).unwrap();
+    let loc = common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "reg",
+        hex,
+        "lib-reg",
+        fp,
+        &[],
+        &["libreg.rlib", "libreg.rmeta", "reg.d"],
+    );
+    let out_dir = unit_path::outputs(&profile, &loc);
+    fs::write(out_dir.join("reg.d"), format!("reg.d: {registry}\n")).unwrap();
+    let refill = repo.worktree("refill-udir");
+    let (out, receipt) = hive.json(&["seed", refill.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let state = State::open_at(hive.home.path.clone()).unwrap();
+    let file = cargo_hive_seed::store::read(&state).unwrap();
+    assert!(
+        file.units
+            .iter()
+            .any(|row| row.unit_layout == UnitLayout::Flat),
+        "flat rows missing: {:?}",
+        file.units
+    );
+    assert!(
+        file.units
+            .iter()
+            .any(|row| row.unit_layout == UnitLayout::UnitDir),
+        "unit-dir rows missing after refill: {:?}",
+        file.units
+    );
+    repo
+}
+
+fn placed_layout_markers(target: &Path) -> (bool, bool) {
+    let mut flat = false;
+    let mut unit_dir = false;
+    if !target.exists() {
+        return (flat, unit_dir);
+    }
+    let mut stack = vec![target.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            let meta = fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !meta.is_file() {
+                continue;
+            }
+            if unit_path::unit_dir_of(&path).is_some() {
+                unit_dir = true;
+            }
+            let text = path.to_string_lossy();
+            if text.contains("/deps/") || text.contains("/.fingerprint/") {
+                flat = true;
+            }
+        }
+    }
+    (flat, unit_dir)
+}
+
+fn seeded_unit_layouts(hive: &Hive, target: &Path) -> Vec<String> {
+    let target = target.canonicalize().unwrap();
+    let state = State::open_at(hive.home.path.clone()).unwrap();
+    let file = cargo_hive_seed::record::read(&state).unwrap();
+    let record = file
+        .targets
+        .get(&target)
+        .unwrap_or_else(|| panic!("no seed record for {}", target.display()));
+    record
+        .units
+        .iter()
+        .map(|unit| match unit.unit_layout {
+            UnitLayout::Flat => "flat".to_string(),
+            UnitLayout::UnitDir => "unit-dir".to_string(),
+        })
+        .collect()
+}
+
 fn path_under(path: &str, root: &Path) -> bool {
     let root = root.canonicalize().unwrap();
     Path::new(path).starts_with(&root)
@@ -2349,7 +2606,14 @@ fn run_seed_until(
     let toolchain = cargo_hive_cargo::toolchain::resolve_toolchain(&lane).unwrap();
     let repos = [repo];
     let ctx = lib_ctx(&lib, &repos);
-    cargo_hive_seed::run(&ctx, &repos[0], &checkout, &toolchain, cancel)
+    cargo_hive_seed::run(
+        &ctx,
+        &repos[0],
+        &checkout,
+        &toolchain,
+        Some(UnitLayout::Flat),
+        cancel,
+    )
 }
 
 #[test]
@@ -2369,12 +2633,16 @@ fn seeding_through_the_fill_and_clone_halves_reports_what_one_run_reports() {
         let ctx = lib_ctx(&lib, &repos);
         let fill = cargo_hive_seed::run_fill(&ctx, &repos[0], &|| false).unwrap();
         match fill {
-            cargo_hive_seed::Fill::Continue(filled) => {
-                cargo_hive_seed::run_clone(&ctx, &repos[0], &checkout, &toolchain, filled, &|| {
-                    false
-                })
-                .unwrap()
-            }
+            cargo_hive_seed::Fill::Continue(filled) => cargo_hive_seed::run_clone(
+                &ctx,
+                &repos[0],
+                &checkout,
+                &toolchain,
+                filled,
+                Some(UnitLayout::Flat),
+                &|| false,
+            )
+            .unwrap(),
             cargo_hive_seed::Fill::Stopped(_) => panic!("nothing cancelled this fill"),
         }
     };
@@ -2409,7 +2677,16 @@ fn a_fill_half_holds_the_store_lock_until_clone_finishes() {
         lib.state.try_store_exclusive().unwrap().is_none(),
         "fill half must keep the shared store lock so gc cannot evict"
     );
-    cargo_hive_seed::run_clone(&ctx, &repos[0], &checkout, &toolchain, filled, &|| false).unwrap();
+    cargo_hive_seed::run_clone(
+        &ctx,
+        &repos[0],
+        &checkout,
+        &toolchain,
+        filled,
+        Some(UnitLayout::Flat),
+        &|| false,
+    )
+    .unwrap();
     assert!(
         lib.state.try_store_exclusive().unwrap().is_some(),
         "clone must release the store lock"

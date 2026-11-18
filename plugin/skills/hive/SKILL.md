@@ -116,6 +116,10 @@ cargo hive explain /path/to/repo --top 20 --json
 cargo hive bench --cold /path/to/cold1 /path/to/cold2 --seeded /path/to/seeded1 /path/to/seeded2 --json
 ```
 
+## Unit dirs and flat layout
+
+Hive reads Cargo unit dirs beside the flat layout. `status` names the layouts it saw. `seed` uses the layout doctor recorded. If fingerprint reading is disabled, `seed` refuses; the recovery is to rerun doctor.
+
 ## When a command refuses
 
 - `source.none` means the repo has no source target record for the current toolchain: no checkout of it has built yet, or none has with this toolchain. Build the main checkout, then run `seed` again; do not retry `seed` first.

@@ -15,6 +15,7 @@ use cargo_hive_core::fingerprint;
 use cargo_hive_core::ledger;
 use cargo_hive_core::receipt::Measured;
 use cargo_hive_core::target::{Owner, TAG_LINE, TargetDir};
+use cargo_hive_core::unit_path::UnitLayout;
 use cargo_hive_platform::Fs;
 use cargo_hive_platform::apfs::Apfs;
 use cargo_hive_seed::choose::{self, Choice};
@@ -22,8 +23,8 @@ use cargo_hive_seed::evict::{self, EvictCtx, Limits};
 use cargo_hive_seed::store::{self, MAX_STORE_BYTES, Row, STORE_FILE, StoreFile, store_dir};
 use cargo_hive_state::State;
 use common::store_fixture::{
-    count, drop_row, entry_dirs, has_finding, plant_rowless, rows, seeded_store, set_last_live_at,
-    synth_entry, synth_entry_at, tree_files,
+    count, drop_row, entry_dirs, has_finding, plant_rowless, plant_rowless_layout, rows,
+    seeded_store, set_last_live_at, synth_entry, synth_entry_at, synth_entry_layout, tree_files,
 };
 use common::{Hive, crate_dirs, plant_session, wait_within};
 
@@ -112,6 +113,69 @@ fn a_rowless_entry_dir_no_target_holds_is_evicted() {
             .iter()
             .all(|p| !p.to_string_lossy().contains("gonecrate-aaaaaaaaaaaaaaaa")),
         "{:?}",
+        entry_dirs(&hive)
+    );
+}
+
+#[test]
+fn store_gc_keeps_a_unit_dir_entry_its_row_holds_and_evicts_a_rowless_one() {
+    let hive = Hive::ready();
+    let repo = seeded_store(&hive);
+    let value = rows(&hive)[0]["toolchain_value"].as_u64().unwrap();
+    synth_entry_layout(
+        &hive,
+        (value, "udirhold-aaaaaaaaaaaaaaaa", "cccccccccccccccc"),
+        UnitLayout::UnitDir,
+        &[],
+        &[("blob", b"keep".to_vec())],
+        0,
+    );
+    plant_rowless_layout(
+        &hive,
+        value,
+        UnitLayout::UnitDir,
+        "udirgone-bbbbbbbbbbbbbbbb",
+        "dddddddddddddddd",
+    );
+    let held = entry_dirs(&hive)
+        .into_iter()
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("u.udirhold-aaaaaaaaaaaaaaaa")
+        })
+        .expect("unit-dir entry held by its row");
+    assert!(
+        entry_dirs(&hive).iter().any(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("u.udirgone-bbbbbbbbbbbbbbbb")
+        }),
+        "rowless unit-dir entry missing before gc: {:?}",
+        entry_dirs(&hive)
+    );
+    remove_all_targets(&repo);
+    let (out, receipt) = hive.json(&["gc"]);
+    assert!(out.status.success(), "{receipt}");
+    assert!(
+        held.is_dir(),
+        "unit-dir entry its row holds was removed: {}",
+        held.display()
+    );
+    assert!(
+        count(&receipt, "store_entries_evicted_rowless") >= 1,
+        "{receipt}"
+    );
+    assert!(
+        entry_dirs(&hive).iter().all(|p| {
+            !p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("u.udirgone-bbbbbbbbbbbbbbbb")
+        }),
+        "rowless unit-dir entry remained: {:?}",
         entry_dirs(&hive)
     );
 }
@@ -411,6 +475,101 @@ fn a_live_unit_in_a_target_gc_skips_for_an_unsupported_profile_still_holds_its_k
 }
 
 #[test]
+fn an_unsupported_unit_dir_profile_holds_pkg_hex_against_eviction() {
+    let hive = Hive::ready();
+    let fs = apfs();
+    let value = 88_010u64;
+    let meta = "holdpkg-aaaaaaaaaaaaaaaa";
+    let hash = "bbbbbbbbbbbbbbbb";
+    synth_entry_layout(
+        &hive,
+        (value, meta, hash),
+        UnitLayout::UnitDir,
+        &[],
+        &[("blob", kib256(3))],
+        31 * DAY,
+    );
+    let root = hive.home.path.join("udir-unsup-hold");
+    let profile = root.join("debug");
+    let hex = "aaaaaaaaaaaaaaaa";
+    let fp = u64::from_str_radix(hex, 16).unwrap();
+    common::unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "holdpkg",
+        hex,
+        "lib-holdpkg",
+        fp,
+        &[],
+        &["libholdpkg.rlib"],
+    );
+    fs::create_dir_all(profile.join("build/weird-name/out")).unwrap();
+    fs::write(
+        root.join("CACHEDIR.TAG"),
+        format!("Signature: 8a477f597d28d172789f06886806bc55\n{TAG_LINE}\n"),
+    )
+    .unwrap();
+    let report = fingerprint::read_profile(&profile);
+    assert!(
+        matches!(
+            report.format,
+            cargo_hive_core::fingerprint::Format::Unsupported(_)
+        ),
+        "{:?}",
+        report.format
+    );
+    let target = TargetDir {
+        path: root.clone(),
+        owner: Owner::Unresolved {
+            reason: "hold test".into(),
+        },
+        profiles: vec![report],
+        size: None,
+        unreadable: None,
+    };
+    let before = entry_dirs(&hive)
+        .into_iter()
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&format!("u.{meta}"))
+        })
+        .expect("unit-dir store entry");
+    assert!(before.is_dir(), "{}", before.display());
+    let outcome = run_evict(
+        &hive,
+        &fs,
+        &[target],
+        Limits {
+            cap_bytes: CAP_BYTES,
+            max_age_secs: MAX_AGE_SECS,
+        },
+        false,
+    );
+    assert_eq!(
+        outcome_count(&outcome, "store_entries_evicted_age"),
+        0,
+        "{:?}",
+        outcome.counts
+    );
+    assert!(
+        before.is_dir(),
+        "unsupported unit-dir hold released {}: {:?}",
+        before.display(),
+        outcome.counts
+    );
+    assert!(
+        rows(&hive).iter().any(|row| {
+            row["name_meta"].as_str() == Some(meta)
+                && row["unit_layout"].as_str() == Some("unit-dir")
+        }),
+        "{:?}",
+        rows(&hive)
+    );
+}
+
+#[test]
 fn an_unreadable_target_holds_the_whole_store_and_gc_still_deletes_sessions_with_its_usual_exit_code()
  {
     use std::os::unix::fs::PermissionsExt;
@@ -629,7 +788,7 @@ fn entries_of_a_value_no_checkout_maps_to_are_dropped_with_their_table_text() {
     let state = State::open_at(hive.home.path.clone()).unwrap();
     let file = store::read(&state).unwrap();
     assert!(matches!(
-        choose::choose(&file, &repo.main, &text, &[]),
+        choose::choose(&file, &repo.main, &text, &[], Some(UnitLayout::Flat)),
         Choice::NoRow { .. }
     ));
 }
@@ -2290,6 +2449,7 @@ fn plant_many_aged(
             repos: Vec::new(),
             registry_deps: Vec::new(),
             variant: 0,
+            unit_layout: cargo_hive_core::unit_path::UnitLayout::Flat,
         });
     }
     state
@@ -2638,18 +2798,18 @@ fn a_seed_after_store_db_was_lost_adopts_equal_entries_and_rewrites_store_db() {
 #[derive(Clone, Copy)]
 enum FileDamage {
     Unparseable,
-    LayoutTwo,
+    LayoutNewer,
 }
 
 fn damaged_store_bytes(damage: FileDamage, existing: &[u8]) -> Vec<u8> {
     match damage {
         FileDamage::Unparseable => b"not-json".to_vec(),
-        FileDamage::LayoutTwo => {
+        FileDamage::LayoutNewer => {
             let mut value: serde_json::Value = serde_json::from_slice(existing).unwrap();
             value
                 .as_object_mut()
                 .expect("store.db is an object")
-                .insert("layout".into(), serde_json::Value::from(2));
+                .insert("layout".into(), serde_json::Value::from(3));
             serde_json::to_vec(&value).unwrap()
         }
     }
@@ -2658,7 +2818,7 @@ fn damaged_store_bytes(damage: FileDamage, existing: &[u8]) -> Vec<u8> {
 #[test]
 fn bare_gc_and_dry_run_keep_store_write_failed_on_a_damaged_store_db() {
     let store_recovery = "remove it, build a checkout of the repository, then run `cargo hive seed`; store entries are kept and adopted";
-    for damage in [FileDamage::Unparseable, FileDamage::LayoutTwo] {
+    for damage in [FileDamage::Unparseable, FileDamage::LayoutNewer] {
         for args in [&["gc"][..], &["gc", "--dry-run"][..]] {
             let hive = Hive::ready();
             let repo = seeded_store(&hive);
@@ -2687,8 +2847,8 @@ fn bare_gc_and_dry_run_keep_store_write_failed_on_a_damaged_store_db() {
                     detail.contains(store_recovery),
                     "missing store recovery: {detail}"
                 ),
-                FileDamage::LayoutTwo => assert!(
-                    detail.contains("records layout 2")
+                FileDamage::LayoutNewer => assert!(
+                    detail.contains("records layout 3")
                         && detail.contains("cargo install cargo-hive"),
                     "missing newer-layout text: {detail}"
                 ),

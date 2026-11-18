@@ -59,7 +59,7 @@ Locality: new file; `src/state.rs` `extend` only by exporting the manifest file 
 
 Satisfies: GCPLAN-1.1, GCPLAN-1.2, GCPLAN-1.3, GCPLAN-1.4, GCPLAN-1.5, GCPLAN-1.6, GCPLAN-1.11, GCPLAN-1.12, GCPLAN-1.13, GCPLAN-5.1, GCPLAN-5.2, GCPLAN-5.3, GCPLAN-5.4, GCPLAN-5.5, GCPLAN-5.6
 Reuse: rung 2 — `discover::checkouts` and `discover::targets(.., &mut Snapshot::default(), ..)` (`src/discover.rs:120`, `:506`), `liveness::liveness` (`src/liveness.rs:210`), `gc::measure` for planned bytes (`src/gc/run.rs:393`), `Fs::entry_stat` for the identity of each path; the class-of-target lookup and the plan builder are new, rung 7.
-Respects: ARCH-4, ARCH-7, ARCH-8, ARCH-17, ARCH-18
+Respects: ARCH-4, ARCH-7, ARCH-8, ARCH-17, ARCH-22
 Interface: `make(ctx: &Ctx, scope_repos: &[PathBuf], cancel: &(dyn Fn() -> bool + Sync)) -> Made { plans, undecided, nothing_to_do, unmeasured, walk_faults }`. `Ctx` carries `state: &State`, `fs`, `Config`, `now`, `account_bytes`, every registered `Repo` and the registered mains (what `select` and `live_checkouts` already produce in `gc_cmd`).
 Depth: if this module vanished, callers would have to know how to turn ownership, class and a liveness verdict into plan groups; they keep a single call.
 Locality: new file; reads `discover` and `liveness` unchanged (`leave`); the class lookup is a private function of this module, because `Class` and `Owner` are already public and `discover.rs` need not depend on plan types.
@@ -70,7 +70,7 @@ For each target the class is: the class of its owner checkout when `Owner::Owned
 
 Satisfies: GCPLAN-2.1, GCPLAN-2.5, GCPLAN-2.6, GCPLAN-2.7, GCPLAN-2.8, GCPLAN-2.9, GCPLAN-2.10, GCPLAN-2.13, GCPLAN-3.1, GCPLAN-3.2, GCPLAN-3.3, GCPLAN-3.4, GCPLAN-3.5, GCPLAN-3.6, GCPLAN-3.8, GCPLAN-4.6, GCPLAN-6.8, GCPLAN-8.2, GCPLAN-8.3, GCPLAN-8.5
 Reuse: rung 2 — `Fs::try_lock_exclusive` and `TryLock` (`src/platform/mod.rs`), `cargo_target::identify` and `fingerprint::read_profile` to rebuild a `TargetDir` under the locks (`src/cargo_target.rs`, `src/fingerprint.rs:396`), `liveness::liveness`, `discover::targets` with an empty snapshot for ownership, `gc::Ledger` and the volume cross-check note (extracted from `src/cli.rs:808-833`). New: the two-phase driver, rung 7.
-Respects: ARCH-9, ARCH-11, ARCH-13, ARCH-17, ARCH-18, ARCH-19, ARCH-20
+Respects: ARCH-9, ARCH-11, ARCH-13, ARCH-17, ARCH-22, ARCH-19, ARCH-20
 Surface: the byte-accounting helper of `gc::run` (`remove_measured`, `scan`, `record`, `src/gc/run.rs:356-490`) — `replace`: extracted to a crate-visible `gc::account::remove_counted(fs, ledger, target, path, account_bytes, dry_run) -> Result<Removed, RemoveFailed>`, `RemoveFailed` being `Scan(String)` or `Remove(io::Error)` so the auto tier keeps its own skip and `unmeasured` wording that `Runner` and `apply` both call. A directory root goes through `scan` then `remove_tree`; a file or symlink root is recorded from one `entry_stat` and removed with `remove_file`, because `scan` rejects a file root and would skip every `deps/*.rlib`. `Ledger` and `Tally` (`pub(crate)` in a private module, `src/gc/ledger.rs:25-35`) are re-exported from `gc` as `pub(crate)`. Auto-tier counts, findings and receipts stay identical (GCPLAN-9.1). The volume cross-check block in `gc_cmd` (`src/cli.rs:801-833`) — `replace`: becomes `cross_check_notes(before, after, containers)`; its caller keeps the same text. Callers of `Runner::remove_measured` (`src/gc/run.rs:259,297,345`) — `replace`.
 Interface: `apply(ctx, id, cancel) -> Applied { outcome, reason, per_target, counts, bytes, notes, unmeasured }`; and the core it calls, `execute(ctx, plan, resolved: &[ResolvedTarget], cancel)`, public and `#[doc(hidden)]`, which takes a plan whose gates, consume and ownership comparison are already done. `execute` is the seam the deletion trial uses on a scratch clone, with a plan built from the clone's `TargetDir` by `build::plan_for_target`.
 Depth: if this module vanished, callers would have to know the lock set, the five staleness checks, the consume point, the delete order and the accounting; they keep one call and one result.
@@ -112,7 +112,7 @@ Locality: `src/platform/mod.rs` and `src/platform/apfs.rs` only; no other `Fs` i
 
 Satisfies: GCPLAN-8.1
 Reuse: rung 2 — the pattern of `delete_in_clone` in `tests/common/prove.rs:900-935` (canonical parent under root, lstat, then `remove_tree` for a directory or `remove_file` otherwise), moved into `src`.
-Respects: ARCH-18
+Respects: ARCH-22
 Surface: `tests/common/prove.rs` `delete_in_clone` (`:900`) and its callers `:1174` and `tests/liveness.rs:1891` — `replace`: `delete_in_clone` calls `guard::delete_checked` with the clone root as `root` and `Expect::Any` (clone inodes differ from any planned inode), treating `Missing` as it does today.
 Interface: `check_entry(fs, root, path, expect) -> Result<EntryStat, Deleted>` (canonical parent inside `root`, lstat, identity compare; mutates nothing) and `delete_checked(fs, root, path, expect) -> Deleted` (`check_entry` then remove by kind), with `Deleted` being `Removed`, `Missing`, `Changed` or `Outside` and `Expect::Entry { kind, dev, ino }` or `Expect::Any`. `apply` and the orphan removal call `check_entry` and then `remove_counted`, so a path is never removed twice; a whole-tree removal checks the target dir against its parent as `root`.
 Depth: if this module vanished, callers would have to know canonicalization, the lstat compare and the remove-by-kind rule; they keep one call.
@@ -122,7 +122,7 @@ Locality: new file; `tests/common/prove.rs` is edited (`extend`) to call it.
 
 Satisfies: GCPLAN-5.8, GCPLAN-5.9, GCPLAN-5.10, GCPLAN-5.11
 Reuse: rung 2 — the lock helpers and Ledger of the apply module, `identify` for the relist, `discover::targets` for fresh ownership; new orchestration is rung 7.
-Respects: ARCH-17, ARCH-18, ARCH-19
+Respects: ARCH-17, ARCH-22, ARCH-19
 Interface: `remove(ctx, plan_target, cancel) -> Removed | Refused(reason) | Skipped(reason)`.
 Depth: if this module vanished, callers would have to know the whole-tree lock set, the relist-after-lock rule and the residual `cargo clean` race; they keep one call.
 Locality: new file; `apply.rs` calls it for an `orphan` plan.

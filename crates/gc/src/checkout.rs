@@ -10,7 +10,8 @@ use cargo_hive_core::ledger::{self, Bytes, Ledger};
 use cargo_hive_core::liveness::Liveness;
 use cargo_hive_core::locks::{self, Acquired, Reason};
 use cargo_hive_core::receipt::Finding;
-use cargo_hive_core::target::{self, Layout, TargetDir};
+use cargo_hive_core::target::{self, TargetDir};
+use cargo_hive_core::unit_path;
 use cargo_hive_platform::{EntryKind, Fs};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -93,6 +94,12 @@ impl Counts {
 }
 
 pub fn unit_order(files: &[PathBuf]) -> Vec<PathBuf> {
+    if files
+        .iter()
+        .any(|path| unit_path::unit_dir_of(path).is_some())
+    {
+        return files.to_vec();
+    }
     let mut deps = Vec::new();
     let mut others = Vec::new();
     let mut prints = Vec::new();
@@ -359,7 +366,13 @@ fn clean_target(
                         input.account_bytes,
                         false,
                     ) {
-                        Ok(removed) if removed.existed => deleted_files += 1,
+                        Ok(removed) if removed.existed => {
+                            if unit_path::unit_dir_of(entry).is_some() {
+                                deleted_files = deleted_files.saturating_add(removed.files);
+                            } else {
+                                deleted_files = deleted_files.saturating_add(1);
+                            }
+                        }
                         Ok(_) => {}
                         Err(err) => {
                             report.failed = true;
@@ -381,12 +394,11 @@ fn clean_target(
         }
     }
     if !report.cancelled {
-        for ((profile, layout), profile_report) in found.iter().zip(&reports) {
+        for ((profile, _), profile_report) in found.iter().zip(&reports) {
             let outcome = clean_profile_objects(ObjectsClean {
                 fs: input.fs,
                 target: path,
                 profile,
-                layout: *layout,
                 profile_report,
                 account_bytes: input.account_bytes,
                 cancel,
@@ -427,7 +439,6 @@ struct ObjectsClean<'a> {
     fs: &'a dyn Fs,
     target: &'a Path,
     profile: &'a Path,
-    layout: Layout,
     profile_report: &'a ProfileReport,
     account_bytes: bool,
     cancel: &'a dyn Fn() -> bool,
@@ -452,13 +463,6 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
         failed: false,
         cancelled: false,
     };
-    if ctx.layout != Layout::Fingerprint {
-        out.findings.push(objects_finding(
-            ctx.profile,
-            format!("profile layout is {:?}, not fingerprint", ctx.layout),
-        ));
-        return out;
-    }
     if let Format::Unsupported(why) = &ctx.profile_report.format {
         out.findings.push(objects_finding(
             ctx.profile,
@@ -476,6 +480,7 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
     if listing.objects.is_empty()
         && listing.candidates.is_empty()
         && !dir_present(ctx.fs, &ctx.profile.join("deps"))
+        && !listing.saw_unit_dir
     {
         return out;
     }
@@ -607,15 +612,14 @@ fn is_dep_info(path: &Path) -> bool {
 }
 
 fn is_fingerprint_dir(path: &Path) -> bool {
-    path.parent()
-        .and_then(|parent| parent.file_name())
-        .is_some_and(|name| name == ".fingerprint")
+    unit_path::is_fingerprint_dir(path)
 }
 
 #[derive(Debug)]
 pub struct Listing {
     pub objects: Vec<(PathBuf, u64, u64)>,
     pub candidates: Vec<PathBuf>,
+    pub saw_unit_dir: bool,
 }
 
 pub fn list_profile(
@@ -626,32 +630,35 @@ pub fn list_profile(
 ) -> Result<Listing, String> {
     let deps = profile.join("deps");
     let deps_entries = match fs.read_dir_bounded(&deps, deps_cap) {
-        Ok(entries) => entries,
-        Err(err) if is_not_found(&err) => {
-            return Ok(Listing {
-                objects: Vec::new(),
-                candidates: Vec::new(),
-            });
-        }
+        Ok(entries) => Some(entries),
+        Err(err) if is_not_found(&err) => None,
         Err(err) => {
             return Err(format!("{}: {err}", deps.display()));
         }
     };
     let mut objects = Vec::new();
     let mut candidates = Vec::new();
-    for (name, kind) in deps_entries {
-        let path = deps.join(&name);
-        if name.ends_with(".rcgu.o") && kind == EntryKind::File {
-            let stat = fs
-                .entry_stat(&path)
-                .map_err(|err| format!("{}: {err}", path.display()))?;
-            if stat.kind == EntryKind::File {
-                objects.push((path.clone(), stat.dev, stat.ino));
+    if let Some(deps_entries) = deps_entries {
+        for (name, kind) in deps_entries {
+            let path = deps.join(&name);
+            if name.ends_with(".rcgu.o") && kind == EntryKind::File {
+                let stat = fs
+                    .entry_stat(&path)
+                    .map_err(|err| format!("{}: {err}", path.display()))?;
+                if stat.kind == EntryKind::File {
+                    objects.push((path.clone(), stat.dev, stat.ino));
+                }
+            }
+            if !name.ends_with(".o") && is_candidate_kind(kind) {
+                candidates.push(path);
             }
         }
-        if !name.ends_with(".o") && is_candidate_kind(kind) {
-            candidates.push(path);
-        }
+    } else if !profile_has_unit_dir(fs, profile, dir_cap)? {
+        return Ok(Listing {
+            objects: Vec::new(),
+            candidates: Vec::new(),
+            saw_unit_dir: false,
+        });
     }
     push_dir_candidates(fs, profile, deps_cap, &mut candidates)?;
     let examples = profile.join("examples");
@@ -666,6 +673,7 @@ pub fn list_profile(
         Err(err) if is_not_found(&err) => {}
         Err(err) => return Err(format!("{}: {err}", examples.display())),
     }
+    let mut saw_unit_dir = false;
     let build = profile.join("build");
     match fs.read_dir_bounded(&build, dir_cap) {
         Ok(entries) => {
@@ -681,6 +689,18 @@ pub fn list_profile(
                     .read_dir_bounded(&child, dir_cap)
                     .map_err(|err| format!("{}: {err}", child.display()))?;
                 for (child_name, child_kind) in child_entries {
+                    if child_kind == EntryKind::Dir
+                        && fingerprint::UnitHash::parse(&child_name).is_some()
+                    {
+                        saw_unit_dir = true;
+                        let loc = unit_path::UnitLoc {
+                            layout: unit_path::UnitLayout::UnitDir,
+                            name_meta: format!("{name}-{child_name}"),
+                        };
+                        let out_dir = unit_path::outputs(profile, &loc);
+                        push_out_listing(fs, &out_dir, deps_cap, &mut objects, &mut candidates)?;
+                        continue;
+                    }
                     if !child_name.ends_with(".o") && is_candidate_kind(child_kind) {
                         candidates.push(child.join(child_name));
                     }
@@ -693,7 +713,62 @@ pub fn list_profile(
     Ok(Listing {
         objects,
         candidates,
+        saw_unit_dir,
     })
+}
+
+fn profile_has_unit_dir(fs: &dyn Fs, profile: &Path, dir_cap: usize) -> Result<bool, String> {
+    let build = profile.join("build");
+    let packages = match fs.read_dir_bounded(&build, dir_cap) {
+        Ok(entries) => entries,
+        Err(err) if is_not_found(&err) => return Ok(false),
+        Err(err) => return Err(format!("{}: {err}", build.display())),
+    };
+    for (name, kind) in packages {
+        if kind != EntryKind::Dir {
+            continue;
+        }
+        let pkg = build.join(name);
+        let children = fs
+            .read_dir_bounded(&pkg, dir_cap)
+            .map_err(|err| format!("{}: {err}", pkg.display()))?;
+        if children.iter().any(|(child, child_kind)| {
+            *child_kind == EntryKind::Dir && fingerprint::UnitHash::parse(child).is_some()
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn push_out_listing(
+    fs: &dyn Fs,
+    out_dir: &Path,
+    deps_cap: usize,
+    objects: &mut Vec<(PathBuf, u64, u64)>,
+    candidates: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let entries = match fs.read_dir_bounded(out_dir, deps_cap) {
+        Ok(entries) => entries,
+        Err(err) if is_not_found(&err) => return Ok(()),
+        Err(err) => return Err(format!("{}: {err}", out_dir.display())),
+    };
+    for (name, kind) in entries {
+        let path = out_dir.join(&name);
+        if name.ends_with(".rcgu.o") && kind == EntryKind::File {
+            let stat = fs
+                .entry_stat(&path)
+                .map_err(|err| format!("{}: {err}", path.display()))?;
+            if stat.kind == EntryKind::File {
+                objects.push((path.clone(), stat.dev, stat.ino));
+            }
+            continue;
+        }
+        if !name.ends_with(".o") && is_candidate_kind(kind) {
+            candidates.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn is_candidate_kind(kind: EntryKind) -> bool {

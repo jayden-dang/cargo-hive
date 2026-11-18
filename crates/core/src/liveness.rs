@@ -4,6 +4,7 @@
 
 use crate::fingerprint;
 use crate::target::TargetDir;
+use crate::unit_path::{self, UnitLoc};
 use cargo_hive_platform::Fs;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -27,7 +28,7 @@ pub enum Liveness {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UnitRef {
     pub profile: PathBuf,
-    pub dir_name: String,
+    pub loc: UnitLoc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -86,10 +87,7 @@ impl fmt::Display for Uncertain {
             Uncertain::Unresolved { unit, dependency } => write!(
                 f,
                 "{}: dependency `{dependency}` matches no unit of the target",
-                unit.profile
-                    .join(".fingerprint")
-                    .join(&unit.dir_name)
-                    .display()
+                unit_path::fingerprint_dir(&unit.profile, &unit.loc).display()
             ),
             Uncertain::ListingFailed { dir, why } => {
                 write!(f, "{}: cannot list: {why}", dir.display())
@@ -122,16 +120,9 @@ impl fmt::Display for Uncertain {
     }
 }
 
-/// Where a unit's `invoked.timestamp` lives: `build/<dir>/` for run-build-script, `.fingerprint/<dir>/` for every other kind.
-pub fn unit_timestamp(profile: &Path, dir_name: &str, kind: fingerprint::UnitKind) -> PathBuf {
-    let base = match kind {
-        fingerprint::UnitKind::RunBuildScript => "build",
-        _ => ".fingerprint",
-    };
-    profile
-        .join(base)
-        .join(dir_name)
-        .join(fingerprint::INVOKED_TIMESTAMP)
+/// Where a unit's `invoked.timestamp` lives for its layout and kind.
+pub fn unit_timestamp(profile: &Path, loc: &UnitLoc, kind: fingerprint::UnitKind) -> PathBuf {
+    unit_path::stamp(profile, loc, kind)
 }
 
 /// The `<hash>` of every `-<hash>` in `name` where `<hash>` is 16 lowercase hex digits and is
@@ -161,16 +152,20 @@ mod tests {
 
     #[test]
     fn a_run_build_script_unit_is_timed_by_its_build_dir() {
+        let loc = UnitLoc {
+            layout: crate::unit_path::UnitLayout::Flat,
+            name_meta: "x-1".into(),
+        };
         assert_eq!(
             unit_timestamp(
                 Path::new("/t/debug"),
-                "x-1",
+                &loc,
                 fingerprint::UnitKind::RunBuildScript
             ),
             Path::new("/t/debug/build/x-1/invoked.timestamp")
         );
         assert_eq!(
-            unit_timestamp(Path::new("/t/debug"), "x-1", fingerprint::UnitKind::Lib),
+            unit_timestamp(Path::new("/t/debug"), &loc, fingerprint::UnitKind::Lib),
             Path::new("/t/debug/.fingerprint/x-1/invoked.timestamp")
         );
     }
@@ -180,7 +175,10 @@ mod tests {
         let reason = Uncertain::Unresolved {
             unit: UnitRef {
                 profile: PathBuf::from("/t/debug"),
-                dir_name: "a-1111111111111111".to_string(),
+                loc: UnitLoc {
+                    layout: crate::unit_path::UnitLayout::Flat,
+                    name_meta: "a-1111111111111111".into(),
+                },
             },
             dependency: "liba".into(),
         };
@@ -194,7 +192,10 @@ mod tests {
         let path = PathBuf::from("/t/debug");
         let unit = UnitRef {
             profile: path.clone(),
-            dir_name: "a-1111111111111111".into(),
+            loc: UnitLoc {
+                layout: crate::unit_path::UnitLayout::Flat,
+                name_meta: "a-1111111111111111".into(),
+            },
         };
         let all = [
             Uncertain::ProfileUnsupported {

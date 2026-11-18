@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use cargo_hive_core::fingerprint::{self, DepEdge};
 use cargo_hive_core::liveness;
 use cargo_hive_core::target::TargetDir;
+use cargo_hive_core::unit_path::{self, UnitLayout, UnitLoc};
 use cargo_hive_state::{Layout, State, StateError};
 
 pub const SEEDS_FILE: &str = "seeds.json";
@@ -29,6 +30,8 @@ pub struct SeededUnit {
     pub stamp: Option<(PathBuf, u64)>,
     pub has_build: bool,
     pub deps_files: u32,
+    #[serde(default, skip_serializing_if = "UnitLayout::is_flat")]
+    pub unit_layout: UnitLayout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,10 +135,12 @@ fn dep_listings(
 ) -> Result<BTreeMap<PathBuf, Vec<String>>, String> {
     let mut dirs = BTreeSet::new();
     for profile in &target.profiles {
-        dirs.insert(profile.path.join("deps"));
+        dirs.insert(unit_path::flat_deps_dir(&profile.path));
     }
     for unit in &record.units {
-        dirs.insert(target.path.join(&unit.rel_profile).join("deps"));
+        dirs.insert(unit_path::flat_deps_dir(
+            &target.path.join(&unit.rel_profile),
+        ));
     }
     let mut listed = BTreeMap::new();
     for dir in dirs {
@@ -198,10 +203,30 @@ fn unit_missing(
     cap: usize,
 ) -> Result<bool, String> {
     let profile = target.join(&unit.rel_profile);
-    let present = counted_deps(&profile.join("deps"), deps, &unit.dir_name, cap)?;
-    let unit_dir_gone = !is_dir(&profile.join(".fingerprint").join(&unit.dir_name));
-    let build_gone = unit.has_build && !is_dir(&profile.join("build").join(&unit.dir_name));
-    Ok(unit_dir_gone || build_gone || present < unit.deps_files)
+    let loc = UnitLoc {
+        layout: unit.unit_layout,
+        name_meta: unit.dir_name.clone(),
+    };
+    match unit.unit_layout {
+        UnitLayout::Flat => {
+            let present = counted_deps(
+                &unit_path::flat_deps_dir(&profile),
+                deps,
+                &unit.dir_name,
+                cap,
+            )?;
+            let unit_dir_gone = !is_dir(&unit_path::fingerprint_dir(&profile, &loc));
+            let run_stamp = unit_path::stamp(&profile, &loc, fingerprint::UnitKind::RunBuildScript);
+            let build_gone =
+                unit.has_build && !is_dir(run_stamp.parent().expect("stamp path has a parent"));
+            Ok(unit_dir_gone || build_gone || present < unit.deps_files)
+        }
+        UnitLayout::UnitDir => {
+            let unit_dir_gone = !is_dir(&unit_path::fingerprint_dir(&profile, &loc));
+            let present = count_files(&unit_path::outputs(&profile, &loc), cap, 0)?;
+            Ok(unit_dir_gone || present < unit.deps_files)
+        }
+    }
 }
 
 fn is_dir(path: &Path) -> bool {
@@ -272,15 +297,13 @@ fn stamp_differs(target: &Path, unit: &SeededUnit) -> bool {
 
 fn stamp_present(target: &Path, unit: &SeededUnit) -> bool {
     let profile = target.join(&unit.rel_profile);
-    [".fingerprint", "build"].into_iter().any(|base| {
-        fs::metadata(
-            profile
-                .join(base)
-                .join(&unit.dir_name)
-                .join(fingerprint::INVOKED_TIMESTAMP),
-        )
-        .is_ok()
-    })
+    let loc = UnitLoc {
+        layout: unit.unit_layout,
+        name_meta: unit.dir_name.clone(),
+    };
+    let lib_stamp = unit_path::stamp(&profile, &loc, fingerprint::UnitKind::Lib);
+    let run_stamp = unit_path::stamp(&profile, &loc, fingerprint::UnitKind::RunBuildScript);
+    fs::metadata(lib_stamp).is_ok() || fs::metadata(run_stamp).is_ok()
 }
 
 fn file_mtime_ns(path: &Path) -> Option<u64> {
@@ -311,7 +334,7 @@ fn reached_units(target: &TargetDir, record: &SeedRecord) -> BTreeSet<(PathBuf, 
             by_hash.entry(unit.hash.to_string()).or_default().push(idx);
             nodes.push(GraphNode {
                 rel: rel.clone(),
-                dir_name: unit.dir_name.clone(),
+                dir_name: unit.loc.name_meta.clone(),
                 deps: unit.deps.clone(),
             });
         }
@@ -407,6 +430,7 @@ mod tests {
         Coverage, DepEdge, Format, ProfileReport, Unit, UnitGraph, UnitHash,
     };
     use cargo_hive_core::target::{Owner, TargetDir};
+    use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
     use cargo_hive_state::State;
 
     /// A scratch root under /private/tmp, removed when the test drops it.
@@ -455,6 +479,7 @@ mod tests {
                 )),
                 has_build: true,
                 deps_files: 1,
+                unit_layout: UnitLayout::Flat,
             }],
         }
     }
@@ -703,7 +728,10 @@ mod tests {
             }
             if spec.in_graph {
                 graph_units.push(Unit {
-                    dir_name: dir_name.clone(),
+                    loc: UnitLoc {
+                        layout: UnitLayout::Flat,
+                        name_meta: dir_name.clone(),
+                    },
                     kind: cargo_hive_core::fingerprint::UnitKind::Lib,
                     hash: UnitHash::parse(&hex).unwrap(),
                     deps: spec
@@ -742,6 +770,7 @@ mod tests {
                     stamp,
                     has_build: spec.has_build,
                     deps_files: spec.recorded_files,
+                    unit_layout: UnitLayout::Flat,
                 });
             }
         }
@@ -763,6 +792,8 @@ mod tests {
                     units: graph_units,
                     targets: Vec::new(),
                 }),
+                layouts: BTreeSet::from([UnitLayout::Flat]),
+                partial_unit_dirs: 0,
             }],
             size: None,
             unreadable: None,

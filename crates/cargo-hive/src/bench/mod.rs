@@ -15,6 +15,7 @@ use cargo_hive_cargo::registry::Repo;
 use cargo_hive_cargo::toolchain::Toolchain;
 use cargo_hive_core::caps::DEPS_CAP;
 use cargo_hive_core::receipt::{Finding, Measured, ReceiptBuilder};
+use cargo_hive_core::unit_path::UnitLayout;
 use cargo_hive_platform::proc::{self, Capture, ChildOutputError};
 use cargo_hive_seed::{self as seed, Fill, record};
 use cargo_hive_state::{State, StateError};
@@ -242,6 +243,7 @@ pub fn run(
     ctx: &Ctx<'_>,
     plan: &Plan,
     limits: Limits,
+    unit_layout: Option<UnitLayout>,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Report {
     let mut report = Report {
@@ -374,6 +376,7 @@ pub fn run(
                         checkout,
                         &plan.toolchain,
                         filled,
+                        unit_layout,
                         cancel,
                     ) {
                         Ok(outcome) => {

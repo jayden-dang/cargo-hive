@@ -504,12 +504,16 @@ fn doctor_cmd(state: &State, out: OutputArgs) -> i32 {
         });
     }
     for (cap, checks) in &caps.disabled {
-        let ids: Vec<String> = checks.iter().map(|c| format!("({})", c.letter())).collect();
-        let line = format!(
-            "{} is disabled: doctor check {} did not pass",
-            cap.describe(),
-            ids.join(", ")
-        );
+        let line = if checks.contains(&doctor::CheckId::F) {
+            doctor::check_f_disabled_line().to_string()
+        } else {
+            let ids: Vec<String> = checks.iter().map(|c| format!("({})", c.letter())).collect();
+            format!(
+                "{} is disabled: doctor check {} did not pass",
+                cap.describe(),
+                ids.join(", ")
+            )
+        };
         human.push_str(&format!("{line}\n"));
         b.finding("capability.disabled", None, line);
     }
@@ -796,6 +800,7 @@ fn report_targets(
     scan: &cargo_hive_cargo::discover::TargetScan,
     seeds: Option<&cargo_hive_seed::record::SeedsFile>,
 ) {
+    use cargo_hive_cargo::discover::{status_layout_suffix, unit_layout_counts};
     use cargo_hive_core::fingerprint::Format;
     use cargo_hive_core::target::Owner;
     let (mut owned, mut orphans, mut unresolved, mut unreadable, mut unsupported) =
@@ -846,8 +851,22 @@ fn report_targets(
                     resolved += e.resolved;
                     dangling += e.unresolved;
                     ambiguous += e.ambiguous;
+                    let (flat, unit_dir) = unit_layout_counts(p);
+                    if flat > 0 {
+                        b.count(&format!("units_flat:{key}"), flat);
+                    }
+                    if unit_dir > 0 {
+                        b.count(&format!("units_unit_dir:{key}"), unit_dir);
+                    }
+                    if p.partial_unit_dirs > 0 {
+                        b.count(
+                            &format!("partial_unit_dirs:{key}"),
+                            p.partial_unit_dirs as u64,
+                        );
+                    }
+                    let suffix = status_layout_suffix(p);
                     human.push_str(&format!(
-                        "    {key}  {} units, edges {} resolved / {} unresolved / {} ambiguous\n",
+                        "    {key}  {} units, edges {} resolved / {} unresolved / {} ambiguous{suffix}\n",
                         p.units, e.resolved, e.unresolved, e.ambiguous
                     ));
                 }
@@ -2002,7 +2021,14 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
     };
     b.toolchain(Some(toolchain.release.clone()));
     b.scope_mut().checkouts.push(real.clone());
-    let result = cargo_hive_seed::run(&ctx, &repos[0], &row, &toolchain, &cancelled);
+    let result = cargo_hive_seed::run(
+        &ctx,
+        &repos[0],
+        &row,
+        &toolchain,
+        caps.unit_layout_or_flat(),
+        &cancelled,
+    );
     let code = cargo_hive_seed::exit_code(&result);
     cargo_hive_seed::record_seed_result(&mut b, &result);
     match result {
@@ -2122,6 +2148,7 @@ fn bench_cmd(
         Limits {
             build_deadline: BUILD_DEADLINE,
         },
+        caps.unit_layout_or_flat(),
         &cancelled,
     );
     b.toolchain(Some(plan.toolchain.release.clone()));

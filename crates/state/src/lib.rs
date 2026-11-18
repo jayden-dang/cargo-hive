@@ -17,7 +17,7 @@ use std::time::SystemTime;
 pub struct Layout(u32);
 
 impl Layout {
-    pub const NEWEST: Layout = Layout(1);
+    pub const NEWEST: Layout = Layout(2);
 
     pub fn absent() -> Layout {
         Layout(1)
@@ -901,7 +901,7 @@ mod tests {
         let root = scratch("layout-newer");
         let state = State::open_at(root.clone()).unwrap();
         let path = root.join("record.json");
-        let before = br#"{"layout":2,"n":1}"#;
+        let before = br#"{"layout":3,"n":1}"#;
         fs::write(&path, before).unwrap();
         let err = state.read::<Record>("record.json").unwrap_err();
         match &err {
@@ -911,7 +911,7 @@ mod tests {
                 newest,
             } => {
                 assert_eq!(file, &path);
-                assert_eq!(*found, 2);
+                assert_eq!(*found, 3);
                 assert_eq!(*newest, Layout::NEWEST.0);
             }
             other => panic!("expected NewerLayout, got {other}"),
@@ -929,11 +929,11 @@ mod tests {
         let root = scratch("layout-newer-unknown");
         let state = State::open_at(root.clone()).unwrap();
         let path = root.join("record.json");
-        let before = br#"{"layout":2,"mystery":true,"n":1}"#;
+        let before = br#"{"layout":3,"mystery":true,"n":1}"#;
         fs::write(&path, before).unwrap();
         let err = state.read::<Record>("record.json").unwrap_err();
         assert!(
-            matches!(err, StateError::NewerLayout { found: 2, .. }),
+            matches!(err, StateError::NewerLayout { found: 3, .. }),
             "{err}"
         );
         assert_eq!(fs::read(&path).unwrap(), before);

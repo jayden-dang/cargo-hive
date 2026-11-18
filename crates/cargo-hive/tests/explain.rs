@@ -1,6 +1,7 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
-use common::{Hive, Scratch, init_repo, register, wait_within};
+use cargo_hive_core::unit_path::{self as unit_path, UnitLayout, UnitLoc};
+use common::{Hive, Scratch, init_repo, register, unit_dirs, wait_within};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -255,7 +256,7 @@ fn explain_refuses_without_fingerprint_reading() {
         .map(|finding| finding["detail"].as_str().unwrap().to_string())
         .unwrap_or_default();
     assert!(
-        why.contains("(f)") && why.contains("fingerprint graph reading"),
+        why.contains("rerun `cargo hive doctor`") && why.contains("1.100 unit dirs"),
         "{why}"
     );
     assert!(findings(&receipt, "copies.group").is_empty(), "{receipt}");
@@ -567,4 +568,181 @@ fn explain_given_a_path_inside_a_repository_explains_that_repository() {
         serde_json::json!([repo]),
         "{receipt}"
     );
+}
+
+fn tag_unit_dir_target(dir: &Path) {
+    fs::create_dir_all(dir.join("debug")).unwrap();
+    fs::write(
+        dir.join("CACHEDIR.TAG"),
+        format!("Signature: 8a477f597d28d172789f06886806bc55\n{TAG}\n"),
+    )
+    .unwrap();
+}
+
+fn set_unit_features(profile: &Path, loc: &UnitLoc, stem: &str, features: &str) {
+    let json = unit_path::fingerprint_dir(profile, loc).join(format!("{stem}.json"));
+    let text = fs::read_to_string(&json).unwrap();
+    let updated = text.replacen(
+        "\"features\":\"[]\"",
+        &format!("\"features\":\"{features}\""),
+        1,
+    );
+    assert_ne!(
+        text,
+        updated,
+        "features were not rewritten in {}",
+        json.display()
+    );
+    fs::write(json, updated).unwrap();
+}
+
+#[test]
+fn explain_groups_unit_dir_copies_with_modes_from_each_units_out() {
+    let hive = Hive::ready();
+    let s = Scratch::new("explain-unit-dir-copies");
+    let repo = init_repo(&s.path.join("app"), "");
+    let target = repo.join("target");
+    let profile = target.join("debug");
+    tag_unit_dir_target(&target);
+
+    let build_hex = "1111111111111111";
+    let check_hex = "2222222222222222";
+    let build_rlib = format!("libwidget-{build_hex}.rlib");
+    let build_rmeta = format!("libwidget-{build_hex}.rmeta");
+    let check_rmeta = format!("libwidget-{check_hex}.rmeta");
+
+    let build = unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "widget",
+        build_hex,
+        "lib-widget",
+        1,
+        &[],
+        &[build_rlib.as_str(), build_rmeta.as_str()],
+    );
+    set_unit_features(&profile, &build, "lib-widget", "[\\\"a\\\"]");
+
+    let check = unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "widget",
+        check_hex,
+        "lib-widget",
+        2,
+        &[],
+        &[check_rmeta.as_str()],
+    );
+    set_unit_features(&profile, &check, "lib-widget", "[\\\"b\\\"]");
+
+    register(&hive, &repo);
+    let (out, receipt) = explain(&hive, &[repo.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let groups: Vec<_> = findings(&receipt, "copies.group")
+        .into_iter()
+        .filter(|finding| {
+            finding["measured"]["crate"] == "widget" && finding["measured"]["target_kind"] == "lib"
+        })
+        .collect();
+    assert_eq!(groups.len(), 1, "{receipt}");
+    assert_eq!(measured_u64(groups[0], "copies"), 2, "{receipt}");
+    assert_eq!(measured_u64(groups[0], "feature_sets"), 2, "{receipt}");
+    assert_eq!(measured_u64(groups[0], "mode_build"), 1, "{receipt}");
+    assert_eq!(measured_u64(groups[0], "mode_check"), 1, "{receipt}");
+}
+
+#[test]
+fn explain_names_a_failed_unit_dir_unit_with_its_code() {
+    let hive = Hive::ready();
+    let s = Scratch::new("explain-unit-dir-failed");
+    let repo = init_repo(&s.path.join("app"), "");
+    let target = repo.join("target");
+    let profile = target.join("debug");
+    tag_unit_dir_target(&target);
+
+    let hex = "3333333333333333";
+    unit_dirs::plant_not_current(&profile, UnitLayout::UnitDir, "widget", hex, "lib-widget");
+    let loc = UnitLoc {
+        layout: UnitLayout::UnitDir,
+        name_meta: format!("widget-{hex}"),
+    };
+    let output = unit_path::fingerprint_dir(&profile, &loc).join("output-lib-widget");
+    fs::write(
+        &output,
+        concat!(
+            r#"{"level":"error","code":{"code":"E0308"},"message":"mismatched types"}"#,
+            "\n",
+            r#"{"level":"error","code":null,"message":"aborting due to 1 previous error"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    register(&hive, &repo);
+    let (out, receipt) = explain(&hive, &[repo.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let failed = findings(&receipt, "unit.failed");
+    assert_eq!(failed.len(), 1, "{receipt}");
+    assert_eq!(failed[0]["measured"]["crate"], "widget", "{receipt}");
+    assert_eq!(failed[0]["measured"]["error_codes"], "E0308", "{receipt}");
+    let failed_units: u64 = findings(&receipt, "copies.totals")
+        .into_iter()
+        .map(|finding| measured_u64(finding, "failed_units"))
+        .sum();
+    assert_eq!(failed_units, 1, "{receipt}");
+}
+
+#[test]
+fn explain_still_groups_flat_copies_with_modes_from_deps() {
+    let hive = Hive::ready();
+    let s = Scratch::new("explain-flat-copies-guard");
+    let repo = init_repo(&s.path.join("app"), "");
+    let target = repo.join("target");
+    let profile = target.join("debug");
+    tag_target(&target);
+
+    let build_hex = "aaaaaaaaaaaaaaaa";
+    let check_hex = "bbbbbbbbbbbbbbbb";
+    let build_rlib = format!("libwidget-{build_hex}.rlib");
+    let build_rmeta = format!("libwidget-{build_hex}.rmeta");
+    let check_rmeta = format!("libwidget-{check_hex}.rmeta");
+
+    let build = unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::Flat,
+        "widget",
+        build_hex,
+        "lib-widget",
+        1,
+        &[],
+        &[build_rlib.as_str(), build_rmeta.as_str()],
+    );
+    set_unit_features(&profile, &build, "lib-widget", "[\\\"a\\\"]");
+
+    let check = unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::Flat,
+        "widget",
+        check_hex,
+        "lib-widget",
+        2,
+        &[],
+        &[check_rmeta.as_str()],
+    );
+    set_unit_features(&profile, &check, "lib-widget", "[\\\"b\\\"]");
+
+    register(&hive, &repo);
+    let (out, receipt) = explain(&hive, &[repo.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let groups: Vec<_> = findings(&receipt, "copies.group")
+        .into_iter()
+        .filter(|finding| {
+            finding["measured"]["crate"] == "widget" && finding["measured"]["target_kind"] == "lib"
+        })
+        .collect();
+    assert_eq!(groups.len(), 1, "{receipt}");
+    assert_eq!(measured_u64(groups[0], "copies"), 2, "{receipt}");
+    assert_eq!(measured_u64(groups[0], "feature_sets"), 2, "{receipt}");
+    assert_eq!(measured_u64(groups[0], "mode_build"), 1, "{receipt}");
+    assert_eq!(measured_u64(groups[0], "mode_check"), 1, "{receipt}");
 }

@@ -262,7 +262,9 @@ _Requirements: UPGRADE-1.1, UPGRADE-3.1, UPGRADE-3.8, UPGRADE-7.2, UPGRADE-7.6_
 - [x] **Step 2: Implement.** Run the task gate for `cargo-hive-gc`; expect pass.
 - [x] **Step 3: Commit.** `feat(gc): plans record their layout`
 
-_Requirements: UPGRADE-1.1, UPGRADE-7.1_
+_Requirements: UPGRADE-1.1_
+
+UPGRADE-7.1 was delivered by this task, then superseded by BUILDDIR-6.7 on 2026-11-17 (requirements.md).
 
 ---
 
@@ -300,7 +302,9 @@ _Requirements: UPGRADE-1.1, UPGRADE-7.1_
   names in the seed crate). Run the task gate for `cargo-hive-seed`; expect pass.
 - [x] **Step 3: Commit.** `feat(seed): the store index and seed record record their layout`
 
-_Requirements: UPGRADE-1.1, UPGRADE-1.5, UPGRADE-7.1_
+_Requirements: UPGRADE-1.1, UPGRADE-1.5_
+
+UPGRADE-7.1 was delivered by this task, then superseded by BUILDDIR-6.7 on 2026-11-17 (requirements.md).
 
 ---
 

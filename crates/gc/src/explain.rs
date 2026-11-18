@@ -10,9 +10,11 @@ use cargo_hive_core::fingerprint::{
 };
 use cargo_hive_core::receipt::{Finding, Measured};
 use cargo_hive_core::target::TargetDir;
+use cargo_hive_core::unit_path::{self, UnitLayout};
 use cargo_hive_platform::Fs;
 use cargo_hive_platform::clock::utc_timestamp;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -221,7 +223,7 @@ fn analyse(inputs: &[ProfileInput], limits: Limits, failed: &FailedUnits) -> Exp
 fn groups_in<'a>(input: &'a ProfileInput, index: Option<&'a ModeIndex>) -> Vec<Group<'a>> {
     let mut buckets: BTreeMap<(&str, &str, u64, u64), Vec<&Unit>> = BTreeMap::new();
     for unit in &input.units {
-        let dir_crate = directory_crate(&unit.dir_name, &unit.hash);
+        let dir_crate = directory_crate(&unit.loc.name_meta, &unit.hash);
         buckets
             .entry((dir_crate, unit.stem.as_str(), unit.target, unit.path))
             .or_default()
@@ -248,7 +250,7 @@ fn divergent_modes(group: &Group<'_>) -> Vec<(Mode, usize)> {
     let mut features_by_mode: BTreeMap<Mode, BTreeSet<&str>> = BTreeMap::new();
     for unit in &group.units {
         features_by_mode
-            .entry(unit_mode(&unit.dir_name, &unit.hash, deps))
+            .entry(unit_mode(&unit.loc.name_meta, &unit.hash, deps))
             .or_default()
             .insert(unit.features.as_ref());
     }
@@ -381,7 +383,7 @@ fn group_finding(
         let mut check = 0_u64;
         let mut unknown = 0_u64;
         for unit in &group.units {
-            match unit_mode(&unit.dir_name, &unit.hash, deps) {
+            match unit_mode(&unit.loc.name_meta, &unit.hash, deps) {
                 Mode::Build => build += 1,
                 Mode::Check => check += 1,
                 Mode::Unknown => unknown += 1,
@@ -447,7 +449,7 @@ fn feature_rows<'a>(group: &'a Group<'a>) -> Vec<FeatureRow<'a>> {
     for unit in &group.units {
         let mode = group
             .deps
-            .map(|deps| unit_mode(&unit.dir_name, &unit.hash, deps));
+            .map(|deps| unit_mode(&unit.loc.name_meta, &unit.hash, deps));
         let rank = mode.map(Mode::rank).unwrap_or(3);
         buckets
             .entry((rank, unit.features.as_ref()))
@@ -598,15 +600,10 @@ fn failed_crate(item: &NotCurrentInput) -> String {
     if let Some(stem) = &item.unit.stem {
         return crate_and_kind(stem).0;
     }
-    let name = item
-        .unit
-        .dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    match cargo_hive_core::fingerprint::unit_hash(&name) {
-        Some(_) => name[..name.len() - UnitHash::HEX_LEN - 1].to_string(),
-        None => name,
+    let name = &item.unit.loc.name_meta;
+    match cargo_hive_core::fingerprint::unit_hash(name) {
+        Some(hash) => directory_crate(name, &hash).to_string(),
+        None => name.clone(),
     }
 }
 
@@ -718,7 +715,7 @@ fn profile_inputs(
                 if cancelled() {
                     return Err(Cancelled);
                 }
-                input.deps = list_deps(fs, &profile.path.join("deps"), deps_cap);
+                input.deps = list_mode_files(fs, &profile.path, &input.units, deps_cap);
             }
             input.not_current = read_not_current(&profile.not_current_units);
             inputs.push(input);
@@ -727,10 +724,57 @@ fn profile_inputs(
     Ok(inputs)
 }
 
-fn list_deps(fs: &dyn Fs, dir: &Path, cap: usize) -> Option<Vec<String>> {
-    fs.read_dir_bounded(dir, cap)
-        .ok()
-        .map(|entries| entries.into_iter().map(|(name, _kind)| name).collect())
+/// Names that feed `mode_index`: flat `deps/` plus each unit-dir unit's `out/`.
+fn list_mode_files(fs: &dyn Fs, profile: &Path, units: &[Unit], cap: usize) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    let mut remaining = cap;
+    let mut listed_a_dir = false;
+    let mut has_unit_dir = false;
+
+    match list_deps(fs, &unit_path::flat_deps_dir(profile), remaining) {
+        DirList::Missing => {}
+        DirList::Failed => return None,
+        DirList::Names(listed) => {
+            listed_a_dir = true;
+            remaining = remaining.saturating_sub(listed.len());
+            names.extend(listed);
+        }
+    }
+
+    for unit in units {
+        if unit.loc.layout != UnitLayout::UnitDir {
+            continue;
+        }
+        has_unit_dir = true;
+        match list_deps(fs, &unit_path::outputs(profile, &unit.loc), remaining) {
+            DirList::Missing => {}
+            DirList::Failed => return None,
+            DirList::Names(listed) => {
+                listed_a_dir = true;
+                remaining = remaining.saturating_sub(listed.len());
+                names.extend(listed);
+            }
+        }
+    }
+
+    if !listed_a_dir && !has_unit_dir {
+        return None;
+    }
+    Some(names)
+}
+
+enum DirList {
+    Missing,
+    Failed,
+    Names(Vec<String>),
+}
+
+fn list_deps(fs: &dyn Fs, dir: &Path, cap: usize) -> DirList {
+    match fs.read_dir_bounded(dir, cap) {
+        Ok(entries) => DirList::Names(entries.into_iter().map(|(name, _kind)| name).collect()),
+        Err(err) if err.kind() == ErrorKind::NotFound => DirList::Missing,
+        Err(_) => DirList::Failed,
+    }
 }
 
 fn read_not_current(units: &[NotCurrentUnit]) -> Vec<NotCurrentInput> {
@@ -820,6 +864,7 @@ mod tests {
     use super::{DIVERGENCE_DETAIL, FailedUnits, Limits, NotCurrentInput, ProfileInput, analyse};
     use cargo_hive_core::fingerprint::{Coverage, NotCurrentUnit, UnitHash, UnitKind};
     use cargo_hive_core::receipt::{Finding, Measured};
+    use cargo_hive_core::unit_path::{UnitLayout, UnitLoc};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -835,7 +880,10 @@ mod tests {
     ) -> cargo_hive_core::fingerprint::Unit {
         let (profile, target, path) = place;
         cargo_hive_core::fingerprint::Unit {
-            dir_name: format!("{dir_crate}-{hash}"),
+            loc: UnitLoc {
+                layout: UnitLayout::Flat,
+                name_meta: format!("{dir_crate}-{hash}"),
+            },
             kind: UnitKind::of(stem),
             hash: UnitHash::parse(hash).unwrap(),
             deps: Vec::new(),
@@ -1039,6 +1087,10 @@ mod tests {
         primary.not_current.push(NotCurrentInput {
             unit: NotCurrentUnit {
                 dir: PathBuf::from("/profile/a/not-current"),
+                loc: UnitLoc {
+                    layout: UnitLayout::Flat,
+                    name_meta: "not-current".into(),
+                },
                 stem: None,
                 features: None,
                 outputs: Vec::new(),
@@ -2465,6 +2517,14 @@ mod tests {
         NotCurrentInput {
             unit: NotCurrentUnit {
                 dir: PathBuf::from(dir),
+                loc: UnitLoc {
+                    layout: UnitLayout::Flat,
+                    name_meta: Path::new(dir)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                },
                 stem: stem.map(str::to_string),
                 features: features.map(Arc::from),
                 outputs: output_names
@@ -3174,6 +3234,14 @@ mod tests {
                 not_current_units: vec![
                     NotCurrentUnit {
                         dir: ok_dir.clone(),
+                        loc: UnitLoc {
+                            layout: UnitLayout::Flat,
+                            name_meta: ok_dir
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        },
                         stem: Some("lib-widget".to_string()),
                         features: Some(Arc::from("[]")),
                         outputs: vec!["output-lib-widget".to_string()],
@@ -3181,6 +3249,14 @@ mod tests {
                     },
                     NotCurrentUnit {
                         dir: big_dir.clone(),
+                        loc: UnitLoc {
+                            layout: UnitLayout::Flat,
+                            name_meta: big_dir
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        },
                         stem: Some("lib-widget".to_string()),
                         features: Some(Arc::from("[]")),
                         outputs: vec!["output-lib-widget".to_string()],
@@ -3193,6 +3269,8 @@ mod tests {
                     units,
                     targets: Vec::new(),
                 }),
+                layouts: std::collections::BTreeSet::from([UnitLayout::Flat]),
+                partial_unit_dirs: 0,
             }],
             size: None,
             unreadable: None,

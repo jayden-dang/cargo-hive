@@ -1,5 +1,8 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
+use cargo_hive_core::fingerprint::le_hex;
+use cargo_hive_core::unit_path::UnitLayout;
+use common::unit_dirs::{plant_partial, plant_unit};
 use common::{Hive, Scratch, git, init_repo, register};
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -196,7 +199,7 @@ fn a_build_dir_outside_every_search_root_is_owned_and_its_artifact_dir_is_not_a_
 }
 
 #[test]
-fn a_profile_in_the_newer_layout_is_unsupported_has_no_edges_and_is_recorded() {
+fn a_profile_with_a_unit_dir_and_no_fingerprint_dir_is_supported() {
     let hive = Hive::ready();
     let s = Scratch::new("newlayout");
     let repo = init_repo(&s.path.join("app"), "");
@@ -206,20 +209,193 @@ fn a_profile_in_the_newer_layout_is_unsupported_has_no_edges_and_is_recorded() {
     register(&hive, &repo);
     let r = status(&hive, &[repo.to_str().unwrap()]);
     let profile = t.join("debug");
-    assert!(
-        finding(&r, "profile.unsupported", &profile)
-            .unwrap()
-            .contains(".fingerprint")
-    );
+    assert_eq!(finding(&r, "profile.unsupported", &profile), None);
     assert_eq!(
         count(&r, &format!("edges_resolved:{}", profile.display())),
-        None
+        Some(0)
     );
     let snapshot: serde_json::Value =
         serde_json::from_slice(&fs::read(hive.home.path.join("snapshot.json")).unwrap()).unwrap();
     assert!(
-        snapshot["unsupported_profiles"][profile.to_str().unwrap()].is_string(),
+        snapshot["unsupported_profiles"]
+            .get(profile.to_str().unwrap())
+            .is_none(),
         "{snapshot}"
+    );
+}
+
+fn tagged_profile(repo: &Path, name: &str) -> PathBuf {
+    let t = repo.join(name);
+    fs::create_dir_all(t.join("debug")).unwrap();
+    fs::write(t.join("CACHEDIR.TAG"), format!("{TAG}\n")).unwrap();
+    t.join("debug")
+}
+
+#[test]
+fn a_unit_dir_target_names_unit_dir_layout_and_counts_only_unit_dir_units() {
+    let hive = Hive::ready();
+    let s = Scratch::new("status-udir");
+    let repo = init_repo(&s.path.join("app"), "");
+    let profile = tagged_profile(&repo, "target");
+    let (a, b) = (0x0102_0304_0506_0708u64, 17_112_352_188_342_185_299u64);
+    plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "dep",
+        &le_hex(b),
+        "lib-dep",
+        b,
+        &[],
+        &[],
+    );
+    plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "app",
+        &le_hex(a),
+        "lib-app",
+        a,
+        &[(b, "dep")],
+        &[],
+    );
+    register(&hive, &repo);
+    let key = profile.display().to_string();
+    let r = status(&hive, &[repo.to_str().unwrap(), "--no-sizes"]);
+    assert_eq!(count(&r, &format!("units:{key}")), Some(2));
+    assert_eq!(count(&r, &format!("units_unit_dir:{key}")), Some(2));
+    assert_eq!(count(&r, &format!("units_flat:{key}")), None);
+    assert_eq!(count(&r, &format!("edges_resolved:{key}")), Some(1));
+    assert_eq!(count(&r, &format!("edges_unresolved:{key}")), Some(0));
+    assert_eq!(count(&r, &format!("edges_ambiguous:{key}")), Some(0));
+    let out = hive.run(&["status", repo.to_str().unwrap(), "--no-sizes"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(&format!(
+            "{key}  2 units, edges 1 resolved / 0 unresolved / 0 ambiguous (unit-dir)"
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_mixed_target_names_flat_and_unit_dir() {
+    let hive = Hive::ready();
+    let s = Scratch::new("status-mixed");
+    let repo = init_repo(&s.path.join("app"), "");
+    let profile = tagged_profile(&repo, "target");
+    let (a, b) = (0x0102_0304_0506_0708u64, 17_112_352_188_342_185_299u64);
+    plant_unit(
+        &profile,
+        UnitLayout::Flat,
+        "dep",
+        &le_hex(b),
+        "lib-dep",
+        b,
+        &[],
+        &[],
+    );
+    plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "app",
+        &le_hex(a),
+        "lib-app",
+        a,
+        &[(b, "dep")],
+        &[],
+    );
+    register(&hive, &repo);
+    let key = profile.display().to_string();
+    let r = status(&hive, &[repo.to_str().unwrap(), "--no-sizes"]);
+    assert_eq!(count(&r, &format!("units_flat:{key}")), Some(1));
+    assert_eq!(count(&r, &format!("units_unit_dir:{key}")), Some(1));
+    let out = hive.run(&["status", repo.to_str().unwrap(), "--no-sizes"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(&format!(
+            "{key}  2 units, edges 1 resolved / 0 unresolved / 0 ambiguous (flat + unit-dir)"
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_partial_unit_dir_is_named_on_the_status_line_and_counted() {
+    let hive = Hive::ready();
+    let s = Scratch::new("status-partial");
+    let repo = init_repo(&s.path.join("app"), "");
+    let profile = tagged_profile(&repo, "target");
+    let fp = 0x0102_0304_0506_0708u64;
+    plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "ok",
+        &le_hex(fp),
+        "lib-ok",
+        fp,
+        &[],
+        &[],
+    );
+    plant_partial(&profile, "ok", "fedcba9876543210");
+    register(&hive, &repo);
+    let key = profile.display().to_string();
+    let r = status(&hive, &[repo.to_str().unwrap(), "--no-sizes"]);
+    assert_eq!(count(&r, &format!("partial_unit_dirs:{key}")), Some(1));
+    assert_eq!(count(&r, &format!("units:{key}")), Some(1));
+    let out = hive.run(&["status", repo.to_str().unwrap(), "--no-sizes"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(&format!(
+            "{key}  1 units, edges 0 resolved / 0 unresolved / 0 ambiguous (unit-dir), 1 partial"
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_flat_only_target_keeps_prior_counts_and_appends_flat() {
+    let hive = Hive::ready();
+    let s = Scratch::new("status-flat");
+    let repo = init_repo(&s.path.join("app"), "");
+    let profile = tagged_profile(&repo, "target");
+    let (a, b) = (0x0102_0304_0506_0708u64, 17_112_352_188_342_185_299u64);
+    plant_unit(
+        &profile,
+        UnitLayout::Flat,
+        "dep",
+        &le_hex(b),
+        "lib-dep",
+        b,
+        &[],
+        &[],
+    );
+    plant_unit(
+        &profile,
+        UnitLayout::Flat,
+        "app",
+        &le_hex(a),
+        "lib-app",
+        a,
+        &[(b, "dep")],
+        &[],
+    );
+    register(&hive, &repo);
+    let key = profile.display().to_string();
+    let r = status(&hive, &[repo.to_str().unwrap(), "--no-sizes"]);
+    assert_eq!(count(&r, &format!("units:{key}")), Some(2));
+    assert_eq!(count(&r, &format!("edges_resolved:{key}")), Some(1));
+    assert_eq!(count(&r, &format!("edges_unresolved:{key}")), Some(0));
+    assert_eq!(count(&r, &format!("edges_ambiguous:{key}")), Some(0));
+    assert_eq!(count(&r, &format!("units_flat:{key}")), Some(2));
+    assert_eq!(count(&r, &format!("units_unit_dir:{key}")), None);
+    assert_eq!(count(&r, &format!("partial_unit_dirs:{key}")), None);
+    let out = hive.run(&["status", repo.to_str().unwrap(), "--no-sizes"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(&format!(
+            "{key}  2 units, edges 1 resolved / 0 unresolved / 0 ambiguous (flat)"
+        )),
+        "{text}"
     );
 }
 

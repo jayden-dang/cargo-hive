@@ -6,6 +6,7 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 use cargo_hive_core::liveness::{Liveness, Uncertain, UnitRef};
+
 use cargo_hive_platform as platform;
 use common::Scratch;
 use common::cargo_fixture::*;
@@ -300,7 +301,7 @@ fn not_current(target: &Path, prefix: &str, keep: impl Fn(&Path) -> bool) -> Vec
             if name.starts_with(prefix) {
                 out.push(UnitRef {
                     profile: profile.path.clone(),
-                    dir_name: name,
+                    loc: unit.loc.clone(),
                 });
             }
         }
@@ -309,7 +310,7 @@ fn not_current(target: &Path, prefix: &str, keep: impl Fn(&Path) -> bool) -> Vec
 }
 
 fn hash_file(unit: &UnitRef) -> PathBuf {
-    let dir = unit.profile.join(".fingerprint").join(&unit.dir_name);
+    let dir = unit.profile.join(".fingerprint").join(&unit.loc.name_meta);
     fs::read_dir(dir)
         .unwrap()
         .take(DIR_CAP)
@@ -363,12 +364,12 @@ fn edge_packages(ws: &Busy, unit: &UnitRef) -> BTreeSet<u64> {
         .graph
         .into_iter()
         .flat_map(|g| g.units)
-        .filter(|u| u.dir_name == unit.dir_name)
+        .filter(|u| u.loc.name_meta == unit.loc.name_meta)
         .flat_map(|u| u.deps);
     let not_current = profile
         .not_current_units
         .into_iter()
-        .filter(|u| u.dir.file_name().is_some_and(|n| *n == *unit.dir_name))
+        .filter(|u| u.loc.name_meta == unit.loc.name_meta)
         .flat_map(|u| u.deps);
     current.chain(not_current).map(|d| d.package).collect()
 }
@@ -702,4 +703,147 @@ fn a_replay_with_nothing_dead_is_vacuous_and_rebuilds_nothing() {
         WindowOutcome::Vacuous("no dead unit lists a file to delete".to_string()),
         "{window:#?}"
     );
+}
+
+#[test]
+fn apply_skips_a_unit_dir_target_while_a_slow_build_rs_holds_the_build_lock() {
+    // Real-cargo lock evidence for unit-dir apply. Runs only under 1.100.0;
+    // under 1.97.1 the skip itself is the recorded outcome for this named test.
+    let toolchain = std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_default();
+    let rustc = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    if !(toolchain.contains("1.100.0") || rustc.contains("1.100.0")) {
+        eprintln!(
+            "skip: apply_skips_a_unit_dir_target_while_a_slow_build_rs_holds_the_build_lock needs RUSTUP_TOOLCHAIN=1.100.0 (saw toolchain={toolchain:?} rustc={rustc:?})"
+        );
+        return;
+    }
+
+    use cargo_hive_core::unit_path::{self, UnitLayout};
+    use common::plan_fixture::tree;
+    use common::unit_dirs;
+    use common::{Hive, init_repo, register};
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let hive = Hive::ready();
+    let scratch = Scratch::new("busy-udir-held");
+    let repo = init_repo(&scratch.path.join("app"), "");
+    // A first plain build creates the unit-dir profile and Cargo lock files.
+    let out = Command::new("cargo")
+        .args(["build", "--offline", "--quiet"])
+        .current_dir(&repo)
+        .env("CARGO_HOME", &hive.cargo_home.path)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let target = repo.join("target");
+    let profile = target.join("debug");
+    assert_eq!(
+        layout_of(&target),
+        UnitLayout::UnitDir,
+        "1.100.0 must produce unit dirs"
+    );
+    // Plant one aged synthetic unit so plan has something to delete without
+    // aging the real cargo graph into an undecided state.
+    let loc = unit_dirs::plant_unit(
+        &profile,
+        UnitLayout::UnitDir,
+        "widget",
+        "4444444444444444",
+        "lib-widget",
+        104,
+        &[],
+        &["a.d", "libwidget.rlib"],
+    );
+    let unit = unit_path::unit_dir(&profile, &loc).unwrap();
+    let stamp = cargo_hive_core::liveness::unit_timestamp(
+        &profile,
+        &loc,
+        cargo_hive_core::fingerprint::UnitKind::of("lib-widget"),
+    );
+    fs::File::open(&stamp)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(30 * 86_400))
+        .unwrap();
+    register(&hive, &repo);
+    let (out, planned) = hive.json(&["gc", "--plan"]);
+    assert!(out.status.success(), "{planned}");
+    let id = planned["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["class"] == "protected")
+        .unwrap_or_else(|| panic!("no protected plan: {planned}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    fs::write(
+        repo.join("build.rs"),
+        r#"fn main() {
+            std::thread::sleep(std::time::Duration::from_secs(300));
+        }
+"#,
+    )
+    .unwrap();
+    let manifest = fs::read_to_string(repo.join("Cargo.toml")).unwrap();
+    if !manifest.contains("build =") {
+        fs::write(
+            repo.join("Cargo.toml"),
+            manifest.replace(
+                "edition = \"2021\"",
+                "edition = \"2021\"\nbuild = \"build.rs\"",
+            ),
+        )
+        .unwrap();
+    }
+    let lock = profile.join(".cargo-build-lock");
+    let mut child = Command::new("cargo")
+        .args(["build", "--offline", "--quiet"])
+        .current_dir(&repo)
+        .env("CARGO_HOME", &hive.cargo_home.path)
+        .env_remove("CARGO_TARGET_DIR")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(30) {
+        if !common::wait_until_lock_free(&lock, Duration::from_millis(1)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !common::wait_until_lock_free(&lock, Duration::from_millis(1)),
+        "slow build.rs never held the build lock"
+    );
+
+    let widget_before = tree(&unit);
+    let (out, r) = hive.json(&["apply", &id]);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(out.status.code(), Some(0), "{r}");
+    let plan = &r["plans"][0];
+    assert_eq!(plan["outcome"], "partial", "{r}");
+    assert_eq!(plan["counts"]["targets_skipped_held"], 1, "{r}");
+    assert_eq!(
+        plan["counts"]["paths_deleted"].as_u64().unwrap_or(0),
+        0,
+        "{r}"
+    );
+    // The slow cargo may still write under the target while we apply; the
+    // planned unit dir must be untouched.
+    assert_eq!(tree(&unit), widget_before);
+    assert!(unit.is_dir(), "held apply must delete nothing");
 }
