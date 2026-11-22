@@ -59,6 +59,99 @@ The Rerun blocks are zsh on macOS. Linux is out of scope.
 
 ## Rerun
 
+### 0. Preflight
+
+Source this block, then run `preflight`. It stops before any measurement, changes no cell, and names the step to fix.
+
+```zsh
+source .skills/verify/scorecard.env
+WTS=()
+
+cleanup_worktrees() {
+  local w
+  for w in $WTS; do
+    git -C $MAIN worktree remove --force $w 2>/dev/null
+  done
+  git -C $MAIN worktree prune
+}
+trap cleanup_worktrees EXIT
+trap 'cleanup_worktrees; return 130' INT
+
+preflight() {
+  local flag v src vars help hv
+  : ${SCORECARD_N:=4}
+  RUN=.skills/verify/$(date +%F)-scorecard
+  mkdir -p $RUN
+  rm -f $RUN/preflight-fail.txt
+  sysctl -n vm.loadavg > $RUN/load-start.txt
+  print "Quiet machine required: no other builds or heavy work running."
+
+  local rustc_bin=$(cd $MAIN && env -u RUSTUP_TOOLCHAIN -u RUSTUP_TOOLCHAIN_SOURCE rustup which rustc)
+  TC=
+  [[ $rustc_bin == */toolchains/*/bin/rustc ]] && TC=${${rustc_bin:h:h}:t}
+  { command -v cargo-hive; cargo hive --version; } > $RUN/hive.txt
+
+  if [[ -n $TC ]]; then
+    RUSTUP_TOOLCHAIN=$TC cargo hive doctor --json > $RUN/doctor.json
+  else
+    cargo hive doctor --json > $RUN/doctor.json
+  fi
+  local doctor_rc=$?
+  if (( doctor_rc != 0 )) || ! jq -e '.toolchain != null' $RUN/doctor.json > /dev/null 2>&1; then
+    { print "doctor failed (exit $doctor_rc) or the toolchain is unsupported:"
+      jq -r '(.checks[]? | select(.verdict != "pass") | "check \(.id): \(.verdict)"), (.unmeasured[]? | "unmeasured: \(tojson)")' $RUN/doctor.json 2>&1
+    } | tee $RUN/preflight-fail.txt >&2
+    return 1
+  fi
+
+  if ! cargo hive repo list --json | jq -e --arg m ${MAIN:A} '.scope.repos | index($m)' > /dev/null; then
+    cargo hive repo add "$MAIN" || { print "preflight stopped: could not register the main checkout" | tee $RUN/preflight-fail.txt >&2; return 1; }
+  fi
+
+  help=$(cargo hive bench --help)
+  for flag in --cold --seeded --build-cmd --json; do
+    if ! print -r -- $help | grep -q -e "$flag"; then
+      print "preflight stopped: bench has no $flag; update the flag list in the preflight step and the bench row step in this commit" | tee $RUN/preflight-fail.txt >&2
+      return 1
+    fi
+  done
+
+  if ! (cd $MAIN && rustup component list --installed) | grep -q '^clippy'; then
+    print "preflight stopped: the clippy component is not installed" | tee $RUN/preflight-fail.txt >&2
+    return 1
+  fi
+
+  local cfg=${HIVE_HOME:-~/.hive}/config.json
+  if [[ -f $cfg ]] && jq -e 'has("secondary_roots")' $cfg > /dev/null 2>&1; then
+    if ! jq -e --arg t ${TMPDIR:A} '.secondary_roots | map(rtrimstr("/")) | any(. as $r | $t | startswith($r))' $cfg > /dev/null; then
+      print "preflight stopped: secondary_roots in $cfg does not cover $TMPDIR" | tee $RUN/preflight-fail.txt >&2
+      return 1
+    fi
+  fi
+
+  if [[ -n $(git -C $MAIN status --porcelain --untracked-files=no) ]]; then
+    print "preflight stopped: the main's tracked tree is not clean" | tee $RUN/preflight-fail.txt >&2
+    return 1
+  fi
+
+  hv=$(cargo hive --version | awk '{print $NF}')
+  src=$(git rev-parse --show-toplevel 2>/dev/null)/crates/cargo/src/env.rs
+  [[ -f $src ]] || src=(${CARGO_HOME:-~/.cargo}/registry/src/*/cargo-hive-cargo-$hv/src/env.rs(N[1]))
+  if [[ ! -f $src ]]; then
+    print "preflight stopped: no env.rs found for hive $hv to check the scrub list against" | tee $RUN/preflight-fail.txt >&2
+    return 1
+  fi
+  vars=(CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_BUILD_BUILD_DIR CARGO_MANIFEST_DIR OUT_DIR CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN RUSTUP_TOOLCHAIN_SOURCE GIT_ CARGO_PKG_)
+  for v in $vars; do
+    if ! grep -q -F "\"$v" $src; then
+      print "preflight stopped: hive's env.rs does not drop $v; update hive_env_cargo in this commit" | tee $RUN/preflight-fail.txt >&2
+      return 1
+    fi
+  done
+  print "preflight passed: toolchain ${TC:-default}, evidence under $RUN"
+}
+```
+
 ### Re-check the setup footprint
 
 Compare R10's Seeded cell with the install section of the README: each command a user runs, and the safety guarantees about what hive installs and writes. The README's source install (`cargo install --path crates/cargo-hive`) is the source form of `cargo install cargo-hive`. If a line changed, fix it in this rerun's own commit.
