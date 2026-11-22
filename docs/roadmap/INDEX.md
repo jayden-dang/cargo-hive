@@ -1,7 +1,7 @@
 # Roadmap: cargo-hive
 
 Status: Approved
-Date: 2026-11-15
+Date: 2026-11-22
 
 <!--
 The program layer: milestone INTENT, above any single feature and below the product
@@ -153,6 +153,7 @@ ID rules:
 **Members:**
 - **ROAD-16** checkout-gc-debug-objects — After: none — Surfaces: `crates/gc` (liveness window, new deletion class), `crates/cargo` or `crates/platform` (reading which debug objects a binary references), the `gc` command in `crates/cargo-hive`, `skills/hive/`. — Card: [ROAD-16](roads/ROAD-16.md)
 - **ROAD-17** warm-slot-pool — After: ROAD-16 — Surfaces: pool and lease state in `crates/state`, a new command in `crates/cargo-hive`, the handoff, `skills/hive/`; issue #18. — Card: [ROAD-17](roads/ROAD-17.md)
+- **ROAD-19** worktree-scorecard — After: none — Surfaces: a scorecard file under `docs/` with its written rerun steps; `cargo hive bench` is used as is, not changed; issue #16. — Card: [ROAD-19](roads/ROAD-19.md)
 **Depends-on:** MILE-2
 **Commitment:** Planned
 **Closed:** None
