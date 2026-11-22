@@ -62,7 +62,7 @@ The Rerun blocks are zsh on macOS. Linux is out of scope.
 
 ### 0. Preflight
 
-Run every Rerun block from the repo root. Source this block, then run `preflight`. It stops before any measurement, changes no cell, and names the step to fix. A dry run must be started through the dry-run harness, which refuses any state root or temp dir outside the scratch area. The traps clean up when the shell exits or is interrupted; in an interactive shell, call `cleanup_worktrees` as the last step of a run.
+Run every Rerun block from the repo root. Source this block, then run `preflight`. It stops before any measurement, changes no cell, and names the step to fix. A dry run must be started through the dry-run harness, which refuses any state root or temp dir outside the scratch area. The traps clean up when the shell exits or is interrupted; in an interactive shell, call `cleanup_worktrees` as the last step of a run. The local env file also carries `O2_ANSWERED`, a placeholder left unset by default; setting it to `yes` lets `record` write the measured values and the workspace name into this file.
 
 ```zsh
 source .skills/verify/scorecard.env
@@ -477,10 +477,10 @@ pipeline() {
 }
 ```
 
-Run the pipelines in the order cold 1, seeded 1, seeded 2, cold 2, cold 3, seeded 3, seeded 4, cold 4, so that drift falls on both arms:
+Run the pipelines in the order cold 1, seeded 1, seeded 2, cold 2, cold 3, seeded 3, seeded 4, cold 4, so that drift falls on both arms. The block starts a fresh `pipe.jsonl` and keeps the old one under a timestamped name, so earlier samples and their void reasons stay in the evidence:
 
 ```text
-rm -f $RUN/pipe.jsonl
+if [[ -f $RUN/pipe.jsonl ]]; then mv $RUN/pipe.jsonl $RUN/pipe.$(date +%H%M%S).jsonl; fi
 for i in {1..$SCORECARD_N}; do
   if (( i % 2 )); then arms=(cold seeded); else arms=(seeded cold); fi
   for a in $arms; do pipeline $a $i || true; done
@@ -503,14 +503,19 @@ Rules `summarize` applies:
 ```zsh
 median() {
   local -a v
-  local n
+  local n s
   v=(${(on)@})
   n=$#v
   (( n > 0 )) || return 1
   if (( n % 2 )); then
     print -r -- $v[$(( (n + 1) / 2 ))]
   else
-    print -r -- $(( (v[n / 2] + v[n / 2 + 1]) / 2 ))
+    s=$(( v[n / 2] + v[n / 2 + 1] ))
+    if (( s >= 0 )); then
+      print -r -- $(( s / 2 ))
+    else
+      print -r -- $(( -((-s + 1) / 2) ))
+    fi
   fi
 }
 
@@ -522,21 +527,29 @@ pipe_reasons() {
   jq -s -r --arg a $1 --arg x $2 '[.[] | select(.arm == $a) | if (.void != null and ((.void.rows // []) | index($x))) then .void.reason elif ($x == "R9" and .r9 == "probe input absent") then "probe input absent" else empty end] | unique | join(", ")' $RUN/pipe.jsonl
 }
 
+sfail() {
+  print -u2 'summarize: a command failed'
+  exit 1
+}
+
 summarize() {
   local row arm m key f rcpt top date hv tc commit machine rs line
   local -a vals lines units short ev rr
   local -A N K CN CM LO HI
+  local rc=0
+  setopt localoptions pipefail
   [[ -n $RUN && -n $MAIN ]] || { print -u2 'run preflight first'; return 1 }
   : ${SCORECARD_N:=4}
   [[ -f $RUN/pipe.jsonl ]] || : > $RUN/pipe.jsonl
+  rm -f $RUN/cells.tsv
 
   date=$(date +%F)
   hv=
   tc=
   rcpt=($RUN/R[1-5].json(N[1]))
   if (( $#rcpt )); then
-    hv=$(jq -r '.hive_version // empty' $rcpt[1])
-    tc=$(jq -r '.toolchain // empty' $rcpt[1])
+    hv=$(jq -r '.hive_version // empty' $rcpt[1]) || return 1
+    tc=$(jq -r '.toolchain // empty' $rcpt[1]) || return 1
   fi
   [[ -n $hv ]] || hv=$(cargo hive --version | awk '{print $NF}')
   [[ -n $tc ]] || tc=$(jq -r '.toolchain // empty' $RUN/doctor.json 2> /dev/null) || tc=
@@ -548,10 +561,12 @@ summarize() {
     commit=$(git rev-list -n1 v$hv 2> /dev/null) || commit=
   fi
   commit=${${commit:-unknown}[1,12]}
-  machine=${(j:, :)${(f)"$(sysctl -n hw.model machdep.cpu.brand_string hw.ncpu)"}}
+  machine=$(sysctl -n hw.model machdep.cpu.brand_string hw.ncpu) || return 1
+  machine=${(j:, :)${(f)machine}}
   : > $RUN/cells.tsv
 
   {
+    setopt errexit
     for row in R1 R2 R3 R4 R5 R6 R7 R8 R9; do
       N=() K=() CN=() CM=() LO=() HI=()
       rs=
@@ -565,24 +580,24 @@ summarize() {
           else
             for arm in cold seeded; do
               if [[ $arm == cold ]]; then m=cold_build_ms; else m=seeded_total_ms; fi
-              N[$arm]=$(jq --arg a $arm '[.scope.checkouts[] | select((split("/") | last) | startswith($a))] | length' $f)
-              CM[$arm]=$(jq -r --arg k ${m}_median '.counts[$k] | if type == "number" then . else empty end' $f)
+              N[$arm]=$(jq --arg a $arm '[.scope.checkouts[] | select((split("/") | last) | startswith($a))] | length' $f) || sfail
+              CM[$arm]=$(jq -r --arg k ${m}_median '.counts[$k] | if type == "number" then . else empty end' $f) || sfail
               K[$arm]=0
               if [[ -n $CM[$arm] ]]; then K[$arm]=$N[$arm]; fi
-              LO[$arm]=$(jq -r --arg k ${m}_min '.counts[$k] // empty' $f)
-              HI[$arm]=$(jq -r --arg k ${m}_max '.counts[$k] // empty' $f)
+              LO[$arm]=$(jq -r --arg k ${m}_min '.counts[$k] // empty' $f) || sfail
+              HI[$arm]=$(jq -r --arg k ${m}_max '.counts[$k] // empty' $f) || sfail
             done
           fi
           ;;
         R6|R7)
           if [[ $row == R6 ]]; then key=r6_ms; else key=r7_bytes; fi
           for arm in cold seeded; do
-            N[$arm]=$(jq -s --arg a $arm 'map(select(.arm == $a)) | length' $RUN/pipe.jsonl)
-            vals=(${(f)"$(pipe_sel $arm $row ".$key != null" ".$key")"})
+            N[$arm]=$(jq -s --arg a $arm 'map(select(.arm == $a)) | length' $RUN/pipe.jsonl) || sfail
+            vals=(${(f)"$(pipe_sel $arm $row ".$key != null" ".$key")"}) || sfail
             vals=(${vals:#})
             K[$arm]=$#vals
             if (( $#vals )); then
-              CM[$arm]=$(median $vals)
+              CM[$arm]=$(median $vals) || sfail
               LO[$arm]=${${(on)vals}[1]}
               HI[$arm]=${${(on)vals}[-1]}
             fi
@@ -590,8 +605,8 @@ summarize() {
           ;;
         R8)
           for arm in cold seeded; do
-            N[$arm]=$(jq -s --arg a $arm 'map(select(.arm == $a)) | length' $RUN/pipe.jsonl)
-            lines=(${(f)"$(pipe_sel $arm R8 '.r8_units != null and .r8_vacuous != null' '"\(.r8_vacuous) \(.r8_units)"')"})
+            N[$arm]=$(jq -s --arg a $arm 'map(select(.arm == $a)) | length' $RUN/pipe.jsonl) || sfail
+            lines=(${(f)"$(pipe_sel $arm R8 '.r8_units != null and .r8_vacuous != null' '"\(.r8_vacuous) \(.r8_units)"')"}) || sfail
             lines=(${lines:#})
             K[$arm]=$#lines
             units=(${${(M)lines:#false *}#false })
@@ -606,8 +621,8 @@ summarize() {
           ;;
         R9)
           for arm in cold seeded; do
-            N[$arm]=$(jq -s --arg a $arm 'map(select(.arm == $a)) | length' $RUN/pipe.jsonl)
-            vals=(${(f)"$(pipe_sel $arm R9 '.r9 == "stale" or .r9 == "fresh-recompiled"' '.r9')"})
+            N[$arm]=$(jq -s --arg a $arm 'map(select(.arm == $a)) | length' $RUN/pipe.jsonl) || sfail
+            vals=(${(f)"$(pipe_sel $arm R9 '.r9 == "stale" or .r9 == "fresh-recompiled"' '.r9')"}) || sfail
             vals=(${vals:#})
             K[$arm]=$#vals
             units=(${(M)vals:#stale})
@@ -623,7 +638,7 @@ summarize() {
       done
       if (( $#short )); then
         if [[ $row == (R6|R7|R8|R9) ]]; then
-          rr=(${(s:, :)"$(pipe_reasons cold $row)"} ${(s:, :)"$(pipe_reasons seeded $row)"})
+          rr=(${(s:, :)"$(pipe_reasons cold $row)"} ${(s:, :)"$(pipe_reasons seeded $row)"}) || sfail
           rs=${(j:, :)${(u)rr}}
         fi
         print -r -- "$row kept previous values (${(j:; :)short}; void: ${rs:-none})"
@@ -638,7 +653,12 @@ summarize() {
     print 'R10 kept previous values (listed, not measured)'
     print -r -- "measured=$date commit=$commit toolchain=$tc machine=$machine evidence=$RUN"
     for line in $ev; do print -r -- $line; done
-  } | tee $RUN/summary.txt
+  } | tee $RUN/summary.txt || rc=$?
+  if (( rc != 0 )) || [[ $(grep -cE '^R(10|[1-9]) ' $RUN/summary.txt) != 10 ]] || [[ -n $(cut -f1 $RUN/cells.tsv | grep -vxE 'R[1-9]') ]]; then
+    rm -f $RUN/cells.tsv
+    print -u2 'summarize failed: the summary or the cells file is incomplete; do not record it'
+    return 1
+  fi
 }
 ```
 
@@ -648,7 +668,7 @@ Run `record` in the same shell after `summarize`. It prints the cells it would w
 
 When it is set, `record` overwrites, for each row that has a line in `$RUN/cells.tsv`: the Cold n, Cold median, Seeded n and Seeded median cells of the Values table, and every cell of that row in the Provenance table, with `$RUN`'s relative path in the Evidence cell. It never adds a row, never touches R10, and never touches the Target (cold), Target (seeded) or Target set cells. A row that kept its previous values keeps every cell. Pass a file path to `record` to write to a copy instead of this file.
 
-After `record`, confirm the setup footprint (below), then remove the run's worktrees and confirm that only the main is left.
+Before the last block, re-check the setup footprint (the section after this one) and fix R10 in the same commit if it changed. The last block ends with `cleanup_worktrees` and a worktree list that must show only the main.
 
 ```zsh
 record() {
@@ -662,8 +682,9 @@ record() {
     print 'stopped after printing: nothing was written; the numbers stay in the run evidence until the operator sets O2_ANSWERED=yes in the env file'
     return 0
   fi
-  tmp=$(mktemp ${TMPDIR:-/tmp}/record.XXXXXX) || return 1
-  awk -F'\t' '
+  tmp=$(mktemp $file.XXXXXX) || return 1
+  {
+    cp -p $file $tmp && awk -F'\t' '
     FNR == NR { cell[$1] = $0; next }
     /^## / { sect = $0 }
     /^\| R(10|[1-9]) \|/ {
@@ -684,8 +705,10 @@ record() {
       }
     }
     { print }
-  ' $RUN/cells.tsv $file > $tmp && cat $tmp > $file
-  rm -f $tmp
+  ' $RUN/cells.tsv $file > $tmp && mv $tmp $file
+  } always {
+    rm -f $tmp
+  }
 }
 ```
 
