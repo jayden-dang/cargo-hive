@@ -4,6 +4,7 @@ Feature code: SCORECARD
 Status: Approved
 Approved: 2026-11-22 12:46 by the operator (Jayden), "approve" on the spec sheet for #16 at feat/worktree-scorecard 226a925, relayed by the conductor (/Users/jayden/Developer/experiments/cargo-zip/.skills/_pending-worktree-scorecard/auto/operator-reply.md). The reply approves the sheet as a whole; the Open Questions O1 and O2 stay open as listed, and Task 9 still waits for the operator's own go-ahead.
 Date: 2026-11-22
+Realigned: 2026-11-23, to docs/scorecard.md at 99186de and .skills/SCORECARD/implementation-notes.md. Approval above is unchanged.
 Requirements: ./requirements.md
 
 ## Context
@@ -30,9 +31,11 @@ because a gated test would widen the document test tier (docs/standards/testing.
 
 So the design is one markdown file with two parts. The first is a table of rows. The second is
 a Rerun section of copy-paste zsh blocks that drive the shipped commands and extract their
-counts with `/usr/bin/jq`, which macOS ships, so no dependency is added. Two items stay open:
-O1, the target values, and O2, whether the doc may name the measured workspace. The design
-keeps every workspace-specific name in a local, uncommitted file until O2 is answered.
+counts with `/usr/bin/jq`, which macOS ships, so no dependency is added. O1, the
+target values, stays open. O2 was answered on 2026-11-22 (the doc may hold the numbers and the
+repo's name; paths, user names and host names stay out). Every workspace-specific name and path
+still lives in a local, uncommitted file, and `record` writes numbers into the doc only when the
+operator sets `SCORECARD_NUMBERS_PUBLIC=yes` (see "Recording a run").
 
 Fresh retrieval (load-subgraph, schema 1.1, SCORECARD seed) found these neighbours: BENCH,
 SEED and CHECKOUTGC (the commands the steps drive), BUILDDIR (toolchain layout), and LIVE (the
@@ -47,26 +50,33 @@ yet. There are no observations.
 2. **Every workspace-specific value lives in a local env file.** The steps read the main
    checkout path, `P`, `FILE`, the probe file, and any variable the workspace needs to build
    offline from `.skills/verify/scorecard.env` (gitignored, `.gitignore:2`). The doc states only
-   the property each value must have. This leaves O2 open (agent-decided, ledger A17). When the
-   operator answers O2 "yes", the values may move into the doc.
+   the property each value must have. This kept O2 open while it was unanswered (agent-decided, ledger A17). O2 is now answered
+   "yes" for numbers and the repo's name, but the paths stay in the env file, because the doc may
+   hold no path (SCORECARD-10.1). The env template in the doc also lists `WORKSPACE_ENV`
+   (a note only; the `export` line beside it takes effect) and `SCORECARD_NUMBERS_PUBLIC`.
 3. **One crate, `P`, serves R5, R6 and R9.** `P` is the workspace crate whose proc macro reads
    `.sqlx/*.json` (or `.env`) without declaring it, so the three rows measure the same crate
    (agent-decided, ledger A14).
 4. **The R6 edit is fixed.** Append with `printf '\n/// Scorecard edit.\n#[allow(dead_code, unreachable_pub)]\npub const SCORECARD_EDIT: u32 = 1;\n' >> "$FILE"`.
    The leading newline, the doc comment and the allow keep it compiling under `deny(missing_docs)`
-   and `unreachable_pub`. `FILE` is an `.rs` file in `P`. Restore it with `git checkout -- "$FILE"`. A public item changes
+   and `unreachable_pub`. `FILE` is an `.rs` file in `P`. It is built by `r6_edit`, so the void check can swap it for a syntax error. Restore it with `git checkout -- "$FILE"`. A public item changes
    `P`'s metadata, so its dependents rebuild as they would after an agent's real edit
    (agent-decided, ledger A15).
 5. **The R9 probe change is fixed.** Flip the first `"nullable"` entry of the probe file's
    `describe` section (`false`↔`true`), which changes the type the macro emits. Then rebuild, and
-   restore with `git checkout --`. The sample is decided by SCORECARD-6.2:
+   restore. `r9_change` makes the change and `r9_restore` undoes it: `git checkout` for a tracked
+   file, and a copy back from `$MAIN` for an untracked one (the `.env` fallback arrives through
+   `UNTRACKED_COPY`, so git cannot restore it). A tracked-files-only
+   `git status --porcelain --untracked-files=no` check voids R9 alone when the tree is not clean. The sample is decided by SCORECARD-6.2:
    - a control rebuild just before the change must exit 0 with no rustc invocation;
    - after the change, a rerun that recompiles `P` is not stale;
    - exit 0 with `Fresh P v` is stale;
    - anything else is void.
 
    Agent-decided, ledger A16; design review finding 2. Where the workspace has no `.sqlx`, the `.env` fallback changes
-   one variable the macro reads.
+   the first variable's value in place: it inserts `x` before a closing quote, else appends it, so
+   the value stays well formed. A new line was rejected because it changes no variable the macro
+   reads.
 6. **By-hand medians use bench's rule** (agent-decided, ledger A18). Odd n takes the middle value. Even n takes
    `floor((a+b)/2)` of the two middle values (bench/stats.rs:18-24), so a by-hand median and a
    bench median are computed the same way.
@@ -89,8 +99,17 @@ yet. There are no observations.
    keep every shape built so far, so a later seed sees more units. Running the pipeline right
    after R1 keeps its seeds to `build` units. R2–R5 are noted as measured after earlier shapes
    (design review finding 8; agent-decided, ledger A20).
-11. **A run cleans up after itself.** One `trap` on EXIT/INT removes every worktree the run made
-   (`git worktree remove --force`), then runs `git worktree prune`. Worktrees are made with
+11. **A run cleans up after itself, and Ctrl-C stops it.** Two separate traps. The EXIT trap runs
+   `cleanup_worktrees`, which removes every worktree the run made (`git worktree remove --force`,
+   tolerating failure) and then runs `git worktree prune`. The INT trap sets
+   `SCORECARD_INTERRUPTED`, runs `cleanup_worktrees` and `return 130`, but a trap's `return` ends
+   only the innermost function and loses its status (zsh), and a single `EXIT INT` trap leaves the
+   shell running. So `bench_row` and `pipeline` are thin wrappers over `bench_row_run` and
+   `pipeline_run`: they return 130 after cleanup when the flag is set (and remove
+   `<row>.new.json`), the inner functions refuse at entry and check after each long command,
+   `preflight` clears the flag, and the loops in the doc test `intr` and break. A caller ending a
+   call with `|| true` must test `intr`. Known gap: an INT during `preflight`'s `doctor` makes
+   `preflight` return 0 with the flag set and `PREFLIGHT_OK` unset (requirements O3). Worktrees are made with
    `git worktree add --detach <wt> HEAD` from a main whose tracked tree is clean (bench refuses
    otherwise, check.rs:117-170). Agent-decided, ledger A21.
 
@@ -111,15 +130,22 @@ bookkeeping around it.
 Satisfies: SCORECARD-1.1, SCORECARD-1.2, SCORECARD-1.3, SCORECARD-1.4, SCORECARD-1.5, SCORECARD-1.6, SCORECARD-1.7, SCORECARD-1.8, SCORECARD-1.9, SCORECARD-10.1
 Reuse: rung 2 — the README "Measured results" table convention (README.md:78-99) and the dated-evidence rule (docs/standards/code.md:20); the table itself is new text
 Respects: ARCH-10
-Interface: a reader sees, per row ID, the metric, its Source, and for each arm the n and median, plus Target (cold), Target (seeded) and Target set. The Provenance table gives, per row ID, Measured on, Hive commit, Toolchain, Machine and Evidence
+Interface: a reader sees, per row ID, the cost, its Source, and for each arm the n and median, plus Target (cold), Target (seeded) and Target set. The Provenance table gives, per row ID, Measured on, Hive commit, Toolchain, Machine and Evidence
 Depth: if the file vanished, a reader would need only the ten row names and the column list to rebuild it; every value is regenerated by the Rerun section
 Locality: new file `docs/scorecard.md`; leave README.md and the MILE assessments untouched
 
 Layout, top to bottom:
 - a one-paragraph header ("what an agent worktree costs, cold and seeded, on the measured
-  workspace");
+  repo");
 - the **Values** table;
 - the **Provenance** table;
+- an evidence paragraph: the evidence directory is local to the measuring machine and gitignored,
+  so no clone can open it; the committed values are copies of that run's `summary.txt`; the
+  paragraph lists the directory's files, and says the load average is recorded at start and end;
+- a **Latest run** paragraph, rewritten by hand at each rerun (`record` never writes it): the
+  hive build profile (the first run used a debug build, so the seeded values of R1 to R5 and R7
+  carry a debug-built seed), the machine load at start and end, per-arm spread, and why two
+  sessions carry two hive commits;
 - **Notes per row**: R6 "by hand (outside bench); environment matches bench's", the R7 seed
   bytes, the R8 vacuity rule, the R9 registry-only seed note;
 - **Rerun**.
@@ -137,10 +163,10 @@ Target set date in a plain commit, and a rerun never touches either (SCORECARD-1
 above `## Rerun` says the blocks are zsh on macOS (the vision's macOS-only constraint; Linux is out
 of scope).
 
-Values-table columns: `Row | Metric | Source | Cold n | Cold median | Seeded n | Seeded median |
+Values-table columns: `Row | Cost | Source | Cold n | Cold median | Seeded n | Seeded median |
 Target (cold) | Target (seeded) | Target set`.
 
-R10's n and median cells read `—`, and its value goes in the Seeded median and Cold median cells
+R10's n and median cells read `—` and its Provenance cells read `listed`, and its value goes in the Seeded median and Cold median cells
 as list text: Seeded holds the list, and Cold holds `nothing`.
 
 SCORECARD-10.1 is met by the env-file split in Decision 2. The doc's text never contains
@@ -148,7 +174,7 @@ SCORECARD-10.1 is met by the env-file split in Decision 2. The doc's text never 
 
 ### Rerun preflight
 
-Satisfies: SCORECARD-8.1, SCORECARD-8.2, SCORECARD-8.3
+Satisfies: SCORECARD-8.1, SCORECARD-8.2, SCORECARD-8.3, SCORECARD-8.9
 Reuse: rung 2 — the shipped CLI (`cargo hive doctor`, `cargo hive repo add`, `cargo hive bench --help`; crates/cargo-hive/src/cli.rs:75-90)
 Interface: one block. It sources `.skills/verify/scorecard.env`, then checks `cargo hive doctor --json` passed and that `$MAIN` is registered. It then greps `cargo hive bench --help` for each quoted flag (`--cold`, `--seeded`, `--build-cmd`, `--json`) and stops on the first missing one, naming the step to fix in the same commit
 Depth: callers keep knowing only "source the env file, then run preflight"; the flag list is the one thing to update when bench changes
@@ -156,7 +182,15 @@ Locality: new text in `docs/scorecard.md` § Rerun; leave bench
 
 The block also:
 - resolves `TC` in `$MAIN` and runs `RUSTUP_TOOLCHAIN=$TC cargo hive doctor --json`. Doctor resolves its toolchain from the state root with any directory toolchain dropped (cli.rs:440; cargo/src/toolchain.rs:73-80), so without the variable it records the rustup default, not the workspace's;
-- records `command -v cargo-hive` and `cargo hive --version` in `$RUN/hive.txt`;
+- records `command -v cargo-hive`, `cargo hive --version` and, as its third line, `build profile:`
+  (`debug` when the binary lies under `target/debug/`) in `$RUN/hive.txt`;
+- runs `check_inputs`, shared with `bench_row` and `pipeline` (SCORECARD-8.9): `P` is non-empty,
+  alphanumeric first, letters, digits, `_` and `-` only; `FILE` is non-empty; `rel_ok` holds for
+  `FILE`, `PROBE` and each `UNTRACKED_COPY` entry (relative, no `..` segment);
+- unsets `PREFLIGHT_OK` at its top and sets it on its last line, so a failed preflight leaves it
+  unset and `bench_row` and `pipeline` refuse (a pipe such as `preflight | tail` runs it in a
+  subshell and leaves it unset); it also clears `SCORECARD_INTERRUPTED`;
+- fails closed when `load-start.txt` or `hive.txt` cannot be written;
 - stops before any measurement when doctor fails a check, or the toolchain is unsupported. It writes the failing checks to `$RUN/preflight-fail.txt` and changes no cell;
 - confirms `rustup component list --installed` lists `clippy` (R3);
 - confirms `$TMPDIR` is a secondary root: `secondary_roots` is absent from
@@ -168,7 +202,8 @@ The block also:
   copy lacks. The source is this repo's `crates/cargo/src/env.rs` at that commit, or, for a
   crates.io install,
   `$CARGO_HOME/registry/src/*/cargo-hive-cargo-<hive_version>/src/env.rs`;
-- sets `RUN=.skills/verify/$(date +%F)-scorecard` (`mkdir -p`);
+- sets `RUN=.skills/verify/$(date +%F)-scorecard` (`mkdir -p`), keeping a `RUN` already set in
+  the shell, so a run that crosses midnight can keep one directory;
 - asks for a quiet machine, with no other builds running;
 - records `sysctl -n vm.loadavg` into `$RUN/load-start.txt`.
 
@@ -190,7 +225,11 @@ into each worktree from the env file's list.
 Satisfies: SCORECARD-2.1, SCORECARD-2.2, SCORECARD-2.3, SCORECARD-2.4
 Reuse: rung 2 — `cargo hive bench --build-cmd <shape> --json` as shipped (bench/command.rs:27-34; receipt keys bench/mod.rs:578-599)
 Respects: ARCH-10, ARCH-5
-Interface: one zsh function `bench_row <row> <shape>`, defined in the doc. For each shape it:
+Interface: one zsh function `bench_row <row> <shape>` (R1 to R5 only), defined in the doc as a
+thin wrapper over `bench_row_run` (Decision 11), with helpers `bench_refuse` (writes the refusal
+finding, cleans up, prints `kept previous values`) and `bench_intr` (removes `<row>.new.json`,
+cleans up). Both `bench_row` and `pipeline` call `check_inputs` and refuse without `PREFLIGHT_OK`.
+For each shape it:
 - builds the main once with the bench line for that shape, with plain `cargo` (Decision 9), so
   the store holds its units (bench.nothing_to_seed otherwise; bench/mod.rs:326-333);
 - runs `git worktree add` 8 times under `$TMPDIR/scorecard/<row>/{cold,seeded}{1..4}`, at
@@ -214,7 +253,13 @@ its bench run.
 Satisfies: SCORECARD-3.1, SCORECARD-3.2, SCORECARD-3.3, SCORECARD-3.4, SCORECARD-3.5, SCORECARD-4.1, SCORECARD-4.2, SCORECARD-4.3, SCORECARD-4.4, SCORECARD-5.1, SCORECARD-5.2, SCORECARD-5.3, SCORECARD-6.1, SCORECARD-6.2, SCORECARD-6.3, SCORECARD-6.4
 Reuse: rung 2 — `cargo hive seed <checkout> --json` (cli.rs:68-73; seed/lib.rs:396-460) and `cargo hive gc --checkout <path> --json` (cli.rs:46-57, 939-946); rung 4 — zsh `zsh/datetime` + `zsh/mathfunc`, `df -k`, `/usr/bin/jq`, `git worktree`
 Respects: ARCH-11, ARCH-13, ARCH-5
-Interface: three zsh functions defined in the doc: `resolve_toolchain`, `hive_env_cargo` and `pipeline`.
+Interface: the zsh functions defined in the doc:
+- `resolve_toolchain`, `hive_env_cargo <args…>` and `pipeline <arm> <i>`, the last a thin wrapper
+  over `pipeline_run` (Decision 11);
+- `hive_env_args`, which builds the environment arguments before the timed window, so the timed
+  part holds only the `env … $CARGO_BIN` exec;
+- `r6_edit` (the Decision 4 edit), `r9_classify`, `r9_change` and `r9_restore` (Decision 5);
+- `pipeline_abort`, which cleans up and prints the reason on an early stop.
 
 `resolve_toolchain` runs once per worktree, right after `git worktree add` (step 1). It sets
 `TC`, `RUSTC_BIN` and `CARGO_BIN`, so no `rustup which` lookup sits inside a timed call; bench
@@ -245,18 +290,25 @@ also resolves before it times (bench/command.rs:76-115). `hive_env_cargo <args�
 6. Apply the Decision 4 edit, then time `hive_env_cargo build --offline --locked` with
    `$EPOCHREALTIME` → R6 sample, as `int(rint(ms))`. Only the cargo exec is timed. A non-zero
    exit voids R6, R8 and R9 for this worktree; R7, measured before it, stands (SCORECARD-3.5).
-7. `cargo hive gc --checkout $WT --json > …-gc.json`, then read `.counts.unit_files_deleted` and
+7. `env RUSTUP_TOOLCHAIN=$TC cargo hive gc --checkout $WT --json > …-gc.json`, then read `.counts.unit_files_deleted` and
    `.counts.objects_deleted`. Rerun the build with `-v`, keeping stderr, and count the lines
    matching ``Running `.*--crate-name``, one per unit compiled. That gives the R8 sample:
    - vacuous when both totals are 0;
    - void when gc or the rerun exits non-zero.
+
+   `gc --checkout` resolves its toolchain from the caller's directory, unlike `seed` and `bench`,
+   which resolve the checkout's own. Without the variable, hive refused every sample, because
+   preflight's doctor ran under `$TC` but gc ran under the default toolchain (found by the first
+   real run). The variable is passed only when `$TC` is non-empty (a linked toolchain has none).
 8. Control rebuild: `-v`, which must exit 0 with no rustc invocation. Then apply the Decision 5
    probe and rebuild with `-v`, deciding the sample by SCORECARD-6.2 (`Fresh $P v` is the
    stale match). Restore the probe file and `FILE`.
 9. `git worktree remove --force`.
 
 Each sample is appended as one JSON line to `$RUN/pipe.jsonl`, with `void` and its reason when
-voided.
+voided. The pipelines block first moves an existing `pipe.jsonl` to a timestamped name
+(`pipe.<HHMMSS>.jsonl`) so a same-day rerun does not mix samples. The per-sample receipts and logs
+are `pipe-<arm><i>-*`.
 
 R7 noise is stated in the row note. The free-space drop also carries:
 - the seed's store-fill writes to `~/.hive`;
@@ -275,7 +327,7 @@ drift falls on both arms.
 
 ### Recording a run
 
-Satisfies: SCORECARD-8.4, SCORECARD-8.5, SCORECARD-8.6, SCORECARD-8.7, SCORECARD-8.8, SCORECARD-9.1, SCORECARD-9.3
+Satisfies: SCORECARD-8.4, SCORECARD-8.5, SCORECARD-8.6, SCORECARD-8.7, SCORECARD-8.8, SCORECARD-8.10, SCORECARD-9.1, SCORECARD-9.3
 Reuse: rung 2 — the evidence convention `.skills/verify/<date>-<feature>/` (docs/agents/verify.md:59-66)
 Interface: `summarize` prints one line per row ID, giving the arm's n and median under Decision 6, or the R8/R9 cell text, from `$RUN/*.json` and `$RUN/pipe.jsonl`. It also prints the Provenance cells under Decision 7
 Depth: n/a — a jq/awk reduction over files the earlier blocks wrote
@@ -286,17 +338,33 @@ The "Record" step tells the person to:
   a row;
 - leave `Target (cold)`, `Target (seeded)` and `Target set` exactly as they are;
 - write `$RUN`'s relative path into each Evidence cell;
-- confirm every worktree from the run is gone in `git worktree list` (the Decision 11 trap
-  removes them on abort too);
+- confirm every worktree from the run is gone in `git worktree list` (the Decision 11 traps
+  remove them on exit and on interrupt, and `record`'s block ends with an explicit cleanup);
 - keep a row's previous cells when an arm has fewer than 3 valid samples, with the void reasons
   printed by `summarize` (SCORECARD-8.8).
+
+Helpers: `median` (Decision 6, flooring negative even-n sums), `pipe_sel` and `pipe_reasons` (select
+the valid samples and collect the void reasons from `pipe.jsonl`), and `sfail` (a failing command
+in the summarize group exits its pipeline subshell, surfaced by `pipefail`, because zsh ignores
+errexit inside `||` contexts). `summarize` writes `$RUN/cells.tsv` (the cells `record` copies; a
+row that kept its previous values has no line, and the file is removed when the 10-line check
+fails) and `$RUN/load-end.txt` (SCORECARD-8.10: a warning on stderr when the start load exceeds
+`hw.ncpu / 2` or `load-start.txt` is missing). It also needs a source receipt that is a JSON
+object.
 
 `summarize` also writes min, max and spread per arm for each measured row to `$RUN/summary.txt`.
 That is evidence only, not a table column: L3 asks for n and median, and the quiet-machine rule
 plus the median are the noise guard.
 
-O2 gate (9.3): while O2 is unanswered, the Record step stops at printing. The numbers stay in
-`$RUN`, and the commit for a run is made only once O2 is answered. The first run (9.1) replaces
+`record [file]` is the Record step as a function. It writes only the cells of rows that have a
+line in `cells.tsv`, through a same-directory temp copy made with `cp -p` and `mv`d over the file;
+given a path, it writes that copy instead. It never writes the Latest run paragraph. Its block
+ends with `cleanup_worktrees` and a worktree list.
+
+Numbers gate (9.3): O2 is answered (2026-11-22), and the gate is the variable
+`SCORECARD_NUMBERS_PUBLIC`, unset by default and set in the local env file only by the operator.
+Unless it is `yes`, `record` stops at printing; the numbers stay in `$RUN`, and no commit names
+or measures the measured repo. The first run (9.1) replaces
 nothing in README.md. The README headline stays history, and R1 holds the new medians.
 
 ### Setup footprint R10
@@ -341,7 +409,7 @@ runs and records in evidence.
 |---|---|---|
 | `docs/scorecard.md` text, by fixed commands. `grep -c '^| R[0-9]' ` per table = 10. Each `R1`…`R10` appears exactly once per table. The grep of 10.1's patterns finds nothing. Target cells read `open — operator` | manual (inspection) | SCORECARD-1.1–1.9, 10.1, 8.4, 8.5 |
 | Dry run of the Rerun blocks with `$MAIN` set to a fresh `git clone` of this repo under `/private/tmp`, a scratch `HIVE_HOME`, and worktrees under `/private/tmp`. No real checkout and no `~/.hive` is touched. Deps must already be cached, since every build is `--offline`. R9 records "probe input absent", since this repo has no `.sqlx` | e2e (manual) | SCORECARD-2.1–2.4, 3.1–3.5, 4.1–4.4, 5.1–5.3, 6.3, 8.1–8.3, 8.6–8.8 |
-| First run on the measured workspace, from its main checkout, with evidence in `$RUN`. It runs only once the operator says to, since it takes hours of builds on the owner's machine; committing its numbers waits on O2 (SCORECARD-9.3) | e2e (manual) | SCORECARD-6.1, 6.2, 6.4, 7.1, 9.1, 9.3 |
+| First run on the measured repo, from its main checkout, with evidence in `$RUN`. It runs only once the operator says to, since it takes hours of builds on the owner's machine; committing its numbers waited on O2, now answered, and on the operator setting `SCORECARD_NUMBERS_PUBLIC` (SCORECARD-9.3) | e2e (manual) | SCORECARD-6.1, 6.2, 6.4, 7.1, 9.1, 9.3 |
 | `scripts/gate.sh` green, and `git diff --stat main` lists no path under crates/, plugin/ or scripts/ | integration (existing gate) | SCORECARD-11.3 |
 | `audit-trace` over docs/specs, and `git diff main -- README.md docs/roadmap/assessments CONTEXT.md docs/specs/catalog/hive.md` shows only the added row and terms | manual (inspection) | SCORECARD-9.2, 11.1, 11.2 |
 
@@ -349,10 +417,10 @@ runs and records in evidence.
 
 Every ID in requirements.md appears in exactly one Satisfies line:
 - Values and Provenance tables: 1.1–1.9, 10.1
-- Rerun preflight: 8.1–8.3
+- Rerun preflight: 8.1–8.3, 8.9
 - Bench rows: 2.1–2.4
 - By-hand pipeline: 3.1–3.5, 4.1–4.4, 5.1–5.3, 6.1–6.4
-- Recording a run: 8.4–8.8, 9.1, 9.3
+- Recording a run: 8.4–8.8, 8.10, 9.1, 9.3
 - Setup footprint: 7.1
 - Spec bookkeeping: 9.2, 11.1–11.3
 
@@ -366,3 +434,12 @@ Requirements changed by this design, synced back after design review (design-rev
 - 6.2: stale needs exit 0 and `Fresh`, with a control rebuild first.
 - 8.7: clean up on abort too, then `git worktree prune`.
 - 8.8 (new): an arm with fewer than 3 valid samples keeps the row's previous cells.
+
+Realigned 2026-11-23 to what was built (docs/scorecard.md at 99186de):
+- 8.7: also stops the run on an interrupt (flag, 130 from the two wrappers, loops break); the known
+  preflight gap is recorded as requirements O3.
+- 8.9 (new): input validation and the `PREFLIGHT_OK` refusal.
+- 8.10 (new): the end load file and the load warning.
+- 9.3: keyed on `SCORECARD_NUMBERS_PUBLIC`, since O2 is answered.
+- 8.6: the evidence is local-only, and the doc says so.
+- Values column `Metric` became `Cost`; "measured workspace" became "measured repo".

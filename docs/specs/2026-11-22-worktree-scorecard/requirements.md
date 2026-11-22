@@ -1,9 +1,10 @@
 # Requirements: Worktree scorecard (what an agent worktree costs, cold and seeded)
 
 Feature code: SCORECARD
-Status: In-progress
+Status: Implemented
 Approved: 2026-11-22 12:46 by the operator (Jayden), "approve" on the spec sheet for #16 at feat/worktree-scorecard 226a925, relayed by the conductor (/Users/jayden/Developer/experiments/cargo-zip/.skills/_pending-worktree-scorecard/auto/operator-reply.md). The reply approves the sheet as a whole; the Open Questions O1 and O2 stay open as listed, and Task 9 still waits for the operator's own go-ahead.
 Date: 2026-11-22
+Realigned: 2026-11-23, to what was built (docs/scorecard.md at 99186de). O1 and O2 are answered on ticket #16 (2026-11-22); see Open Questions.
 
 <!--
 Rules:
@@ -38,8 +39,9 @@ reviewing session). Neither is the operator's choice.
 
 "The scorecard" below is the file `docs/scorecard.md`. "The steps" are its Rerun section.
 "A run" is one pass through the steps on one machine and one hive commit. "The measured
-workspace" is the large private Rust workspace the scorecard measures. Whether the scorecard
-may name it is Open Question O2.
+repo" is the large private Rust workspace the scorecard measures. The owner answered O2 on
+2026-11-22: the scorecard may name it and hold its measured numbers, and paths, user names and
+host names stay out.
 
 ## 1. One scorecard lists every cost with its open target
 
@@ -191,7 +193,7 @@ arm, so that I can see whether cleaning a worktree costs a rebuild.
 declaring it, so that I can see whether the rebuild came back stale.
 
 - **SCORECARD-6.1** WHEN a pipeline worktree's R8 rerun has finished THE SYSTEM SHALL change one
-  input that a proc macro in the measured workspace reads without declaring it. The input is a
+  input that a proc macro in the measured repo reads without declaring it. The input is a
   `.sqlx/*.json` query file, or `.env` where there is none, and the change alters what the macro
   would emit. The system then reruns the same `cargo` command line (agent-decided; close package
   D14).
@@ -235,20 +237,38 @@ feature ships, so that the new numbers replace the old ones in the same rows.
   the steps SHALL say to correct that step in the same commit as the rerun's numbers (Weigh W1).
 - **SCORECARD-8.3** THE SYSTEM SHALL quote, in each step that fills a row, the exact command line
   it runs. A placeholder (`$MAIN`, `$P`, `$FILE`, `$WT`) stands for each path or name of the
-  measured workspace or machine (agent-decided; close package D6).
+  measured repo or machine (agent-decided; close package D6).
 - **SCORECARD-8.4** WHEN a run records its numbers THE SYSTEM SHALL overwrite the value,
   sample-count, median and metadata cells of the existing rows, and SHALL NOT add a row.
 - **SCORECARD-8.5** WHEN a run records its numbers THE SYSTEM SHALL leave every target slot and
   Target set date as it was.
 - **SCORECARD-8.6** THE SYSTEM SHALL keep each run's receipts and by-hand logs under
   `.skills/verify/<date>-scorecard/`, outside git, and cite that path in each measured row's
-  evidence cell (close package D17; docs/agents/verify.md "Evidence").
+  evidence cell (close package D17; docs/agents/verify.md "Evidence"). The scorecard says the
+  evidence is local to the measuring machine: git ignores the directory, no clone can open it, and
+  the committed values are copies of that run's `summary.txt`.
 - **SCORECARD-8.7** WHEN the steps make worktrees for a run THE SYSTEM SHALL have them removed
-  with `git worktree remove` at the end of the run, and on an aborted run as well, followed by
-  `git worktree prune`.
+  with `git worktree remove` at the end of the run, followed by `git worktree prune`. WHEN the run
+  is interrupted (Ctrl-C) THE SYSTEM SHALL do the same cleanup and then stop the run: the
+  interrupt trap sets `SCORECARD_INTERRUPTED`, `bench_row` and `pipeline` return exit status 130
+  and refuse to start while it is set, and the doc's loops break. `preflight` clears the flag.
+  The exit and interrupt traps are separate, and the interrupt trap does not exit an interactive
+  shell. A caller that ends a call with `|| true` hides the 130 and must test the flag (`intr`).
+  Known gap: an interrupt that lands during `preflight`'s `doctor` call makes `preflight` return 0
+  with the flag set and `PREFLIGHT_OK` unset; later steps still refuse (O3 below).
 - **SCORECARD-8.8** IF a row has fewer than 3 valid samples in an arm after a run THEN THE SYSTEM
   SHALL keep that row's previous values and metadata, and the run's evidence SHALL say which
   samples were void and why (agent-decided; ledger A23).
+- **SCORECARD-8.9** IF `P` is empty or is not letters, digits, `_` and `-` starting with a letter
+  or digit, or `FILE` is empty, or `FILE`, `PROBE` or an `UNTRACKED_COPY` entry is absolute or
+  has a `..` segment, or `bench_row` is given a row other than R1 to R5, THEN THE SYSTEM SHALL
+  refuse before any measurement, and `bench_row` and `pipeline` SHALL refuse to run unless the
+  shell's last `preflight` passed (`PREFLIGHT_OK`). Added at realign 2026-11-23; built in
+  `check_inputs`, `rel_ok`, `safe_rm` and the `PREFLIGHT_OK` guard (commits 97181bd, 94f9628).
+- **SCORECARD-8.10** WHEN `summarize` runs THE SYSTEM SHALL write the end load average to
+  `load-end.txt`, and print a warning to stderr, not a failure, when the start load in
+  `load-start.txt` is above half the logical core count or the file is missing. Added at realign
+  2026-11-23; built in 97181bd.
 
 ## 9. The first run replaces today's headline
 
@@ -260,10 +280,13 @@ that I can read R1 as a measured baseline rather than the two-sample headline.
   seeded, n = 2, no hive commit), which fails #16 Acceptance 3 (close package D18).
 - **SCORECARD-9.2** (guard) WHEN the scorecard is written THE SYSTEM SHALL CONTINUE TO hold
   README.md's "Measured results" and the MILE assessments' numbers unchanged as dated history.
-- **SCORECARD-9.3** IF O2 is unanswered when the first run is ready to record THEN THE SYSTEM
-  SHALL keep the run's numbers in its evidence only, and commit nothing that names or measures
-  the workspace (agent-decided: the option that leaves O2 fully open, charter fork order step 4;
-  ledger A12).
+- **SCORECARD-9.3** IF the operator's switch is not set when a run is ready to record THEN THE
+  SYSTEM SHALL keep the run's numbers in its evidence only, and commit nothing that names or
+  measures the measured repo (agent-decided: the option that leaves the question fully open,
+  charter fork order step 4; ledger A12). O2 was answered on 2026-11-22 (yes: numbers and the
+  repo's name may be committed). The switch in the doc is the variable `SCORECARD_NUMBERS_PUBLIC`,
+  unset by default: `record` writes nothing into the scorecard unless it is `yes`. The operator
+  sets it in the local env file.
 
 ## 10. Quality attributes
 
@@ -307,8 +330,8 @@ The guards:
 
 - Changing `cargo hive bench`, or any hive command, flag, rule, receipt key or state file.
 - Linux, and CI runs of the scorecard.
-- Choosing any target value (O1), or naming the measured workspace or its paths before O2 is
-  answered.
+- Choosing any target value (O1), or committing the measured repo's paths, user names or host
+  names (O2 answered 2026-11-22: its name and numbers are allowed, paths are not).
 - Fixing any number the scorecard shows.
 - Aging a target, or faking invocation times, to make R8 non-vacuous (agent-decided, from
   ROAD-19's "measures only": aging fakes the invocation times hive reads. Reopen if R8 stays
@@ -322,6 +345,21 @@ The guards:
 
 - O1 Target value of each row, and whether a row takes one target or one per arm. Owner:
   operator. Date: 2026-11-22. Forbid-guess: no session or agent writes a target value.
+  **Answered 2026-11-22 on ticket #16, in part:** targets stay `open — operator` until the first
+  measured run is recorded; after that the owner sets them, and a rerun never changes them. The
+  first run was recorded 2026-11-23, so the owner's targets are still to come. No target is written.
 - O2 Whether the scorecard may name the measured workspace and hold its numbers and paths in
   this public repo. Owner: operator. Date: 2026-11-22. Forbid-guess: until it is
-  answered, SCORECARD-9.3 holds.
+  answered, SCORECARD-9.3 holds. **Answered 2026-11-22 on ticket #16:** the scorecard may hold
+  the measured numbers and may name the measured repo, as other files in this repo already do.
+  Paths, user names and host names stay out of it. SCORECARD-9.3 now keys on
+  `SCORECARD_NUMBERS_PUBLIC`.
+- O3 Known gap, found by dry run 3 (2026-11-23), kept open: an interrupt during `preflight`'s
+  `doctor` call returns 0 with `SCORECARD_INTERRUPTED` set and `PREFLIGHT_OK` unset. Later
+  `bench_row` and `pipeline` calls still refuse, so no wrong number can be measured, but the
+  exit status is misleading, because `preflight` has no wrapper like the other two. `summarize`
+  and `record` are not interrupt-aware either. Owner: operator (fix, or accept).
+- O4 Decision for the owner: the first run used a debug build of hive, so the seeded values of R1
+  to R5 and R7 carry a debug-built seed. The scorecard says so in its Latest run paragraph and
+  `hive.txt` records the build profile, but no requirement forces a rerun to state it. Add one,
+  or leave it to the Latest run paragraph?

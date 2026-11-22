@@ -418,13 +418,59 @@ _Requirements: SCORECARD-9.1, SCORECARD-6.1, SCORECARD-6.2, SCORECARD-9.3_
 
 **Depends-on:** Task 8
 
-- [ ] **Step 1: Run the gate.** Run `scripts/gate.sh` and expect exit 0.
-- [ ] **Step 2: Check the diff.**
+- [x] **Step 1: Run the gate.** Run `scripts/gate.sh` and expect exit 0.
+- [x] **Step 2: Check the diff.**
   - `git diff --stat main -- crates plugin scripts` prints nothing.
   - `git diff main -- README.md docs/roadmap/assessments` prints nothing.
   - `git diff main -- docs/specs/catalog/hive.md` shows only the SCORECARD line added.
   - `git diff main -- CONTEXT.md` shows only added lines (`grep -c '^-[^-]'` = 0).
-- [ ] **Step 3: Run audit-trace** over `docs/specs` and expect no finding for SCORECARD.
-- [ ] **Step 4: Save the outputs** to `guards.txt`. No commit, since no repo file changes.
+- [x] **Step 3: Run audit-trace** over `docs/specs` and expect no finding for SCORECARD.
+- [x] **Step 4: Save the outputs** to `guards.txt`. No commit, since no repo file changes.
+
+Evidence (local, gitignored): `.skills/SCORECARD/task-10-report.md` and
+`.skills/verify/2026-11-23-scorecard/guards.txt`. The gate exited 0 at 2026-11-23 00:51, bound to
+that earlier HEAD; the three commits since (97181bd, 94f9628, 99186de) change only
+`docs/scorecard.md`, and `git diff --stat main -- crates plugin scripts` is still empty. The gate
+is re-run at the final HEAD by the controller after this realign.
 
 _Requirements: SCORECARD-11.1, SCORECARD-11.2, SCORECARD-11.3, SCORECARD-9.2_
+
+---
+
+### Task 11: Input validation, interrupt stop and load warning (added at close; recorded at realign)
+
+**Files:**
+- Modify: `docs/scorecard.md` (the env template and preflight, `bench_row`, `pipeline`, `summarize`)
+
+**Reuse:** rung 2 — the Rerun blocks of Tasks 3, 4, 5 and 8
+
+**Interfaces:**
+- Consumes: `preflight`, `bench_row`, `pipeline`, `summarize` (Tasks 3, 4, 5, 8)
+- Produces: `check_inputs`, `rel_ok`, `safe_rm`, `PREFLIGHT_OK`, `intr`, the wrappers over
+  `bench_row_run` and `pipeline_run`, `$RUN/load-end.txt`
+
+**Depends-on:** Task 8
+
+This work came out of the whole-branch review and the acceptance dry runs, after Task 8. The steps
+below record it as done; the evidence is in `.skills/SCORECARD/close-fix-report.md` and
+`.skills/SCORECARD/dryrun3-report.md` (local).
+
+- [x] **Step 1: Validation.** `check_inputs` rejects an empty or malformed `P`, an empty `FILE`, and an absolute or `..` `FILE`, `PROBE` or `UNTRACKED_COPY` entry; `bench_row` accepts R1 to R5 only; `bench_row` and `pipeline` refuse without `PREFLIGHT_OK`. Checked in dry-run shells, one per bad input (commits 97181bd, 94f9628).
+- [x] **Step 2: Interrupt.** A real INT during a child stops the run: cleanup, flag, 130 from the wrappers, loops break, `preflight` clears the flag. Checked by dry run 3 at 99186de (D1 to D6, all PASS); the preflight-`doctor` gap is requirements O3.
+- [x] **Step 3: Load.** `summarize` writes `load-end.txt` and warns on a high or missing start load. Checked in the dry harness (stubbed load values 20.00 and a missing file warn; 8.99 and 5.75 do not).
+- [x] **Step 4: Commits.** `docs(scorecard): address the whole-branch review`, `docs(scorecard): make bench_row and pipeline refuse after a failed preflight`, `docs(scorecard): stop the run when it is interrupted`.
+
+_Requirements: SCORECARD-8.7, SCORECARD-8.9, SCORECARD-8.10_
+
+---
+
+## Realigned 2026-11-23
+
+The plan text above is left as approved; what was built differs in these recorded ways:
+- Two traps, not one `EXIT INT` trap (Task 3 Interfaces): the INT trap sets `SCORECARD_INTERRUPTED`, and `bench_row` and `pipeline` are wrappers returning 130. See requirement 8.7 and design Decision 11.
+- The checkout gc runs as `env RUSTUP_TOOLCHAIN=$TC cargo hive gc --checkout …`, found by Task 9's first real run (design "By-hand pipeline" step 7; requirement 5.1 stands unchanged).
+- Helpers beyond the interfaces (`median`, `pipe_sel`, `pipe_reasons`, `record`, `bench_refuse`, `pipeline_abort`, `r6_edit`, `r9_change`, `r9_restore`, `hive_env_args`, `check_inputs`), and the files `cells.tsv`, `summary.txt`, `load-end.txt` and the timestamped `pipe.jsonl` rotation: design "By-hand pipeline", "Recording a run" and "Rerun preflight".
+- `SCORECARD_NUMBERS_PUBLIC` replaced `O2_ANSWERED` as the Record switch (requirement 9.3, design "Recording a run"); O1 and O2 are answered on ticket #16 (requirements Open Questions).
+- The `.env` probe edit inserts `x` before a closing quote (design Decision 5); an untracked probe file is restored by copying from the main.
+- The Values column is `Cost`, not `Metric`; "measured workspace" became "measured repo"; the hive used in the first run was a debug build (requirements O4).
+- Task 11 and requirements 8.9 and 8.10 were added for the validation and load work.
