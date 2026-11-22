@@ -356,8 +356,8 @@ _Requirements: SCORECARD-6.1, SCORECARD-6.2, SCORECARD-6.3, SCORECARD-6.4_
 
 **Depends-on:** Task 7
 
-- [ ] **Step 1: Write the failing check.** On a fresh `$DRY`, run the whole Rerun section in order with `SCORECARD_N=3`: preflight, `bench_row R1 build`, the pipeline ×6, `bench_row R2 check-all` … `bench_row R5 check-lib=cargo-hive-core`, then `summarize > $DRY/summary.txt`. Expect a failure, because `summarize` is absent.
-- [ ] **Step 2: Write both sections.**
+- [x] **Step 1: Write the failing check.** On a fresh `$DRY`, run the whole Rerun section in order with `SCORECARD_N=3`: preflight, `bench_row R1 build`, the pipeline ×6, `bench_row R2 check-all` … `bench_row R5 check-lib=cargo-hive-core`, then `summarize > $DRY/summary.txt`. Expect a failure, because `summarize` is absent.
+- [x] **Step 2: Write both sections.**
   - `summarize`: the median rule of design Decision 6 (odd n takes the middle; even n takes `floor((a+b)/2)`), and the Provenance cells of Decision 7 (`git rev-list -n1 v<hive_version>`, or the source `git rev-parse HEAD`; `sysctl -n hw.model machdep.cpu.brand_string hw.ncpu`).
   - Record:
     - overwrite only the value, n, median and Provenance cells;
@@ -366,7 +366,7 @@ _Requirements: SCORECARD-6.1, SCORECARD-6.2, SCORECARD-6.3, SCORECARD-6.4_
     - an arm with fewer than 3 valid samples keeps the row's previous cells;
     - confirm `git worktree list`;
     - while O2 is unanswered, stop after printing and commit nothing that names or measures the workspace.
-- [ ] **Step 3: Run the check.** Run Step 1's command and expect exit 0.
+- [x] **Step 3: Run the check.** Run Step 1's command and expect exit 0.
   - `$DRY/summary.txt` has exactly 10 lines starting `R1`…`R10`.
   - R1's cold median equals `jq .counts.cold_build_ms_median $RUN/R1.json`.
   - A by-hand median of `[5,1,4,2]` gives 3.
@@ -374,7 +374,7 @@ _Requirements: SCORECARD-6.1, SCORECARD-6.2, SCORECARD-6.3, SCORECARD-6.4_
   - After the run, `git -C $DRY/main worktree list` shows only the main, and `ls ~/.hive` is unchanged, since the run used the scratch `HIVE_HOME`.
   - `$DRY/summary.txt` also gives min, max and spread per arm for every measured row, as evidence only (B5).
   - Then set the catalog Status to Implemented. Implemented means the doc and its steps work; it does not complete #16, which needs Task 9's first measured run. Landing this branch must not close #16, overriding the default landing action in `docs/agents/project.md` ("closes the tickets it completed"). Run `refresh-lanes`. Record its printed word; on this branch it is expected to be `not on main` (plan-review F6).
-- [ ] **Step 4: Commit.** `git commit -am "docs(scorecard): summarize and record a run in place; dry run passes"` (the scratch copy and `$DRY` are not committed)
+- [x] **Step 4: Commit.** `git commit -am "docs(scorecard): summarize and record a run in place; dry run passes"` (the scratch copy and `$DRY` are not committed)
 
 _Requirements: SCORECARD-8.4, SCORECARD-8.5, SCORECARD-8.6, SCORECARD-8.8, SCORECARD-9.3_
 
