@@ -41,8 +41,8 @@ The operator sets a target by editing that row's Target cell and its Target set 
 ## Notes per row
 
 - R1 to R5: bench times one first build per fresh checkout. Rows measured later in a run see a store and a main target dir that earlier shapes already filled, so R2 to R5 are noted as measured after earlier shapes.
-- R6: by hand (outside bench). The environment matches bench's: the same variable scrub that hive applies to the builds it runs. Only the cargo exec is timed, after a fixed one-file edit to a workspace crate. The median follows bench's rule: the middle value for odd n, and the floor of the mean of the two middle values for even n.
-- R7: the bytes the volume lost, read as the drop in free space from before a worktree's first build to after it, never bytes that clones share. The reading also carries the seed's store writes, any Cargo source unpacks, and any other writer on the same APFS container, so the quiet-machine rule and the median over four samples are the only guards.
+- R6: by hand (outside bench); environment matches bench's, but bench did not time it. The environment is the same variable scrub that hive applies to the builds it runs. Only the cargo exec is timed, after a fixed one-file edit to a workspace crate. The median follows bench's rule: the middle value for odd n, and the floor of the mean of the two middle values for even n.
+- R7: the bytes the volume lost, read as the drop in free space from before a worktree's first build to after it, never bytes that clones share. The reading also carries the seed's store writes, any Cargo source unpacks, and any other writer on the same APFS container, so the quiet-machine rule and the median over four samples are the only guards. On the seeded arm the seed receipt's `clone_bytes_not_shared` is recorded beside the value as the seed's registry part at seed time; it is 0 on a fully shared clone and never stands in for the drop.
 - R8: a sample is vacuous when the deletion removed no unit files and no objects, because then nothing could be rebuilt because of it. A vacuous sample is valid and counted. A sample is void when the deletion or the rebuild fails.
 
 ## What a run touches
@@ -223,6 +223,145 @@ bench_row() {
 ```
 
 Run the rows in that order, after `preflight`: `bench_row R1 build`, `bench_row R2 check-all`, `bench_row R3 clippy-all`, `bench_row R4 test-no-run`, `bench_row R5 check-lib=$P`. R2 to R5 are measured after earlier shapes have filled the store and the main target dir. Copy each printed cell into its row of the Values table only when the row printed its values, and fill that row's Provenance from the run's evidence.
+
+### 2. By-hand pipeline
+
+Run `preflight` first, in the same shell, with `P` and `FILE` set in the env file: `P` is the workspace crate whose proc macro reads a file without declaring it, and `FILE` is a `.rs` file in `P`, relative to the repo root. Build the main with `bench_row R1 build` before the first pipeline, so the seed has `build` units to clone. `pipeline <arm> <i>` measures one fresh worktree of its own, never one a bench run used. Per worktree it does, in order: add the worktree and resolve its toolchain; read free space; for the seeded arm only, seed it; run the first build; read free space again; apply the fixed edit; time the next build; remove the worktree. R6 is that timed build; R7 is the drop in free space across the first build, which for the seeded arm includes the seed.
+
+Every by-hand `cargo` runs through `hive_env_cargo`: the toolchain's own `cargo` binary under the environment hive builds its children with. The main is never built that way; an empty `RUSTC_WRAPPER` stops Cargo writing `.rustc_info.json`, and the seed needs that file.
+
+A void sample is still written to `$RUN/pipe.jsonl`, with its rows and reason in `void`, and the function returns non-zero, so call it as `pipeline cold 1 || true`. A seed that exits non-zero, clones no units, or reports a `source.none`, `toolchain.missing` or `store.tag` finding voids R6 to R9, because the worktree was not seeded. A failed first build voids R6 to R9. A failed R6 build voids R6 and every row after it; R7, read before it, stands. A seeded line carries `r7_clone_bytes_not_shared`, the seed's registry part at seed time, or `r7_unmeasured` with the receipt's reason; it never stands in for `r7_bytes`.
+
+```zsh
+zmodload zsh/datetime zsh/mathfunc
+
+resolve_toolchain() {
+  local wt=$1
+  RUSTC_BIN=$(cd $wt && env -u RUSTUP_TOOLCHAIN -u RUSTUP_TOOLCHAIN_SOURCE rustup which rustc) || return 1
+  CARGO_BIN=$(cd $wt && env -u RUSTUP_TOOLCHAIN -u RUSTUP_TOOLCHAIN_SOURCE rustup which cargo) || return 1
+  TC=
+  if [[ $RUSTC_BIN == */toolchains/*/bin/rustc ]]; then
+    TC=${${RUSTC_BIN:h:h}:t}
+  fi
+}
+
+hive_env_cargo() {
+  local v
+  local -a drop keep args
+  drop=(CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_BUILD_BUILD_DIR CARGO_MANIFEST_DIR OUT_DIR CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN RUSTUP_TOOLCHAIN_SOURCE)
+  for v in ${(M)${(k)parameters[(R)*export*]}:#(GIT_*|CARGO_PKG_*)}; do
+    drop+=($v)
+  done
+  for v in $drop; do
+    args+=(-u $v)
+  done
+  keep=(RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= RUSTUP_AUTO_INSTALL=0 RUSTC=$RUSTC_BIN)
+  if [[ -n $TC ]]; then
+    keep+=(RUSTUP_TOOLCHAIN=$TC)
+  fi
+  env $args $keep $CARGO_BIN "$@"
+}
+
+r6_edit() {
+  printf '\n/// Scorecard edit.\n#[allow(dead_code, unreachable_pub)]\npub const SCORECARD_EDIT: u32 = 1;\n' >> "$FILE"
+}
+
+pipeline_abort() {
+  cleanup_worktrees
+  WTS=()
+  git -C $MAIN worktree prune
+  print -u2 "pipeline $1 $2 stopped: $3"
+}
+
+pipeline() {
+  local arm=$1 i=$2 wt=$TMPDIR/scorecard/pipe/$1$2 run=${RUN:A} f a b rc ms
+  local r7=null clone=null unm=null r6=null void=null
+  local -a rows
+  [[ $arm == (cold|seeded) && $i == <-> ]] || { print -u2 'usage: pipeline cold|seeded <i>'; return 1 }
+  [[ -n $RUN && -n $TMPDIR && -n $MAIN && -n $P && -n $FILE ]] || { print -u2 'run preflight first, with P and FILE set'; return 1 }
+
+  rm -rf $wt
+  git -C $MAIN worktree prune
+  mkdir -p ${wt:h}
+  git -C $MAIN worktree add --detach $wt > /dev/null 2>&1 || { pipeline_abort $arm $i "could not add a worktree at $wt"; return 1 }
+  WTS+=($wt)
+  for f in ${=UNTRACKED_COPY}; do
+    mkdir -p $wt/${f:h} && cp -p $MAIN/$f $wt/$f || { pipeline_abort $arm $i "could not copy $f into the worktree"; return 1 }
+  done
+  resolve_toolchain $wt || { pipeline_abort $arm $i 'could not resolve the toolchain'; return 1 }
+
+  sync
+  a=$(/bin/df -k $wt | awk 'NR==2{print $4}')
+
+  if [[ $arm == seeded ]]; then
+    rc=0
+    cargo hive seed $wt --json > $RUN/pipe-$arm$i-seed.json || rc=$?
+    clone=$(jq -c '.counts.clone_bytes_not_shared // null' $RUN/pipe-$arm$i-seed.json 2> /dev/null) || clone=null
+    if [[ $clone == null ]]; then
+      unm=$(jq -c '[.unmeasured[]? | select(tojson | contains("clone_bytes_not_shared")) | (.reason // tojson)] | first // "no reason in the receipt"' $RUN/pipe-$arm$i-seed.json 2> /dev/null) || unm='"no readable receipt"'
+    fi
+    if (( rc != 0 )); then
+      void="{\"reason\":\"the seed exited $rc\"}"
+    elif jq -e '(.counts.clone_units_cloned // 0) == 0' $RUN/pipe-$arm$i-seed.json > /dev/null 2>&1; then
+      void='{"reason":"the seed cloned no units"}'
+    elif jq -e 'any(.findings[]?; (.kind // "") | test("source\\.none|toolchain\\.missing|store\\.tag"))' $RUN/pipe-$arm$i-seed.json > /dev/null 2>&1; then
+      void='{"reason":"the seed reported a source.none, toolchain.missing or store.tag finding"}'
+    fi
+    if [[ $void != null ]]; then
+      void=$(jq -c '. + {rows: ["R6","R7","R8","R9"]}' <<< $void)
+    fi
+  fi
+
+  if [[ $void == null ]]; then
+    rc=0
+    (cd $wt && hive_env_cargo build --offline --locked) > $RUN/pipe-$arm$i-first.log 2>&1 || rc=$?
+    if (( rc != 0 )); then
+      void='{"rows":["R6","R7","R8","R9"],"reason":"the first build failed"}'
+    else
+      sync
+      b=$(/bin/df -k $wt | awk 'NR==2{print $4}')
+      [[ $a == <-> && $b == <-> ]] || { pipeline_abort $arm $i 'could not read free space'; return 1 }
+      r7=$(( (a - b) * 1024 ))
+    fi
+  fi
+
+  if [[ $void == null ]]; then
+    (cd $wt && r6_edit)
+    (
+      cd $wt
+      t0=$EPOCHREALTIME
+      rc=0
+      hive_env_cargo build --offline --locked > $run/pipe-$arm$i-r6.log 2>&1 || rc=$?
+      t1=$EPOCHREALTIME
+      print -r -- $rc $(( int(rint((t1 - t0) * 1000)) )) > $run/pipe-$arm$i-r6.txt
+    )
+    read rc ms < $RUN/pipe-$arm$i-r6.txt
+    if (( rc != 0 )); then
+      void='{"rows":["R6","R8","R9"],"reason":"the R6 build failed"}'
+    else
+      r6=$ms
+    fi
+  fi
+
+  jq -nc --arg arm $arm --argjson i $i --argjson r7 $r7 --argjson clone $clone --argjson unm $unm --argjson r6 $r6 --argjson void $void '
+    {arm: $arm, i: $i, r7_bytes: (if ($void.rows // []) | index("R7") then null else $r7 end), r6_ms: $r6, void: $void}
+    + (if $arm == "seeded" then (if $clone != null then {r7_clone_bytes_not_shared: $clone} else {r7_unmeasured: $unm} end) else {} end)' >> $RUN/pipe.jsonl
+
+  git -C $MAIN worktree remove --force $wt 2> /dev/null || true
+  WTS=(${WTS:#$wt})
+  git -C $MAIN worktree prune
+  [[ $void == null ]]
+}
+```
+
+Run the pipelines in the order cold 1, seeded 1, seeded 2, cold 2, cold 3, seeded 3, seeded 4, cold 4, so that drift falls on both arms:
+
+```text
+for i in {1..$SCORECARD_N}; do
+  if (( i % 2 )); then arms=(cold seeded); else arms=(seeded cold); fi
+  for a in $arms; do pipeline $a $i || true; done
+done
+```
 
 ### Re-check the setup footprint
 
