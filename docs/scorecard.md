@@ -36,7 +36,7 @@ R8 cells read `R rebuilt over k non-vacuous samples; m vacuous`, or `all vacuous
 
 Medians are only as quiet as the machine they were measured on. Each run records the load average at its start and end (`load-start.txt`, `load-end.txt`) and the min, max and spread per arm in `summary.txt`, all in its evidence directory; read the medians together with them. "Measured on" is the date the summary was written, so a run that straddles midnight shows the later date.
 
-**Latest run** (rewritten by hand at each rerun; `record` never touches it). The run was on a non-quiet machine: the load average was roughly 1.6 to 4 at the start and 7 to 11 at the end across the two sessions, and cold-arm spreads reach 10 to 40 percent of the median. R1 to R5 and R6 to R9 come from two sessions on two nights, each with its own evidence directory, so R1 to R5 and R6 to R9 carry different dates and evidence paths. The two hive commits in the Provenance column differ only by documentation: the later one adds two docs-only commits on top of the first, and `git diff --stat <first>..<second> -- crates` shows nothing.
+**Latest run** (rewritten by hand at each rerun; `record` never writes it). The run was on a non-quiet machine. The 1-minute load average was 1.59 at the start and 10.95 at the end of the first session (R1 to R5), and 4.14 at the start and 6.85 at the end of the second (R6 to R9); the second session's start already had 5- and 15-minute averages of 7.79 and 8.81. Spread (max minus min) as a share of the median, cold arm and seeded arm: R1 9.9 and 11.7 percent, R2 32.5 and 16.0, R3 24.7 and 31.1, R4 38.9 and 16.4, R5 60.9 and 15.4; R6, from the second session, 5.6 and 40.5 (one slow seeded sample); R7, from the second session, 1.2 and 11.6. R1 to R5 and R6 to R9 come from two sessions on two nights, each with its own evidence directory, so they carry different hive commits and evidence paths; every row shows the same "Measured on" date because it is the date the summary was written. The two hive commits in the Provenance column differ only by documentation: the later one adds two docs-only commits on top of the first, and `git diff --stat <first>..<second> -- crates` shows nothing.
 
 ## Targets
 
@@ -676,7 +676,7 @@ Run `record` in the same shell after `summarize`. It prints the cells it would w
 
 When it is set, `record` overwrites, for each row that has a line in `$RUN/cells.tsv`: the Cold n, Cold median, Seeded n and Seeded median cells of the Values table, and every cell of that row in the Provenance table, with `$RUN`'s relative path in the Evidence cell. It never adds a row, never touches R10, and never touches the Target (cold), Target (seeded) or Target set cells. A row that kept its previous values keeps every cell. Pass a file path to `record` to write to a copy instead of this file.
 
-The Latest run paragraph under the Provenance table is not written by `record`: rewrite it by hand at each rerun.
+The Latest run paragraph under the Provenance table is not written by `record`: rewrite it by hand at each rerun. Before committing a rerun, re-check that paragraph (loads, spreads, commits, dates) against the new evidence.
 
 Before the last block, re-check the setup footprint (the section after this one) and fix R10 in the same commit if it changed. The last block ends with `cleanup_worktrees` and a worktree list that must show only the main.
 
