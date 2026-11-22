@@ -212,3 +212,8 @@ _Avoid_: dashboard, benchmark report, metrics doc
 **Scorecard row**:
 One cost on the scorecard (R1–R10), with a value per arm, its source (a bench or hive receipt count, or "by hand (outside bench)"), its sample count and median, and its target slots.
 _Avoid_: metric, line item
+In a row's note, "vacuous" means gc deleted nothing for that sample. Such a sample is valid and counted, unlike the liveness-window sense of Vacuous above, which is never counted as a pass.
+
+**Arm**:
+One of the two groups of samples of a scorecard row: cold or seeded.
+_Avoid_: mode, variant
