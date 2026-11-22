@@ -229,6 +229,8 @@ Run the rows in that order, after `preflight`: `bench_row R1 build`, `bench_row 
 
 Run `preflight` first, in the same shell, with `P` and `FILE` set in the env file: `P` is the workspace crate whose proc macro reads a file without declaring it, `FILE` is a `.rs` file in `P`, and `PROBE` is the file that macro reads without declaring it, a `.sqlx/*.json` query file or else a `.env`; both relative to the repo root. Leave `PROBE` empty where the workspace has no such file. Build the main with `bench_row R1 build` before the first pipeline, so the seed has `build` units to clone. `pipeline <arm> <i>` measures one fresh worktree of its own, never one a bench run used. Per worktree it does, in order: add the worktree and resolve its toolchain; read free space; for the seeded arm only, seed it; run the first build; read free space again; apply the fixed edit; time the next build; run `cargo hive gc --checkout` on the worktree and rerun the build with `-v`; rebuild with `-v` once more as a control, change the probe file, rebuild with `-v` and restore both files; remove the worktree. R6 is that timed build; R8 is the rustc invocations of the rerun; R9 is whether the rebuild after the probe change left `P` untouched; R7 is the drop in free space across the first build, which for the seeded arm includes the seed.
 
+`gc --checkout` checks the toolchain it is started under, not the checkout's own, so the pipeline starts it with `RUSTUP_TOOLCHAIN=$TC`, the release `resolve_toolchain` found for the worktree (left unset when `TC` is empty); `seed` and `bench` resolve the checkout's toolchain themselves.
+
 Every by-hand `cargo` runs through `hive_env_cargo`: the toolchain's own `cargo` binary under the environment hive builds its children with. The main is never built that way; an empty `RUSTC_WRAPPER` stops Cargo writing `.rustc_info.json`, and the seed needs that file.
 
 A void sample is still written to `$RUN/pipe.jsonl`, with its rows and reason in `void`, and the function returns non-zero, so call it as `pipeline cold 1 || true`. A seed that exits non-zero, clones no units, or reports a `source.none`, `toolchain.missing` or `store.tag` finding voids R6 to R9, because the worktree was not seeded. A failed first build voids R6 to R9. A failed R6 build voids R6 and every row after it; R7, read before it, stands. A gc or a rerun that exits non-zero, or a gc receipt without both deletion totals, voids R8 and R9; R6 and R7 stand. The line then carries `null` for the four R8 keys. A control rebuild that exits non-zero or compiles a unit, a probe change that does not apply, a probe rebuild that exits non-zero without recompiling `P`, or a file that does not restore voids R9 alone; R6 to R8 stand. The line's `r9` is `stale`, `fresh-recompiled`, `probe input absent` when `PROBE` is empty, or `null` when void. A seeded line carries `r7_clone_bytes_not_shared`, the seed's registry part at seed time, or `r7_unmeasured` with the receipt's reason; it never stands in for `r7_bytes`.
@@ -322,7 +324,7 @@ pipeline_abort() {
 pipeline() {
   local arm=$1 i=$2 wt=$TMPDIR/scorecard/pipe/$1$2 run=${RUN:A} f a b rc ms
   local r7=null clone=null unm=null r6=null void=null r8u=null r8f=null r8o=null r8v=null r9=null probe_void cls st
-  local -a rows
+  local -a rows gc_env
   [[ $arm == (cold|seeded) && $i == <-> ]] || { print -u2 'usage: pipeline cold|seeded <i>'; return 1 }
   [[ -n $RUN && -n $TMPDIR && -n $MAIN && -n $P && -n $FILE ]] || { print -u2 'run preflight first, with P and FILE set'; return 1 }
 
@@ -398,7 +400,9 @@ pipeline() {
 
   if [[ $void == null ]]; then
     rc=0
-    cargo hive gc --checkout $wt --json > $RUN/pipe-$arm$i-gc.json || rc=$?
+    gc_env=()
+    if [[ -n $TC ]]; then gc_env=(RUSTUP_TOOLCHAIN=$TC); fi
+    env $gc_env cargo hive gc --checkout $wt --json > $RUN/pipe-$arm$i-gc.json || rc=$?
     r8f=$(jq -c '.counts.unit_files_deleted // null' $RUN/pipe-$arm$i-gc.json 2> /dev/null) || r8f=null
     r8o=$(jq -c '.counts.objects_deleted // null' $RUN/pipe-$arm$i-gc.json 2> /dev/null) || r8o=null
     [[ $r8f == <-> ]] || r8f=null
