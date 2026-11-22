@@ -222,8 +222,8 @@ _Requirements: SCORECARD-8.1, SCORECARD-8.2, SCORECARD-8.3, SCORECARD-8.7_
 
 **Depends-on:** Task 3
 
-- [ ] **Step 1: Write the failing check.** Extract `$DRY/rerun.zsh`. Then, in one harness shell, run `preflight` and `bench_row R1 build` on the dry-run clone with `SCORECARD_N=2`. Expect a failure, because the section is absent.
-- [ ] **Step 2: Write the block.** Write it as design "Bench rows R1–R5" lays out:
+- [x] **Step 1: Write the failing check.** Extract `$DRY/rerun.zsh`. Then, in one harness shell, run `preflight` and `bench_row R1 build` on the dry-run clone with `SCORECARD_N=2`. Expect a failure, because the section is absent.
+- [x] **Step 2: Write the block.** Write it as design "Bench rows R1–R5" lays out:
   - the main build per shape with plain `cargo`;
   - after R1, `test -f "$(cargo metadata --format-version 1 --no-deps --manifest-path $MAIN/Cargo.toml | jq -r .target_directory)/.rustc_info.json"`;
   - `git -C $MAIN worktree add --detach` for `SCORECARD_N` cold and `SCORECARD_N` seeded under `$TMPDIR/scorecard/<row>/`, each added to `WTS`, with `UNTRACKED_COPY` files copied in;
@@ -233,9 +233,9 @@ _Requirements: SCORECARD-8.1, SCORECARD-8.2, SCORECARD-8.3, SCORECARD-8.7_
   - the worktree removal.
 
   Rows run in the order of design Decision 10: R1 here, R2–R5 after the pipeline. R5 uses `check-lib=$P`.
-- [ ] **Step 3: Run the check.** Run Step 1's command and expect exit 0. `$RUN/R1.json` has `.counts.cold_build_ms_median` as an integer. The printed `seeded=` equals `jq .counts.seeded_total_ms_median`. `git -C $DRY/main worktree list` shows only the main.
+- [x] **Step 3: Run the check.** Run Step 1's command and expect exit 0. `$RUN/R1.json` has `.counts.cold_build_ms_median` as an integer. The printed `seeded=` equals `jq .counts.seeded_total_ms_median`. `git -C $DRY/main worktree list` shows only the main.
   - Then rerun `bench_row R1 build` with an existing target dir planted in one worktree. Expect `R1 kept previous values` and `$RUN/R1.refusal.json` present.
-- [ ] **Step 4: Commit.** `git commit -am "docs(scorecard): fill the first-command rows from one bench run per shape"`
+- [x] **Step 4: Commit.** `git commit -am "docs(scorecard): fill the first-command rows from one bench run per shape"`
 
 _Requirements: SCORECARD-2.1, SCORECARD-2.2, SCORECARD-2.3, SCORECARD-2.4_
 
