@@ -18,8 +18,9 @@ moves a row.
    numbers replace the old ones in place, with no second row.
 
 **Must keep:** bench's own rules and receipts (the scorecard uses bench where it fits and
-records the rest by hand); every duration comes from `cargo hive bench`, as integer
-milliseconds (GOAL-4).
+records the rest by hand); a duration bench can time comes from `cargo hive bench`, as integer
+milliseconds (GOAL-4); the one bench cannot time, the next build after an edit, is timed by hand
+and labelled outside bench (2026-11-22).
 **Off limits:** Linux; changing what hive does (this item measures, it fixes nothing).
 **Decided:** none yet beyond the issue's rows (#16, 2026-11-22).
 **Delegated:** where the scorecard file lives and its layout; how the by-hand rows are
