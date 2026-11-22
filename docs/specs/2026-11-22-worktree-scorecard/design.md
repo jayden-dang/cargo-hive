@@ -347,7 +347,7 @@ No ID is unmapped.
 
 Requirements changed by this design, synced back after design review (design-review.md):
 - SCORECARD-1.4: n counts valid samples only.
-- 3.5 (new): a failed R6, gc or rerun voids the rest of that worktree's pipeline.
+- 3.5 (new): a failed first build, R6, gc or rerun voids the rest of that worktree's pipeline.
 - 4.4 (new): an unseeded seeded worktree is void.
 - 5.1: count rustc invocations with `-v`, not `Compiling` lines, which are per package.
 - 6.2: stale needs exit 0 and `Fresh`, with a control rebuild first.
