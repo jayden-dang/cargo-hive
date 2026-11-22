@@ -73,7 +73,7 @@ target for any row.
   the hive commit, the toolchain, the machine and the evidence path. The toolchain is the
   `rustc -vV` release line. The machine is its model, chip and core count.
 - **SCORECARD-1.6** THE SYSTEM SHALL give every row a Target (cold) slot, a Target (seeded) slot
-  and a Target set date. The slot shape is agent-decided (close package D5): two slots keep open
+  and a Target set date. The two-slot layout is agent-decided (close package D4), and what fills it is O1 (close package D5): two slots keep open
   whether the operator sets one target per row or one per arm.
 - **SCORECARD-1.7** WHILE the operator has not set a row's target THE SYSTEM SHALL show that slot
   as "open — operator", with an empty Target set date. Only the operator fills a target slot.
@@ -122,14 +122,20 @@ so that I can read what an agent waits for on its second build.
   Must keep, as amended 2026-11-22), with a note that its environment matches bench's
   (SCORECARD-3.4) but bench did not time it.
 - **SCORECARD-3.4** THE SYSTEM SHALL run every by-hand `cargo` command of R6–R9, the pipeline's
-  first build included, under the environment bench builds with:
-  - `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` set empty;
-  - `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR` and every
-    `CARGO_BUILD_RUSTC*` unset;
-  - `RUSTUP_TOOLCHAIN` pinned to the toolchain the bench receipt names.
+  first build included, under the environment bench's `timed_build` builds
+  (crates/cargo/src/env.rs:114-156), all of it:
+  - the toolchain's own `cargo` binary, not the rustup proxy;
+  - an environment cleared and refilled from the caller's, dropping `CARGO_TARGET_DIR`,
+    `CARGO_BUILD_TARGET_DIR`, `CARGO_BUILD_BUILD_DIR`, `CARGO_MANIFEST_DIR`, `OUT_DIR`,
+    `CARGO_BUILD_RUSTC`, `CARGO_BUILD_RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`,
+    `RUSTC`, `RUSTUP_TOOLCHAIN`, `RUSTUP_TOOLCHAIN_SOURCE`, and every `GIT_*` and
+    `CARGO_PKG_*` variable;
+  - `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` set empty, `RUSTUP_AUTO_INSTALL=0`, `RUSTC`
+    set to the toolchain's `rustc`, and `RUSTUP_TOOLCHAIN` set to the toolchain the bench
+    receipt names.
 
   The `bench.command` line carries no toolchain and no environment
-  (crates/cargo-hive/src/bench/command.rs:66, :76-). The match is agent-decided; review
+  (crates/cargo-hive/src/bench/command.rs:62-67). The match is agent-decided; ledger A10,
   req-review.md 3c.
 
 ## 4. Private bytes come from the volume
@@ -232,7 +238,8 @@ that I can read R1 as a measured baseline rather than the two-sample headline.
   README.md's "Measured results" and the MILE assessments' numbers unchanged as dated history.
 - **SCORECARD-9.3** IF O2 is unanswered when the first run is ready to record THEN THE SYSTEM
   SHALL keep the run's numbers in its evidence only, and commit nothing that names or measures
-  the workspace.
+  the workspace (agent-decided: the option that leaves O2 fully open, charter fork order step 4;
+  ledger A12).
 
 ## 10. Quality attributes
 
@@ -279,7 +286,9 @@ The guards:
 - Choosing any target value (O1), or naming the measured workspace or its paths before O2 is
   answered.
 - Fixing any number the scorecard shows.
-- Aging a target, or faking invocation times, to make R8 non-vacuous (ledger S1).
+- Aging a target, or faking invocation times, to make R8 non-vacuous (agent-decided, from
+  ROAD-19's "measures only": aging fakes the invocation times hive reads. Reopen if R8 stays
+  all vacuous after the first run; ledger S1, A13).
 - A test, lint or script that checks the scorecard's shape or drives a run (Weigh W1; reopen
   when someone other than the owner reruns it, or when a rerun commit adds a row).
 - Committing receipts or by-hand logs to git.
@@ -288,7 +297,7 @@ The guards:
 ## Open Questions
 
 - O1 Target value of each row, and whether a row takes one target or one per arm. Owner:
-  operator. Date: 2026-11-22. Forbid-guess (cấm đoán): no session or agent writes a target value.
+  operator. Date: 2026-11-22. Forbid-guess: no session or agent writes a target value.
 - O2 Whether the scorecard may name the measured workspace and hold its numbers and paths in
-  this public repo. Owner: operator. Date: 2026-11-22. Forbid-guess (cấm đoán): until it is
+  this public repo. Owner: operator. Date: 2026-11-22. Forbid-guess: until it is
   answered, SCORECARD-9.3 holds.
