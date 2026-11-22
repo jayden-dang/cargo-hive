@@ -131,6 +131,11 @@ Cell vocabulary, fixed so a rerun only swaps values:
 - R8 as `R rebuilt over k non-vacuous samples; m vacuous` or `all vacuous`
 - R9 as `s stale of n`
 
+A `## Targets` paragraph says how a target is set: the operator edits the row's Target cell and its
+Target set date in a plain commit, and a rerun never touches either (SCORECARD-1.7, 8.5). One line
+above `## Rerun` says the blocks are zsh on macOS (the vision's macOS-only constraint; Linux is out
+of scope).
+
 Values-table columns: `Row | Metric | Source | Cold n | Cold median | Seeded n | Seeded median |
 Target (cold) | Target (seeded) | Target set`.
 
@@ -149,6 +154,9 @@ Depth: callers keep knowing only "source the env file, then run preflight"; the 
 Locality: new text in `docs/scorecard.md` § Rerun; leave bench
 
 The block also:
+- resolves `TC` in `$MAIN` and runs `RUSTUP_TOOLCHAIN=$TC cargo hive doctor --json`. Doctor resolves its toolchain from the state root with any directory toolchain dropped (cli.rs:440; cargo/src/toolchain.rs:73-80), so without the variable it records the rustup default, not the workspace's;
+- records `command -v cargo-hive` and `cargo hive --version` in `$RUN/hive.txt`;
+- stops before any measurement when doctor fails a check, or the toolchain is unsupported. It writes the failing checks to `$RUN/preflight-fail.txt` and changes no cell;
 - confirms `rustup component list --installed` lists `clippy` (R3);
 - confirms `$TMPDIR` is a secondary root: `secondary_roots` is absent from
   `~/.hive/config.json`, so the defaults hold, or it lists `$TMPDIR`;
@@ -166,7 +174,7 @@ The block also:
 Every later block writes its receipts and logs under `$RUN`.
 
 **What a run touches**, written as a note in the doc:
-- the real `~/.hive`: store, `store.db` and receipts, from bench's prime, `seed` and `gc`;
+- the real `~/.hive`: `capabilities.json` (doctor), store, `store.db` and receipts, from bench's prime, `seed` and `gc`;
 - the main checkout's target dir;
 - `~/.cargo`: every build is `--offline`, so nothing is downloaded, but Cargo may unpack cached
   `.crate` files into `registry/src`;
@@ -281,6 +289,10 @@ The "Record" step tells the person to:
   removes them on abort too);
 - keep a row's previous cells when an arm has fewer than 3 valid samples, with the void reasons
   printed by `summarize` (SCORECARD-8.8).
+
+`summarize` also writes min, max and spread per arm for each measured row to `$RUN/summary.txt`.
+That is evidence only, not a table column: L3 asks for n and median, and the quiet-machine rule
+plus the median are the noise guard.
 
 O2 gate (9.3): while O2 is unanswered, the Record step stops at printing. The numbers stay in
 `$RUN`, and the commit for a run is made only once O2 is answered. The first run (9.1) replaces

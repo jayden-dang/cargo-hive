@@ -61,6 +61,7 @@ check is a fixed command run by hand, and its output goes to evidence (Weigh W1)
 |---|---|---|
 | `docs/scorecard.md` | Create | The scorecard: Values table, Provenance table, notes per row, what a run touches, Rerun blocks (preflight, `bench_row`, `resolve_toolchain`, `hive_env_cargo`, `pipeline`, `summarize`, Record) |
 | `docs/specs/catalog/hive.md` | Modify | The SCORECARD row's Status: Draft → In-progress at build start, Implemented once Task 8's dry run passes |
+| `docs/roadmap/lanes.md` | Regenerate | Written only by `refresh-lanes` after each Status stamp. On this branch it prints `not on main` and writes nothing. The Delivered-by line in `docs/roadmap/INDEX.md` belongs to landing (`land-branch`), not to this plan |
 | `docs/specs/2026-11-22-worktree-scorecard/tasks.md` | Modify | Checkboxes ticked during build |
 
 Evidence, outside git: `.skills/verify/<date>-scorecard/` (runs), `.skills/verify/scorecard.env`
@@ -73,10 +74,26 @@ Retrieval for this map (load-subgraph):
 - cluster(SCORECARD): the focus only.
 - owns_coverage is 14 of 15 before this file.
 
-Dry-run variables, used in Tasks 3–8. Each task's check sources them first:
-`export REPO=<this repo's root> DRY=/private/tmp/sc-dry HIVE_HOME=/private/tmp/sc-dry/hive`;
-`export PATH=$REPO/target/debug:$PATH` after `cargo build -p cargo-hive` in `$REPO`, so `cargo hive`
-runs the dev build; `MAIN=$DRY/main` is a `git clone "$REPO" "$DRY/main"`.
+Dry-run harness, used in Tasks 3–8. Write it once to `/private/tmp/sc-dry/dry.env`:
+
+```zsh
+export REPO=<this repo's root> DRY=/private/tmp/sc-dry
+export HIVE_HOME=$DRY/hive TMPDIR=$DRY/tmp
+[[ $HIVE_HOME == /private/tmp/* && $TMPDIR == /private/tmp/* ]] || { print -u2 "dry run refused: HIVE_HOME/TMPDIR not under /private/tmp"; exit 1; }
+mkdir -p $HIVE_HOME $TMPDIR
+export PATH=$REPO/target/debug:$PATH
+[[ $(command -v cargo-hive) == $REPO/target/debug/cargo-hive ]] || { print -u2 "dry run refused: cargo-hive is not the dev build"; exit 1; }
+export MAIN=$DRY/main
+```
+
+Before the first check, run `cargo build -p cargo-hive` in `$REPO` and `git clone "$REPO" "$DRY/main"`.
+The dev build is needed because installed 0.1.2 fails doctor check (f) on Cargo 1.100 (plan-review
+F8). Every check below runs as `zsh -ec 'source /private/tmp/sc-dry/dry.env; source $DRY/rerun.zsh; …'`,
+one shell per check, so a missing or wrong harness fails closed before any `cargo hive` command.
+`$DRY/rerun.zsh` holds every zsh block under `## Rerun`, extracted fresh for each check:
+`awk '/^## Rerun/,0' docs/scorecard.md | awk '/^```zsh/{f=1;next}/^```/{f=0}f' > $DRY/rerun.zsh`.
+A check whose step needs a block also requires `[ -s $DRY/rerun.zsh ]` and `whence <function>` to
+succeed (plan-review F3, P1).
 
 ---
 
@@ -102,14 +119,16 @@ runs the dev build; `MAIN=$DRY/main` is a `git clone "$REPO" "$DRY/main"`.
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing check.** `test -f docs/scorecard.md && [ "$(grep -cE '^\| R([1-9]|10) \|' docs/scorecard.md)" = 20 ] && [ "$(grep -c 'open — operator' docs/scorecard.md)" = 20 ] && ! grep -nE '/Users/|/private/|SCORECARD-|\$HOME' docs/scorecard.md`. Run it and expect a non-zero exit, because the file is absent.
+- [ ] **Step 1: Write the failing check.** `test -f docs/scorecard.md && [ "$(grep -cE '^\| R([1-9]|10) \|' docs/scorecard.md)" = 20 ] && [ "$(grep -o 'open — operator' docs/scorecard.md | wc -l | tr -d ' ')" = 20 ] && grep -q '^## Targets' docs/scorecard.md && grep -q 'zsh on macOS' docs/scorecard.md && ! grep -nE '/Users/|/private/|SCORECARD-|\$HOME' docs/scorecard.md`. Run it and expect a non-zero exit, because the file is absent.
 - [ ] **Step 2: Write the file.** Write the header paragraph, then the Values and Provenance tables, with one line per R1–R10 in each and the Metric names from SCORECARD-1.1. Fill the cells:
   - Every measured value cell reads `not yet measured`, and every target slot reads `open — operator`.
   - Target set is empty.
   - Source cells: R1–R5 name `cold_build_ms_median` / `seeded_total_ms_median`; R6 reads `by hand (outside bench)`; R7 reads `by hand (free space)`; R8 reads `by hand (cargo -v after gc --checkout)`; R9 reads `by hand (cargo -v after probe)`; R10 reads `listed`.
   - R10's n and median cells read `—`.
+  - Add `## Targets`: the operator sets a target by editing that row's Target cell and its Target set date in a plain commit, and a rerun never touches either.
+  - State once, above `## Rerun`, that the Rerun blocks are zsh on macOS.
   - Add `## Notes per row` and `## What a run touches` as the design section "Values and Provenance tables" and "Rerun preflight" lay them out. The R6, R7 and R8 notes go in here; the R9 note is added in Task 7.
-- [ ] **Step 3: Run the check.** Run Step 1's command and expect exit 0. Also run `grep -c '^| R' docs/scorecard.md` and expect 20.
+- [ ] **Step 3: Run the check.** Run Step 1's command and expect exit 0. Also run `grep -cE '^\| R([1-9]|10) \|' docs/scorecard.md` and expect 20 (header rows do not match).
 - [ ] **Step 4: Commit.** `git add docs/scorecard.md && git commit -m "docs(scorecard): add the worktree scorecard's tables with open target slots"`
 
 _Requirements: SCORECARD-1.1, SCORECARD-1.2, SCORECARD-1.3, SCORECARD-1.4, SCORECARD-1.5, SCORECARD-1.6, SCORECARD-1.7, SCORECARD-1.8, SCORECARD-1.9, SCORECARD-10.1_
@@ -156,10 +175,13 @@ _Requirements: SCORECARD-7.1_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing check.** On the dry-run variables, copy the preflight block into `$DRY/preflight.zsh`: `awk '/^### 0. Preflight/,/^### 1\./' docs/scorecard.md | awk '/^```zsh/{f=1;next}/^```/{f=0}f' > $DRY/preflight.zsh`. Then run `zsh $DRY/preflight.zsh` with `$DRY/scorecard.env` pointing `MAIN=$DRY/main`. Expect a failure, because the section is absent.
+- [ ] **Step 1: Write the failing check.** Write `$DRY/scorecard.env` with `MAIN=$DRY/main`, extract `$DRY/rerun.zsh`, then run `zsh -ec 'source /private/tmp/sc-dry/dry.env; [ -s $DRY/rerun.zsh ]; source $DRY/rerun.zsh; whence preflight; preflight'`. Expect a failure, because the block is absent and `rerun.zsh` is empty.
 - [ ] **Step 2: Write the block.** Write it as design "Rerun preflight" lays out:
+  - the block defines `preflight`;
   - source the env file;
-  - `cargo hive doctor --json` passes;
+  - resolve `TC` in `$MAIN` (as `resolve_toolchain` does), then run `RUSTUP_TOOLCHAIN=$TC cargo hive doctor --json`, so doctor records the measured workspace's toolchain (P2);
+  - record `command -v cargo-hive` and `cargo hive --version` in `$RUN/hive.txt`;
+  - if doctor fails, or the toolchain is unsupported, stop before any measurement. Write the failing checks to `$RUN/preflight-fail.txt` and change no cell (B3);
   - `$MAIN` is registered (`cargo hive repo add "$MAIN"` when not);
   - the `cargo hive bench --help` greps for `--cold`, `--seeded`, `--build-cmd`, `--json`;
   - the `clippy` component is installed;
@@ -235,7 +257,7 @@ _Requirements: SCORECARD-2.1, SCORECARD-2.2, SCORECARD-2.3, SCORECARD-2.4_
 
 **Depends-on:** Task 4
 
-- [ ] **Step 1: Write the failing check.** Copy `### 2. By-hand pipeline`'s zsh into `$DRY/pipe.zsh`. Run `pipeline cold 1; pipeline seeded 1` on the dry-run clone, with `P=cargo-hive-core` and `FILE=crates/core/src/lib.rs`. Expect a failure, because the section is absent.
+- [ ] **Step 1: Write the failing check.** Extract `$DRY/rerun.zsh`. In one harness shell, run `preflight; bench_row R1 build` (Task 4, which builds the main), then `pipeline cold 1; pipeline seeded 1` on the dry-run clone, with `P=cargo-hive-core` and `FILE=crates/core/src/lib.rs`. Expect a failure, because the section is absent.
 - [ ] **Step 2: Write the block.** Write it as design "By-hand pipeline R6–R9" steps 1–6 lay out:
   - `resolve_toolchain` in a subshell `cd $WT` with `RUSTUP_TOOLCHAIN` and `RUSTUP_TOOLCHAIN_SOURCE` unset, with the `…/toolchains/<name>/bin/` basename rule;
   - `hive_env_cargo` with the full `env -u` list from design and `RUSTUP_TOOLCHAIN=$TC` only when non-empty;
@@ -272,7 +294,7 @@ _Requirements: SCORECARD-3.1, SCORECARD-3.2, SCORECARD-3.3, SCORECARD-3.4, SCORE
 
 - [ ] **Step 1: Write the failing check.** Run `pipeline cold 1` on the dry-run clone, then `jq -e 'has("r8_units") and has("r8_vacuous")' <(tail -1 $RUN/pipe.jsonl)`. Expect a non-zero exit.
 - [ ] **Step 2: Write step 7.** Run `cargo hive gc --checkout $WT --json > $RUN/pipe-<arm><i>-gc.json` and read `.counts.unit_files_deleted` and `.counts.objects_deleted` (unsuffixed totals). Run `hive_env_cargo build --offline --locked -v 2> …-r8.log` and count with `grep -c 'Running `.*--crate-name'`. Mark the sample vacuous or void as design step 7 says. Add the R8 note with its cell form.
-- [ ] **Step 3: Run the check.** Run Step 1's command and expect exit 0. If `r8_vacuous` is false, then `r8_objects_deleted + r8_unit_files_deleted > 0`. On a scratch crate, `printf '\n// e\n' >> src/lib.rs` followed by the counter on `cargo build -v` prints 1, matching the 2026-11-22 check.
+- [ ] **Step 3: Run the check.** Run Step 1's command and expect exit 0. The line's `r8_unit_files_deleted` equals `jq .counts.unit_files_deleted` on that worktree's saved `-gc.json`, and `r8_units` equals `grep -c 'Running `.*--crate-name'` on its saved `-r8.log` (plan-review F4). On a scratch crate, `printf '\n// e\n' >> src/lib.rs` followed by the counter on `cargo build -v` prints 1, matching the 2026-11-22 check.
 - [ ] **Step 4: Commit.** `git commit -am "docs(scorecard): count units rebuilt after a checkout gc, with vacuous samples kept apart"`
 
 _Requirements: SCORECARD-5.1, SCORECARD-5.2, SCORECARD-5.3_
@@ -290,7 +312,7 @@ _Requirements: SCORECARD-5.1, SCORECARD-5.2, SCORECARD-5.3_
 - Consumes: `pipeline`, `hive_env_cargo`, env keys `P`, `PROBE` (Task 5)
 - Produces:
   - the function `r9_classify <exit> <log>`, which prints `stale`, `fresh-recompiled` or `void`
-    (stale = exit 0 and a `Fresh $P v` line; recompiled = a ``Running `.*--crate-name $P_crate``
+    (stale = exit 0 and a `Fresh $P v` line; recompiled = a ``Running `.*--crate-name ${P//-/_}``
     line; otherwise void);
   - `pipe.jsonl` key `r9`;
   - the R9 note that seed clones registry units and not workspace crates.
@@ -303,7 +325,7 @@ _Requirements: SCORECARD-5.1, SCORECARD-5.2, SCORECARD-5.3_
   - `void.log`: `error: failed to get ...`, exit 101.
 
   Run `P=p r9_classify 0 $DRY/r9/stale.log`, and the same for the other two. Expect a failure, because the function is absent.
-- [ ] **Step 2: Write step 8.** Write the control rebuild (`-v`, which must exit 0 with no `--crate-name` line, else void), then the Decision 5 probe change on `$PROBE` (flip the first `"nullable"` with `jq`, or the `.env` fallback). Rebuild with `-v`, classify with `r9_classify`, then restore with `git checkout -- "$PROBE" "$FILE"`. Add the R9 note. Where `PROBE` is unset, the step records `r9: "probe input absent"`.
+- [ ] **Step 2: Write step 8.** Write the control rebuild (`-v`, which must exit 0 with no `--crate-name` line, else void), then the Decision 5 probe change on `$PROBE` (flip the first `"nullable"` with `jq`, or the `.env` fallback). Rebuild with `-v`, classify with `r9_classify`, then restore with `git checkout -- "$PROBE" "$FILE"`. Add the R9 note. Where `PROBE` is unset, the step skips the probe, records `r9: "probe input absent"`, and restores only `git checkout -- "$FILE"` (plan-review F5).
 - [ ] **Step 3: Run the check.** The three classify calls print `stale`, `fresh-recompiled` and `void`. Run `pipeline cold 1` on the dry-run clone, with `PROBE` unset. Expect `r9 == "probe input absent"` and `git -C <wt> status --porcelain` empty before removal.
 - [ ] **Step 4: Commit.** `git commit -am "docs(scorecard): probe a proc macro's undeclared input for stale rebuilds"`
 
@@ -344,9 +366,10 @@ _Requirements: SCORECARD-6.1, SCORECARD-6.2, SCORECARD-6.3, SCORECARD-6.4_
   - `$DRY/summary.txt` has exactly 10 lines starting `R1`…`R10`.
   - R1's cold median equals `jq .counts.cold_build_ms_median $RUN/R1.json`.
   - A by-hand median of `[5,1,4,2]` gives 3.
-  - Apply the Record step to a scratch copy of `docs/scorecard.md`. `diff` against the original changes only lines starting `| R` and leaves every `open — operator` cell. `grep -c '^| R'` is still 20.
+  - Apply the Record step to a scratch copy of `docs/scorecard.md`. `diff` against the original changes only lines matching `^\| R([1-9]|10) \|` and leaves every `open — operator` cell. `grep -o 'open — operator' | wc -l` is still 20.
   - After the run, `git -C $DRY/main worktree list` shows only the main, and `ls ~/.hive` is unchanged, since the run used the scratch `HIVE_HOME`.
-  - Then set the catalog Status to Implemented.
+  - `$DRY/summary.txt` also gives min, max and spread per arm for every measured row, as evidence only (B5).
+  - Then set the catalog Status to Implemented, and run `refresh-lanes`. Record its printed word; on this branch it is expected to be `not on main` (plan-review F6).
 - [ ] **Step 4: Commit.** `git commit -am "docs(scorecard): summarize and record a run in place; dry run passes"` (the scratch copy and `$DRY` are not committed)
 
 _Requirements: SCORECARD-8.4, SCORECARD-8.5, SCORECARD-8.6, SCORECARD-8.8, SCORECARD-9.3_
@@ -366,7 +389,7 @@ _Requirements: SCORECARD-8.4, SCORECARD-8.5, SCORECARD-8.6, SCORECARD-8.8, SCORE
 
 **Depends-on:** Task 8
 
-- [ ] **Step 1: Gate.** Do not start until the operator says to run it: it is hours of builds on the owner's machine, and it writes the real `~/.hive` (design "What a run touches"). Record the go-ahead and the O2 answer in `$RUN/gate.txt`.
+- [ ] **Step 1: Gate.** Do not start until the operator says to run it: it is hours of builds on the owner's machine, and it writes the real `~/.hive`, including `capabilities.json` (design "What a run touches"). The operator also decides first how `~/.hive/capabilities.json` is restored after the 2026-11-22 incident. Record the go-ahead and the O2 answer in `$RUN/gate.txt`.
 - [ ] **Step 2: Run.** Run the Rerun section in order with `SCORECARD_N=4`, then `summarize > $RUN/summary.txt`. Check:
   - `summary.txt` has 10 row lines;
   - R1's seeded median equals `jq .counts.seeded_total_ms_median $RUN/R1.json`;
