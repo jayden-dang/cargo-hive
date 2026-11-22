@@ -159,7 +159,7 @@ The block also:
 - stops before any measurement when doctor fails a check, or the toolchain is unsupported. It writes the failing checks to `$RUN/preflight-fail.txt` and changes no cell;
 - confirms `rustup component list --installed` lists `clippy` (R3);
 - confirms `$TMPDIR` is a secondary root: `secondary_roots` is absent from
-  `~/.hive/config.json`, so the defaults hold, or it lists `$TMPDIR`;
+  `${HIVE_HOME:-~/.hive}/config.json` (hive's state root, crates/state/src/lib.rs:184-189), so the defaults hold, or it lists `$TMPDIR`;
 - confirms the main's tracked tree is clean (`git -C $MAIN status --porcelain --untracked-files=no` is empty);
 - after R1's main build, checks that `<main target>/.rustc_info.json` exists (Decision 9);
 - runs a drift guard: greps the hive source at the measured commit (`DROP_EXACT` and

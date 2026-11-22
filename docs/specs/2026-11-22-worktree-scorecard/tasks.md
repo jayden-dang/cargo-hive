@@ -15,6 +15,8 @@ Max-concurrency: auto
 Requirements: ./requirements.md
 Design: ./design.md
 
+**Completion:** Tasks 1–8 and 10 land the scorecard and its steps. #16 is complete only after Task 9, the operator-gated first run, so a landing before Task 9 leaves #16 open (ledger S3).
+
 **Goal:** Land `docs/scorecard.md`. It records an agent worktree's cost on the measured workspace,
 cold and seeded, in ten rows with open target slots, and its copy-paste Rerun steps replace the
 numbers in place.
@@ -123,7 +125,7 @@ succeed (plan-review F3, P1).
 - [ ] **Step 2: Write the file.** Write the header paragraph, then the Values and Provenance tables, with one line per R1–R10 in each and the Metric names from SCORECARD-1.1. Fill the cells:
   - Every measured value cell reads `not yet measured`, and every target slot reads `open — operator`.
   - Target set is empty.
-  - Source cells: R1–R5 name `cold_build_ms_median` / `seeded_total_ms_median`; R6 reads `by hand (outside bench)`; R7 reads `by hand (free space)`; R8 reads `by hand (cargo -v after gc --checkout)`; R9 reads `by hand (cargo -v after probe)`; R10 reads `listed`.
+  - Source cells: R1–R5 name `cold_build_ms_median` / `seeded_total_ms_median`; R6 reads `by hand (outside bench)`; R7 reads `by hand (outside bench): free space`; R8 reads `by hand (outside bench): cargo -v after gc --checkout`; R9 reads `by hand (outside bench): cargo -v after probe`; R10 reads `listed`.
   - R10's n and median cells read `—`.
   - Add `## Targets`: the operator sets a target by editing that row's Target cell and its Target set date in a plain commit, and a rerun never touches either.
   - State once, above `## Rerun`, that the Rerun blocks are zsh on macOS.
@@ -185,7 +187,7 @@ _Requirements: SCORECARD-7.1_
   - `$MAIN` is registered (`cargo hive repo add "$MAIN"` when not);
   - the `cargo hive bench --help` greps for `--cold`, `--seeded`, `--build-cmd`, `--json`;
   - the `clippy` component is installed;
-  - the `secondary_roots` check;
+  - the `secondary_roots` check, reading `${HIVE_HOME:-~/.hive}/config.json`, the state root hive itself reads (crates/state/src/lib.rs:184-189);
   - the main's tracked tree is clean;
   - the env.rs drift guard (repo path, or `$CARGO_HOME/registry/src/*/cargo-hive-cargo-<hive_version>/src/env.rs`);
   - `RUN` setup with `sysctl -n vm.loadavg > $RUN/load-start.txt`;
@@ -219,7 +221,7 @@ _Requirements: SCORECARD-8.1, SCORECARD-8.2, SCORECARD-8.3, SCORECARD-8.7_
 
 **Depends-on:** Task 3
 
-- [ ] **Step 1: Write the failing check.** Copy `### 1. Bench rows`'s zsh into `$DRY/bench.zsh` with the same awk extraction. Then run preflight and `bench_row R1 build` on the dry-run clone with `SCORECARD_N=2`. Expect a failure, because the section is absent.
+- [ ] **Step 1: Write the failing check.** Extract `$DRY/rerun.zsh`. Then, in one harness shell, run `preflight` and `bench_row R1 build` on the dry-run clone with `SCORECARD_N=2`. Expect a failure, because the section is absent.
 - [ ] **Step 2: Write the block.** Write it as design "Bench rows R1–R5" lays out:
   - the main build per shape with plain `cargo`;
   - after R1, `test -f "$(cargo metadata --format-version 1 --no-deps --manifest-path $MAIN/Cargo.toml | jq -r .target_directory)/.rustc_info.json"`;
@@ -312,7 +314,7 @@ _Requirements: SCORECARD-5.1, SCORECARD-5.2, SCORECARD-5.3_
 - Consumes: `pipeline`, `hive_env_cargo`, env keys `P`, `PROBE` (Task 5)
 - Produces:
   - the function `r9_classify <exit> <log>`, which prints `stale`, `fresh-recompiled` or `void`
-    (stale = exit 0 and a `Fresh $P v` line; recompiled = a ``Running `.*--crate-name ${P//-/_}``
+    (stale = exit 0 and a `Fresh $P v` line; recompiled = a ``Running `.*--crate-name ${P//-/_} `` line, the trailing space being the right boundary
     line; otherwise void);
   - `pipe.jsonl` key `r9`;
   - the R9 note that seed clones registry units and not workspace crates.
@@ -322,11 +324,12 @@ _Requirements: SCORECARD-5.1, SCORECARD-5.2, SCORECARD-5.3_
 - [ ] **Step 1: Write the failing check.** Write three canned logs into `$DRY/r9/`:
   - `stale.log`: `       Fresh p v0.1.0 (/x)`, exit 0;
   - `recompiled.log`: ``     Running `rustc --crate-name p src/lib.rs` ``, exit 1;
-  - `void.log`: `error: failed to get ...`, exit 101.
+  - `void.log`: `error: failed to get ...`, exit 101;
+  - `prefix.log`: ``     Running `rustc --crate-name p_core src/lib.rs` ``, exit 0, which must classify `void` for `P=p` and not `fresh-recompiled`.
 
-  Run `P=p r9_classify 0 $DRY/r9/stale.log`, and the same for the other two. Expect a failure, because the function is absent.
+  Run `P=p r9_classify 0 $DRY/r9/stale.log`, and the same for the other three. Expect a failure, because the function is absent.
 - [ ] **Step 2: Write step 8.** Write the control rebuild (`-v`, which must exit 0 with no `--crate-name` line, else void), then the Decision 5 probe change on `$PROBE` (flip the first `"nullable"` with `jq`, or the `.env` fallback). Rebuild with `-v`, classify with `r9_classify`, then restore with `git checkout -- "$PROBE" "$FILE"`. Add the R9 note. Where `PROBE` is unset, the step skips the probe, records `r9: "probe input absent"`, and restores only `git checkout -- "$FILE"` (plan-review F5).
-- [ ] **Step 3: Run the check.** The three classify calls print `stale`, `fresh-recompiled` and `void`. Run `pipeline cold 1` on the dry-run clone, with `PROBE` unset. Expect `r9 == "probe input absent"` and `git -C <wt> status --porcelain` empty before removal.
+- [ ] **Step 3: Run the check.** The four classify calls print `stale`, `fresh-recompiled`, `void` and `void`. Run `pipeline cold 1` on the dry-run clone, with `PROBE` unset. Expect `r9 == "probe input absent"` and `git -C <wt> status --porcelain` empty before removal.
 - [ ] **Step 4: Commit.** `git commit -am "docs(scorecard): probe a proc macro's undeclared input for stale rebuilds"`
 
 _Requirements: SCORECARD-6.1, SCORECARD-6.2, SCORECARD-6.3, SCORECARD-6.4_
@@ -369,7 +372,7 @@ _Requirements: SCORECARD-6.1, SCORECARD-6.2, SCORECARD-6.3, SCORECARD-6.4_
   - Apply the Record step to a scratch copy of `docs/scorecard.md`. `diff` against the original changes only lines matching `^\| R([1-9]|10) \|` and leaves every `open — operator` cell. `grep -o 'open — operator' | wc -l` is still 20.
   - After the run, `git -C $DRY/main worktree list` shows only the main, and `ls ~/.hive` is unchanged, since the run used the scratch `HIVE_HOME`.
   - `$DRY/summary.txt` also gives min, max and spread per arm for every measured row, as evidence only (B5).
-  - Then set the catalog Status to Implemented, and run `refresh-lanes`. Record its printed word; on this branch it is expected to be `not on main` (plan-review F6).
+  - Then set the catalog Status to Implemented. Implemented means the doc and its steps work; it does not complete #16, which needs Task 9's first measured run. Landing this branch must not close #16, overriding the default landing action in `docs/agents/project.md` ("closes the tickets it completed"). Run `refresh-lanes`. Record its printed word; on this branch it is expected to be `not on main` (plan-review F6).
 - [ ] **Step 4: Commit.** `git commit -am "docs(scorecard): summarize and record a run in place; dry run passes"` (the scratch copy and `$DRY` are not committed)
 
 _Requirements: SCORECARD-8.4, SCORECARD-8.5, SCORECARD-8.6, SCORECARD-8.8, SCORECARD-9.3_
