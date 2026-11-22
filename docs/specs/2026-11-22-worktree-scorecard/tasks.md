@@ -322,16 +322,16 @@ _Requirements: SCORECARD-5.1, SCORECARD-5.2, SCORECARD-5.3_
 
 **Depends-on:** Task 6
 
-- [ ] **Step 1: Write the failing check.** Write three canned logs into `$DRY/r9/`:
+- [x] **Step 1: Write the failing check.** Write three canned logs into `$DRY/r9/`:
   - `stale.log`: `       Fresh p v0.1.0 (/x)`, exit 0;
   - `recompiled.log`: ``     Running `rustc --crate-name p src/lib.rs` ``, exit 1;
   - `void.log`: `error: failed to get ...`, exit 101;
   - `prefix.log`: ``     Running `rustc --crate-name p_core src/lib.rs` ``, exit 0, which must classify `void` for `P=p` and not `fresh-recompiled`.
 
   Run `P=p r9_classify 0 $DRY/r9/stale.log`, and the same for the other three. Expect a failure, because the function is absent.
-- [ ] **Step 2: Write step 8.** Write the control rebuild (`-v`, which must exit 0 with no `--crate-name` line, else void), then the Decision 5 probe change on `$PROBE` (flip the first `"nullable"` with `jq`, or the `.env` fallback). Rebuild with `-v`, classify with `r9_classify`, then restore with `git checkout -- "$PROBE" "$FILE"`. Add the R9 note. Where `PROBE` is unset, the step skips the probe, records `r9: "probe input absent"`, and restores only `git checkout -- "$FILE"` (plan-review F5).
-- [ ] **Step 3: Run the check.** The four classify calls print `stale`, `fresh-recompiled`, `void` and `void`. Run `pipeline cold 1` on the dry-run clone, with `PROBE` unset. Expect `r9 == "probe input absent"` and `git -C <wt> status --porcelain` empty before removal.
-- [ ] **Step 4: Commit.** `git commit -am "docs(scorecard): probe a proc macro's undeclared input for stale rebuilds"`
+- [x] **Step 2: Write step 8.** Write the control rebuild (`-v`, which must exit 0 with no `--crate-name` line, else void), then the Decision 5 probe change on `$PROBE` (flip the first `"nullable"` with `jq`, or the `.env` fallback). Rebuild with `-v`, classify with `r9_classify`, then restore with `git checkout -- "$PROBE" "$FILE"`. Add the R9 note. Where `PROBE` is unset, the step skips the probe, records `r9: "probe input absent"`, and restores only `git checkout -- "$FILE"` (plan-review F5).
+- [x] **Step 3: Run the check.** The four classify calls print `stale`, `fresh-recompiled`, `void` and `void`. Run `pipeline cold 1` on the dry-run clone, with `PROBE` unset. Expect `r9 == "probe input absent"` and `git -C <wt> status --porcelain` empty before removal.
+- [x] **Step 4: Commit.** `git commit -am "docs(scorecard): probe a proc macro's undeclared input for stale rebuilds"`
 
 _Requirements: SCORECARD-6.1, SCORECARD-6.2, SCORECARD-6.3, SCORECARD-6.4_
 
