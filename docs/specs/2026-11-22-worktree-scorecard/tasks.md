@@ -393,13 +393,13 @@ _Requirements: SCORECARD-8.4, SCORECARD-8.5, SCORECARD-8.6, SCORECARD-8.8, SCORE
 
 **Depends-on:** Task 8
 
-- [ ] **Step 1: Gate.** Do not start until the operator says to run it: it is hours of builds on the owner's machine, and it writes the real `~/.hive`, including `capabilities.json` (design "What a run touches"). The operator also decides first how `~/.hive/capabilities.json` is restored after the 2026-11-22 incident. Record the go-ahead and the O2 answer in `$RUN/gate.txt`.
-- [ ] **Step 2: Run.** Run the Rerun section in order with `SCORECARD_N=4`, then `summarize > $RUN/summary.txt`. Check:
+- [x] **Step 1: Gate.** Do not start until the operator says to run it: it is hours of builds on the owner's machine, and it writes the real `~/.hive`, including `capabilities.json` (design "What a run touches"). The operator also decides first how `~/.hive/capabilities.json` is restored after the 2026-11-22 incident. Record the go-ahead and the O2 answer in `$RUN/gate.txt`.
+- [x] **Step 2: Run.** Run the Rerun section in order with `SCORECARD_N=4`, then `summarize > $RUN/summary.txt`. Check:
   - `summary.txt` has 10 row lines;
   - R1's seeded median equals `jq .counts.seeded_total_ms_median $RUN/R1.json`;
   - R9's line reads `s stale of n` with n ≥ 3 per arm, or `kept previous values`, with its void reasons.
-- [ ] **Step 3: Record.** If O2 allows, apply Record to `docs/scorecard.md` and confirm `diff` touches only `| R` lines and no target cell. If O2 is unanswered, leave the doc unchanged and note "numbers held in evidence (O2)" in the build report.
-- [ ] **Step 4: Commit,** only if Step 3 changed the doc: `git commit -am "docs(scorecard): record the first measured run"`
+- [x] **Step 3: Record.** If O2 allows, apply Record to `docs/scorecard.md` and confirm `diff` touches only `| R` lines and no target cell. If O2 is unanswered, leave the doc unchanged and note "numbers held in evidence (O2)" in the build report.
+- [x] **Step 4: Commit,** only if Step 3 changed the doc: `git commit -am "docs(scorecard): record the first measured run"`
 
 _Requirements: SCORECARD-9.1, SCORECARD-6.1, SCORECARD-6.2, SCORECARD-9.3_
 
