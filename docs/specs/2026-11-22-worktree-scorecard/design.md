@@ -46,7 +46,7 @@ yet. There are no observations.
 2. **Every workspace-specific value lives in a local env file.** The steps read the main
    checkout path, `P`, `FILE`, the probe file, and any variable the workspace needs to build
    offline from `.skills/verify/scorecard.env` (gitignored, `.gitignore:2`). The doc states only
-   the property each value must have. This leaves O2 open (agent-decided, ledger A3). When the
+   the property each value must have. This leaves O2 open (agent-decided, ledger A17). When the
    operator answers O2 "yes", the values may move into the doc.
 3. **One crate, `P`, serves R5, R6 and R9.** `P` is the workspace crate whose proc macro reads
    `.sqlx/*.json` (or `.env`) without declaring it, so the three rows measure the same crate
@@ -66,10 +66,10 @@ yet. There are no observations.
 
    Agent-decided, ledger A16; design review finding 2. Where the workspace has no `.sqlx`, the `.env` fallback changes
    one variable the macro reads.
-6. **By-hand medians use bench's rule.** Odd n takes the middle value. Even n takes
+6. **By-hand medians use bench's rule** (agent-decided, ledger A18). Odd n takes the middle value. Even n takes
    `floor((a+b)/2)` of the two middle values (bench/stats.rs:18-24), so a by-hand median and a
    bench median are computed the same way.
-7. **Provenance cells are read, never typed:**
+7. **Provenance cells are read, never typed** (agent-decided, from SCORECARD-1.5):
    - Toolchain is the receipt's top-level `.toolchain`.
    - The hive commit is `git rev-list -n1 v<hive_version>` for a crates.io install, or the
      source checkout's `git rev-parse HEAD` for `cargo install --path`.
@@ -83,15 +83,15 @@ yet. There are no observations.
    `source.none` and nothing gets seeded. The main build therefore runs `cargo` with
    `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` unset, not empty, in the main checkout, and
    preflight checks that `.rustc_info.json` exists in the main's target dir (design review
-   finding 1).
+   finding 1; agent-decided, ledger A19).
 10. **Run order is R1, then the R6–R9 pipeline, then R2–R5.** The store and the main's target
    keep every shape built so far, so a later seed sees more units. Running the pipeline right
    after R1 keeps its seeds to `build` units. R2–R5 are noted as measured after earlier shapes
-   (design review finding 8).
+   (design review finding 8; agent-decided, ledger A20).
 11. **A run cleans up after itself.** One `trap` on EXIT/INT removes every worktree the run made
    (`git worktree remove --force`), then runs `git worktree prune`. Worktrees are made with
    `git worktree add --detach <wt> HEAD` from a main whose tracked tree is clean (bench refuses
-   otherwise, check.rs:117-170).
+   otherwise, check.rs:117-170). Agent-decided, ledger A21.
 
 Spine invariants this feature relies on:
 - **ARCH-10:** hive's own reports carry only bench durations; the doc labels its one exception.
@@ -154,9 +154,11 @@ The block also:
   `~/.hive/config.json`, so the defaults hold, or it lists `$TMPDIR`;
 - confirms the main's tracked tree is clean (`git -C $MAIN status --porcelain --untracked-files=no` is empty);
 - after R1's main build, checks that `<main target>/.rustc_info.json` exists (Decision 9);
-- runs a drift guard: greps the hive source at the measured commit (`crates/cargo/src/env.rs`
-  `DROP_EXACT`, `TARGET_VARS`) for each variable `hive_env_cargo` drops, and stops on any
-  name the copy lacks;
+- runs a drift guard: greps the hive source at the measured commit (`DROP_EXACT` and
+  `TARGET_VARS` in `env.rs`) for each variable `hive_env_cargo` drops, and stops on any name the
+  copy lacks. The source is this repo's `crates/cargo/src/env.rs` at that commit, or, for a
+  crates.io install,
+  `$CARGO_HOME/registry/src/*/cargo-hive-cargo-<hive_version>/src/env.rs`;
 - sets `RUN=.skills/verify/$(date +%F)-scorecard` (`mkdir -p`);
 - asks for a quiet machine, with no other builds running;
 - records `sysctl -n vm.loadavg` into `$RUN/load-start.txt`.
@@ -166,7 +168,8 @@ Every later block writes its receipts and logs under `$RUN`.
 **What a run touches**, written as a note in the doc:
 - the real `~/.hive`: store, `store.db` and receipts, from bench's prime, `seed` and `gc`;
 - the main checkout's target dir;
-- `~/.cargo`, which only reads its cache, since every build is `--offline`;
+- `~/.cargo`: every build is `--offline`, so nothing is downloaded, but Cargo may unpack cached
+  `.crate` files into `registry/src`;
 - `$MAIN/.git/worktrees/`;
 - `$TMPDIR/scorecard/`.
 
@@ -202,21 +205,25 @@ its bench run.
 Satisfies: SCORECARD-3.1, SCORECARD-3.2, SCORECARD-3.3, SCORECARD-3.4, SCORECARD-3.5, SCORECARD-4.1, SCORECARD-4.2, SCORECARD-4.3, SCORECARD-4.4, SCORECARD-5.1, SCORECARD-5.2, SCORECARD-5.3, SCORECARD-6.1, SCORECARD-6.2, SCORECARD-6.3, SCORECARD-6.4
 Reuse: rung 2 — `cargo hive seed <checkout> --json` (cli.rs:68-73; seed/lib.rs:396-460) and `cargo hive gc --checkout <path> --json` (cli.rs:46-57, 939-946); rung 4 — zsh `zsh/datetime` + `zsh/mathfunc`, `df -k`, `/usr/bin/jq`, `git worktree`
 Respects: ARCH-11, ARCH-13, ARCH-5
-Interface: two zsh functions defined in the doc.
+Interface: three zsh functions defined in the doc: `resolve_toolchain`, `hive_env_cargo` and `pipeline`.
 
-`hive_env_cargo <args…>` runs cargo under the environment `timed_build` builds
-(crates/cargo/src/env.rs:114-156):
+`resolve_toolchain` runs once per worktree, right after `git worktree add` (step 1). It sets
+`TC`, `RUSTC_BIN` and `CARGO_BIN`, so no `rustup which` lookup sits inside a timed call; bench
+also resolves before it times (bench/command.rs:76-115). `hive_env_cargo <args…>` then runs
+`$CARGO_BIN` under the environment `timed_build` builds (crates/cargo/src/env.rs:114-156):
 - `TC` is the toolchain name, computed in a subshell `cd $WT` with `RUSTUP_TOOLCHAIN` and
   `RUSTUP_TOOLCHAIN_SOURCE` unset, so the worktree's `rust-toolchain.toml` decides (env.rs:14-47).
   It is `basename` of the toolchain dir when `rustup which rustc` lies under
   `…/toolchains/<name>/bin/`, else empty, the linked-toolchain case (toolchain.rs:118-122);
 - `env -u CARGO_TARGET_DIR -u CARGO_BUILD_TARGET_DIR -u CARGO_BUILD_BUILD_DIR -u CARGO_MANIFEST_DIR -u OUT_DIR -u CARGO_BUILD_RUSTC -u CARGO_BUILD_RUSTC_WRAPPER -u CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER -u RUSTUP_TOOLCHAIN -u RUSTUP_TOOLCHAIN_SOURCE`, plus each `GIT_*` and `CARGO_PKG_*` variable present;
-- `RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= RUSTUP_AUTO_INSTALL=0 RUSTC=$(rustup which rustc)`,
+- `RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= RUSTUP_AUTO_INSTALL=0 RUSTC=$RUSTC_BIN`,
   plus `RUSTUP_TOOLCHAIN=$TC` only when `$TC` is non-empty (env.rs:152-155);
-- the command itself: `$(rustup which cargo) <args…>`.
+- the command itself: `$CARGO_BIN <args…>`. `RUSTC_BIN` and `CARGO_BIN` are
+  `rustup which rustc` and `rustup which cargo`, run in the same subshell as `TC`.
 
 `pipeline <arm> <i>` runs once per worktree, in this order:
-1. `git worktree add` at `$MAIN`'s HEAD, into `$TMPDIR/scorecard/pipe/<arm><i>`.
+1. `git worktree add --detach` at `$MAIN`'s HEAD, into `$TMPDIR/scorecard/pipe/<arm><i>`,
+   then `resolve_toolchain`.
 2. Free-space reading A: `sync; /bin/df -k $WT | awk 'NR==2{print $4}'`. Use `/bin/df`, because
    a coreutils `df` on PATH changes the columns.
 3. Seeded arm only: `cargo hive seed $WT --json > $RUN/pipe-<arm><i>-seed.json`, then read
@@ -227,8 +234,8 @@ Interface: two zsh functions defined in the doc.
    worktree (SCORECARD-3.5).
 5. Free-space reading B. R7 sample = (A − B) × 1024.
 6. Apply the Decision 4 edit, then time `hive_env_cargo build --offline --locked` with
-   `$EPOCHREALTIME` → R6 sample, as `int(rint(ms))`. A non-zero exit voids R6–R9 for this
-   worktree (SCORECARD-3.5).
+   `$EPOCHREALTIME` → R6 sample, as `int(rint(ms))`. Only the cargo exec is timed. A non-zero
+   exit voids R6, R8 and R9 for this worktree; R7, measured before it, stands (SCORECARD-3.5).
 7. `cargo hive gc --checkout $WT --json > …-gc.json`, then read `.counts.unit_files_deleted` and
    `.counts.objects_deleted`. Rerun the build with `-v`, keeping stderr, and count the lines
    matching ``Running `.*--crate-name``, one per unit compiled. That gives the R8 sample:
@@ -321,7 +328,7 @@ runs and records in evidence.
 |---|---|---|
 | `docs/scorecard.md` text, by fixed commands. `grep -c '^| R[0-9]' ` per table = 10. Each `R1`…`R10` appears exactly once per table. The grep of 10.1's patterns finds nothing. Target cells read `open — operator` | manual (inspection) | SCORECARD-1.1–1.9, 10.1, 8.4, 8.5 |
 | Dry run of the Rerun blocks with `$MAIN` set to a fresh `git clone` of this repo under `/private/tmp`, a scratch `HIVE_HOME`, and worktrees under `/private/tmp`. No real checkout and no `~/.hive` is touched. Deps must already be cached, since every build is `--offline`. R9 records "probe input absent", since this repo has no `.sqlx` | e2e (manual) | SCORECARD-2.1–2.4, 3.1–3.5, 4.1–4.4, 5.1–5.3, 6.3, 8.1–8.3, 8.6–8.8 |
-| First run on the measured workspace, from its main checkout, with evidence in `$RUN` | e2e (manual) | SCORECARD-6.1, 6.2, 6.4, 7.1, 9.1, 9.3 |
+| First run on the measured workspace, from its main checkout, with evidence in `$RUN`. It runs only once the operator says to, since it takes hours of builds on the owner's machine; committing its numbers waits on O2 (SCORECARD-9.3) | e2e (manual) | SCORECARD-6.1, 6.2, 6.4, 7.1, 9.1, 9.3 |
 | `scripts/gate.sh` green, and `git diff --stat main` lists no path under crates/, plugin/ or scripts/ | integration (existing gate) | SCORECARD-11.3 |
 | `audit-trace` over docs/specs, and `git diff main -- README.md docs/roadmap/assessments CONTEXT.md docs/specs/catalog/hive.md` shows only the added row and terms | manual (inspection) | SCORECARD-9.2, 11.1, 11.2 |
 
