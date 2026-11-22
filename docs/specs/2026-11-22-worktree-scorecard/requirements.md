@@ -68,7 +68,8 @@ target for any row.
   count, or the hive receipt count, its value comes from, or reads "by hand (outside bench)",
   or, for R10, "listed" (Weigh W1).
 - **SCORECARD-1.4** THE SYSTEM SHALL show each measured row's sample count and median for each
-  arm on its own. Measured rows are R1–R9.
+  arm on its own. Measured rows are R1–R9. The count is the number of valid samples: a sample
+  voided under SCORECARD-3.5, 4.4 or 6.2 is not counted.
 - **SCORECARD-1.5** THE SYSTEM SHALL record, for each measured row, the date it was measured,
   the hive commit, the toolchain, the machine and the evidence path. The toolchain is the
   `rustc -vV` release line. The machine is its model, chip and core count.
@@ -138,6 +139,10 @@ so that I can read what an agent waits for on its second build.
   (crates/cargo-hive/src/bench/command.rs:62-67). The match is agent-decided; ledger A10,
   req-review.md 3c.
 
+- **SCORECARD-3.5** IF the R6 rebuild, or the `cargo hive gc --checkout` run or rerun of
+  SCORECARD-5.1, exits non-zero THEN THE SYSTEM SHALL void that worktree's samples for the row
+  that failed and every row after it in the pipeline (design review finding 3).
+
 ## 4. Private bytes come from the volume
 
 **Story:** As the owner, I want the bytes a new worktree adds to the disk recorded for each arm,
@@ -154,6 +159,10 @@ so that I can read how much private build output one more agent costs.
   the free-space drop by design and never stands in for it.
 - **SCORECARD-4.3** IF the seed receipt lists `clone_bytes_not_shared` under `unmeasured` THEN
   THE SYSTEM SHALL record the receipt's reason in its place, not a number.
+- **SCORECARD-4.4** IF a seeded pipeline worktree's seed receipt reports `clone_units_cloned`
+  of 0, or a `source.none`, `toolchain.missing` or `store.tag` finding, THEN THE SYSTEM SHALL
+  void that worktree's samples for R6–R9, because the worktree was not seeded (design review
+  finding 4).
 
 ## 5. Units rebuilt after a hive deletion are counted
 
@@ -162,8 +171,10 @@ arm, so that I can see whether cleaning a worktree costs a rebuild.
 
 - **SCORECARD-5.1** WHEN a pipeline worktree's R6 rebuild has finished THE SYSTEM SHALL run
   `cargo hive gc --checkout <worktree> --json`, then rerun the same `cargo` command line. The
-  sample's value is the number of `Compiling` lines Cargo prints on that rerun (agent-decided;
-  close package D13).
+  rerun passes `-v`, and the sample's value is the number of rustc invocations Cargo reports
+  on that rerun: `Running` lines that carry `--crate-name`, one per unit compiled. A `Compiling`
+  line is one per package, not per unit, so it is not used. Agent-decided; close package D13,
+  design review finding 5.
 - **SCORECARD-5.2** IF that gc receipt's totals `unit_files_deleted` and `objects_deleted` are
   both 0 THEN THE SYSTEM SHALL count the sample as vacuous, not as 0 rebuilt units. Both totals
   are recorded beside each sample (crates/cargo-hive/src/cli.rs:939-946).
@@ -181,8 +192,14 @@ declaring it, so that I can see whether the rebuild came back stale.
   `.sqlx/*.json` query file, or `.env` where there is none, and the change alters what the macro
   would emit. The system then reruns the same `cargo` command line (agent-decided; close package
   D14).
-- **SCORECARD-6.2** IF the crate whose macro reads the changed file prints no `Compiling` line on
-  that rerun THEN THE SYSTEM SHALL count the sample as stale.
+- **SCORECARD-6.2** IF that rerun exits 0 and Cargo reports the crate whose macro reads the
+  changed file as `Fresh` (with `-v`) THEN THE SYSTEM SHALL count the sample as stale.
+  - A rerun that recompiles that crate is not stale, whatever its exit code.
+  - A rerun that exits non-zero without recompiling it is void.
+  - A control rebuild just before the probe change must exit 0 with no rustc invocation, or
+  the sample is void.
+
+  Design review finding 2.
 - **SCORECARD-6.3** THE SYSTEM SHALL show R9's value per arm as "s stale of n", and the steps
   SHALL restore the changed file after each sample.
 - **SCORECARD-6.4** THE SYSTEM SHALL state beside R9 that seed clones registry units and not
@@ -224,7 +241,11 @@ feature ships, so that the new numbers replace the old ones in the same rows.
   `.skills/verify/<date>-scorecard/`, outside git, and cite that path in each measured row's
   evidence cell (close package D17; docs/agents/verify.md "Evidence").
 - **SCORECARD-8.7** WHEN the steps make worktrees for a run THE SYSTEM SHALL have them removed
-  with `git worktree remove` at the end of the run.
+  with `git worktree remove` at the end of the run, and on an aborted run as well, followed by
+  `git worktree prune`.
+- **SCORECARD-8.8** IF a row has fewer than 3 valid samples in an arm after a run THEN THE SYSTEM
+  SHALL keep that row's previous values and metadata, and the run's evidence SHALL say which
+  samples were void and why.
 
 ## 9. The first run replaces today's headline
 
