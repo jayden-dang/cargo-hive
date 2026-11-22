@@ -260,8 +260,8 @@ _Requirements: SCORECARD-2.1, SCORECARD-2.2, SCORECARD-2.3, SCORECARD-2.4_
 
 **Depends-on:** Task 4
 
-- [ ] **Step 1: Write the failing check.** Extract `$DRY/rerun.zsh`. In one harness shell, run `preflight; bench_row R1 build` (Task 4, which builds the main), then `pipeline cold 1; pipeline seeded 1` on the dry-run clone, with `P=cargo-hive-core` and `FILE=crates/core/src/lib.rs`. Expect a failure, because the section is absent.
-- [ ] **Step 2: Write the block.** Write it as design "By-hand pipeline R6–R9" steps 1–6 lay out:
+- [x] **Step 1: Write the failing check.** Extract `$DRY/rerun.zsh`. In one harness shell, run `preflight; bench_row R1 build` (Task 4, which builds the main), then `pipeline cold 1; pipeline seeded 1` on the dry-run clone, with `P=cargo-hive-core` and `FILE=crates/core/src/lib.rs`. Expect a failure, because the section is absent.
+- [x] **Step 2: Write the block.** Write it as design "By-hand pipeline R6–R9" steps 1–6 lay out:
   - `resolve_toolchain` in a subshell `cd $WT` with `RUSTUP_TOOLCHAIN` and `RUSTUP_TOOLCHAIN_SOURCE` unset, with the `…/toolchains/<name>/bin/` basename rule;
   - `hive_env_cargo` with the full `env -u` list from design and `RUSTUP_TOOLCHAIN=$TC` only when non-empty;
   - `sync; /bin/df -k` readings;
@@ -272,9 +272,9 @@ _Requirements: SCORECARD-2.1, SCORECARD-2.2, SCORECARD-2.3, SCORECARD-2.4_
   - the R6-failure void (R6, R8 and R9; R7 stands).
 
   Add the R6 note "by hand (outside bench); environment matches bench's, but bench did not time it" and the R7 noise note.
-- [ ] **Step 3: Run the check.** Run Step 1's command and expect exit 0. `$RUN/pipe.jsonl` has 2 lines. The `r6_ms` values are integers, and the seeded line's `r7_clone_bytes_not_shared` is an integer. Environment check: with `CARGO_TARGET_DIR=/tmp/x` and `RUSTC_WRAPPER=sccache` exported, and `CARGO_BIN=/usr/bin/env` set for one call, `hive_env_cargo` prints `RUSTC_WRAPPER=`, `RUSTUP_AUTO_INSTALL=0` and `RUSTC=$RUSTC_BIN`, and no `CARGO_TARGET_DIR` line.
+- [x] **Step 3: Run the check.** Run Step 1's command and expect exit 0. `$RUN/pipe.jsonl` has 2 lines. The `r6_ms` values are integers, and the seeded line's `r7_clone_bytes_not_shared` is an integer. Environment check: with `CARGO_TARGET_DIR=/tmp/x` and `RUSTC_WRAPPER=sccache` exported, and `CARGO_BIN=/usr/bin/env` set for one call, `hive_env_cargo` prints `RUSTC_WRAPPER=`, `RUSTUP_AUTO_INSTALL=0` and `RUSTC=$RUSTC_BIN`, and no `CARGO_TARGET_DIR` line.
   - Then append a syntax error to `FILE` in place of the Decision 4 edit and rerun `pipeline cold 2`. Expect its line to carry `void.rows` = `["R6","R8","R9"]` and `r7_bytes` present.
-- [ ] **Step 4: Commit.** `git commit -am "docs(scorecard): time the next build after an edit and read private bytes by hand"`
+- [x] **Step 4: Commit.** `git commit -am "docs(scorecard): time the next build after an edit and read private bytes by hand"`
 
 _Requirements: SCORECARD-3.1, SCORECARD-3.2, SCORECARD-3.3, SCORECARD-3.4, SCORECARD-3.5, SCORECARD-4.1, SCORECARD-4.2, SCORECARD-4.3, SCORECARD-4.4_
 
