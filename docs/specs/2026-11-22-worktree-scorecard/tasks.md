@@ -295,10 +295,10 @@ _Requirements: SCORECARD-3.1, SCORECARD-3.2, SCORECARD-3.3, SCORECARD-3.4, SCORE
 
 **Depends-on:** Task 5
 
-- [ ] **Step 1: Write the failing check.** Run `pipeline cold 1` on the dry-run clone, then `jq -e 'has("r8_units") and has("r8_vacuous")' <(tail -1 $RUN/pipe.jsonl)`. Expect a non-zero exit.
-- [ ] **Step 2: Write step 7.** Run `cargo hive gc --checkout $WT --json > $RUN/pipe-<arm><i>-gc.json` and read `.counts.unit_files_deleted` and `.counts.objects_deleted` (unsuffixed totals). Run `hive_env_cargo build --offline --locked -v 2> …-r8.log` and count with `grep -c 'Running `.*--crate-name'`. Mark the sample vacuous or void as design step 7 says. Add the R8 note with its cell form.
-- [ ] **Step 3: Run the check.** Run Step 1's command and expect exit 0. The line's `r8_unit_files_deleted` equals `jq .counts.unit_files_deleted` on that worktree's saved `-gc.json`, and `r8_units` equals `grep -c 'Running `.*--crate-name'` on its saved `-r8.log` (plan-review F4). On a scratch crate, `printf '\n// e\n' >> src/lib.rs` followed by the counter on `cargo build -v` prints 1, matching the 2026-11-22 check.
-- [ ] **Step 4: Commit.** `git commit -am "docs(scorecard): count units rebuilt after a checkout gc, with vacuous samples kept apart"`
+- [x] **Step 1: Write the failing check.** Run `pipeline cold 1` on the dry-run clone, then `jq -e 'has("r8_units") and has("r8_vacuous")' <(tail -1 $RUN/pipe.jsonl)`. Expect a non-zero exit.
+- [x] **Step 2: Write step 7.** Run `cargo hive gc --checkout $WT --json > $RUN/pipe-<arm><i>-gc.json` and read `.counts.unit_files_deleted` and `.counts.objects_deleted` (unsuffixed totals). Run `hive_env_cargo build --offline --locked -v 2> …-r8.log` and count with `grep -c 'Running `.*--crate-name'`. Mark the sample vacuous or void as design step 7 says. Add the R8 note with its cell form.
+- [x] **Step 3: Run the check.** Run Step 1's command and expect exit 0. The line's `r8_unit_files_deleted` equals `jq .counts.unit_files_deleted` on that worktree's saved `-gc.json`, and `r8_units` equals `grep -c 'Running `.*--crate-name'` on its saved `-r8.log` (plan-review F4). On a scratch crate, `printf '\n// e\n' >> src/lib.rs` followed by the counter on `cargo build -v` prints 1, matching the 2026-11-22 check.
+- [x] **Step 4: Commit.** `git commit -am "docs(scorecard): count units rebuilt after a checkout gc, with vacuous samples kept apart"`
 
 _Requirements: SCORECARD-5.1, SCORECARD-5.2, SCORECARD-5.3_
 
