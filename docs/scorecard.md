@@ -44,6 +44,7 @@ The operator sets a target by editing that row's Target cell and its Target set 
 - R6: by hand (outside bench); environment matches bench's, but bench did not time it. The environment is the same variable scrub that hive applies to the builds it runs. Only the cargo exec is timed, with the environment arguments built before the window, after a fixed one-file edit to a workspace crate. The median follows bench's rule: the middle value for odd n, and the floor of the mean of the two middle values for even n.
 - R7: the bytes the volume lost, read as the drop in free space from before a worktree's first build to after it, never bytes that clones share. The reading also carries the seed's store writes, any Cargo source unpacks, and any other writer on the same APFS container, so the quiet-machine rule and the median over four samples are the only guards. On the seeded arm the seed receipt's `clone_bytes_not_shared` is recorded beside the value as the seed's registry part at seed time; it is 0 on a fully shared clone and never stands in for the drop.
 - R8: a sample is vacuous when the deletion removed no unit files and no objects, because then nothing could be rebuilt because of it. A vacuous sample is valid and counted. A sample is void when the deletion or the rebuild fails. Each pipeline line holds `r8_units`, the count of lines in the saved rebuild log matching ``Running `.*--crate-name`` (one per unit compiled; a `Compiling` line is one per package and is not used), with `r8_unit_files_deleted` and `r8_objects_deleted` from the saved gc receipt's unsuffixed totals and `r8_vacuous`, true when both totals are 0. A vacuous sample's `r8_units` is kept but is not a rebuild count. The cell reads `R rebuilt over k non-vacuous samples; m vacuous`, with R the median of `r8_units` over the non-vacuous, non-void samples of the arm, or `all vacuous` when every sample is vacuous; void samples are in neither count.
+- R9: a sample is stale when the rebuild after the probe change exits 0 and Cargo reports `P` as `Fresh` under `-v`; it is `fresh-recompiled` when the rebuild recompiles `P`, whatever its exit code; and it is void when the control rebuild before the change does not exit 0 without compiling a unit, or when the probe rebuild exits non-zero without recompiling `P`. The probe flips the first `nullable` entry of the `describe` section of the `.sqlx` query file, which changes the type the macro emits; with a `.env` it changes the value of its first variable. The cell reads `s stale of n`, with n the valid samples of the arm; a void sample and a `probe input absent` sample are not counted. Seed clones registry units and not workspace crates, so the probe measures Cargo's own input tracking in both arms and does not single out staleness hive caused.
 
 ## What a run touches
 
@@ -226,11 +227,11 @@ Run the rows in that order, after `preflight`: `bench_row R1 build`, `bench_row 
 
 ### 2. By-hand pipeline
 
-Run `preflight` first, in the same shell, with `P` and `FILE` set in the env file: `P` is the workspace crate whose proc macro reads a file without declaring it, and `FILE` is a `.rs` file in `P`, relative to the repo root. Build the main with `bench_row R1 build` before the first pipeline, so the seed has `build` units to clone. `pipeline <arm> <i>` measures one fresh worktree of its own, never one a bench run used. Per worktree it does, in order: add the worktree and resolve its toolchain; read free space; for the seeded arm only, seed it; run the first build; read free space again; apply the fixed edit; time the next build; run `cargo hive gc --checkout` on the worktree and rerun the build with `-v`; remove the worktree. R6 is that timed build; R8 is the rustc invocations of the rerun; R7 is the drop in free space across the first build, which for the seeded arm includes the seed.
+Run `preflight` first, in the same shell, with `P` and `FILE` set in the env file: `P` is the workspace crate whose proc macro reads a file without declaring it, `FILE` is a `.rs` file in `P`, and `PROBE` is the file that macro reads without declaring it, a `.sqlx/*.json` query file or else a `.env`; both relative to the repo root. Leave `PROBE` empty where the workspace has no such file. Build the main with `bench_row R1 build` before the first pipeline, so the seed has `build` units to clone. `pipeline <arm> <i>` measures one fresh worktree of its own, never one a bench run used. Per worktree it does, in order: add the worktree and resolve its toolchain; read free space; for the seeded arm only, seed it; run the first build; read free space again; apply the fixed edit; time the next build; run `cargo hive gc --checkout` on the worktree and rerun the build with `-v`; rebuild with `-v` once more as a control, change the probe file, rebuild with `-v` and restore both files; remove the worktree. R6 is that timed build; R8 is the rustc invocations of the rerun; R9 is whether the rebuild after the probe change left `P` untouched; R7 is the drop in free space across the first build, which for the seeded arm includes the seed.
 
 Every by-hand `cargo` runs through `hive_env_cargo`: the toolchain's own `cargo` binary under the environment hive builds its children with. The main is never built that way; an empty `RUSTC_WRAPPER` stops Cargo writing `.rustc_info.json`, and the seed needs that file.
 
-A void sample is still written to `$RUN/pipe.jsonl`, with its rows and reason in `void`, and the function returns non-zero, so call it as `pipeline cold 1 || true`. A seed that exits non-zero, clones no units, or reports a `source.none`, `toolchain.missing` or `store.tag` finding voids R6 to R9, because the worktree was not seeded. A failed first build voids R6 to R9. A failed R6 build voids R6 and every row after it; R7, read before it, stands. A gc or a rerun that exits non-zero, or a gc receipt without both deletion totals, voids R8 and R9; R6 and R7 stand. The line then carries `null` for the four R8 keys. A seeded line carries `r7_clone_bytes_not_shared`, the seed's registry part at seed time, or `r7_unmeasured` with the receipt's reason; it never stands in for `r7_bytes`.
+A void sample is still written to `$RUN/pipe.jsonl`, with its rows and reason in `void`, and the function returns non-zero, so call it as `pipeline cold 1 || true`. A seed that exits non-zero, clones no units, or reports a `source.none`, `toolchain.missing` or `store.tag` finding voids R6 to R9, because the worktree was not seeded. A failed first build voids R6 to R9. A failed R6 build voids R6 and every row after it; R7, read before it, stands. A gc or a rerun that exits non-zero, or a gc receipt without both deletion totals, voids R8 and R9; R6 and R7 stand. The line then carries `null` for the four R8 keys. A control rebuild that exits non-zero or compiles a unit, a probe change that does not apply, a probe rebuild that exits non-zero without recompiling `P`, or a file that does not restore voids R9 alone; R6 to R8 stand. The line's `r9` is `stale`, `fresh-recompiled`, `probe input absent` when `PROBE` is empty, or `null` when void. A seeded line carries `r7_clone_bytes_not_shared`, the seed's registry part at seed time, or `r7_unmeasured` with the receipt's reason; it never stands in for `r7_bytes`.
 
 ```zsh
 zmodload zsh/datetime zsh/mathfunc
@@ -271,6 +272,39 @@ r6_edit() {
   printf '\n/// Scorecard edit.\n#[allow(dead_code, unreachable_pub)]\npub const SCORECARD_EDIT: u32 = 1;\n' >> "$FILE"
 }
 
+r9_classify() {
+  local code=$1 log=$2
+  if grep -qE "Running \`.*--crate-name ${P//-/_} " $log 2> /dev/null; then
+    print fresh-recompiled
+  elif [[ $code == 0 ]] && grep -qF "Fresh $P v" $log 2> /dev/null; then
+    print stale
+  else
+    print void
+  fi
+}
+
+r9_change() {
+  local tmp=$(mktemp)
+  if [[ $PROBE == *.json ]]; then
+    jq 'if (.describe.nullable[0] | type) == "boolean" then .describe.nullable[0] |= not else error("no nullable entry") end' $PROBE > $tmp || return 1
+  else
+    awk '!d && /^[A-Za-z_][A-Za-z0-9_]*=/ {print $0 "x"; d=1; next} {print} END {exit !d}' $PROBE > $tmp || return 1
+  fi
+  cat $tmp > $PROBE
+  rm -f $tmp
+}
+
+r9_restore() {
+  local f
+  for f in "$@"; do
+    if git ls-files --error-unmatch -- $f > /dev/null 2>&1; then
+      git checkout -- $f || return 1
+    else
+      cp -p $MAIN/$f $f || return 1
+    fi
+  done
+}
+
 pipeline_abort() {
   cleanup_worktrees
   WTS=()
@@ -280,7 +314,7 @@ pipeline_abort() {
 
 pipeline() {
   local arm=$1 i=$2 wt=$TMPDIR/scorecard/pipe/$1$2 run=${RUN:A} f a b rc ms
-  local r7=null clone=null unm=null r6=null void=null r8u=null r8f=null r8o=null r8v=null
+  local r7=null clone=null unm=null r6=null void=null r8u=null r8f=null r8o=null r8v=null r9=null probe_void cls
   local -a rows
   [[ $arm == (cold|seeded) && $i == <-> ]] || { print -u2 'usage: pipeline cold|seeded <i>'; return 1 }
   [[ -n $RUN && -n $TMPDIR && -n $MAIN && -n $P && -n $FILE ]] || { print -u2 'run preflight first, with P and FILE set'; return 1 }
@@ -388,8 +422,40 @@ pipeline() {
     r8u=null r8f=null r8o=null r8v=null
   fi
 
-  jq -nc --arg arm $arm --argjson i $i --argjson r7 "${r7:-null}" --argjson clone "${clone:-null}" --argjson unm "${unm:-null}" --argjson r6 "${r6:-null}" --argjson r8u "${r8u:-null}" --argjson r8f "${r8f:-null}" --argjson r8o "${r8o:-null}" --argjson r8v "${r8v:-null}" --argjson void "${void:-null}" '
-    {arm: $arm, i: $i, r7_bytes: (if ($void.rows // []) | index("R7") then null else $r7 end), r6_ms: $r6, r8_units: $r8u, r8_unit_files_deleted: $r8f, r8_objects_deleted: $r8o, r8_vacuous: $r8v, void: $void}
+  if [[ $void == null ]]; then
+    probe_void=
+    if [[ -z $PROBE ]]; then
+      r9='"probe input absent"'
+      (cd $wt && git checkout -- "$FILE") || probe_void='the edit to the crate file was not restored'
+    else
+      rc=0
+      (cd $wt && hive_env_cargo build --offline --locked -v) > /dev/null 2> $RUN/pipe-$arm$i-r9-control.log || rc=$?
+      if (( rc != 0 )); then
+        probe_void="the control rebuild exited $rc"
+      elif grep -q 'Running `.*--crate-name' $RUN/pipe-$arm$i-r9-control.log; then
+        probe_void='the control rebuild compiled a unit'
+      elif ! (cd $wt && r9_change); then
+        probe_void="the probe change did not apply to $PROBE"
+      else
+        rc=0
+        (cd $wt && hive_env_cargo build --offline --locked -v) > /dev/null 2> $RUN/pipe-$arm$i-r9.log || rc=$?
+        cls=$(r9_classify $rc $RUN/pipe-$arm$i-r9.log)
+        r9=\"$cls\"
+        [[ $cls != void ]] || probe_void="the probe rebuild exited $rc without recompiling $P"
+      fi
+      (cd $wt && r9_restore "$PROBE" "$FILE") || probe_void=${probe_void:-'the probe file was not restored'}
+    fi
+    if [[ -n $(git -C $wt status --porcelain --untracked-files=no) ]]; then
+      probe_void=${probe_void:-'the worktree was not clean after the probe'}
+    fi
+    if [[ -n $probe_void ]]; then
+      void=$(jq -nc --arg r "$probe_void" '{rows: ["R9"], reason: $r}')
+      r9=null
+    fi
+  fi
+
+  jq -nc --arg arm $arm --argjson i $i --argjson r7 "${r7:-null}" --argjson clone "${clone:-null}" --argjson unm "${unm:-null}" --argjson r6 "${r6:-null}" --argjson r8u "${r8u:-null}" --argjson r8f "${r8f:-null}" --argjson r8o "${r8o:-null}" --argjson r8v "${r8v:-null}" --argjson r9 "${r9:-null}" --argjson void "${void:-null}" '
+    {arm: $arm, i: $i, r7_bytes: (if ($void.rows // []) | index("R7") then null else $r7 end), r6_ms: $r6, r8_units: $r8u, r8_unit_files_deleted: $r8f, r8_objects_deleted: $r8o, r8_vacuous: $r8v, r9: $r9, void: $void}
     + (if $arm == "seeded" then (if $clone != null then {r7_clone_bytes_not_shared: $clone} else {r7_unmeasured: $unm} end) else {} end)' >> $RUN/pipe.jsonl
 
   git -C $MAIN worktree remove --force $wt 2> /dev/null || true
