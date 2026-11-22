@@ -61,7 +61,7 @@ The Rerun blocks are zsh on macOS. Linux is out of scope.
 
 ### 0. Preflight
 
-Source this block, then run `preflight`. It stops before any measurement, changes no cell, and names the step to fix.
+Run every Rerun block from the repo root. Source this block, then run `preflight`. It stops before any measurement, changes no cell, and names the step to fix. A dry run must be started through the dry-run harness, which refuses any state root or temp dir outside the scratch area. The traps clean up when the shell exits or is interrupted; in an interactive shell, call `cleanup_worktrees` as the last step of a run.
 
 ```zsh
 source .skills/verify/scorecard.env
@@ -80,6 +80,8 @@ trap 'cleanup_worktrees; return 130' INT
 preflight() {
   local flag v src vars help hv
   : ${SCORECARD_N:=4}
+  [[ -n $MAIN ]] || { print -u2 'MAIN is empty: set it in the env file'; return 1 }
+  [[ -n $TMPDIR ]] || { print -u2 'TMPDIR is empty'; return 1 }
   RUN=.skills/verify/$(date +%F)-scorecard
   mkdir -p $RUN
   rm -f $RUN/preflight-fail.txt
@@ -123,7 +125,7 @@ preflight() {
 
   local cfg=${HIVE_HOME:-~/.hive}/config.json
   if [[ -f $cfg ]] && jq -e 'has("secondary_roots")' $cfg > /dev/null 2>&1; then
-    if ! jq -e --arg t ${TMPDIR:A} '.secondary_roots | map(rtrimstr("/")) | any(. as $r | $t | startswith($r))' $cfg > /dev/null; then
+    if ! jq -e --arg t ${TMPDIR:A} '.secondary_roots | map(rtrimstr("/")) | any(. as $r | $t == $r or ($t | startswith($r + "/")))' $cfg > /dev/null; then
       print "preflight stopped: secondary_roots in $cfg does not cover $TMPDIR" | tee $RUN/preflight-fail.txt >&2
       return 1
     fi
