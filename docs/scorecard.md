@@ -154,6 +154,67 @@ preflight() {
 }
 ```
 
+### 1. Bench rows
+
+Run `preflight` first, in the same shell. `bench_row <row> <shape>` measures one first-command row: R1 `build`, R2 `check-all`, R3 `clippy-all`, R4 `test-no-run`, R5 `check-lib=$P`, in that order. `P` comes from the env file and stays the same from run to run; it must be a package name made of letters, digits, `_` and `-`. Each row builds the main checkout once with plain `cargo`, so the store holds that shape's units before bench seeds from it. The seeded value is the seed plus the build, and the seed and build times sit beside it. A row whose bench run exits non-zero keeps its previous values: copy the refusal or failure finding from `$RUN/<row>.refusal.json` into the run's evidence and change no cell.
+
+```zsh
+bench_row() {
+  local row=$1 shape=$2 i w f rc ret
+  local -a cargs cold seeded
+  : ${SCORECARD_N:=4}
+  [[ -n $RUN && -n $TMPDIR && -n $MAIN ]] || { print -u2 'run preflight first'; return 1 }
+  case $shape in
+    build) cargs=(build) ;;
+    check-all) cargs=(check --all-targets) ;;
+    clippy-all) cargs=(clippy --all-targets) ;;
+    test-no-run) cargs=(test --no-run) ;;
+    check-lib=*) cargs=(check -p ${shape#check-lib=} --lib) ;;
+    *) print -u2 "unknown shape $shape"; return 1 ;;
+  esac
+
+  (cd $MAIN && env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER cargo $cargs --offline --locked) || { print -u2 "$row: the main build failed"; return 1 }
+  if [[ $row == R1 ]]; then
+    test -f "$(cargo metadata --format-version 1 --no-deps --manifest-path $MAIN/Cargo.toml | jq -r .target_directory)/.rustc_info.json" || { print -u2 "$row: the main target dir has no .rustc_info.json; see the preflight notes"; return 1 }
+  fi
+
+  rm -rf $TMPDIR/scorecard/$row
+  mkdir -p $TMPDIR/scorecard/$row
+  for i in {1..$SCORECARD_N}; do
+    for w in $TMPDIR/scorecard/$row/cold$i $TMPDIR/scorecard/$row/seeded$i; do
+      git -C $MAIN worktree add --detach $w > /dev/null 2>&1 || { print -u2 "$row: could not add $w"; return 1 }
+      WTS+=($w)
+      for f in ${=UNTRACKED_COPY}; do
+        mkdir -p $w/${f:h} && cp -p $MAIN/$f $w/$f
+      done
+    done
+    cold+=($TMPDIR/scorecard/$row/cold$i)
+    seeded+=($TMPDIR/scorecard/$row/seeded$i)
+  done
+
+  cargo hive bench --cold $cold --seeded $seeded --build-cmd $shape --json > $RUN/$row.new.json
+  rc=$?
+  if (( rc == 0 )) && jq -e '[.counts.cold_build_ms_median, .counts.seeded_total_ms_median, .counts.seeded_seed_ms_median, .counts.seeded_build_ms_median] | all(type == "number")' $RUN/$row.new.json > /dev/null 2>&1; then
+    mv $RUN/$row.new.json $RUN/$row.json
+    jq -r --arg r $row '"\($r) cold=\(.counts.cold_build_ms_median) seeded=\(.counts.seeded_total_ms_median) seed=\(.counts.seeded_seed_ms_median) build=\(.counts.seeded_build_ms_median) toolchain=\(.toolchain)"' $RUN/$row.json
+    ret=0
+  else
+    mv $RUN/$row.new.json $RUN/$row.refusal.json
+    print "$row kept previous values"
+    ret=1
+  fi
+
+  for w in $cold $seeded; do
+    git -C $MAIN worktree remove --force $w 2> /dev/null
+    WTS=(${WTS:#$w})
+  done
+  git -C $MAIN worktree prune
+  return $ret
+}
+```
+
+Run the rows in that order, after `preflight`: `bench_row R1 build`, `bench_row R2 check-all`, `bench_row R3 clippy-all`, `bench_row R4 test-no-run`, `bench_row R5 check-lib=$P`. R2 to R5 are measured after earlier shapes have filled the store and the main target dir. Copy each printed cell into its row of the Values table only when the row printed its values, and fill that row's Provenance from the run's evidence.
+
 ### Re-check the setup footprint
 
 Compare R10's Seeded cell with the install section of the README: each command a user runs, and the safety guarantees about what hive installs and writes. The README's source install (`cargo install --path crates/cargo-hive`) is the source form of `cargo install cargo-hive`. If a line changed, fix it in this rerun's own commit.
