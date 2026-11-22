@@ -41,7 +41,7 @@ The operator sets a target by editing that row's Target cell and its Target set 
 ## Notes per row
 
 - R1 to R5: bench times one first build per fresh checkout. Rows measured later in a run see a store and a main target dir that earlier shapes already filled, so R2 to R5 are noted as measured after earlier shapes.
-- R6: by hand (outside bench); environment matches bench's, but bench did not time it. The environment is the same variable scrub that hive applies to the builds it runs. Only the cargo exec is timed, after a fixed one-file edit to a workspace crate. The median follows bench's rule: the middle value for odd n, and the floor of the mean of the two middle values for even n.
+- R6: by hand (outside bench); environment matches bench's, but bench did not time it. The environment is the same variable scrub that hive applies to the builds it runs. Only the cargo exec is timed, with the environment arguments built before the window, after a fixed one-file edit to a workspace crate. The median follows bench's rule: the middle value for odd n, and the floor of the mean of the two middle values for even n.
 - R7: the bytes the volume lost, read as the drop in free space from before a worktree's first build to after it, never bytes that clones share. The reading also carries the seed's store writes, any Cargo source unpacks, and any other writer on the same APFS container, so the quiet-machine rule and the median over four samples are the only guards. On the seeded arm the seed receipt's `clone_bytes_not_shared` is recorded beside the value as the seed's registry part at seed time; it is 0 on a fully shared clone and never stands in for the drop.
 - R8: a sample is vacuous when the deletion removed no unit files and no objects, because then nothing could be rebuilt because of it. A vacuous sample is valid and counted. A sample is void when the deletion or the rebuild fails.
 
@@ -245,7 +245,7 @@ resolve_toolchain() {
   fi
 }
 
-hive_env_cargo() {
+hive_env_args() {
   local v
   local -a drop keep args
   drop=(CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_BUILD_BUILD_DIR CARGO_MANIFEST_DIR OUT_DIR CARGO_BUILD_RUSTC CARGO_BUILD_RUSTC_WRAPPER CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN RUSTUP_TOOLCHAIN_SOURCE)
@@ -259,7 +259,12 @@ hive_env_cargo() {
   if [[ -n $TC ]]; then
     keep+=(RUSTUP_TOOLCHAIN=$TC)
   fi
-  env $args $keep $CARGO_BIN "$@"
+  HIVE_ENV_ARGS=($args $keep)
+}
+
+hive_env_cargo() {
+  hive_env_args
+  env $HIVE_ENV_ARGS $CARGO_BIN "$@"
 }
 
 r6_edit() {
@@ -297,11 +302,15 @@ pipeline() {
     rc=0
     cargo hive seed $wt --json > $RUN/pipe-$arm$i-seed.json || rc=$?
     clone=$(jq -c '.counts.clone_bytes_not_shared // null' $RUN/pipe-$arm$i-seed.json 2> /dev/null) || clone=null
+    [[ $clone == <-> ]] || clone=null
     if [[ $clone == null ]]; then
-      unm=$(jq -c '[.unmeasured[]? | select(tojson | contains("clone_bytes_not_shared")) | (.reason // tojson)] | first // "no reason in the receipt"' $RUN/pipe-$arm$i-seed.json 2> /dev/null) || unm='"no readable receipt"'
+      unm=$(jq -c '[.unmeasured[]? | select(tojson | contains("clone_bytes_not_shared")) | (.reason // tojson)] | first // "no reason in the receipt"' $RUN/pipe-$arm$i-seed.json 2> /dev/null) || unm=
+      [[ -n $unm ]] || unm='"no readable receipt"'
     fi
     if (( rc != 0 )); then
       void="{\"reason\":\"the seed exited $rc\"}"
+    elif ! jq -e . $RUN/pipe-$arm$i-seed.json > /dev/null 2>&1; then
+      void='{"reason":"the seed receipt is unreadable"}'
     elif jq -e '(.counts.clone_units_cloned // 0) == 0' $RUN/pipe-$arm$i-seed.json > /dev/null 2>&1; then
       void='{"reason":"the seed cloned no units"}'
     elif jq -e 'any(.findings[]?; (.kind // "") | test("source\\.none|toolchain\\.missing|store\\.tag"))' $RUN/pipe-$arm$i-seed.json > /dev/null 2>&1; then
@@ -326,16 +335,19 @@ pipeline() {
   fi
 
   if [[ $void == null ]]; then
-    (cd $wt && r6_edit)
+    (cd $wt && r6_edit) || { pipeline_abort $arm $i "could not edit $FILE"; return 1 }
+    rm -f $run/pipe-$arm$i-r6.txt
     (
       cd $wt
+      hive_env_args
       t0=$EPOCHREALTIME
       rc=0
-      hive_env_cargo build --offline --locked > $run/pipe-$arm$i-r6.log 2>&1 || rc=$?
+      env $HIVE_ENV_ARGS $CARGO_BIN build --offline --locked > $run/pipe-$arm$i-r6.log 2>&1 || rc=$?
       t1=$EPOCHREALTIME
       print -r -- $rc $(( int(rint((t1 - t0) * 1000)) )) > $run/pipe-$arm$i-r6.txt
-    )
-    read rc ms < $RUN/pipe-$arm$i-r6.txt
+    ) || true
+    read rc ms < $run/pipe-$arm$i-r6.txt || { pipeline_abort $arm $i 'the R6 timing was not recorded'; return 1 }
+    [[ $rc == <-> && $ms == <-> ]] || { pipeline_abort $arm $i 'the R6 timing was not readable'; return 1 }
     if (( rc != 0 )); then
       void='{"rows":["R6","R8","R9"],"reason":"the R6 build failed"}'
     else
@@ -343,7 +355,7 @@ pipeline() {
     fi
   fi
 
-  jq -nc --arg arm $arm --argjson i $i --argjson r7 $r7 --argjson clone $clone --argjson unm $unm --argjson r6 $r6 --argjson void $void '
+  jq -nc --arg arm $arm --argjson i $i --argjson r7 "${r7:-null}" --argjson clone "${clone:-null}" --argjson unm "${unm:-null}" --argjson r6 "${r6:-null}" --argjson void "${void:-null}" '
     {arm: $arm, i: $i, r7_bytes: (if ($void.rows // []) | index("R7") then null else $r7 end), r6_ms: $r6, void: $void}
     + (if $arm == "seeded" then (if $clone != null then {r7_clone_bytes_not_shared: $clone} else {r7_unmeasured: $unm} end) else {} end)' >> $RUN/pipe.jsonl
 
