@@ -204,3 +204,11 @@ _Avoid_: warm sample, cached build
 **Prime**:
 The one fill bench runs before its first sample, reported apart and kept out of every median, so the store's first fill is measured once.
 _Avoid_: warm-up
+
+**Scorecard**:
+The one file, `docs/scorecard.md`, that records what an agent worktree costs on the measured workspace, cold and seeded, one row per cost, each beside the target the owner set for it. A rerun replaces a row's numbers in place.
+_Avoid_: dashboard, benchmark report, metrics doc
+
+**Scorecard row**:
+One cost on the scorecard (R1–R10), with a value per arm, its source (a bench or hive receipt count, or "by hand (outside bench)"), its sample count and median, and its target slots.
+_Avoid_: metric, line item
