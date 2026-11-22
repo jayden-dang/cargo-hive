@@ -58,3 +58,7 @@ Nothing else is touched. Untracked files the workspace needs to build, such as a
 The Rerun blocks are zsh on macOS. Linux is out of scope.
 
 ## Rerun
+
+### Re-check the setup footprint
+
+Compare R10's Seeded cell with the install section of the README: each command a user runs, and the safety guarantees about what hive installs and writes. The README's source install (`cargo install --path crates/cargo-hive`) is the source form of `cargo install cargo-hive`. If a line changed, fix it in this rerun's own commit.
