@@ -284,25 +284,32 @@ r9_classify() {
 }
 
 r9_change() {
-  local tmp=$(mktemp)
-  if [[ $PROBE == *.json ]]; then
-    jq 'if (.describe.nullable[0] | type) == "boolean" then .describe.nullable[0] |= not else error("no nullable entry") end' $PROBE > $tmp || return 1
-  else
-    awk '!d && /^[A-Za-z_][A-Za-z0-9_]*=/ {print $0 "x"; d=1; next} {print} END {exit !d}' $PROBE > $tmp || return 1
-  fi
-  cat $tmp > $PROBE
-  rm -f $tmp
+  local tmp rc=0
+  mkdir -p $TMPDIR/scorecard || return 1
+  tmp=$(mktemp $TMPDIR/scorecard/r9.XXXXXX) || return 1
+  {
+    if [[ $PROBE == *.json ]]; then
+      jq 'if (.describe.nullable[0] | type) == "boolean" then .describe.nullable[0] |= not else error("no nullable entry") end' "$PROBE" > $tmp || rc=1
+    else
+      awk -v q="'" '!d && /^[A-Za-z_][A-Za-z0-9_]*=/ {c = substr($0, length($0), 1); if (c == "\"" || c == q) {print substr($0, 1, length($0) - 1) "x" c} else {print $0 "x"}; d=1; next} {print} END {exit !d}' "$PROBE" > $tmp || rc=1
+    fi
+    (( rc == 0 )) && { cat $tmp > "$PROBE" || rc=1 }
+  } always {
+    rm -f $tmp
+  }
+  return $rc
 }
 
 r9_restore() {
-  local f
+  local f rc=0
   for f in "$@"; do
-    if git ls-files --error-unmatch -- $f > /dev/null 2>&1; then
-      git checkout -- $f || return 1
+    if git ls-files --error-unmatch -- "$f" > /dev/null 2>&1; then
+      git checkout -- "$f" || rc=1
     else
-      cp -p $MAIN/$f $f || return 1
+      cp -pf "$MAIN/$f" "$f" || rc=1
     fi
   done
+  return $rc
 }
 
 pipeline_abort() {
@@ -314,7 +321,7 @@ pipeline_abort() {
 
 pipeline() {
   local arm=$1 i=$2 wt=$TMPDIR/scorecard/pipe/$1$2 run=${RUN:A} f a b rc ms
-  local r7=null clone=null unm=null r6=null void=null r8u=null r8f=null r8o=null r8v=null r9=null probe_void cls
+  local r7=null clone=null unm=null r6=null void=null r8u=null r8f=null r8o=null r8v=null r9=null probe_void cls st
   local -a rows
   [[ $arm == (cold|seeded) && $i == <-> ]] || { print -u2 'usage: pipeline cold|seeded <i>'; return 1 }
   [[ -n $RUN && -n $TMPDIR && -n $MAIN && -n $P && -n $FILE ]] || { print -u2 'run preflight first, with P and FILE set'; return 1 }
@@ -429,8 +436,11 @@ pipeline() {
       (cd $wt && git checkout -- "$FILE") || probe_void='the edit to the crate file was not restored'
     else
       rc=0
-      (cd $wt && hive_env_cargo build --offline --locked -v) > /dev/null 2> $RUN/pipe-$arm$i-r9-control.log || rc=$?
-      if (( rc != 0 )); then
+      [[ -f $wt/$PROBE ]] || rc=-1
+      (( rc != 0 )) || (cd $wt && hive_env_cargo build --offline --locked -v) > /dev/null 2> $RUN/pipe-$arm$i-r9-control.log || rc=$?
+      if (( rc == -1 )); then
+        probe_void='probe input missing'
+      elif (( rc != 0 )); then
         probe_void="the control rebuild exited $rc"
       elif grep -q 'Running `.*--crate-name' $RUN/pipe-$arm$i-r9-control.log; then
         probe_void='the control rebuild compiled a unit'
@@ -445,8 +455,10 @@ pipeline() {
       fi
       (cd $wt && r9_restore "$PROBE" "$FILE") || probe_void=${probe_void:-'the probe file was not restored'}
     fi
-    if [[ -n $(git -C $wt status --porcelain --untracked-files=no) ]]; then
+    if ! st=$(git -C $wt status --porcelain --untracked-files=no) || [[ -n $st ]]; then
       probe_void=${probe_void:-'the worktree was not clean after the probe'}
+    elif [[ -n $PROBE ]] && ! git -C $wt ls-files --error-unmatch -- "$PROBE" > /dev/null 2>&1 && ! cmp -s "$MAIN/$PROBE" "$wt/$PROBE"; then
+      probe_void=${probe_void:-'the probe file was not restored'}
     fi
     if [[ -n $probe_void ]]; then
       void=$(jq -nc --arg r "$probe_void" '{rows: ["R9"], reason: $r}')
