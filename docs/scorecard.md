@@ -98,7 +98,7 @@ SCORECARD_NUMBERS_PUBLIC=
 
 `preflight` rejects an empty `P` or `FILE`, a `P` that is not letters, digits, `_` and `-` or that starts with `-`, and a `FILE`, `PROBE` or `UNTRACKED_COPY` entry that is absolute or has a `..` segment. A failed preflight must be fixed and rerun before anything else: it sets `PREFLIGHT_OK` only when every check passed, and `bench_row` and `pipeline` refuse to run without it and re-check these inputs themselves.
 
-The evidence directory is named for the date preflight runs on. A run that crosses midnight would start a second directory in a new shell. To keep one directory, finish before midnight, or set `RUN` to the earlier directory (`RUN=.skills/verify/<date>-scorecard`) before `preflight`: preflight keeps a `RUN` already set in the shell, including a leftover one from an earlier run in the same shell, so `unset RUN` before a new run. A second preflight overwrites `load-start.txt`, and `summarize` writes the date it runs on. When resuming, run only the pipelines still missing: the pipelines block moves an existing `pipe.jsonl` aside.
+The evidence directory is named for the date preflight runs on. A run that crosses midnight would start a second directory in a new shell. To keep one directory, finish before midnight, or set `RUN` to the earlier directory (`RUN=.skills/verify/<date>-scorecard`) before `preflight`: preflight keeps a `RUN` already set in the shell, including a leftover one from an earlier run in the same shell, so `unset RUN` before a new run. Ctrl-C stops the run after cleaning up: the interrupt trap removes the worktrees and sets `SCORECARD_INTERRUPTED`, and `bench_row` and `pipeline` return 130 and refuse to start while it is set. The interrupt trap's `return` ends only the function that was running and loses its status, so `bench_row` and `pipeline` are thin wrappers that turn the flag into 130. A rerunner clears the flag by rerunning `preflight`, and in a loop must test `intr` after each call, because a trailing `|| true` hides the 130. A second preflight overwrites `load-start.txt`, and `summarize` writes the date it runs on. When resuming, run only the pipelines still missing: the pipelines block moves an existing `pipe.jsonl` aside.
 
 ```zsh
 source .skills/verify/scorecard.env
@@ -112,7 +112,11 @@ cleanup_worktrees() {
   git -C $MAIN worktree prune || true
 }
 trap cleanup_worktrees EXIT
-trap 'cleanup_worktrees; return 130' INT
+trap 'SCORECARD_INTERRUPTED=1; cleanup_worktrees; return 130' INT
+
+intr() {
+  [[ -n $SCORECARD_INTERRUPTED ]]
+}
 
 rel_ok() {
   [[ $1 != /* && $1 != .. && $1 != ../* && $1 != */../* && $1 != */.. ]]
@@ -135,7 +139,7 @@ safe_rm() {
 
 preflight() {
   local flag v src vars help hv hbin prof msg
-  unset PREFLIGHT_OK
+  unset PREFLIGHT_OK SCORECARD_INTERRUPTED
   : ${SCORECARD_N:=4}
   [[ -n $MAIN ]] || { print -u2 'MAIN is empty: set it in the env file'; return 1 }
   [[ -n $TMPDIR ]] || { print -u2 'TMPDIR is empty'; return 1 }
@@ -213,6 +217,7 @@ preflight() {
     fi
   done
   print "preflight passed: toolchain ${TC:-default}, evidence under $RUN"
+  intr && return 130
   PREFLIGHT_OK=1
 }
 ```
@@ -229,11 +234,29 @@ bench_refuse() {
   print "$1 kept previous values"
 }
 
+bench_intr() {
+  rm -f $RUN/$1.new.json
+  cleanup_worktrees
+  WTS=()
+  print -u2 "$1 interrupted"
+}
+
 bench_row() {
+  bench_row_run "$@"
+  local s=$?
+  intr || return $s
+  [[ $1 =~ '^R[1-5]$' ]] && rm -f $RUN/$1.new.json
+  cleanup_worktrees
+  WTS=()
+  return 130
+}
+
+bench_row_run() {
   local row=$1 shape=$2 i w f rc ret
   local -a cargs cold seeded
   : ${SCORECARD_N:=4}
   [[ $row =~ '^R[1-5]$' ]] || { print -u2 "unknown row '$row': expected R1 to R5"; return 1 }
+  intr && { print -u2 'refusing to run: the run was interrupted; rerun preflight'; return 130 }
   [[ -n $PREFLIGHT_OK ]] || { print -u2 'refusing to run: no passing preflight in this shell'; return 1 }
   check_inputs || return 1
   [[ -n $RUN && -n $TMPDIR && -n $MAIN ]] || { print -u2 'run preflight first'; return 1 }
@@ -247,7 +270,7 @@ bench_row() {
   esac
 
   rm -f $RUN/$row.refusal.json $RUN/$row.new.json
-  (cd $MAIN && env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER cargo $cargs --offline --locked) || { bench_refuse $row 'the main build failed'; return 1 }
+  (cd $MAIN && env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER cargo $cargs --offline --locked) || { intr && { bench_intr $row; return 130 }; bench_refuse $row 'the main build failed'; return 1 }
   if [[ $row == R1 ]]; then
     test -f "$(cargo metadata --format-version 1 --no-deps --manifest-path $MAIN/Cargo.toml | jq -r .target_directory)/.rustc_info.json" || { bench_refuse $row 'the main target dir has no .rustc_info.json'; return 1 }
   fi
@@ -269,6 +292,7 @@ bench_row() {
 
   rc=0
   cargo hive bench --cold $cold --seeded $seeded --build-cmd $shape --json > $RUN/$row.new.json || rc=$?
+  intr && { bench_intr $row; return 130 }
   if (( rc == 0 )) && jq -e '[.counts.cold_build_ms_median, .counts.seeded_total_ms_median, .counts.seeded_seed_ms_median, .counts.seeded_build_ms_median] | all(type == "number")' $RUN/$row.new.json > /dev/null 2>&1; then
     mv $RUN/$row.new.json $RUN/$row.json
     jq -r --arg r $row '"\($r) cold=\(.counts.cold_build_ms_median) seeded=\(.counts.seeded_total_ms_median) seed=\(.counts.seeded_seed_ms_median) build=\(.counts.seeded_build_ms_median) toolchain=\(.toolchain)"' $RUN/$row.json
@@ -288,7 +312,7 @@ bench_row() {
 }
 ```
 
-Run the rows in that order, after `preflight`: `bench_row R1 build`, `bench_row R2 check-all`, `bench_row R3 clippy-all`, `bench_row R4 test-no-run`, `bench_row R5 check-lib=$P`. R2 to R5 are measured after earlier shapes have filled the store and the main target dir. Copy each printed cell into its row of the Values table only when the row printed its values, and fill that row's Provenance from the run's evidence.
+Run the rows in that order, after `preflight`: `bench_row R1 build`, `bench_row R2 check-all`, `bench_row R3 clippy-all`, `bench_row R4 test-no-run`, `bench_row R5 check-lib=$P`. R2 to R5 are measured after earlier shapes have filled the store and the main target dir. After each call, test `intr`: if it is true, stop the run. Copy each printed cell into its row of the Values table only when the row printed its values, and fill that row's Provenance from the run's evidence.
 
 ### 2. By-hand pipeline
 
@@ -387,10 +411,20 @@ pipeline_abort() {
 }
 
 pipeline() {
+  pipeline_run "$@"
+  local s=$?
+  intr || return $s
+  cleanup_worktrees
+  WTS=()
+  return 130
+}
+
+pipeline_run() {
   local arm=$1 i=$2 wt=$TMPDIR/scorecard/pipe/$1$2 run=${RUN:A} f a b rc ms
   local r7=null clone=null unm=null r6=null void=null r8u=null r8f=null r8o=null r8v=null r9=null probe_void cls st
   local -a rows gc_env
   [[ $arm == (cold|seeded) && $i == <-> ]] || { print -u2 'usage: pipeline cold|seeded <i>'; return 1 }
+  intr && { print -u2 'refusing to run: the run was interrupted; rerun preflight'; return 130 }
   [[ -n $PREFLIGHT_OK ]] || { print -u2 'refusing to run: no passing preflight in this shell'; return 1 }
   check_inputs || return 1
   [[ -n $RUN && -n $TMPDIR && -n $MAIN && -n $P && -n $FILE ]] || { print -u2 'run preflight first, with P and FILE set'; return 1 }
@@ -411,6 +445,7 @@ pipeline() {
   if [[ $arm == seeded ]]; then
     rc=0
     cargo hive seed $wt --json > $RUN/pipe-$arm$i-seed.json || rc=$?
+    intr && { pipeline_abort $arm $i interrupted; return 130 }
     clone=$(jq -c '.counts.clone_bytes_not_shared // null' $RUN/pipe-$arm$i-seed.json 2> /dev/null) || clone=null
     [[ $clone == <-> ]] || clone=null
     if [[ $clone == null ]]; then
@@ -434,6 +469,7 @@ pipeline() {
   if [[ $void == null ]]; then
     rc=0
     (cd $wt && hive_env_cargo build --offline --locked) > $RUN/pipe-$arm$i-first.log 2>&1 || rc=$?
+    intr && { pipeline_abort $arm $i interrupted; return 130 }
     if (( rc != 0 )); then
       void='{"rows":["R6","R7","R8","R9"],"reason":"the first build failed"}'
     else
@@ -456,6 +492,7 @@ pipeline() {
       t1=$EPOCHREALTIME
       print -r -- $rc $(( int(rint((t1 - t0) * 1000)) )) > $run/pipe-$arm$i-r6.txt
     ) || true
+    intr && { pipeline_abort $arm $i interrupted; return 130 }
     read rc ms < $run/pipe-$arm$i-r6.txt || { pipeline_abort $arm $i 'the R6 timing was not recorded'; return 1 }
     [[ $rc == <-> && $ms == <-> ]] || { pipeline_abort $arm $i 'the R6 timing was not readable'; return 1 }
     if (( rc != 0 )); then
@@ -470,6 +507,7 @@ pipeline() {
     gc_env=()
     if [[ -n $TC ]]; then gc_env=(RUSTUP_TOOLCHAIN=$TC); fi
     env $gc_env cargo hive gc --checkout $wt --json > $RUN/pipe-$arm$i-gc.json || rc=$?
+    intr && { pipeline_abort $arm $i interrupted; return 130 }
     r8f=$(jq -c '.counts.unit_files_deleted // null' $RUN/pipe-$arm$i-gc.json 2> /dev/null) || r8f=null
     r8o=$(jq -c '.counts.objects_deleted // null' $RUN/pipe-$arm$i-gc.json 2> /dev/null) || r8o=null
     [[ $r8f == <-> ]] || r8f=null
@@ -481,6 +519,7 @@ pipeline() {
     else
       rc=0
       (cd $wt && hive_env_cargo build --offline --locked -v) > /dev/null 2> $RUN/pipe-$arm$i-r8.log || rc=$?
+      intr && { pipeline_abort $arm $i interrupted; return 130 }
       if (( rc != 0 )); then
         void="{\"rows\":[\"R8\",\"R9\"],\"reason\":\"the rebuild after the gc exited $rc\"}"
       else
@@ -509,6 +548,7 @@ pipeline() {
       rc=0
       [[ -f $wt/$PROBE ]] || rc=-1
       (( rc != 0 )) || (cd $wt && hive_env_cargo build --offline --locked -v) > /dev/null 2> $RUN/pipe-$arm$i-r9-control.log || rc=$?
+      intr && { pipeline_abort $arm $i interrupted; return 130 }
       if (( rc == -1 )); then
         probe_void='probe input missing'
       elif (( rc != 0 )); then
@@ -520,6 +560,7 @@ pipeline() {
       else
         rc=0
         (cd $wt && hive_env_cargo build --offline --locked -v) > /dev/null 2> $RUN/pipe-$arm$i-r9.log || rc=$?
+        intr && { pipeline_abort $arm $i interrupted; return 130 }
         cls=$(r9_classify $rc $RUN/pipe-$arm$i-r9.log)
         r9=\"$cls\"
         [[ $cls != void ]] || probe_void="the probe rebuild exited $rc without recompiling $P"
@@ -537,6 +578,7 @@ pipeline() {
     fi
   fi
 
+  intr && { pipeline_abort $arm $i interrupted; return 130 }
   jq -nc --arg arm $arm --argjson i $i --argjson r7 "${r7:-null}" --argjson clone "${clone:-null}" --argjson unm "${unm:-null}" --argjson r6 "${r6:-null}" --argjson r8u "${r8u:-null}" --argjson r8f "${r8f:-null}" --argjson r8o "${r8o:-null}" --argjson r8v "${r8v:-null}" --argjson r9 "${r9:-null}" --argjson void "${void:-null}" '
     {arm: $arm, i: $i, r7_bytes: (if ($void.rows // []) | index("R7") then null else $r7 end), r6_ms: $r6, r8_units: $r8u, r8_unit_files_deleted: $r8f, r8_objects_deleted: $r8o, r8_vacuous: $r8v, r9: $r9, void: $void}
     + (if $arm == "seeded" then (if $clone != null then {r7_clone_bytes_not_shared: $clone} else {r7_unmeasured: $unm} end) else {} end)' >> $RUN/pipe.jsonl
@@ -554,7 +596,10 @@ Run the pipelines with the block below. For a `SCORECARD_N` of 4 the order is co
 if [[ -f $RUN/pipe.jsonl ]]; then mv $RUN/pipe.jsonl $RUN/pipe.$(date +%H%M%S).jsonl; fi
 for i in {1..$SCORECARD_N}; do
   if (( i % 2 )); then arms=(cold seeded); else arms=(seeded cold); fi
-  for a in $arms; do pipeline $a $i || true; done
+  for a in $arms; do
+    pipeline $a $i || true
+    if intr; then break 2; fi
+  done
 done
 ```
 
@@ -795,8 +840,12 @@ record() {
 ```
 
 ```text
-summarize
-record
+if intr; then
+  print -u2 'the run was interrupted: rerun preflight and the missing rows before summarize'
+else
+  summarize
+  record
+fi
 git -C $MAIN worktree list
 cleanup_worktrees
 git -C $MAIN worktree list
