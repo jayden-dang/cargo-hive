@@ -11,10 +11,10 @@ What an agent worktree costs, cold and seeded, on the measured workspace. A cold
 | R3 | First-command time for `clippy --all-targets` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 60742 | 4 | 56694 | open — operator | open — operator |  |
 | R4 | First-command time for `test --no-run` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 97891 | 4 | 86345 | open — operator | open — operator |  |
 | R5 | First-command time for `check -p <package> --lib` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 42375 | 4 | 35282 | open — operator | open — operator |  |
-| R6 | Next build after a one-file edit in a workspace crate (ms) | by hand (outside bench) | 4 | 7573 | 4 | 7087 | open — operator | open — operator |  |
-| R7 | Private bytes each new worktree adds (bytes) | by hand (outside bench): free space | 4 | 5322027008 | 4 | 3269083136 | open — operator | open — operator |  |
-| R8 | Units rebuilt because of a hive deletion | by hand (outside bench): cargo -v after gc --checkout | not yet measured | not yet measured | not yet measured | not yet measured | open — operator | open — operator |  |
-| R9 | Stale results on a probe that changes a file a proc macro reads without declaring it | by hand (outside bench): cargo -v after probe | not yet measured | not yet measured | not yet measured | not yet measured | open — operator | open — operator |  |
+| R6 | Next build after a one-file edit in a workspace crate (ms) | by hand (outside bench) | 4 | 6631 | 4 | 6821 | open — operator | open — operator |  |
+| R7 | Private bytes each new worktree adds (bytes) | by hand (outside bench): free space | 4 | 5210083328 | 4 | 3475857408 | open — operator | open — operator |  |
+| R8 | Units rebuilt because of a hive deletion | by hand (outside bench): cargo -v after gc --checkout | 4 | 0 rebuilt over 4 non-vacuous samples; 0 vacuous | 4 | 0 rebuilt over 4 non-vacuous samples; 0 vacuous | open — operator | open — operator |  |
+| R9 | Stale results on a probe that changes a file a proc macro reads without declaring it | by hand (outside bench): cargo -v after probe | 4 | 4 stale of 4 | 4 | 4 stale of 4 | open — operator | open — operator |  |
 | R10 | Setup footprint | listed | — | nothing | — | `cargo install cargo-hive`, `cargo hive doctor`, `cargo hive repo add <main>`; Cargo config files 0, environment variables 0, rustc wrappers 0, cargo shims 0; files outside the state root: 0, beyond clones into target dirs | open — operator | open — operator |  |
 
 R8 cells read `R rebuilt over k non-vacuous samples; m vacuous`, or `all vacuous`. R9 cells read `s stale of n`.
@@ -28,10 +28,10 @@ R8 cells read `R rebuilt over k non-vacuous samples; m vacuous`, or `all vacuous
 | R3 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
 | R4 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
 | R5 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
-| R6 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
-| R7 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
-| R8 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
-| R9 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
+| R6 | 2026-11-23 | 715cf4b5ade6 | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard |
+| R7 | 2026-11-23 | 715cf4b5ade6 | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard |
+| R8 | 2026-11-23 | 715cf4b5ade6 | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard |
+| R9 | 2026-11-23 | 715cf4b5ade6 | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard |
 | R10 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
 
 ## Targets
