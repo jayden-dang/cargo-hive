@@ -151,10 +151,10 @@ _Requirements: SCORECARD-1.1, SCORECARD-1.2, SCORECARD-1.3, SCORECARD-1.4, SCORE
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing check.** `grep -E '^\| R10 \|' docs/scorecard.md | grep -q 'cargo install cargo-hive' && grep -E '^\| R10 \|' docs/scorecard.md | grep -q 'Cargo config files 0' && grep -q 'Re-check the setup footprint' docs/scorecard.md`. Run it and expect a non-zero exit.
-- [ ] **Step 2: Write the row.** R10 Seeded holds the list from design "Setup footprint R10": the three commands; `Cargo config files 0, environment variables 0, rustc wrappers 0, cargo shims 0`; `files outside the state root: 0, beyond clones into target dirs`. R10 Cold reads `nothing`. Under `## Rerun`, add the step "Re-check the setup footprint": compare the list with README's install section, and fix a changed line in the rerun's own commit.
-- [ ] **Step 3: Run the check.** Run Step 1's command and expect exit 0. Also read README.md:101-115 and confirm each listed command appears there.
-- [ ] **Step 4: Commit.** `git commit -am "docs(scorecard): list the setup footprint hive needs before its numbers apply"`
+- [x] **Step 1: Write the failing check.** `grep -E '^\| R10 \|' docs/scorecard.md | grep -q 'cargo install cargo-hive' && grep -E '^\| R10 \|' docs/scorecard.md | grep -q 'Cargo config files 0' && grep -q 'Re-check the setup footprint' docs/scorecard.md`. Run it and expect a non-zero exit.
+- [x] **Step 2: Write the row.** R10 Seeded holds the list from design "Setup footprint R10": the three commands; `Cargo config files 0, environment variables 0, rustc wrappers 0, cargo shims 0`; `files outside the state root: 0, beyond clones into target dirs`. R10 Cold reads `nothing`. Under `## Rerun`, add the step "Re-check the setup footprint": compare the list with README's install section, and fix a changed line in the rerun's own commit.
+- [x] **Step 3: Run the check.** Run Step 1's command and expect exit 0. Also read README.md:101-115 and confirm each listed command appears there.
+- [x] **Step 4: Commit.** `git commit -am "docs(scorecard): list the setup footprint hive needs before its numbers apply"`
 
 _Requirements: SCORECARD-7.1_
 
