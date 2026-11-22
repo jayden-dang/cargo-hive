@@ -6,13 +6,13 @@ What an agent worktree costs, cold and seeded, on the measured workspace. A cold
 
 | Row | Metric | Source | Cold n | Cold median | Seeded n | Seeded median | Target (cold) | Target (seeded) | Target set |
 |---|---|---|---|---|---|---|---|---|---|
-| R1 | First-command time for `build` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | not yet measured | not yet measured | not yet measured | not yet measured | open — operator | open — operator |  |
-| R2 | First-command time for `check --all-targets` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | not yet measured | not yet measured | not yet measured | not yet measured | open — operator | open — operator |  |
-| R3 | First-command time for `clippy --all-targets` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | not yet measured | not yet measured | not yet measured | not yet measured | open — operator | open — operator |  |
-| R4 | First-command time for `test --no-run` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | not yet measured | not yet measured | not yet measured | not yet measured | open — operator | open — operator |  |
-| R5 | First-command time for `check -p <package> --lib` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | not yet measured | not yet measured | not yet measured | not yet measured | open — operator | open — operator |  |
-| R6 | Next build after a one-file edit in a workspace crate (ms) | by hand (outside bench) | not yet measured | not yet measured | not yet measured | not yet measured | open — operator | open — operator |  |
-| R7 | Private bytes each new worktree adds (bytes) | by hand (outside bench): free space | not yet measured | not yet measured | not yet measured | not yet measured | open — operator | open — operator |  |
+| R1 | First-command time for `build` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 90673 | 4 | 79340 | open — operator | open — operator |  |
+| R2 | First-command time for `check --all-targets` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 62946 | 4 | 46561 | open — operator | open — operator |  |
+| R3 | First-command time for `clippy --all-targets` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 60742 | 4 | 56694 | open — operator | open — operator |  |
+| R4 | First-command time for `test --no-run` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 97891 | 4 | 86345 | open — operator | open — operator |  |
+| R5 | First-command time for `check -p <package> --lib` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 42375 | 4 | 35282 | open — operator | open — operator |  |
+| R6 | Next build after a one-file edit in a workspace crate (ms) | by hand (outside bench) | 4 | 7573 | 4 | 7087 | open — operator | open — operator |  |
+| R7 | Private bytes each new worktree adds (bytes) | by hand (outside bench): free space | 4 | 5322027008 | 4 | 3269083136 | open — operator | open — operator |  |
 | R8 | Units rebuilt because of a hive deletion | by hand (outside bench): cargo -v after gc --checkout | not yet measured | not yet measured | not yet measured | not yet measured | open — operator | open — operator |  |
 | R9 | Stale results on a probe that changes a file a proc macro reads without declaring it | by hand (outside bench): cargo -v after probe | not yet measured | not yet measured | not yet measured | not yet measured | open — operator | open — operator |  |
 | R10 | Setup footprint | listed | — | nothing | — | `cargo install cargo-hive`, `cargo hive doctor`, `cargo hive repo add <main>`; Cargo config files 0, environment variables 0, rustc wrappers 0, cargo shims 0; files outside the state root: 0, beyond clones into target dirs | open — operator | open — operator |  |
@@ -23,13 +23,13 @@ R8 cells read `R rebuilt over k non-vacuous samples; m vacuous`, or `all vacuous
 
 | Row | Measured on | Hive commit | Toolchain | Machine | Evidence |
 |---|---|---|---|---|---|
-| R1 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
-| R2 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
-| R3 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
-| R4 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
-| R5 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
-| R6 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
-| R7 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
+| R1 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
+| R2 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
+| R3 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
+| R4 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
+| R5 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
+| R6 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
+| R7 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
 | R8 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
 | R9 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
 | R10 | not yet measured | not yet measured | not yet measured | not yet measured | not yet measured |
