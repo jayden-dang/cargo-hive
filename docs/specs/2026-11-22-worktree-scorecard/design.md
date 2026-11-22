@@ -221,9 +221,10 @@ Interface: two zsh functions defined in the doc.
    a coreutils `df` on PATH changes the columns.
 3. Seeded arm only: `cargo hive seed $WT --json > $RUN/pipe-<arm><i>-seed.json`, then read
    `.counts.clone_bytes_not_shared`, or its `.unmeasured[]` reason. The worktree is void
-   (SCORECARD-4.4) when `.counts.clone_units_cloned` is 0 or a `source.none`,
+   (SCORECARD-4.4) when the seed exits non-zero, `.counts.clone_units_cloned` is 0, or a `source.none`,
    `toolchain.missing` or `store.tag` finding appears.
-4. First build: `hive_env_cargo build --offline --locked`.
+4. First build: `hive_env_cargo build --offline --locked`. A non-zero exit voids R6–R9 for this
+   worktree (SCORECARD-3.5).
 5. Free-space reading B. R7 sample = (A − B) × 1024.
 6. Apply the Decision 4 edit, then time `hive_env_cargo build --offline --locked` with
    `$EPOCHREALTIME` → R6 sample, as `int(rint(ms))`. A non-zero exit voids R6–R9 for this

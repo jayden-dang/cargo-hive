@@ -69,7 +69,8 @@ target for any row.
   or, for R10, "listed" (Weigh W1).
 - **SCORECARD-1.4** THE SYSTEM SHALL show each measured row's sample count and median for each
   arm on its own. Measured rows are R1–R9. The count is the number of valid samples: a sample
-  voided under SCORECARD-3.5, 4.4 or 6.2 is not counted.
+  voided under SCORECARD-3.5, 4.4 or 6.2 is not counted. A vacuous R8 sample
+  (SCORECARD-5.2) is valid and is counted.
 - **SCORECARD-1.5** THE SYSTEM SHALL record, for each measured row, the date it was measured,
   the hive commit, the toolchain, the machine and the evidence path. The toolchain is the
   `rustc -vV` release line. The machine is its model, chip and core count.
@@ -139,9 +140,10 @@ so that I can read what an agent waits for on its second build.
   (crates/cargo-hive/src/bench/command.rs:62-67). The match is agent-decided; ledger A10,
   req-review.md 3c.
 
-- **SCORECARD-3.5** IF the R6 rebuild, or the `cargo hive gc --checkout` run or rerun of
-  SCORECARD-5.1, exits non-zero THEN THE SYSTEM SHALL void that worktree's samples for the row
-  that failed and every row after it in the pipeline (design review finding 3).
+- **SCORECARD-3.5** IF the pipeline's first build, the R6 rebuild, or the `cargo hive gc
+  --checkout` run or rerun of SCORECARD-5.1, exits non-zero THEN THE SYSTEM SHALL void that
+  worktree's samples for the row that failed and every row after it in the pipeline (design
+  review finding 3; agent-decided; ledger A23).
 
 ## 4. Private bytes come from the volume
 
@@ -159,10 +161,10 @@ so that I can read how much private build output one more agent costs.
   the free-space drop by design and never stands in for it.
 - **SCORECARD-4.3** IF the seed receipt lists `clone_bytes_not_shared` under `unmeasured` THEN
   THE SYSTEM SHALL record the receipt's reason in its place, not a number.
-- **SCORECARD-4.4** IF a seeded pipeline worktree's seed receipt reports `clone_units_cloned`
-  of 0, or a `source.none`, `toolchain.missing` or `store.tag` finding, THEN THE SYSTEM SHALL
+- **SCORECARD-4.4** IF a seeded pipeline worktree's seed exits non-zero, or its receipt reports
+  `clone_units_cloned` of 0 or a `source.none`, `toolchain.missing` or `store.tag` finding, THEN THE SYSTEM SHALL
   void that worktree's samples for R6–R9, because the worktree was not seeded (design review
-  finding 4).
+  finding 4; agent-decided; ledger A23).
 
 ## 5. Units rebuilt after a hive deletion are counted
 
@@ -199,7 +201,7 @@ declaring it, so that I can see whether the rebuild came back stale.
   - A control rebuild just before the probe change must exit 0 with no rustc invocation, or
   the sample is void.
 
-  Design review finding 2.
+  Design review finding 2; agent-decided; ledger A23.
 - **SCORECARD-6.3** THE SYSTEM SHALL show R9's value per arm as "s stale of n", and the steps
   SHALL restore the changed file after each sample.
 - **SCORECARD-6.4** THE SYSTEM SHALL state beside R9 that seed clones registry units and not
@@ -245,7 +247,7 @@ feature ships, so that the new numbers replace the old ones in the same rows.
   `git worktree prune`.
 - **SCORECARD-8.8** IF a row has fewer than 3 valid samples in an arm after a run THEN THE SYSTEM
   SHALL keep that row's previous values and metadata, and the run's evidence SHALL say which
-  samples were void and why.
+  samples were void and why (agent-decided; ledger A23).
 
 ## 9. The first run replaces today's headline
 
