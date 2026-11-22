@@ -178,8 +178,8 @@ _Requirements: SCORECARD-7.1_
 
 **Depends-on:** Task 1
 
-- [ ] **Step 1: Write the failing check.** Write `$DRY/scorecard.env` with `MAIN=$DRY/main`, extract `$DRY/rerun.zsh`, then run `zsh -ec 'source /private/tmp/sc-dry/dry.env; [ -s $DRY/rerun.zsh ]; source $DRY/rerun.zsh; whence preflight; preflight'`. Expect a failure, because the block is absent and `rerun.zsh` is empty.
-- [ ] **Step 2: Write the block.** Write it as design "Rerun preflight" lays out:
+- [x] **Step 1: Write the failing check.** Write `$DRY/scorecard.env` with `MAIN=$DRY/main`, extract `$DRY/rerun.zsh`, then run `zsh -ec 'source /private/tmp/sc-dry/dry.env; [ -s $DRY/rerun.zsh ]; source $DRY/rerun.zsh; whence preflight; preflight'`. Expect a failure, because the block is absent and `rerun.zsh` is empty.
+- [x] **Step 2: Write the block.** Write it as design "Rerun preflight" lays out:
   - the block defines `preflight`;
   - source the env file;
   - resolve `TC` in `$MAIN` (as `resolve_toolchain` does), then run `RUSTUP_TOOLCHAIN=$TC cargo hive doctor --json`, so doctor records the measured workspace's toolchain (P2);
@@ -195,10 +195,10 @@ _Requirements: SCORECARD-7.1_
   - the `cleanup_worktrees` trap (`git -C $MAIN worktree remove --force` for each of `$WTS`, then `git -C $MAIN worktree prune`).
 
   Every quoted command line is written exactly as it runs, with placeholders only.
-- [ ] **Step 3: Run the check.** Run Step 1's command and expect exit 0, with `$RUN/load-start.txt` present.
+- [x] **Step 3: Run the check.** Run Step 1's command and expect exit 0, with `$RUN/load-start.txt` present.
   - Then rename `--build-cmd` to `--build-cmdx` in a scratch copy of the block and rerun it. Expect it to stop with a message naming the flag.
   - Then run the block with `WTS=($DRY/x)` after `git -C $DRY/main worktree add --detach $DRY/x HEAD`, and send INT. Expect `git -C $DRY/main worktree list` to show only the main.
-- [ ] **Step 4: Commit.** `git commit -am "docs(scorecard): add the rerun preflight and worktree cleanup trap"`
+- [x] **Step 4: Commit.** `git commit -am "docs(scorecard): add the rerun preflight and worktree cleanup trap"`
 
 _Requirements: SCORECARD-8.1, SCORECARD-8.2, SCORECARD-8.3, SCORECARD-8.7_
 
