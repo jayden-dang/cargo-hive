@@ -122,8 +122,8 @@ succeed (plan-review F3, P1).
 
 **Depends-on:** none
 
-- [ ] **Step 1: Write the failing check.** `test -f docs/scorecard.md && [ "$(grep -cE '^\| R([1-9]|10) \|' docs/scorecard.md)" = 20 ] && [ "$(grep -o 'open — operator' docs/scorecard.md | wc -l | tr -d ' ')" = 20 ] && grep -q '^## Targets' docs/scorecard.md && grep -q 'zsh on macOS' docs/scorecard.md && ! grep -nE '/Users/|/private/|SCORECARD-|\$HOME' docs/scorecard.md`. Run it and expect a non-zero exit, because the file is absent.
-- [ ] **Step 2: Write the file.** Write the header paragraph, then the Values and Provenance tables, with one line per R1–R10 in each and the Metric names from SCORECARD-1.1. Fill the cells:
+- [x] **Step 1: Write the failing check.** `test -f docs/scorecard.md && [ "$(grep -cE '^\| R([1-9]|10) \|' docs/scorecard.md)" = 20 ] && [ "$(grep -o 'open — operator' docs/scorecard.md | wc -l | tr -d ' ')" = 20 ] && grep -q '^## Targets' docs/scorecard.md && grep -q 'zsh on macOS' docs/scorecard.md && ! grep -nE '/Users/|/private/|SCORECARD-|\$HOME' docs/scorecard.md`. Run it and expect a non-zero exit, because the file is absent.
+- [x] **Step 2: Write the file.** Write the header paragraph, then the Values and Provenance tables, with one line per R1–R10 in each and the Metric names from SCORECARD-1.1. Fill the cells:
   - Every measured value cell reads `not yet measured`, and every target slot reads `open — operator`.
   - Target set is empty.
   - Source cells: R1–R5 name `cold_build_ms_median` / `seeded_total_ms_median`; R6 reads `by hand (outside bench)`; R7 reads `by hand (outside bench): free space`; R8 reads `by hand (outside bench): cargo -v after gc --checkout`; R9 reads `by hand (outside bench): cargo -v after probe`; R10 reads `listed`.
@@ -131,8 +131,8 @@ succeed (plan-review F3, P1).
   - Add `## Targets`: the operator sets a target by editing that row's Target cell and its Target set date in a plain commit, and a rerun never touches either.
   - State once, above `## Rerun`, that the Rerun blocks are zsh on macOS.
   - Add `## Notes per row` and `## What a run touches` as the design section "Values and Provenance tables" and "Rerun preflight" lay them out. The R6, R7 and R8 notes go in here; the R9 note is added in Task 7.
-- [ ] **Step 3: Run the check.** Run Step 1's command and expect exit 0. Also run `grep -cE '^\| R([1-9]|10) \|' docs/scorecard.md` and expect 20 (header rows do not match).
-- [ ] **Step 4: Commit.** `git add docs/scorecard.md && git commit -m "docs(scorecard): add the worktree scorecard's tables with open target slots"`
+- [x] **Step 3: Run the check.** Run Step 1's command and expect exit 0. Also run `grep -cE '^\| R([1-9]|10) \|' docs/scorecard.md` and expect 20 (header rows do not match).
+- [x] **Step 4: Commit.** `git add docs/scorecard.md && git commit -m "docs(scorecard): add the worktree scorecard's tables with open target slots"`
 
 _Requirements: SCORECARD-1.1, SCORECARD-1.2, SCORECARD-1.3, SCORECARD-1.4, SCORECARD-1.5, SCORECARD-1.6, SCORECARD-1.7, SCORECARD-1.8, SCORECARD-1.9, SCORECARD-10.1_
 
