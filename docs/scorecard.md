@@ -63,7 +63,7 @@ The operator sets a target by editing that row's Target cell and its Target set 
 - The main checkout's worktree metadata under its git dir. `git worktree prune` on the main also drops the stale metadata of any other worktree of that main whose directory is unmounted or gone.
 - A scratch directory named `scorecard` under the temp dir.
 
-Nothing else is touched. Untracked files the measured repo needs to build, such as an `.env`, are copied into each worktree from the local env file's list. A `kill -9` skips the cleanup traps and leaves those copied `.env` files under the scratch directory until they are removed by hand. Every removal is guarded: `bench_row` accepts only the rows R1 to R5, and `safe_rm` refuses any path whose resolved form is not strictly under `$TMPDIR/scorecard/`.
+Nothing else is touched. Untracked files the measured repo needs to build, such as an `.env`, are copied into each worktree from the local env file's list. A `kill -9` skips the cleanup traps and leaves those copied `.env` files under the scratch directory until they are removed by hand. Every recursive removal is guarded: `bench_row` accepts only the rows R1 to R5, and `safe_rm` refuses any path whose resolved form is not strictly under `$TMPDIR/scorecard/`.
 
 The Rerun blocks are zsh on macOS. Linux is out of scope.
 
@@ -89,16 +89,16 @@ SCORECARD_NUMBERS_PUBLIC=
 
 - `MAIN`: the measured repo's main checkout; every worktree is added from it.
 - `SCORECARD_N`: samples per arm; 4 when unset.
-- `P`: the package the by-hand rows and R5 build; letters, digits, `_` and `-` only.
-- `FILE`: the `.rs` file in `P` that the R6 edit appends to; relative, no `..` segment.
+- `P`: the package the by-hand rows and R5 build; required; letters, digits, `_` and `-` only.
+- `FILE`: required; the `.rs` file in `P` that the R6 edit appends to; relative, no `..` segment.
 - `PROBE`: the file the R9 probe changes, a `.sqlx/*.json` query file or else a `.env`; relative, no `..` segment; empty where the repo has none.
 - `WORKSPACE_ENV`: a note of the variables the measured repo needs; no block reads it, the `export` line beside it is what takes effect (for an sqlx repo, `export SQLX_OFFLINE=true`).
 - `UNTRACKED_COPY`: space-separated relative paths without spaces or `..` segments, such as `.env`, copied from the main into each worktree.
 - `SCORECARD_NUMBERS_PUBLIC`: the operator's switch to let `record` write the measured values into this file. Unset by default; the operator sets it to `yes` only after agreeing that the measured repo's numbers may be committed.
 
-`preflight` rejects a `P` that is not letters, digits, `_` and `-`, and a `FILE`, `PROBE` or `UNTRACKED_COPY` entry that is absolute or has a `..` segment.
+`preflight` rejects an empty `P` or `FILE`, a `P` that is not letters, digits, `_` and `-` or that starts with `-`, and a `FILE`, `PROBE` or `UNTRACKED_COPY` entry that is absolute or has a `..` segment. A failed preflight must be fixed and rerun before anything else: it sets `PREFLIGHT_OK` only when every check passed, and `bench_row` and `pipeline` refuse to run without it and re-check these inputs themselves.
 
-The evidence directory is named for the date preflight runs on. A run that crosses midnight would start a second directory in a new shell. To keep one directory, finish before midnight, or set `RUN` to the earlier directory (`RUN=.skills/verify/<date>-scorecard`) before `preflight`: preflight keeps a `RUN` already set in the shell, so unset it for a new run. A second preflight overwrites `load-start.txt`, and `summarize` writes the date it runs on. When resuming, run only the pipelines still missing: the pipelines block moves an existing `pipe.jsonl` aside.
+The evidence directory is named for the date preflight runs on. A run that crosses midnight would start a second directory in a new shell. To keep one directory, finish before midnight, or set `RUN` to the earlier directory (`RUN=.skills/verify/<date>-scorecard`) before `preflight`: preflight keeps a `RUN` already set in the shell, including a leftover one from an earlier run in the same shell, so `unset RUN` before a new run. A second preflight overwrites `load-start.txt`, and `summarize` writes the date it runs on. When resuming, run only the pipelines still missing: the pipelines block moves an existing `pipe.jsonl` aside.
 
 ```zsh
 source .skills/verify/scorecard.env
@@ -118,6 +118,15 @@ rel_ok() {
   [[ $1 != /* && $1 != .. && $1 != ../* && $1 != */../* && $1 != */.. ]]
 }
 
+check_inputs() {
+  local v
+  [[ $P =~ '^[A-Za-z0-9][A-Za-z0-9_-]*$' ]] || { print -u2 'P must be set: letters, digits, _ and -, starting with a letter or digit'; return 1 }
+  [[ -n $FILE ]] && rel_ok "$FILE" && rel_ok "$PROBE" || { print -u2 'FILE must be set, and FILE and PROBE must be relative paths without a .. segment'; return 1 }
+  for v in ${=UNTRACKED_COPY}; do
+    rel_ok $v || { print -u2 "an UNTRACKED_COPY entry must be a relative path without a .. segment: $v"; return 1 }
+  done
+}
+
 safe_rm() {
   local root=${${TMPDIR:A}%/}/scorecard
   [[ -n $TMPDIR && -n $1 && ${1:A} == $root/?* ]] || { print -u2 "refusing to remove $1: not strictly under $root/"; return 1 }
@@ -125,18 +134,15 @@ safe_rm() {
 }
 
 preflight() {
-  local flag v src vars help hv hbin prof
+  local flag v src vars help hv hbin prof msg
+  unset PREFLIGHT_OK
   : ${SCORECARD_N:=4}
   [[ -n $MAIN ]] || { print -u2 'MAIN is empty: set it in the env file'; return 1 }
   [[ -n $TMPDIR ]] || { print -u2 'TMPDIR is empty'; return 1 }
   : ${RUN:=.skills/verify/$(date +%F)-scorecard}
   mkdir -p $RUN
   rm -f $RUN/preflight-fail.txt
-  [[ -z $P || $P =~ '^[A-Za-z0-9_-]+$' ]] || { print "preflight stopped: P must be letters, digits, _ and -" | tee $RUN/preflight-fail.txt >&2; return 1 }
-  rel_ok "$FILE" && rel_ok "$PROBE" || { print "preflight stopped: FILE and PROBE must be relative paths without a .. segment" | tee $RUN/preflight-fail.txt >&2; return 1 }
-  for v in ${=UNTRACKED_COPY}; do
-    rel_ok $v || { print "preflight stopped: an UNTRACKED_COPY entry must be a relative path without a .. segment: $v" | tee $RUN/preflight-fail.txt >&2; return 1 }
-  done
+  msg=$(check_inputs 2>&1) || { print "preflight stopped: $msg" | tee $RUN/preflight-fail.txt >&2; return 1 }
   sysctl -n vm.loadavg > $RUN/load-start.txt || { print "preflight stopped: could not read the load average" | tee $RUN/preflight-fail.txt >&2; return 1 }
   print "Quiet machine required: no other builds or heavy work running."
 
@@ -207,6 +213,7 @@ preflight() {
     fi
   done
   print "preflight passed: toolchain ${TC:-default}, evidence under $RUN"
+  PREFLIGHT_OK=1
 }
 ```
 
@@ -227,6 +234,8 @@ bench_row() {
   local -a cargs cold seeded
   : ${SCORECARD_N:=4}
   [[ $row =~ '^R[1-5]$' ]] || { print -u2 "unknown row '$row': expected R1 to R5"; return 1 }
+  [[ -n $PREFLIGHT_OK ]] || { print -u2 'refusing to run: no passing preflight in this shell'; return 1 }
+  check_inputs || return 1
   [[ -n $RUN && -n $TMPDIR && -n $MAIN ]] || { print -u2 'run preflight first'; return 1 }
   case $shape in
     build) cargs=(build) ;;
@@ -382,6 +391,8 @@ pipeline() {
   local r7=null clone=null unm=null r6=null void=null r8u=null r8f=null r8o=null r8v=null r9=null probe_void cls st
   local -a rows gc_env
   [[ $arm == (cold|seeded) && $i == <-> ]] || { print -u2 'usage: pipeline cold|seeded <i>'; return 1 }
+  [[ -n $PREFLIGHT_OK ]] || { print -u2 'refusing to run: no passing preflight in this shell'; return 1 }
+  check_inputs || return 1
   [[ -n $RUN && -n $TMPDIR && -n $MAIN && -n $P && -n $FILE ]] || { print -u2 'run preflight first, with P and FILE set'; return 1 }
 
   safe_rm $wt || { pipeline_abort $arm $i "could not clear $wt"; return 1 }
