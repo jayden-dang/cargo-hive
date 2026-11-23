@@ -1,7 +1,8 @@
 # Tasks: Warm slot pool
 
 Feature code: SLOTS
-Status: Draft
+Status: Approved
+Approved: 2026-11-23 13:39 +07 by Jayden, who replied "approve" on the spec sheet at `99fcdb1faeadd60fcb3dd86047127e27d03c8a40` (recorded in `.skills/_pending-warm_slot_pool/auto/operator-reply.md`).
 Date: 2026-11-23
 Execution-mode: unset
 Requirements: ./requirements.md
