@@ -10,6 +10,7 @@
 Feature code: SCORECARD
 Status: Approved
 Approved: 2026-11-22 12:46 by the operator (Jayden), "approve" on the spec sheet for #16 at feat/worktree-scorecard 226a925, relayed by the conductor (/Users/jayden/Developer/experiments/cargo-zip/.skills/_pending-worktree-scorecard/auto/operator-reply.md). The reply approves the sheet as a whole; the Open Questions O1 and O2 stay open as listed, and Task 9 still waits for the operator's own go-ahead.
+Re-approved: 2026-11-23 by the operator (Jayden), "đồng ý" on the realign changes listed in the PR #38 description, with the 8.7 and Task 11 fixes of this change.
 Date: 2026-11-22
 Execution-mode: continuous
 Delivered-by: PR #38
@@ -457,7 +458,7 @@ below record it as done; the evidence is in `.skills/SCORECARD/close-fix-report.
 `.skills/SCORECARD/dryrun3-report.md` (local).
 
 - [x] **Step 1: Validation.** `check_inputs` rejects an empty or malformed `P`, an empty `FILE`, and an absolute or `..` `FILE`, `PROBE` or `UNTRACKED_COPY` entry; `bench_row` accepts R1 to R5 only; `bench_row` and `pipeline` refuse without `PREFLIGHT_OK`. Checked in dry-run shells, one per bad input (commits 97181bd, 94f9628).
-- [x] **Step 2: Interrupt.** A real INT during a child stops the run: cleanup, flag, 130 from the wrappers, loops break, `preflight` clears the flag. Checked by dry run 3 at 99186de (D1 to D6, all PASS); the preflight-`doctor` gap is requirements O3.
+- [x] **Step 2: Interrupt.** A real INT during a child stops the run: cleanup, flag, 130 from the wrappers, loops break, `preflight` clears the flag. Checked by dry run 3 at 99186de (D1 to D8 pass, plus the one minor, D9); the preflight-`doctor` gap is requirements O3.
 - [x] **Step 3: Load.** `summarize` writes `load-end.txt` and warns on a high or missing start load. Checked in the dry harness (stubbed load values 20.00 and a missing file warn; 8.99 and 5.75 do not).
 - [x] **Step 4: Commits.** `docs(scorecard): address the whole-branch review`, `docs(scorecard): make bench_row and pipeline refuse after a failed preflight`, `docs(scorecard): stop the run when it is interrupted`.
 

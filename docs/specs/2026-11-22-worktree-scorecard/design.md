@@ -3,6 +3,7 @@
 Feature code: SCORECARD
 Status: Approved
 Approved: 2026-11-22 12:46 by the operator (Jayden), "approve" on the spec sheet for #16 at feat/worktree-scorecard 226a925, relayed by the conductor (/Users/jayden/Developer/experiments/cargo-zip/.skills/_pending-worktree-scorecard/auto/operator-reply.md). The reply approves the sheet as a whole; the Open Questions O1 and O2 stay open as listed, and Task 9 still waits for the operator's own go-ahead.
+Re-approved: 2026-11-23 by the operator (Jayden), "đồng ý" on the realign changes listed in the PR #38 description, with the 8.7 and Task 11 fixes of this change.
 Date: 2026-11-22
 Realigned: 2026-11-23, to docs/scorecard.md at 99186de and .skills/SCORECARD/implementation-notes.md. Approval above is unchanged.
 Requirements: ./requirements.md

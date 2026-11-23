@@ -3,6 +3,7 @@
 Feature code: SCORECARD
 Status: Implemented
 Approved: 2026-11-22 12:46 by the operator (Jayden), "approve" on the spec sheet for #16 at feat/worktree-scorecard 226a925, relayed by the conductor (/Users/jayden/Developer/experiments/cargo-zip/.skills/_pending-worktree-scorecard/auto/operator-reply.md). The reply approves the sheet as a whole; the Open Questions O1 and O2 stay open as listed, and Task 9 still waits for the operator's own go-ahead.
+Re-approved: 2026-11-23 by the operator (Jayden), "đồng ý" on the realign changes listed in the PR #38 description, with the 8.7 and Task 11 fixes of this change.
 Date: 2026-11-22
 Realigned: 2026-11-23, to what was built (docs/scorecard.md at 99186de). O1 and O2 are answered on ticket #16 (2026-11-22); see Open Questions.
 
@@ -248,8 +249,9 @@ feature ships, so that the new numbers replace the old ones in the same rows.
   evidence is local to the measuring machine: git ignores the directory, no clone can open it, and
   the committed values are copies of that run's `summary.txt`.
 - **SCORECARD-8.7** WHEN the steps make worktrees for a run THE SYSTEM SHALL have them removed
-  with `git worktree remove` at the end of the run, followed by `git worktree prune`. WHEN the run
-  is interrupted (Ctrl-C) THE SYSTEM SHALL do the same cleanup and then stop the run: the
+  with `git worktree remove` at the end of the run, and on an aborted run as well, followed by
+  `git worktree prune`. WHEN the run is interrupted (Ctrl-C) THE SYSTEM SHALL do the same cleanup
+  and then stop the run: the
   interrupt trap sets `SCORECARD_INTERRUPTED`, `bench_row` and `pipeline` return exit status 130
   and refuse to start while it is set, and the doc's loops break. `preflight` clears the flag.
   The exit and interrupt traps are separate, and the interrupt trap does not exit an interactive
