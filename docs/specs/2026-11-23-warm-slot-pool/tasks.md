@@ -269,11 +269,11 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 
 **Depends-on:** Task 4.
 
-- [ ] Add failing tests for missing expected per-root evidence, row present but skipped, shared/outside/nested roots, held lock, scan fault, unsupported/undecided root and cancellation. Include replaced inode, omitted role, coincident versus split target/build roots, both GC undecided findings and proved initial absence.
-- [ ] Run `cargo test -p cargo-hive --test checkout_gc` and observe the missing positive-verdict seam. Keep the standalone receipt and exit tests as guards.
-- [ ] Extract the typed runner from emission. Refuse strict discovery/ownership faults before GC effects. Check actual root identity under the acquired Cargo lock before traversal/deletion. Return typed completion for each expected root and carry incomplete verdicts without changing standalone snapshots, emission or exits.
-- [ ] Re-run the scoped integration tests and `cargo test -p cargo-hive-gc`. Compare the unchanged standalone cases. Assert no mutation of skipped, unsafe or out-of-scope roots. A valid earlier scoped effect may persist when a later root fails; the strict verdict must be incomplete, with no readiness eligibility.
-- [ ] Commit as `refactor(gc): expose positive scoped cleanup evidence`.
+- [x] Add failing tests for missing expected per-root evidence, row present but skipped, shared/outside/nested roots, held lock, scan fault, unsupported/undecided root and cancellation. Include replaced inode, omitted role, coincident versus split target/build roots, both GC undecided findings and proved initial absence.
+- [x] Run `cargo test -p cargo-hive --test checkout_gc` and observe the missing positive-verdict seam. Keep the standalone receipt and exit tests as guards.
+- [x] Extract the typed runner from emission. Refuse strict discovery/ownership faults before GC effects. Check actual root identity under the acquired Cargo lock before traversal/deletion. Return typed completion for each expected root and carry incomplete verdicts without changing standalone snapshots, emission or exits.
+- [x] Re-run the scoped integration tests and `cargo test -p cargo-hive-gc`. Compare the unchanged standalone cases. Assert no mutation of skipped, unsafe or out-of-scope roots. A valid earlier scoped effect may persist when a later root fails; the strict verdict must be incomplete, with no readiness eligibility.
+- [x] Commit as `refactor(gc): expose positive scoped cleanup evidence`.
 
 _Requirements: SLOTS-3.6, SLOTS-3.7, SLOTS-3.10_
 
