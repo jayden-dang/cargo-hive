@@ -5,6 +5,7 @@ Status: Approved
 Approved: 2026-11-23 13:39 +07 by Jayden, who replied "approve" on the spec sheet at `99fcdb1faeadd60fcb3dd86047127e27d03c8a40` (recorded in `.skills/_pending-warm_slot_pool/auto/operator-reply.md`).
 Date: 2026-11-23
 Execution-mode: continuous
+Delivery boundary for this integration: Tasks 1–4. The operator directed a stop after Task 4 and a local main merge and push on 2026-11-23. Tasks 5–10 remain approved and pending.
 Requirements: ./requirements.md
 Design: ./design.md
 
@@ -34,6 +35,7 @@ Design: ./design.md
 | `crates/state/src/slots.rs` | New strict layout 2 record, checked revisions, transition/outcome I/O with fault tests. |
 | `crates/platform/src/flock.rs` | Check inherited writer and credential descriptors and owner-controlled paths for slot state. |
 | `crates/platform/src/lib.rs` | Export slot-only platform support. |
+| `crates/platform/src/proc.rs` | Confirm both pipes finish for bounded slot Git probes. |
 | `crates/platform/src/slot.rs` | New local process instance, boot session and entropy helpers. |
 | `crates/platform/tests/slot_fence.rs` | New real macOS multi-process fence and child-lifetime proof. |
 | `crates/cargo/src/git.rs` | Slot-only bounded complete read-only Git identity, worktree and cleanliness facts. |
@@ -57,6 +59,8 @@ Design: ./design.md
 | `plugin/skills/hive/scripts/slot-handoff.sh` | New guide-owned fenced Git/mtime/foreground Cargo procedure. |
 | `README.md` | Document optional pool use beside the existing workflow. |
 | `docs/specs/2026-11-23-warm-slot-pool/verification.md` | New implementation-time runbook and proof procedure for real pair measurements. |
+| `docs/roadmap/roads/ROAD-17.md` | Approved roadmap card recording the dirty-return decision. |
+| `docs/roadmap/roads/ROAD-17.notes.md` | Approved shaping notes that record the decision and its evidence. |
 
 Retrieval at the file-map boundary was advisory. It found OWNS paths for 15
 of 16 registered codes and no active observations. The SLOTS cluster had only
@@ -164,6 +168,7 @@ _Requirements: SLOTS-1.3, SLOTS-1.4, SLOTS-4.2, SLOTS-4.3, SLOTS-4.8, SLOTS-5.3,
 ### Task 4: Refuse a dirty or uncertain return without checkout effects
 
 **Files:**
+- Modify: `crates/platform/src/proc.rs`
 - Modify: `crates/cargo/src/git.rs`
 - Create: `crates/cargo-hive/src/slot/inspect.rs`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
@@ -179,12 +184,12 @@ _Requirements: SLOTS-1.3, SLOTS-1.4, SLOTS-4.2, SLOTS-4.3, SLOTS-4.8, SLOTS-5.3,
 
 **Depends-on:** Task 3.
 
-- [ ] Write subprocess cases for staged and unstaged tracked edits, unmerged state, ignored/untracked `.env` and `.sqlx`, disguised material in retained roots and active writers. Assert bytes, index, mtimes, outputs and original hold are unchanged on refusal.
-- [ ] Exercise main, owner lane, replacement inode, symlink and overlapping roots. Prove the slot reader accepts complete NUL records at the exact output cap and refuses a plausible complete-looking retained prefix at cap+1, missing terminal NUL and incomplete owner inventories.
-- [ ] Check deliberate resolution, clean return, lost reply and identical replay from a new process. Re-read the retired generation and confirm old discovery/classification behavior.
-- [ ] Run `cargo test -p cargo-hive --test slots` and `cargo test -p cargo-hive-cargo`. Observe missing slot-only inspection and clean-return checks.
-- [ ] Implement the checked, read-only preflight and transition. Confine root exceptions to positively verified generated roots and perform no cleanup on refusal.
-- [ ] Repeat the tests and inspect refused checkout and state. Commit as `feat(slot): preserve changes on refused returns`.
+- [x] Write subprocess cases for staged and unstaged tracked edits, unmerged state, ignored/untracked `.env` and `.sqlx`, disguised material in retained roots and active writers. Assert bytes, index, mtimes, outputs and original hold are unchanged on refusal.
+- [x] Exercise main, owner lane, replacement inode, symlink and overlapping roots. Prove the slot reader accepts complete NUL records at the exact output cap and refuses a plausible complete-looking retained prefix at cap+1, missing terminal NUL and incomplete owner inventories.
+- [x] Check deliberate resolution, clean return, lost reply and identical replay from a new process. Re-read the retired generation and confirm old discovery/classification behavior.
+- [x] Run `cargo test -p cargo-hive --test slots` and `cargo test -p cargo-hive-cargo`. Observe missing slot-only inspection and clean-return checks.
+- [x] Implement the checked, read-only preflight and transition. Confine root exceptions to positively verified generated roots and perform no cleanup on refusal.
+- [x] Repeat the tests and inspect refused checkout and state. Commit as `feat(slot): preserve changes on refused returns`.
 
 _Requirements: SLOTS-1.5, SLOTS-1.9, SLOTS-2.1, SLOTS-2.2, SLOTS-2.3, SLOTS-2.4, SLOTS-2.5_
 
