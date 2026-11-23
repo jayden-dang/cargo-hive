@@ -97,8 +97,16 @@ pub(super) fn dispatch(command: SlotCommand) -> i32 {
                 |state| begin(state, &request, control_fd),
             );
         }
-        SlotCommand::StepCheck { scope, out, .. } => {
-            return unavailable("slot step-check", Some(scope.repo), out.json);
+        SlotCommand::StepCheck {
+            scope,
+            generation,
+            attempt,
+            lock_fd,
+            out,
+        } => {
+            return run_scoped("slot step-check", &scope.repo, out.json, |state| {
+                step_check(state, &scope, generation, attempt, lock_fd)
+            });
         }
         SlotCommand::Producer(op) => {
             return run_scoped(
@@ -108,11 +116,12 @@ pub(super) fn dispatch(command: SlotCommand) -> i32 {
                 |state| producer(state, &op),
             );
         }
-        SlotCommand::Ready { request, .. } => {
-            return unavailable(
+        SlotCommand::Ready { request, attempt } => {
+            return run_scoped(
                 "slot ready",
-                Some(request.operation.scope.repo),
+                &request.operation.scope.repo,
                 request.operation.out.json,
+                |state| ready(state, &request, attempt),
             );
         }
         SlotCommand::Return(op) => {
@@ -1300,9 +1309,9 @@ fn begin(
                 ))?;
             }
             tx.sync_slots(&saved)?;
-            return Ok(ReturnPlan::Replay(begin_result(
+            return Ok(ReturnPlan::Replay(Box::new(begin_result(
                 COMMAND, pool, outcome, false,
-            )));
+            ))));
         }
         if slot.generation != key.generation
             || !matches!(&slot.phase, Phase::Reserved { lease } if lease.credential == input.credential)
@@ -1323,7 +1332,7 @@ fn begin(
         })))
     })?;
     let snapshot = match plan {
-        ReturnPlan::Replay(result) => return Ok(result),
+        ReturnPlan::Replay(result) => return Ok(*result),
         ReturnPlan::Inspect(snapshot) => snapshot,
     };
     let pool = &snapshot.pool;
@@ -1440,9 +1449,769 @@ fn begin_result(command: &'static str, pool: &Pool, outcome: &Outcome, live: boo
     result
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StepRequest {
+    auth: PreparationInput,
+    step: PreparationStep,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PreparationStep {
+    Checkout,
+    CheckoutDone,
+    Seed,
+}
+
+struct PreparationFence<'a> {
+    state: &'a State,
+    scope: &'a SlotScopeArgs,
+    registered: VerifiedRepo,
+    generation: u64,
+    attempt: u64,
+    auth: PreparationInput,
+    runner: Runner,
+    fd: i32,
+    inherited: std::os::fd::OwnedFd,
+    lock_id: FileIdentity,
+    _guard: cargo_hive_platform::flock::InheritedLockGuard,
+}
+
+impl<'a> PreparationFence<'a> {
+    fn acquire(
+        state: &'a State,
+        scope: &'a SlotScopeArgs,
+        generation: u64,
+        attempt: u64,
+        fd: u32,
+        auth: PreparationInput,
+    ) -> Result<Self, Refusal> {
+        if !slots::hex(&scope.pool, 32)
+            || !(1..=2).contains(&scope.slot)
+            || attempt == 0
+            || !slots::hex(&auth.credential, KEY_HEX_LEN)
+            || !slots::hex(&auth.nonce, KEY_HEX_LEN)
+        {
+            return Err(producer_fence_refusal());
+        }
+        let runner = producer_runner(&auth.nonce)?;
+        let registered = verify_operation_repo(state, &scope.repo)?;
+        let path = state
+            .root()
+            .join(LOCK_NAMESPACE)
+            .join(&scope.pool)
+            .join(Slot::lock_name_for(scope.slot));
+        let (independent, lock_id) =
+            slots::open_slot_lock(&path).map_err(|_| producer_fence_refusal())?;
+        if try_exclusive(&independent)
+            .map_err(|_| producer_fence_refusal())?
+            .is_some()
+        {
+            return Err(producer_fence_refusal());
+        }
+        let fd = i32::try_from(fd)
+            .ok()
+            .filter(|fd| *fd > 2)
+            .ok_or_else(producer_fence_refusal)?;
+        let inherited = duplicate_inherited_fd(fd).map_err(|_| producer_fence_refusal())?;
+        let identity = LockFileIdentity {
+            dev: lock_id.dev,
+            ino: lock_id.ino,
+        };
+        let InheritedLock::Acquired(guard) = try_lock_inherited(inherited.as_fd(), identity)
+            .map_err(|_| producer_fence_refusal())?
+        else {
+            return Err(producer_fence_refusal());
+        };
+        Ok(Self {
+            state,
+            scope,
+            registered,
+            generation,
+            attempt,
+            auth,
+            runner,
+            fd,
+            inherited,
+            lock_id,
+            _guard: guard,
+        })
+    }
+
+    fn index(&self) -> usize {
+        usize::from(self.scope.slot - 1)
+    }
+
+    fn check<'s>(&self, slot: &'s Slot) -> Result<(&'s Lease, &'s Attempt), Refusal> {
+        let Phase::Preparing { lease, attempt } = &slot.phase else {
+            return Err(producer_fence_refusal());
+        };
+        if slot.generation != self.generation
+            || slot.lock_id != self.lock_id
+            || lease.credential != self.auth.credential
+            || attempt.attempt_id != self.attempt
+            || attempt.runner != self.runner
+        {
+            return Err(producer_fence_refusal());
+        }
+        let offset = attempt.lock_offset.ok_or_else(producer_fence_refusal)?;
+        verify_guide_lock(
+            &runner_instance(&self.runner),
+            self.fd,
+            LockFileIdentity {
+                dev: self.lock_id.dev,
+                ino: self.lock_id.ino,
+            },
+            self.inherited.as_fd(),
+            Some(offset),
+        )
+        .map_err(|_| producer_fence_refusal())?;
+        Ok((lease, attempt))
+    }
+
+    fn snapshot(&self, stage: AttemptStage) -> Result<ReturnScope, Refusal> {
+        with_slot_state(self.state, |tx| {
+            let (mut saved, index) = checked_pool(tx, self.state, self.scope, &self.registered)?;
+            let (_, attempt) = self.check(&saved.pools[index].slots[self.index()])?;
+            if attempt.stage != stage {
+                return Err(producer_fence_refusal());
+            }
+            Ok(ReturnScope {
+                pool: saved.pools.swap_remove(index),
+                registry: tx.read_slot_registry()?,
+                secondary_roots: self.state.slot_config()?.secondary_roots,
+            })
+        })
+    }
+
+    fn update(
+        &self,
+        snapshot: &ReturnScope,
+        update: impl FnOnce(&mut Slot) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        with_slot_state(self.state, |tx| {
+            let (mut saved, index) = checked_pool(tx, self.state, self.scope, &self.registered)?;
+            let pool = &saved.pools[index];
+            let slot = &pool.slots[self.index()];
+            if slot != &snapshot.pool.slots[self.index()]
+                || pool.profile != snapshot.pool.profile
+                || tx.read_slot_registry::<Registry>()? != snapshot.registry
+                || self.state.slot_config()?.secondary_roots != snapshot.secondary_roots
+            {
+                return Err(producer_fence_refusal());
+            }
+            self.check(slot)?;
+            update(&mut saved.pools[index].slots[self.index()])?;
+            commit_slot_update(tx, &mut saved)
+        })
+    }
+}
+
+fn prepare_stage(slot: &mut Slot, stage: AttemptStage) -> Result<(), Refusal> {
+    let Phase::Preparing { attempt, .. } = &mut slot.phase else {
+        return Err(producer_fence_refusal());
+    };
+    attempt.stage = stage;
+    Ok(())
+}
+
+fn step_check(
+    state: &State,
+    scope: &SlotScopeArgs,
+    generation: u64,
+    attempt: u64,
+    fd: u32,
+) -> Result<SlotResult, Refusal> {
+    let input = read_stdin_complete(1024, CREDENTIAL_DEADLINE, cancelled).map_err(|err| {
+        if err.kind() == io::ErrorKind::Interrupted {
+            StateError::Cancelled.into()
+        } else {
+            credential_refusal()
+        }
+    })?;
+    let input: StepRequest = serde_json::from_slice(&input).map_err(|_| credential_refusal())?;
+    let fence = PreparationFence::acquire(state, scope, generation, attempt, fd, input.auth)?;
+    let kind = match input.step {
+        PreparationStep::Checkout => {
+            let snapshot = fence.snapshot(AttemptStage::PermitIssued)?;
+            let slot = &snapshot.pool.slots[fence.index()];
+            let (lease, _) = fence.check(slot)?;
+            if slot.checkout_id.is_some()
+                || !slot_identity_present(state.root(), &snapshot.pool, slot)
+            {
+                return Err(Refusal::ReturnUncertain(
+                    "First checkout requires the exact unused slot path.",
+                ));
+            }
+            verify_no_checkout_ancestor(&snapshot.pool.root)?;
+            owner_worktree_inventory(
+                &snapshot.pool.root,
+                &snapshot.registry,
+                Some(&snapshot.pool),
+            )?;
+            inspect::reject_checkout_filters(&snapshot.pool.main)?;
+            verify_requested_tree(&snapshot.pool.main, &lease.requested_commit)?;
+            fence.update(&snapshot, |slot| {
+                if !slot_identity_present(state.root(), &snapshot.pool, slot) {
+                    return Err(producer_fence_refusal());
+                }
+                prepare_stage(slot, AttemptStage::CheckoutInProgress)
+            })?;
+            "checkout_permitted"
+        }
+        PreparationStep::CheckoutDone => {
+            let snapshot = fence.snapshot(AttemptStage::CheckoutInProgress)?;
+            let slot = &snapshot.pool.slots[fence.index()];
+            let (lease, _) = fence.check(slot)?;
+            let commit = &lease.requested_commit;
+            let mut candidate = snapshot.pool.clone();
+            let path = candidate.checkout_path(slot);
+            let checkout = new_checkout_identity(&path, &candidate.common_git_id.path)?;
+            let epoch = OutputEpoch {
+                pool_id: candidate.pool_id.clone(),
+                slot: slot.number,
+                checkout: checkout.clone(),
+            };
+            let evidence = first_root_evidence(&candidate.profile, &path, epoch)?;
+            let slot = &mut candidate.slots[fence.index()];
+            if slot.checkout_id.is_some() {
+                return Err(producer_fence_refusal());
+            }
+            slot.checkout_id = Some(checkout.clone());
+            slot.last_head = Some(commit.clone());
+            slot.producer = Producer::NeverBuilt {
+                evidence: Some(evidence.clone()),
+            };
+            inspect_prepared_checkout(&candidate, &snapshot, fence.index(), commit)?;
+            fence.update(&snapshot, |slot| {
+                slot.checkout_id = Some(checkout);
+                slot.last_head = Some(commit.clone());
+                slot.producer = Producer::NeverBuilt {
+                    evidence: Some(evidence),
+                };
+                prepare_stage(slot, AttemptStage::CheckoutVerified)
+            })?;
+            "checkout_verified"
+        }
+        PreparationStep::Seed => {
+            let mut snapshot = fence.snapshot(AttemptStage::CheckoutVerified)?;
+            let index = fence.index();
+            let slot = &snapshot.pool.slots[index];
+            let (lease, _) = fence.check(slot)?;
+            let commit = lease.requested_commit.clone();
+            let Producer::NeverBuilt {
+                evidence: Some(evidence),
+            } = &slot.producer
+            else {
+                return Err(producer_fence_refusal());
+            };
+            let evidence = evidence.clone();
+            let mut proof = inspect_prepared_checkout(&snapshot.pool, &snapshot, index, &commit)?;
+            fence.update(&snapshot, |slot| {
+                prepare_stage(slot, AttemptStage::SeedInProgress)
+            })?;
+            prepare_stage(
+                &mut snapshot.pool.slots[index],
+                AttemptStage::SeedInProgress,
+            )?;
+            proof.release_output_locks();
+            let parent = runner_instance(&fence.runner);
+            let cancel = || cancelled() || parent_instance().as_ref().ok() != Some(&parent);
+            let seed = crate::cli::initial_seed_for_slot(
+                state,
+                &proof,
+                evidence,
+                fence.generation,
+                &cancel,
+            )
+            .map_err(|err| {
+                if cancel() {
+                    Refusal::State(StateError::Cancelled)
+                } else {
+                    Refusal::ReturnUncertain(err)
+                }
+            })?;
+            let producer = Producer::SeedOnly {
+                evidence: seed.evidence,
+                generation: seed.generation,
+                profile: slots::ProfileBinding {
+                    id: snapshot.pool.profile.id.clone(),
+                    revision: snapshot.pool.profile.revision,
+                },
+                final_roots: seed.final_roots,
+                registry_units: seed.registry_units,
+            };
+            let mut candidate = snapshot.pool.clone();
+            candidate.slots[index].producer = producer.clone();
+            inspect_prepared_checkout(&candidate, &snapshot, index, &commit)?;
+            fence.update(&snapshot, |slot| {
+                slot.producer = producer;
+                prepare_stage(slot, AttemptStage::CheckoutVerified)
+            })?;
+            "initial_seed_verified"
+        }
+    };
+    Ok(SlotResult::new(
+        "slot step-check",
+        kind,
+        Some(scope.repo.clone()),
+        0,
+    ))
+}
+
+fn verify_requested_tree(main: &Path, commit: &str) -> Result<(), Refusal> {
+    let root = format!("{commit}^{{tree}}");
+    let output = Git::at(main)
+        .slot_read_only(
+            &[
+                "rev-list",
+                "--objects",
+                "--no-object-names",
+                "--missing=print",
+                &root,
+            ],
+            1024 * 1024,
+        )
+        .map_err(|err| git_error(main, err))?;
+    let mut lines = complete_git_lines(&output).ok_or_else(commit_refusal)?;
+    let valid = |line: &str| line.len() == commit.len() && slots::object_id(line);
+    if !lines.next().is_some_and(valid) || !lines.all(valid) {
+        return Err(commit_refusal());
+    }
+    Ok(())
+}
+
+fn new_checkout_identity(path: &Path, common: &Path) -> Result<slots::CheckoutIdentity, Refusal> {
+    let refuse = || {
+        Refusal::ReturnUncertain(
+            "Could not prove the newly provisioned detached checkout and Git administration path.",
+        )
+    };
+    let directory = owned_identity(path).ok_or_else(refuse)?;
+    let facts = git_scope(
+        path,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+            "--show-superproject-working-tree",
+        ],
+    )?;
+    let fields: Vec<_> = complete_git_lines(&facts).ok_or_else(refuse)?.collect();
+    let [top, admin, observed_common] = fields.as_slice() else {
+        return Err(refuse());
+    };
+    let admin = PathBuf::from(admin);
+    if path.as_os_str() != *top
+        || common.as_os_str() != *observed_common
+        || admin.parent() != Some(common.join("worktrees").as_path())
+    {
+        return Err(refuse());
+    }
+    let identity = slots::owner_directory(&admin).map_err(|_| refuse())?;
+    Ok(slots::CheckoutIdentity {
+        directory,
+        admin: GitIdentity::of(admin, &identity),
+    })
+}
+
+fn first_root_evidence(
+    profile: &PoolProfile,
+    path: &Path,
+    epoch: OutputEpoch,
+) -> Result<slots::EmptyEpoch, Refusal> {
+    let unproved = || {
+        Refusal::ReturnUncertain(
+            "The new checkout's first Cargo output roots are not proved empty.",
+        )
+    };
+    let invocation = profile.invocations.first().ok_or_else(unproved)?;
+    let root = |relative: &Path| {
+        let root = path.join(relative);
+        if canonical_worktree_path(&root).ok().as_ref() != Some(&root) {
+            return Err(unproved());
+        }
+        if !exists(&root).map_err(|_| unproved())? {
+            return Ok(slots::RootProof::Absent { path: root });
+        }
+        let identity = owned_identity(&root)
+            .filter(|identity| identity.dev == epoch.checkout.directory.dev)
+            .ok_or_else(unproved)?;
+        let mut entries = fs::read_dir(&root).map_err(|_| unproved())?;
+        if entries.next().is_some() {
+            return Err(unproved());
+        }
+        Ok(slots::RootProof::Empty {
+            root: slots::VerifiedRoot {
+                path: root,
+                identity,
+            },
+        })
+    };
+    let roots = OutputRoots {
+        target: root(&invocation.target_root)?,
+        build: root(&invocation.build_root)?,
+    };
+    Ok(slots::EmptyEpoch { epoch, roots })
+}
+
+fn inspect_prepared_checkout(
+    pool: &Pool,
+    scope: &ReturnScope,
+    index: usize,
+    commit: &str,
+) -> Result<CheckoutProof, Refusal> {
+    let slot = &pool.slots[index];
+    let identity = slot
+        .checkout_id
+        .as_ref()
+        .ok_or_else(producer_fence_refusal)?;
+    let proof = inspect_checkout(
+        &SlotScope {
+            pool,
+            slot,
+            registry: &scope.registry,
+            secondary_roots: &scope.secondary_roots,
+        },
+        &ExpectedCheckout {
+            identity,
+            head: Some(commit),
+        },
+    )?;
+    check_producer_inventory(&proof)?;
+    let records = owner_worktree_inventory(&pool.root, &scope.registry, Some(pool))?;
+    if !records
+        .iter()
+        .any(|record| record.path == proof.path && record.detached)
+    {
+        return Err(Refusal::ReturnUncertain(
+            "The prepared checkout is not detached at the requested commit.",
+        ));
+    }
+    let eligible = profile::eligible_producer(&slot.producer, slot.generation)?;
+    let roots = eligible.roots();
+    for invocation in &pool.profile.invocations {
+        let shape = InvocationInput {
+            profile: slots::ProfileBinding {
+                id: pool.profile.id.clone(),
+                revision: pool.profile.revision,
+            },
+            invocation: invocation.id.clone(),
+            argv: invocation.argv.clone(),
+            cwd: invocation.cwd.clone(),
+        };
+        profile::check_invocation(&pool.profile, &shape, &proof, &roots)?;
+    }
+    Ok(proof)
+}
+
+fn empty_gc_roots(evidence: &slots::EmptyEpoch) -> [cargo_hive_gc::checkout::RequiredRoot; 2] {
+    use cargo_hive_gc::checkout::{RequiredRoot, RootPresence, RootRole};
+    let convert = |role, proof: &slots::RootProof| match proof {
+        slots::RootProof::Absent { path } => RequiredRoot {
+            role,
+            path: path.clone(),
+            presence: RootPresence::InitiallyAbsent,
+        },
+        slots::RootProof::Empty { root } => RequiredRoot {
+            role,
+            path: root.path.clone(),
+            presence: RootPresence::InitiallyEmpty {
+                dev: root.identity.dev,
+                ino: root.identity.ino,
+            },
+        },
+    };
+    [
+        convert(RootRole::Target, &evidence.roots.target),
+        convert(RootRole::Build, &evidence.roots.build),
+    ]
+}
+
+fn seeded_gc_roots(
+    roots: &OutputRoots<RootExpectation>,
+) -> Result<[cargo_hive_gc::checkout::RequiredRoot; 2], Refusal> {
+    use cargo_hive_gc::checkout::{RequiredRoot, RootPresence, RootRole};
+    let convert = |role, proof: &RootExpectation| match proof {
+        RootExpectation::Present { root } => Ok(RequiredRoot {
+            role,
+            path: root.path.clone(),
+            presence: RootPresence::Present {
+                dev: root.identity.dev,
+                ino: root.identity.ino,
+            },
+        }),
+        RootExpectation::Absent { .. } => Err(producer_fence_refusal()),
+    };
+    Ok([
+        convert(RootRole::Target, &roots.target)?,
+        convert(RootRole::Build, &roots.build)?,
+    ])
+}
+
+fn ready(
+    state: &State,
+    request: &SlotLockedOperation,
+    attempt: u64,
+) -> Result<SlotResult, Refusal> {
+    const COMMAND: &str = "slot ready";
+    let op = &request.operation;
+    let key = request_key(
+        &op.scope,
+        op.generation,
+        OperationKind::Ready,
+        &op.op,
+        Some(attempt),
+    )?;
+    let fence = PreparationFence::acquire(
+        state,
+        &op.scope,
+        op.generation,
+        attempt,
+        request.lock_fd,
+        PreparationInput::read()?,
+    )?;
+    if let Some(result) = replay_ready(
+        state,
+        COMMAND,
+        &op.scope,
+        &key,
+        ReplayCredential {
+            credential: &fence.auth.credential,
+            runner: Some(&fence.runner),
+        },
+        &fence.registered,
+        false,
+    )? {
+        return Ok(result);
+    }
+    let mut snapshot = fence.snapshot(AttemptStage::CheckoutVerified)?;
+    let index = fence.index();
+    let slot = &snapshot.pool.slots[index];
+    let (lease, _) = fence.check(slot)?;
+    let lease = lease.clone();
+    let expected = match &slot.producer {
+        Producer::NeverBuilt {
+            evidence: Some(evidence),
+        } => empty_gc_roots(evidence),
+        Producer::SeedOnly { final_roots, .. } => seeded_gc_roots(final_roots)?,
+        _ => return Err(producer_fence_refusal()),
+    };
+    let mut proof =
+        inspect_prepared_checkout(&snapshot.pool, &snapshot, index, &lease.requested_commit)?;
+    fence.update(&snapshot, |slot| {
+        if slot.outcomes.len() >= MAX_OUTCOMES {
+            return Err(Refusal::OutcomeLimit);
+        }
+        if slot
+            .outcomes
+            .iter()
+            .any(|outcome| key.matches_identity(outcome))
+        {
+            return Err(producer_fence_refusal());
+        }
+        prepare_stage(slot, AttemptStage::GcInProgress)
+    })?;
+    prepare_stage(&mut snapshot.pool.slots[index], AttemptStage::GcInProgress)?;
+    proof.release_output_locks();
+    let parent = runner_instance(&fence.runner);
+    let cancel = || cancelled() || parent_instance().as_ref().ok() != Some(&parent);
+    let gc = crate::cli::checkout_gc_for_slot(state, &proof.path, &expected, &cancel).map_err(
+        |err| {
+            if err.is_cancelled() {
+                Refusal::State(StateError::Cancelled)
+            } else {
+                Refusal::ReturnUncertain(err.detail(&expected))
+            }
+        },
+    )?;
+    if gc.completed != expected
+        || gc.expected != expected
+        || gc.report.failed
+        || gc.report.cancelled
+        || cancel()
+    {
+        return Err(producer_fence_refusal());
+    }
+    let final_proof =
+        inspect_prepared_checkout(&snapshot.pool, &snapshot, index, &lease.requested_commit)?;
+    let outcome = Outcome {
+        pool_id: key.pool_id.into(),
+        slot: key.slot,
+        generation: key.generation,
+        operation: key.operation.into(),
+        kind: key.kind,
+        attempt_id: key.attempt_id,
+        request: OutcomeRequest::Ready {
+            runner: fence.runner.clone(),
+        },
+        credential: fence.auth.credential.clone(),
+        result: TransitionResult::Ready {
+            commit: lease.requested_commit.clone(),
+        },
+    };
+    let result = make_ready_result(
+        COMMAND,
+        &snapshot.pool,
+        &outcome,
+        Some(final_proof.path.clone()),
+    )?;
+    fence.update(&snapshot, |slot| {
+        slot.phase = Phase::Leased {
+            ready_commit: lease.requested_commit.clone(),
+            lease,
+        };
+        slot.outcomes.push(outcome);
+        Ok(())
+    })?;
+    Ok(result)
+}
+
+fn make_ready_result(
+    command: &'static str,
+    pool: &Pool,
+    outcome: &Outcome,
+    path: Option<PathBuf>,
+) -> Result<SlotResult, Refusal> {
+    let TransitionResult::Ready { commit } = &outcome.result else {
+        return Err(producer_fence_refusal());
+    };
+    let mut result = SlotResult::new(command, "ready", Some(pool.main.clone()), 0);
+    result.pool_id = Some(pool.pool_id.clone());
+    result.attempt = outcome.attempt_id;
+    result.transition = Some(SlotTransition {
+        slot: outcome.slot,
+        generation: outcome.generation,
+        phase: "leased",
+        commit: commit.clone(),
+        current: path.is_some(),
+    });
+    result.use_policy = path.as_ref().map(|_| "guide_guarded_cargo_only");
+    result.path = path;
+    Ok(result)
+}
+
+struct ReplayCredential<'a> {
+    credential: &'a str,
+    runner: Option<&'a Runner>,
+}
+
+fn replay_ready(
+    state: &State,
+    command: &'static str,
+    scope: &SlotScopeArgs,
+    key: &SlotRequestKey<'_>,
+    auth: ReplayCredential<'_>,
+    registered: &VerifiedRepo,
+    acknowledge: bool,
+) -> Result<Option<SlotResult>, Refusal> {
+    let slot_index = usize::from(key.slot - 1);
+    let lookup = |slot: &Slot| -> Result<Option<Outcome>, Refusal> {
+        let Some(outcome) = slot
+            .outcomes
+            .iter()
+            .find(|entry| key.matches_identity(entry))
+        else {
+            return Ok(None);
+        };
+        let OutcomeRequest::Ready {
+            runner: saved_runner,
+        } = &outcome.request
+        else {
+            return Ok(None);
+        };
+        if outcome.credential != auth.credential
+            || auth.runner.is_some_and(|runner| runner != saved_runner)
+        {
+            return Err(producer_fence_refusal());
+        }
+        Ok(Some(outcome.clone()))
+    };
+    let snapshot = with_slot_state(state, |tx| {
+        let (mut saved, index) = checked_pool(tx, state, scope, registered)?;
+        let Some(outcome) = lookup(&saved.pools[index].slots[slot_index])? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            outcome,
+            ReturnScope {
+                pool: saved.pools.swap_remove(index),
+                registry: tx.read_slot_registry()?,
+                secondary_roots: state.slot_config()?.secondary_roots,
+            },
+        )))
+    })?;
+    let Some((outcome, snapshot)) = snapshot else {
+        return Ok(None);
+    };
+    let pool = &snapshot.pool;
+    let slot = &pool.slots[slot_index];
+    let mut path = None;
+    if !acknowledge
+        && slot.generation == outcome.generation
+        && let Phase::Leased {
+            lease,
+            ready_commit,
+        } = &slot.phase
+        && lease.credential == auth.credential
+        && outcome.result
+            == (TransitionResult::Ready {
+                commit: ready_commit.clone(),
+            })
+    {
+        let checkout = pool.checkout_path(slot);
+        let identity = slot
+            .checkout_id
+            .as_ref()
+            .ok_or_else(producer_fence_refusal)?;
+        inspect::verify_checkout_scope(
+            &SlotScope {
+                pool,
+                slot,
+                registry: &snapshot.registry,
+                secondary_roots: &snapshot.secondary_roots,
+            },
+            &checkout,
+            &ExpectedCheckout {
+                identity,
+                head: Some(ready_commit),
+            },
+        )?;
+        if git_scope(&checkout, &["rev-parse", "--abbrev-ref", "HEAD"])? != b"HEAD\n" {
+            return Err(producer_fence_refusal());
+        }
+        path = Some(checkout);
+    }
+    with_slot_state(state, |tx| {
+        let (mut saved, index) = checked_pool(tx, state, scope, registered)?;
+        let current = &saved.pools[index];
+        if &current.slots[slot_index] != slot
+            || current.profile != pool.profile
+            || tx.read_slot_registry::<Registry>()? != snapshot.registry
+            || state.slot_config()?.secondary_roots != snapshot.secondary_roots
+            || (path.is_some() && !slot_identity_present(state.root(), pool, slot))
+        {
+            return Err(producer_fence_refusal());
+        }
+        tx.sync_slots(&saved)?;
+        let mut result = make_ready_result(command, pool, &outcome, path)?;
+        if acknowledge {
+            result.kind = "acknowledged";
+            saved.pools[index].slots[slot_index]
+                .outcomes
+                .retain(|entry| entry != &outcome);
+            commit_slot_update(tx, &mut saved)?;
+        }
+        Ok(Some(result))
+    })
+}
+
 enum ReturnPlan {
     Inspect(Box<ReturnScope>),
-    Replay(SlotResult),
+    Replay(Box<SlotResult>),
 }
 
 fn return_slot(
@@ -1498,7 +2267,9 @@ fn return_slot(
             if !matches_request(outcome) {
                 return Err(Refusal::Scope("The operation ID is already bound to a different request. Use the guide's exact original request.".into()));
             }
-            return replay(tx, &saved, pool, outcome).map(ReturnPlan::Replay);
+            return replay(tx, &saved, pool, outcome)
+                .map(Box::new)
+                .map(ReturnPlan::Replay);
         }
         if slot.generation != key.generation
             || !matches!(&slot.phase, Phase::Leased { lease, .. }
@@ -1519,7 +2290,7 @@ fn return_slot(
         })))
     })?;
     let snapshot = match plan {
-        ReturnPlan::Replay(result) => return Ok(result),
+        ReturnPlan::Replay(result) => return Ok(*result),
         ReturnPlan::Inspect(snapshot) => snapshot,
     };
     let pool = &snapshot.pool;
@@ -1648,6 +2419,22 @@ fn replay_outcome(
     let acknowledging = matches!(action, ReplayAction::Acknowledge);
     let input = SlotOperationInput::read()?;
     let registered = verify_operation_repo(state, &scope.repo)?;
+    if key.attempt_id.is_some()
+        && let Some(result) = replay_ready(
+            state,
+            command,
+            scope,
+            &key,
+            ReplayCredential {
+                credential: &input.credential,
+                runner: None,
+            },
+            &registered,
+            acknowledging,
+        )?
+    {
+        return Ok(result);
+    }
     with_slot_state(state, |tx| {
         let (mut saved, pool_index) = checked_pool(tx, state, scope, &registered)?;
         let pool = &saved.pools[pool_index];
@@ -1667,6 +2454,21 @@ fn replay_outcome(
                             | OperationKind::ProducerComplete
                     ) || (!acknowledging && outcome.kind == OperationKind::ProducerStart))
                     && outcome.credential == input.credential
+            })
+            .or_else(|| {
+                if acknowledging || key.attempt_id.is_some() {
+                    return None;
+                }
+                // The original begin request precedes allocation of its attempt ID.
+                // Only its historical result can be looked up without that ID.
+                slot.outcomes.iter().enumerate().find(|(_, outcome)| {
+                    outcome.kind == OperationKind::Begin
+                        && outcome.pool_id == key.pool_id
+                        && outcome.slot == key.slot
+                        && outcome.generation == key.generation
+                        && outcome.operation == key.operation
+                        && outcome.credential == input.credential
+                })
             })
             .ok_or_else(missing)?;
         let acknowledgement = acknowledging.then_some("acknowledged");

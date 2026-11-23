@@ -1553,7 +1553,6 @@ impl CheckoutGc {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
 #[derive(Debug)]
 pub(crate) struct SlotGcReport {
     pub(crate) expected: Vec<checkout::RequiredRoot>,
@@ -1561,7 +1560,6 @@ pub(crate) struct SlotGcReport {
     pub(crate) report: checkout::CheckoutReport,
 }
 
-#[cfg(all(test, target_os = "macos"))]
 #[derive(Debug)]
 pub(crate) struct SlotGcRefusal {
     pub(crate) expected: Vec<checkout::RequiredRoot>,
@@ -1569,7 +1567,34 @@ pub(crate) struct SlotGcRefusal {
     pub(crate) evidence: Box<SlotGcFailure>,
 }
 
-#[cfg(all(test, target_os = "macos"))]
+impl SlotGcRefusal {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.reason.code == 130
+    }
+    pub(crate) fn detail(&self, expected: &[checkout::RequiredRoot]) -> &'static str {
+        if self.expected != expected {
+            return "The requested cleanup roots changed.";
+        }
+        match &*self.evidence {
+            SlotGcFailure::Setup => "Could not establish scoped cleanup inputs and capabilities.",
+            SlotGcFailure::Discovery {
+                checkout_faults,
+                target_faults,
+                unresolved,
+            } if !checkout_faults.is_empty()
+                || !target_faults.is_empty()
+                || !unresolved.is_empty() =>
+            {
+                "Scoped checkout or Cargo root discovery was incomplete."
+            }
+            SlotGcFailure::Run(evidence) if evidence.expected() == expected => {
+                "Scoped cleanup could not prove both Cargo output roots complete."
+            }
+            _ => "Could not verify the scoped cleanup result.",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum SlotGcFailure {
     Setup,
@@ -1581,7 +1606,6 @@ pub(crate) enum SlotGcFailure {
     Run(checkout::EvidencedCheckoutReport),
 }
 
-#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn checkout_gc_for_slot(
     state: &State,
     path: &Path,
@@ -2394,9 +2418,200 @@ pub(crate) fn locate_checkout(
     Ok((repo, row, toolchain))
 }
 
-fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
+type SeedCheckout = (
+    registry::Repo,
+    discover::Checkout,
+    cargo_hive_cargo::toolchain::Toolchain,
+);
+
+fn run_selected_seed(
+    state: &State,
+    reg: &Registry,
+    cfg: &cargo_hive_state::Config,
+    caps: &cargo_hive_doctor::Capabilities,
+    selected: &SeedCheckout,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Option<Result<cargo_hive_seed::Outcome, cargo_hive_seed::Error>> {
     use cargo_hive_cargo::ctx::Ctx;
-    use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
+    use cargo_hive_doctor::Capability;
+    let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
+    let platform = platform::current().ok()?;
+    let (repo, row, toolchain) = selected;
+    let ctx = Ctx {
+        state,
+        fs: &*platform.fs,
+        cfg,
+        now: std::time::SystemTime::now(),
+        account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
+        repos: std::slice::from_ref(repo),
+        mains: &registered_mains,
+        liveness: cargo_hive_gc::liveness::liveness,
+    };
+    Some(cargo_hive_seed::run(
+        &ctx,
+        repo,
+        row,
+        toolchain,
+        caps.unit_layout_or_flat(),
+        cancel,
+    ))
+}
+
+pub(crate) fn initial_seed_for_slot(
+    state: &State,
+    proof: &crate::slot::CheckoutProof,
+    evidence: cargo_hive_state::slots::EmptyEpoch,
+    generation: u64,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<cargo_hive_state::slots::SeedEvidence, &'static str> {
+    use cargo_hive_state::slots::{
+        FileIdentity, OutputRoots, RootExpectation, RootProof, SeedEvidence, VerifiedRoot,
+    };
+    let refused = "Initial seed could not prove complete registry-only placement in the new slot.";
+    let root_path = |proof: &RootProof| match proof {
+        RootProof::Absent { path } => path.clone(),
+        RootProof::Empty { root } => root.path.clone(),
+    };
+    let path = root_path(&evidence.roots.target);
+    if path != root_path(&evidence.roots.build) {
+        return Err("Initial registry-only seed requires coincident target and build roots.");
+    }
+    let max_bytes = cargo_hive_state::slots::MAX_BYTES;
+    let reg = state
+        .read_regular_bounded(registry::FILE, max_bytes)
+        .map_err(|_| refused)?;
+    let cfg = state.slot_config().map_err(|_| refused)?;
+    cargo_hive_state::window_days(cfg.gc_window_days).map_err(|_| refused)?;
+    let caps = state
+        .read_regular_bounded(cargo_hive_doctor::CAPABILITIES_FILE, max_bytes)
+        .map_err(|_| refused)?;
+    let selected = locate_checkout(&reg, &cfg, &caps, &proof.path).map_err(|_| refused)?;
+    if selected.1.path != proof.path || cancel() {
+        return Err(refused);
+    }
+    let outcome = run_selected_seed(state, &reg, &cfg, &caps, &selected, cancel)
+        .ok_or(refused)?
+        .map_err(|_| refused)?;
+    let count = outcome.placed.len() as u64;
+    if cancel()
+        || outcome.cancelled
+        || count == 0
+        || !outcome.findings.is_empty()
+        || outcome.counts.get("clone_units_cloned") != Some(&count)
+        || [
+            "clone_units_failed",
+            "clone_units_dropped",
+            "clone_units_existing",
+            "clone_units_outside_window",
+        ]
+        .iter()
+        .any(|name| outcome.counts.get(*name).copied().unwrap_or_default() != 0)
+        || outcome
+            .placed
+            .iter()
+            .any(|unit| Some(unit.unit_layout) != caps.unit_layout_or_flat())
+    {
+        return Err(refused);
+    }
+    let observed = cargo_hive_state::slots::owner_directory(&path).map_err(|_| refused)?;
+    let identity = FileIdentity::of(&observed);
+    if path.canonicalize().as_ref().ok() != Some(&path)
+        || outcome.target.as_ref() != Some(&(path.clone(), (identity.dev, identity.ino)))
+        || [&evidence.roots.target, &evidence.roots.build]
+            .into_iter()
+            .any(|proof| matches!(proof, RootProof::Empty { root } if root.identity != identity))
+    {
+        return Err(refused);
+    }
+    initialize_seed_locks(&path, identity, &outcome.placed, cancel)?;
+    let root = RootExpectation::Present {
+        root: VerifiedRoot { path, identity },
+    };
+    Ok(SeedEvidence {
+        evidence,
+        generation,
+        final_roots: OutputRoots {
+            target: root.clone(),
+            build: root,
+        },
+        registry_units: count,
+    })
+}
+
+fn initialize_seed_locks(
+    root: &Path,
+    root_id: cargo_hive_state::slots::FileIdentity,
+    placed: &[cargo_hive_seed::place::SeededUnit],
+    cancel: &dyn Fn() -> bool,
+) -> Result<(), &'static str> {
+    use cargo_hive_core::{caps::CRATE_DIR_CAP, target, unit_path::UnitLayout};
+    use cargo_hive_state::slots::{FileIdentity, owner_directory};
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::Component;
+
+    let refused = "Initial registry-only seed could not establish the native Cargo profile locks.";
+    let layout = match placed.first().ok_or(refused)?.unit_layout {
+        UnitLayout::Flat => target::Layout::Fingerprint,
+        UnitLayout::UnitDir => target::Layout::NewBuildDir,
+    };
+    let proposed: std::collections::BTreeSet<_> = placed
+        .iter()
+        .map(|unit| {
+            if unit.rel_profile.as_os_str().is_empty()
+                || !unit
+                    .rel_profile
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+            {
+                return Err(refused);
+            }
+            Ok(root.join(&unit.rel_profile))
+        })
+        .collect::<Result<_, _>>()?;
+    let fs = platform::host_fs();
+    let profiles =
+        target::identify_strict(fs.as_ref(), root, CRATE_DIR_CAP, cancel).map_err(|_| refused)?;
+    if profiles.len() != proposed.len()
+        || profiles
+            .iter()
+            .any(|(path, observed)| *observed != layout || !proposed.contains(path))
+    {
+        return Err(refused);
+    }
+
+    // Seed places artifacts without running Cargo. Only a freshly placed profile can initialize
+    // the vacant advisory lock paths. Ordinary cleanup still requires and acquires these locks.
+    for (profile, _) in profiles {
+        let identity = owner_directory(&profile)
+            .map_err(|_| refused)
+            .map(|meta| FileIdentity::of(&meta))?;
+        let checked = || {
+            owner_directory(root).is_ok_and(|meta| FileIdentity::of(&meta) == root_id)
+                && owner_directory(&profile).is_ok_and(|meta| FileIdentity::of(&meta) == identity)
+                && profile.canonicalize().as_ref().ok() == Some(&profile)
+                && !cancel()
+        };
+        if identity.dev != root_id.dev || !checked() {
+            return Err(refused);
+        }
+        for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(profile.join(name))
+                .map_err(|_| refused)?;
+            file.sync_all().map_err(|_| refused)?;
+        }
+        if !checked() {
+            return Err(refused);
+        }
+    }
+    Ok(())
+}
+
+fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
+    use cargo_hive_doctor::{self as doctor, Capabilities};
     use cargo_hive_state::window_days;
     let loaded = (|| -> Result<_, StateError> {
         Ok((
@@ -2424,7 +2639,7 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
         );
     }
     let cancelled = || platform::signals::cancelled();
-    let (repo, row, toolchain) = match locate_checkout(&reg, &cfg, &caps, checkout) {
+    let selected = match locate_checkout(&reg, &cfg, &caps, checkout) {
         Ok(v) => v,
         Err(r) => {
             b.finding(r.kind, r.path, r.detail.clone());
@@ -2436,33 +2651,13 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
             return emit(state, out, b.finish(), &human, r.code);
         }
     };
-    let real = row.path.clone();
-    let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
-    let Ok(platform) = platform::current() else {
+    let real = selected.1.path.clone();
+    b.toolchain(Some(selected.2.release.clone()));
+    b.scope_mut().checkouts.push(real.clone());
+    let Some(result) = run_selected_seed(state, &reg, &cfg, &caps, &selected, &cancelled) else {
         eprintln!("{MACOS_ONLY_MESSAGE}");
         return 2;
     };
-    let repos = [repo];
-    let ctx = Ctx {
-        state,
-        fs: &*platform.fs,
-        cfg: &cfg,
-        now: std::time::SystemTime::now(),
-        account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
-        repos: &repos,
-        mains: &registered_mains,
-        liveness: cargo_hive_gc::liveness::liveness,
-    };
-    b.toolchain(Some(toolchain.release.clone()));
-    b.scope_mut().checkouts.push(real.clone());
-    let result = cargo_hive_seed::run(
-        &ctx,
-        &repos[0],
-        &row,
-        &toolchain,
-        caps.unit_layout_or_flat(),
-        &cancelled,
-    );
     let code = cargo_hive_seed::exit_code(&result);
     cargo_hive_seed::record_seed_result(&mut b, &result);
     match result {
@@ -2722,6 +2917,31 @@ mod tests {
             role,
             presence: checkout::RootPresence::InitiallyAbsent,
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_checks_an_initially_empty_root_without_writing_it() {
+        use std::os::unix::fs::MetadataExt;
+        let (_scratch, state, _, lane) = checkout_gc_fixture();
+        let mut required = absent_roots(&lane);
+        let path = required[0].path.clone();
+        std::fs::create_dir(&path).unwrap();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        for root in &mut required {
+            root.presence = checkout::RootPresence::InitiallyEmpty {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            };
+        }
+        let result = checkout_gc_for_slot(&state, &lane, &required, &|| false).unwrap();
+        assert_eq!(result.completed, required);
+        assert_eq!(std::fs::symlink_metadata(&path).unwrap().ino(), meta.ino());
+        assert!(std::fs::read_dir(&path).unwrap().next().is_none());
+        let unexpected = path.join("unexpected");
+        std::fs::write(&unexpected, b"keep").unwrap();
+        assert!(checkout_gc_for_slot(&state, &lane, &required, &|| false).is_err());
+        assert_eq!(std::fs::read(unexpected).unwrap(), b"keep");
     }
 
     #[cfg(target_os = "macos")]

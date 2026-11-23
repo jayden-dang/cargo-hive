@@ -50,6 +50,7 @@ pub enum RootRole {
 pub enum RootPresence {
     Present { dev: u64, ino: u64 },
     InitiallyAbsent,
+    InitiallyEmpty { dev: u64, ino: u64 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -278,7 +279,7 @@ pub fn run_with_evidence(
             break;
         }
         let root = same_path[0];
-        if root.presence == RootPresence::InitiallyAbsent {
+        if !matches!(root.presence, RootPresence::Present { .. }) {
             continue;
         }
         let strict = StrictRoot {
@@ -302,7 +303,9 @@ pub fn run_with_evidence(
     }
     if !report.cancelled {
         for root in roots {
-            if root.presence == RootPresence::InitiallyAbsent && check_root(input, root, report) {
+            if !matches!(root.presence, RootPresence::Present { .. })
+                && check_root(input, root, report)
+            {
                 result.completed.push(root.clone());
             }
         }
@@ -420,6 +423,20 @@ fn matches_presence(input: &CheckoutInput<'_>, root: &RequiredRoot) -> bool {
                 && input.fs.entry_stat(&root.path).is_ok_and(|stat| {
                     stat.kind == EntryKind::Dir && stat.dev == dev && stat.ino == ino
                 })
+        }
+        RootPresence::InitiallyEmpty { dev, ino } => {
+            let matches_identity = || {
+                root.path.canonicalize().as_ref().ok() == Some(&root.path)
+                    && input.fs.entry_stat(&root.path).is_ok_and(|stat| {
+                        stat.kind == EntryKind::Dir && stat.dev == dev && stat.ino == ino
+                    })
+            };
+            matches_identity()
+                && input
+                    .fs
+                    .read_dir_bounded(&root.path, 1)
+                    .is_ok_and(|entries| entries.is_empty())
+                && matches_identity()
         }
         RootPresence::InitiallyAbsent => {
             let Ok(relative) = root.path.strip_prefix(input.checkout) else {

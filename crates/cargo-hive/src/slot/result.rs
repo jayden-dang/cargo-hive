@@ -26,6 +26,10 @@ pub(super) struct SlotResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_policy: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<&'static str>,
@@ -69,6 +73,8 @@ impl SlotResult {
             transition: None,
             attempt: None,
             current: None,
+            path: None,
+            use_policy: None,
             detail: None,
             next_action: None,
             code,

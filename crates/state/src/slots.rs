@@ -504,6 +504,9 @@ impl Attempt {
 #[serde(rename_all = "snake_case")]
 pub enum AttemptStage {
     PermitIssued,
+    CheckoutInProgress,
+    CheckoutVerified,
+    SeedInProgress,
     GcInProgress,
 }
 

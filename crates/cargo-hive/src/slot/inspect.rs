@@ -130,7 +130,7 @@ pub(super) fn owned_identity(path: &Path) -> Option<FileIdentity> {
         .map(FileIdentity::of)
 }
 
-fn verify_checkout_scope(
+pub(super) fn verify_checkout_scope(
     scope: &SlotScope<'_>,
     path: &Path,
     expected: &ExpectedCheckout<'_>,
@@ -433,6 +433,14 @@ fn tracked_paths(checkout: &Path, oid_len: usize) -> Result<BTreeMap<PathBuf, En
 }
 
 fn reject_status_filters(checkout: &Path) -> Result<(), Refusal> {
+    reject_filters(checkout, false)
+}
+
+pub(super) fn reject_checkout_filters(checkout: &Path) -> Result<(), Refusal> {
+    reject_filters(checkout, true)
+}
+
+fn reject_filters(checkout: &Path, writing: bool) -> Result<(), Refusal> {
     let settings = inventory_git(checkout, &["config", "--null", "--list"], GIT_OUTPUT_LIMIT)?;
     for record in nul_records(&settings)? {
         let record = std::str::from_utf8(record)
@@ -440,7 +448,9 @@ fn reject_status_filters(checkout: &Path) -> Result<(), Refusal> {
         let key = record.split_once('\n').map_or(record, |(key, _)| key);
         if key.is_empty()
             || (key.starts_with("filter.")
-                && (key.ends_with(".clean") || key.ends_with(".process")))
+                && (key.ends_with(".clean")
+                    || key.ends_with(".process")
+                    || (writing && key.ends_with(".smudge"))))
         {
             return Err(Refusal::ReturnUncertain(
                 "A configured Git clean filter or incomplete configuration prevents a read-only status check.",

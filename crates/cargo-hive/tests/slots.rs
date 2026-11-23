@@ -363,6 +363,10 @@ fn producer_slot() -> LeasedSlot {
 }
 
 fn producer_slot_with_source(source: Option<&str>) -> LeasedSlot {
+    LeasedSlot::from_fixture(reviewed_pool_fixture(source))
+}
+
+fn reviewed_pool_fixture(source: Option<&str>) -> PoolFixture {
     let fixture = PoolFixture::new();
     if let Some(source) = source {
         fs::write(fixture.repo.join("src/lib.rs"), source).unwrap();
@@ -418,7 +422,7 @@ fn producer_slot_with_source(source: Option<&str>) -> LeasedSlot {
     profile["consumers"][0]["prior_object"] = json!(source);
     profile["consumers"][0]["requested_object"] = json!(source);
     fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
-    LeasedSlot::from_fixture(fixture)
+    fixture
 }
 
 fn producer_input(slot: &LeasedSlot) -> Value {
@@ -3813,7 +3817,7 @@ fn a_native_guide_begin_issues_only_one_durable_permit() {
     let (out, reserved) = finish_private(start_private(&fixture.hive, args, &key));
     assert!(out.status.success(), "{reserved}");
     let reserved_revision = fixture.record()["revision"].as_u64().unwrap();
-    for name in ["first-control", "retry-control"] {
+    for name in ["first-control", "retry-control", "wrong-open-control"] {
         private_file(&proof.join(name));
     }
 
@@ -3831,6 +3835,14 @@ IFS= read -r credential < "$proof/begin-key" || exit 21
 IFS= read -r nonce < "$proof/begin-nonce" || exit 22
 printf -v request '{"credential":"%s","nonce":"%s"}' "$credential" "$nonce"
 exec 9< "$lock" || exit 23
+"$bin" slot begin --repo "$repo" --pool "$pool" --slot 1 --generation 1 \
+    --op "$operation" --lock-fd 9 --control-fd 8 --json \
+    <<< "$request" 8<> "$lock" > "$proof/alias-result"
+printf '%s\n' "$?" > "$proof/alias-status" || exit 24
+"$bin" slot begin --repo "$repo" --pool "$pool" --slot 1 --generation 1 \
+    --op "$operation" --lock-fd 9 --control-fd 8 --json \
+    <<< "$request" 9< "$lock" 8<> "$proof/wrong-open-control" > "$proof/wrong-open-result"
+printf '%s\n' "$?" > "$proof/wrong-open-status" || exit 24
 for call in first retry; do
     exec 8<> "$proof/$call-control" || exit 24
     "$bin" slot begin --repo "$repo" --pool "$pool" --slot 1 --generation 1 \
@@ -3862,7 +3874,7 @@ done
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let independent = fs::File::open(lock).unwrap();
+    let independent = fs::File::open(&lock).unwrap();
     let mut held_after_call = Vec::new();
     let mut guide_input = guide.stdin.take().unwrap();
     for name in ["first-exited", "retry-exited"] {
@@ -3890,6 +3902,21 @@ done
     assert_no_credential(&out, &nonce);
     assert!(out.status.success());
     assert_eq!(held_after_call.len(), 2);
+    assert_eq!(
+        fs::read_to_string(proof.join("alias-status")).unwrap(),
+        "1\n"
+    );
+    assert_eq!(fs::metadata(&lock).unwrap().len(), 0);
+    assert_eq!(
+        fs::read_to_string(proof.join("wrong-open-status")).unwrap(),
+        "1\n"
+    );
+    assert_eq!(
+        fs::metadata(proof.join("wrong-open-control"))
+            .unwrap()
+            .len(),
+        0
+    );
     assert_eq!(
         fs::read_to_string(proof.join("first-status")).unwrap(),
         "0\n",
@@ -3949,6 +3976,329 @@ done
 }
 
 #[test]
+fn the_packaged_guide_returns_a_first_ready_slot_with_absent_roots() {
+    let fixture = reviewed_pool_fixture(None);
+    fixture.hive.write_ready_capabilities();
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let key_path = fixture._repo_dir.path.join("take-key");
+    private_file(&key_path);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key_path, "3")
+            .status
+            .success()
+    );
+    let credential = fs::read_to_string(&key_path).unwrap();
+    let out = run_packaged_take(&fixture, pool, &head, &key_path, "take");
+    assert_no_credential(&out, &credential);
+    assert!(
+        out.status.success(),
+        "the packaged guide should return first ready: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ready: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(ready["kind"], "ready");
+    assert_eq!(ready["use_policy"], "guide_guarded_cargo_only");
+    assert_eq!(ready["path"], json!(checkout));
+    assert_eq!(ready["commit"], head);
+    assert_eq!(ready["current"], true);
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), head);
+    assert!(git(&checkout, &["status", "--porcelain"]).is_empty());
+    assert!(!checkout.join("target").exists());
+    let saved = fixture.record();
+    let slot = &saved["pools"][0]["slots"][0];
+    assert_eq!(slot["phase"]["kind"], "leased");
+    assert_eq!(
+        slot["producer"]["evidence"]["roots"]["target"]["kind"],
+        "absent"
+    );
+    assert_eq!(
+        slot["producer"]["evidence"]["roots"]["build"]["kind"],
+        "absent"
+    );
+    let attempt = ready["attempt"].as_u64().unwrap().to_string();
+    let replay = |command| {
+        let mut args = fixture.replay(command, pool, 1, 1, &"3".repeat(32));
+        args.extend(["--attempt".to_owned(), attempt.clone()]);
+        finish_private(start_private(&fixture.hive, args, &credential))
+    };
+    let (out, replayed) = replay("outcome");
+    assert!(out.status.success(), "{replayed}");
+    assert_eq!(replayed, ready);
+    assert_eq!(fixture.record()["revision"], saved["revision"]);
+    let returned = fixture.replay("return", pool, 1, 1, &"4".repeat(32));
+    let (out, returned) = finish_private(start_private(&fixture.hive, returned, &credential));
+    assert!(out.status.success(), "{returned}");
+    let (out, historical) = replay("outcome");
+    assert!(out.status.success(), "{historical}");
+    assert_eq!(historical["current"], false);
+    assert!(historical.get("path").is_none());
+    assert!(historical.get("use_policy").is_none());
+    let (out, ack) = replay("ack");
+    assert!(out.status.success(), "{ack}");
+    assert_eq!(ack["kind"], "acknowledged");
+    let (out, _) = replay("outcome");
+    assert_eq!(out.status.code(), Some(1));
+}
+
+fn run_packaged_take(
+    fixture: &PoolFixture,
+    pool: &str,
+    head: &str,
+    key_path: &Path,
+    mode: &str,
+) -> Output {
+    common::wait_within(
+        start_packaged_take(fixture, pool, head, key_path, mode),
+        Duration::from_secs(30),
+    )
+}
+
+fn start_packaged_take(
+    fixture: &PoolFixture,
+    pool: &str,
+    head: &str,
+    key_path: &Path,
+    mode: &str,
+) -> Child {
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
+    let mut command = fixture
+        .hive
+        .command_with(Path::new("/bin/bash"), &["--noprofile", "--norc"]);
+    producer_environment(&mut command);
+    command
+        .arg(helper)
+        .args([mode, env!("CARGO_BIN_EXE_cargo-hive")])
+        .arg(&fixture.repo)
+        .args([
+            pool,
+            "1",
+            "0",
+            head,
+            &"1".repeat(32),
+            &"2".repeat(32),
+            &"3".repeat(32),
+        ])
+        .env_remove("BASH_ENV")
+        .stdin(fs::File::open(key_path).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn a_lost_packaged_ready_reply_can_be_replayed_from_the_original_request() {
+    let fixture = reviewed_pool_fixture(None);
+    fixture.hive.write_ready_capabilities();
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success());
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let key = fixture._repo_dir.path.join("lost-ready-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let credential = fs::read_to_string(&key).unwrap();
+    let mut guide = start_packaged_take(&fixture, pool, &head, &key, "take");
+    drop(guide.stdout.take());
+    let out = common::wait_within(guide, Duration::from_secs(30));
+    assert!(!out.status.success());
+    assert_no_credential(&out, &credential);
+    let saved = fixture.record();
+    assert_eq!(saved["pools"][0]["slots"][0]["phase"]["kind"], "leased");
+
+    let original = fixture.replay("outcome", pool, 1, 1, &"2".repeat(32));
+    let (out, permit) = finish_private(start_private(&fixture.hive, original, &credential));
+    assert!(out.status.success(), "{permit}");
+    assert_eq!(permit["current"], false);
+    assert!(permit.get("path").is_none());
+    let mut request = fixture.replay("outcome", pool, 1, 1, &"3".repeat(32));
+    request.extend([
+        "--attempt".into(),
+        permit["attempt"].as_u64().unwrap().to_string(),
+    ]);
+    let (out, ready) = finish_private(start_private(&fixture.hive, request, &credential));
+    assert!(out.status.success(), "{ready}");
+    assert_eq!(ready["kind"], "ready");
+    assert_eq!(ready["current"], true);
+    assert_eq!(ready["path"], initialized["slots"][0]["path"]);
+    assert_eq!(fixture.record()["revision"], saved["revision"]);
+}
+
+#[test]
+fn a_requested_initial_seed_without_registry_units_stays_unavailable() {
+    let fixture = reviewed_pool_fixture(None);
+    fixture.hive.write_ready_capabilities();
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success());
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let key = fixture._repo_dir.path.join("seed-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let out = run_packaged_take(&fixture, pool, &head, &key, "take-seeded");
+    assert_no_credential(&out, &fs::read_to_string(&key).unwrap());
+    assert_eq!(out.status.code(), Some(1));
+    let refused: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(refused.get("path").is_none());
+    assert!(
+        refused["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("registry-only"))
+    );
+    let saved = fixture.record();
+    let slot = &saved["pools"][0]["slots"][0];
+    assert_eq!(slot["phase"]["kind"], "preparing");
+    assert_eq!(slot["phase"]["attempt"]["stage"], "seed_in_progress");
+    assert_eq!(slot["producer"]["kind"], "never_built");
+    assert!(!checkout.join("target").exists());
+}
+
+#[test]
+fn the_packaged_guide_can_attest_a_nonempty_registry_only_initial_seed() {
+    use common::registry_fixture::{RegistryRepo, cargo_json};
+    let fixture = reviewed_pool_fixture(None);
+    fixture.hive.write_ready_capabilities();
+    fs::create_dir(fixture.hive.home.path.join("no-cache")).unwrap();
+    let _registry_fixture = RegistryRepo::new(&fixture.hive);
+    let manifest = fixture.repo.join("Cargo.toml");
+    let donor = fs::read_to_string(&manifest)
+        .unwrap()
+        .replace("[dependencies]\n", "[dependencies]\nleafcrate = \"1\"\n");
+    fs::write(manifest, donor).unwrap();
+    let donor = cargo_json(&fixture.hive, &fixture.repo, &["build"]);
+    assert!(
+        donor
+            .registry_recompiled
+            .iter()
+            .any(|unit| unit.starts_with("leafcrate"))
+    );
+    // The donor prepares the registry store, but the pinned first-ready source stays unchanged.
+    git(
+        &fixture.repo,
+        &["restore", "--", "Cargo.toml", "Cargo.lock"],
+    );
+    fs::remove_file(fixture.hive.cargo_home.path.join("config.toml")).unwrap();
+    fixture
+        .hive
+        .config(&json!({"secondary_roots": [fixture.hive.secondary_root.path]}).to_string());
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let key = fixture._repo_dir.path.join("seed-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let out = run_packaged_take(&fixture, pool, &head, &key, "take-seeded");
+    assert_no_credential(&out, &fs::read_to_string(&key).unwrap());
+    let ready: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        out.status.success(),
+        "{ready}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(ready["path"], json!(checkout));
+    assert_eq!(ready["use_policy"], "guide_guarded_cargo_only");
+    let saved = fixture.record();
+    let slot = &saved["pools"][0]["slots"][0];
+    assert_eq!(slot["phase"]["kind"], "leased");
+    let producer = &slot["producer"];
+    assert_eq!(producer["kind"], "seed_only");
+    assert_eq!(producer["registry_units"], 1);
+    assert_eq!(producer["evidence"]["roots"]["target"]["kind"], "absent");
+    assert_eq!(producer["final_roots"]["target"]["kind"], "present");
+    assert!(checkout.join("target/CACHEDIR.TAG").is_file());
+}
+
+#[test]
+fn the_packaged_guide_refuses_an_unfetched_tree_input_before_any_checkout() {
+    let scratch = Scratch::new("slot-missing-blob");
+    let origin = init_repo(&scratch.path.join("origin"), "");
+    git(&origin, &["switch", "-c", "requested"]);
+    fs::write(origin.join("new-input"), b"requires a missing blob").unwrap();
+    git(&origin, &["add", "new-input"]);
+    git(&origin, &["commit", "-qm", "new input"]);
+    let commit = git(&origin, &["rev-parse", "HEAD"]);
+    let blob = git(&origin, &["rev-parse", "HEAD:new-input"]);
+    git(&origin, &["switch", "main"]);
+    git(&origin, &["config", "uploadpack.allowFilter", "true"]);
+    git(
+        &origin,
+        &["config", "uploadpack.allowAnySHA1InWant", "true"],
+    );
+    git(
+        &scratch.path,
+        &[
+            "clone",
+            "--no-local",
+            "--single-branch",
+            "--filter=blob:none",
+            origin.to_str().unwrap(),
+            "owner",
+        ],
+    );
+    let repo = scratch.path.join("owner").canonicalize().unwrap();
+    git(&repo, &["config", "protocol.file.allow", "always"]);
+    git(
+        &repo,
+        &["fetch", "--filter=blob:none", "origin", "requested"],
+    );
+    let fixture = PoolFixture::from_repo(scratch, repo);
+    let objects = || {
+        git(
+            &fixture.repo,
+            &[
+                "cat-file",
+                "--batch-all-objects",
+                "--batch-check=%(objectname)",
+            ],
+        )
+    };
+    let before = objects();
+    assert!(before.lines().any(|oid| oid == commit));
+    assert!(!before.lines().any(|oid| oid == blob));
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let key = fixture._repo_dir.path.join("missing-blob-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let out = run_packaged_take(&fixture, pool, &commit, &key, "take");
+    assert_eq!(out.status.code(), Some(1));
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["kind"], "refused");
+    assert_eq!(objects(), before);
+    assert!(!checkout.exists());
+    assert_eq!(
+        fixture.record()["pools"][0]["slots"][0]["phase"]["attempt"]["stage"],
+        "permit_issued"
+    );
+}
+
+#[test]
 fn unavailable_protocol_has_no_state_effects() {
     let fixture = PoolFixture::new();
     let absent = fixture._repo_dir.path.join("must-stay-absent");
@@ -3956,7 +4306,7 @@ fn unavailable_protocol_has_no_state_effects() {
         .hive
         .command(&[
             "slot",
-            "ready",
+            "recover",
             "--repo",
             fixture.repo.to_str().unwrap(),
             "--pool",
@@ -3967,10 +4317,6 @@ fn unavailable_protocol_has_no_state_effects() {
             "1",
             "--op",
             &"2".repeat(32),
-            "--attempt",
-            "1",
-            "--lock-fd",
-            "3",
             "--json",
         ])
         .env("HIVE_HOME", &absent)
