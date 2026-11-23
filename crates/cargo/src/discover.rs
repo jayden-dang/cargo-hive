@@ -801,6 +801,19 @@ pub fn resolvers_of(scan: &TargetScan, target: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Checks both configured output roles of foreign workspaces, even when no target row
+/// was requested for their destination. Metadata resolution supplies canonical paths.
+pub fn foreign_output_overlaps(scan: &TargetScan, checkout: &Path, root: &Path) -> bool {
+    scan.workspaces.iter().any(|workspace| {
+        workspace.checkout != checkout
+            && workspace.result.as_ref().is_ok_and(|resolved| {
+                [&resolved.target_directory, &resolved.build_directory]
+                    .into_iter()
+                    .any(|output| output.starts_with(root) || root.starts_with(output))
+            })
+    })
+}
+
 pub fn failed_workspaces(scan: &TargetScan) -> Vec<(PathBuf, String)> {
     scan.workspaces
         .iter()
@@ -1462,6 +1475,35 @@ mod tests {
             vec![PathBuf::from("/repo/worktree")]
         );
         assert!(resolvers_of(&scan, Path::new("/nobody")).is_empty());
+    }
+
+    #[test]
+    fn foreign_output_overlap_checks_both_roles_without_discovered_target_rows() {
+        let lane = Path::new("/repo/lane");
+        let root = lane.join("target");
+        let own = || WorkspaceResolution {
+            dir: lane.to_path_buf(),
+            checkout: lane.to_path_buf(),
+            result: Ok(resolved(
+                "/repo/lane",
+                "/repo/lane/target",
+                "/repo/lane/target",
+            )),
+        };
+        for (target, build, overlaps) in [
+            ("/other/target", "/repo/lane/target/debug/foreign", true),
+            ("/repo/lane", "/other/build", true),
+            ("/repo/lane/target-other", "/other/build", false),
+        ] {
+            let foreign = WorkspaceResolution {
+                dir: "/other".into(),
+                checkout: "/other".into(),
+                result: Ok(resolved("/other", target, build)),
+            };
+            let scan = scan_with(vec![own(), foreign], Vec::new());
+            assert_eq!(resolvers_of(&scan, &root), [lane]);
+            assert_eq!(super::foreign_output_overlaps(&scan, lane, &root), overlaps);
+        }
     }
 
     #[test]

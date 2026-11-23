@@ -2,7 +2,7 @@
 //!
 //! `read` returns `Ok(None)` when the file is not a linked Mach-O binary (no magic,
 //! `MH_OBJECT`, or `MH_DSYM`). Fat images contribute the union of every thin slice.
-//! Every byte comes from `Fs::read_at`; hitting a size cap is `MapError::Bound`.
+//! Positional reads are bounded by the parser. Hitting a size cap is `MapError::Bound`.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -85,7 +85,64 @@ impl std::error::Error for MapError {
 
 /// Read the debug map of the Mach-O (or fat Mach-O) at `path`.
 pub fn read(fs: &dyn Fs, path: &Path) -> Result<Option<DebugMap>, MapError> {
-    let magic_bytes = read_at(fs, path, 0, 4)?;
+    parse(&|offset, len| fs.read_at(path, offset, len).map_err(MapError::Read))
+}
+
+/// Strict GC pins all positional reads to one verified regular-file handle.
+#[cfg(unix)]
+pub(crate) fn read_strict(
+    fs: &dyn Fs,
+    path: &Path,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Option<DebugMap>, MapError> {
+    use std::os::unix::fs::{FileExt, MetadataExt};
+    let check_cancel = || {
+        if cancel() {
+            Err(MapError::Read(io::ErrorKind::Interrupted.into()))
+        } else {
+            Ok(())
+        }
+    };
+    check_cancel()?;
+    let file = fs.open_regular(path).map_err(MapError::Read)?;
+    let before = file.metadata().map_err(MapError::Read)?;
+    let map = parse(&|offset, len| {
+        check_cancel()?;
+        let available = usize::try_from(before.len().saturating_sub(offset)).unwrap_or(usize::MAX);
+        if available == 0 {
+            return Ok(Vec::new());
+        }
+        let mut bytes = vec![0; len.min(available)];
+        let count = file.read_at(&mut bytes, offset).map_err(MapError::Read)?;
+        bytes.truncate(count);
+        Ok(bytes)
+    })?;
+    check_cancel()?;
+    let after = std::fs::symlink_metadata(path).map_err(MapError::Read)?;
+    let stamp = |meta: &std::fs::Metadata| {
+        (
+            meta.dev(),
+            meta.ino(),
+            meta.len(),
+            meta.mtime(),
+            meta.mtime_nsec(),
+            meta.ctime(),
+            meta.ctime_nsec(),
+        )
+    };
+    if !after.is_file() || stamp(&before) != stamp(&after) {
+        return Err(MapError::Read(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "debug-map candidate changed during reading",
+        )));
+    }
+    Ok(map)
+}
+
+type ReadRange<'a> = dyn Fn(u64, usize) -> Result<Vec<u8>, MapError> + 'a;
+
+fn parse(read: &ReadRange<'_>) -> Result<Option<DebugMap>, MapError> {
+    let magic_bytes = read(0, 4)?;
     if magic_bytes.len() < 4 {
         return Ok(None);
     }
@@ -94,22 +151,18 @@ pub fn read(fs: &dyn Fs, path: &Path) -> Result<Option<DebugMap>, MapError> {
     let magic_be = u32::from_be_bytes(raw);
 
     match magic_le {
-        MH_MAGIC_64 => parse_thin(fs, path, 0, None),
+        MH_MAGIC_64 => parse_thin(read, 0, None),
         MH_MAGIC | MH_CIGAM | MH_CIGAM_64 => {
             Err(MapError::Unsupported("32-bit or big-endian thin header"))
         }
-        _ if magic_be == FAT_MAGIC_BE => parse_fat(fs, path, false),
-        _ if magic_be == FAT_MAGIC_64_BE => parse_fat(fs, path, true),
+        _ if magic_be == FAT_MAGIC_BE => parse_fat(read, false),
+        _ if magic_be == FAT_MAGIC_64_BE => parse_fat(read, true),
         _ => Ok(None),
     }
 }
 
-fn read_at(fs: &dyn Fs, path: &Path, offset: u64, len: usize) -> Result<Vec<u8>, MapError> {
-    fs.read_at(path, offset, len).map_err(MapError::Read)
-}
-
-fn parse_fat(fs: &dyn Fs, path: &Path, is_64: bool) -> Result<Option<DebugMap>, MapError> {
-    let hdr = read_at(fs, path, 0, 8)?;
+fn parse_fat(read: &ReadRange<'_>, is_64: bool) -> Result<Option<DebugMap>, MapError> {
+    let hdr = read(0, 8)?;
     if hdr.len() < 8 {
         return Err(MapError::Truncated("fat header"));
     }
@@ -121,7 +174,7 @@ fn parse_fat(fs: &dyn Fs, path: &Path, is_64: bool) -> Result<Option<DebugMap>, 
     let table_len = (u64::from(nfat_arch))
         .checked_mul(arch_size)
         .ok_or(MapError::Truncated("fat arch table"))?;
-    let table = read_at(fs, path, 8, table_len as usize)?;
+    let table = read(8, table_len as usize)?;
     if table.len() as u64 != table_len {
         return Err(MapError::Truncated("fat arch table"));
     }
@@ -149,7 +202,7 @@ fn parse_fat(fs: &dyn Fs, path: &Path, is_64: bool) -> Result<Option<DebugMap>, 
         let slice_end = slice_off
             .checked_add(slice_size)
             .ok_or(MapError::Truncated("fat slice range"))?;
-        let slice_magic = read_range(fs, path, slice_off, 0, 4, Some(slice_end))?;
+        let slice_magic = read_range(read, slice_off, 0, 4, Some(slice_end))?;
         if slice_magic.len() < 4 {
             return Err(MapError::UnknownSlice(cputype));
         }
@@ -157,7 +210,7 @@ fn parse_fat(fs: &dyn Fs, path: &Path, is_64: bool) -> Result<Option<DebugMap>, 
         if slice_le != MH_MAGIC_64 {
             return Err(MapError::UnknownSlice(cputype));
         }
-        match parse_thin(fs, path, slice_off, Some(slice_end))? {
+        match parse_thin(read, slice_off, Some(slice_end))? {
             None => {}
             Some(map) => {
                 any_linked = true;
@@ -174,8 +227,7 @@ fn parse_fat(fs: &dyn Fs, path: &Path, is_64: bool) -> Result<Option<DebugMap>, 
 }
 
 fn read_range(
-    fs: &dyn Fs,
-    path: &Path,
+    read: &ReadRange<'_>,
     base: u64,
     relative: u64,
     len: usize,
@@ -190,16 +242,15 @@ fn read_range(
     if end.is_some_and(|end| finish > end) {
         return Err(MapError::Truncated("fat slice range"));
     }
-    read_at(fs, path, offset, len)
+    read(offset, len)
 }
 
 fn parse_thin(
-    fs: &dyn Fs,
-    path: &Path,
+    read: &ReadRange<'_>,
     base: u64,
     end: Option<u64>,
 ) -> Result<Option<DebugMap>, MapError> {
-    let header = read_range(fs, path, base, 0, HEADER64 as usize, end)?;
+    let header = read_range(read, base, 0, HEADER64 as usize, end)?;
     if header.len() < HEADER64 as usize {
         return Err(MapError::Truncated("header"));
     }
@@ -220,7 +271,7 @@ fn parse_thin(
     let cmds = if sizeofcmds == 0 {
         Vec::new()
     } else {
-        let cmds = read_range(fs, path, base, HEADER64, sizeofcmds as usize, end)?;
+        let cmds = read_range(read, base, HEADER64, sizeofcmds as usize, end)?;
         if cmds.len() as u64 != sizeofcmds {
             return Err(MapError::Truncated("load commands"));
         }
@@ -272,7 +323,7 @@ fn parse_thin(
     let symtab_data = if sym_bytes == 0 {
         Vec::new()
     } else {
-        let data = read_range(fs, path, base, u64::from(symoff), sym_bytes as usize, end)?;
+        let data = read_range(read, base, u64::from(symoff), sym_bytes as usize, end)?;
         if data.len() as u64 != sym_bytes {
             return Err(MapError::Truncated("symbol table"));
         }
@@ -281,7 +332,7 @@ fn parse_thin(
     let strtab = if str_bytes == 0 {
         Vec::new()
     } else {
-        let data = read_range(fs, path, base, u64::from(stroff), str_bytes as usize, end)?;
+        let data = read_range(read, base, u64::from(stroff), str_bytes as usize, end)?;
         if data.len() as u64 != str_bytes {
             return Err(MapError::Truncated("string table"));
         }
@@ -640,6 +691,72 @@ mod tests {
         buf
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn strict_reads_refuse_nonregular_candidates_and_poll_between_ranges() {
+        use std::cell::Cell;
+        use std::os::unix::fs::symlink;
+        use std::time::UNIX_EPOCH;
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "hive-debug-map-{}-{}",
+            std::process::id(),
+            now.as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let dir = TempDir::adopt(dir);
+        let path = dir.path().join("binary");
+        let bytes = thin_with_oso(&["kept.rcgu.o"]);
+        std::fs::write(&path, &bytes).unwrap();
+        let fs = MemFs::with(&path, bytes);
+        assert_eq!(
+            super::read_strict(&fs, &path, &|| false).unwrap(),
+            read(&fs, &path).unwrap()
+        );
+
+        let calls = Cell::new(0);
+        let cancel = || {
+            calls.set(calls.get() + 1);
+            calls.get() == 3
+        };
+        assert!(matches!(
+            super::read_strict(&fs, &path, &cancel),
+            Err(MapError::Read(err)) if err.kind() == io::ErrorKind::Interrupted
+        ));
+
+        calls.set(0);
+        let cancel = || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 3 {
+                std::fs::rename(&path, dir.path().join("previous")).unwrap();
+                std::fs::write(&path, b"replacement").unwrap();
+            }
+            false
+        };
+        assert!(matches!(
+            super::read_strict(&fs, &path, &cancel),
+            Err(MapError::Read(err)) if err.kind() == io::ErrorKind::InvalidData
+        ));
+
+        let link = dir.path().join("link");
+        symlink(&path, &link).unwrap();
+        let fifo = dir.path().join("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for candidate in [link, fifo] {
+            assert!(matches!(
+                super::read_strict(&fs, &candidate, &|| false),
+                Err(MapError::Read(err)) if err.kind() == io::ErrorKind::InvalidData
+            ));
+        }
+    }
+
     #[test]
     fn generated_debug_maps_and_truncations_keep_exact_objects() {
         for data in [&b""[..], &b"\xff"[..], &b"probe"[..]] {
@@ -653,9 +770,8 @@ mod tests {
                 "cut {end}"
             );
         }
-        let fs = crate::reader_testing::ReaderFs::new(vec![]);
-        assert!(super::read_range(&fs, path, u64::MAX, 1, 1, None).is_err());
-        assert_eq!(fs.reads.get(), 0);
+        let unexpected_read = |_, _| panic!("overflow must be refused before reading");
+        assert!(super::read_range(&unexpected_read, u64::MAX, 1, 1, None).is_err());
     }
 
     #[test]

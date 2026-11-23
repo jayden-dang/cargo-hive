@@ -2894,6 +2894,59 @@ mod tests {
                 .any(|finding| finding.kind == "gc.root_incomplete")
         );
 
+        let target = required[0].path.clone();
+        let debug = target.join("debug");
+        let unit = debug.join(".fingerprint/fixture-aaaaaaaaaaaaaaaa");
+        let foreign_output = unit.join("foreign-target");
+        std::fs::create_dir_all(&foreign_output).unwrap();
+        let sentinel = foreign_output.join("keep");
+        std::fs::write(&sentinel, b"foreign output").unwrap();
+        std::fs::write(
+            target.join("CACHEDIR.TAG"),
+            cargo_hive_core::target::TAG_LINE,
+        )
+        .unwrap();
+        std::fs::write(debug.join(".cargo-build-lock"), "").unwrap();
+        std::fs::write(unit.join("lib-fixture"), "0000000000000068").unwrap();
+        std::fs::write(
+            unit.join("lib-fixture.json"),
+            r#"{"rustc":1,"features":"[]","declared_features":"[]","target":2,"profile":3,"path":4,"deps":[],"local":[],"rustflags":[],"config":5,"compile_kind":0}"#,
+        )
+        .unwrap();
+        let stamp = unit.join("invoked.timestamp");
+        std::fs::write(&stamp, b"").unwrap();
+        std::fs::File::open(&stamp)
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400),
+            )
+            .unwrap();
+        std::fs::write(
+            reg.repos[1].main.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = {:?}", foreign_output),
+        )
+        .unwrap();
+        let identity = platform::current().unwrap().fs.entry_stat(&target).unwrap();
+        let required = required.map(|mut root| {
+            root.presence = checkout::RootPresence::Present {
+                dev: identity.dev,
+                ino: identity.ino,
+            };
+            root
+        });
+        let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .expect_err("a nested foreign output must block strict cleanup");
+        let SlotGcFailure::Run(evidence) = *refusal.evidence else {
+            panic!("expected typed root refusal");
+        };
+        assert!(evidence.completed().is_empty());
+        assert!(evidence.report.per_target.is_empty(), "cleanup started");
+        assert!(evidence.report.findings.iter().any(|finding| {
+            finding.kind == "gc.root_incomplete" && finding.path.as_ref() == Some(&target)
+        }));
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"foreign output");
+        assert!(stamp.is_file());
+
         std::fs::write(reg.repos[1].main.join("Cargo.toml"), "[broken").unwrap();
         let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
             .err()

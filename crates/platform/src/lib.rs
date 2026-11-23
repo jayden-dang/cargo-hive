@@ -306,13 +306,11 @@ pub trait Fs {
     fn temp_dir(&self, parent: &Path, prefix: &str) -> io::Result<TempDir>;
     fn write_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
-    /// Reads a regular file without following its last path component or waiting on a pipe.
-    fn read_regular_bounded(&self, path: &Path, cap: usize) -> io::Result<Vec<u8>> {
+    /// Opens one regular file without following its last component or waiting on a pipe.
+    fn open_regular(&self, path: &Path) -> io::Result<std::fs::File> {
         #[cfg(unix)]
         {
-            use std::io::Read;
             use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-            let limit = cap.checked_add(1).ok_or(io::ErrorKind::InvalidInput)?;
             let expected = std::fs::symlink_metadata(path)?;
             if !expected.is_file() {
                 return Err(io::Error::new(
@@ -332,21 +330,30 @@ pub trait Fs {
                     "file identity changed during open",
                 ));
             }
-            let mut bytes = Vec::new();
-            file.take(limit as u64).read_to_end(&mut bytes)?;
-            if bytes.len() > cap {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("file exceeds {cap} bytes"),
-                ));
-            }
-            Ok(bytes)
+            Ok(file)
         }
         #[cfg(not(unix))]
         {
-            let _ = (path, cap);
+            let _ = path;
             Err(io::Error::from(io::ErrorKind::Unsupported))
         }
+    }
+
+    /// Reads at most `cap` bytes from a verified regular file.
+    fn read_regular_bounded(&self, path: &Path, cap: usize) -> io::Result<Vec<u8>> {
+        use std::io::Read;
+        let limit = cap.checked_add(1).ok_or(io::ErrorKind::InvalidInput)?;
+        let mut bytes = Vec::new();
+        self.open_regular(path)?
+            .take(limit as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > cap {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("file exceeds {cap} bytes"),
+            ));
+        }
+        Ok(bytes)
     }
     /// Up to `len` bytes from `offset`; fewer at EOF, empty past it. Follows a symlink.
     fn read_at(&self, path: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {

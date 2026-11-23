@@ -360,6 +360,7 @@ fn required_roots<'a>(
                 .iter()
                 .any(|nested| path.starts_with(nested) || nested.starts_with(path))
             || discover::resolvers_of(input.scan, path) != [input.checkout]
+            || discover::foreign_output_overlaps(input.scan, input.checkout, path)
         {
             incomplete_root(
                 report,
@@ -877,7 +878,18 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
     let mut loose = BTreeSet::new();
     let mut oso_entries = 0u64;
     for path in &listing.candidates {
-        match debug_map::read(ctx.fs, path) {
+        let map = if ctx.scope_valid.is_some() {
+            debug_map::read_strict(ctx.fs, path, ctx.cancel)
+        } else {
+            debug_map::read(ctx.fs, path)
+        };
+        match map {
+            Err(debug_map::MapError::Read(err))
+                if ctx.scope_valid.is_some() && err.kind() == io::ErrorKind::Interrupted =>
+            {
+                out.cancelled = true;
+                return out;
+            }
             Ok(Some(map)) => {
                 out.binaries_read += 1;
                 oso_entries = oso_entries
