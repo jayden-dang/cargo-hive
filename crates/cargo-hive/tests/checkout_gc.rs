@@ -1403,10 +1403,15 @@ fn checkout_gc_cannot_prove_either_kind_of_undecided_traversal() {
     let debug = target.join("debug");
     let required = provided_roots(fs.as_ref(), &target, &target);
     let bin = find_linked_named(&debug, "app-").expect("a built app binary");
-    let rec = Recording::over_real().fail_read_at(bin);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(bin)
+        .unwrap()
+        .set_len(4)
+        .unwrap();
     let before = tree(&target);
     let (report, completed) =
-        checkout_with_evidence(&rec, &scan, &checkout, &nested, &required, &|| false);
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
     assert!(completed.is_empty(), "{report:?}");
     assert!(
         report

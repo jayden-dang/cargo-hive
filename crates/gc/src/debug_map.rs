@@ -742,13 +742,20 @@ mod tests {
         let link = dir.path().join("link");
         symlink(&path, &link).unwrap();
         let fifo = dir.path().join("fifo");
-        assert!(
-            std::process::Command::new("mkfifo")
-                .arg(&fifo)
-                .status()
-                .unwrap()
-                .success()
-        );
+        use cargo_hive_platform::proc::{Capture, Spec, run_bounded};
+        let mut create_fifo = Spec::new("/usr/bin/mkfifo");
+        create_fifo.args.push(fifo.as_os_str().into());
+        let output = run_bounded(
+            &create_fifo,
+            std::time::Duration::from_secs(5),
+            Capture {
+                stdout_cap: 0,
+                stderr_cap: 4096,
+            },
+            || false,
+        )
+        .unwrap();
+        assert!(output.status.success(), "{output:?}");
         for candidate in [link, fifo] {
             assert!(matches!(
                 super::read_strict(&fs, &candidate, &|| false),
