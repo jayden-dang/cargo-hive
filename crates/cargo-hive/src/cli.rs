@@ -1421,15 +1421,30 @@ impl CheckoutGc {
         use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
 
         let loaded = (|| -> Result<_, StateError> {
+            if let Some(cancel) = strict_cancel {
+                let check_cancel = || {
+                    if cancel() {
+                        Err(StateError::Cancelled)
+                    } else {
+                        Ok(())
+                    }
+                };
+                let max_bytes = cargo_hive_state::slots::MAX_BYTES;
+                check_cancel()?;
+                let registry: Registry = state.read_regular_bounded(registry::FILE, max_bytes)?;
+                check_cancel()?;
+                let config = state.slot_config()?;
+                check_cancel()?;
+                let capabilities: Capabilities =
+                    state.read_regular_bounded(doctor::CAPABILITIES_FILE, max_bytes)?;
+                check_cancel()?;
+                return Ok((registry, config, capabilities, Snapshot::default()));
+            }
             Ok((
                 state.read::<Registry>(registry::FILE)?,
                 state.config()?,
                 state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
-                if strict_cancel.is_none() {
-                    state.read::<Snapshot>(discover::SNAPSHOT_FILE)?
-                } else {
-                    Snapshot::default()
-                },
+                state.read::<Snapshot>(discover::SNAPSHOT_FILE)?,
             ))
         })();
         let (reg, cfg, caps, snapshot) = loaded.map_err(CheckoutGcError::State)?;
@@ -1604,6 +1619,9 @@ pub(crate) fn checkout_gc_for_slot(
             } else {
                 refuse("checkout discovery was incomplete", evidence)
             });
+        }
+        Err(CheckoutGcError::State(StateError::Cancelled)) => {
+            return Err(cancelled(SlotGcFailure::Setup));
         }
         Err(_) if cancel() => return Err(cancelled(SlotGcFailure::Setup)),
         Err(_) => {
@@ -3041,6 +3059,72 @@ mod tests {
         assert!(evidence.report.cancelled);
         assert!(evidence.completed().is_empty());
         assert_eq!(evidence.report.totals.objects_deleted, 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_refuses_unsafe_setup_artifacts() {
+        let (scratch, state, _, lane) = checkout_gc_fixture();
+        let expected = absent_roots(&lane);
+        assert!(checkout_gc_for_slot(&state, &lane, &expected, &|| false).is_ok());
+        std::fs::create_dir(scratch.path().join("missing-cache")).unwrap();
+        let assert_strict_refusal = || {
+            let refusal = checkout_gc_for_slot(&state, &lane, &expected, &|| false)
+                .expect_err("strict setup must refuse unsafe state");
+            assert_eq!(refusal.reason.code, 1);
+            assert_eq!(refusal.expected, expected);
+            assert!(matches!(*refusal.evidence, SlotGcFailure::Setup));
+            assert!(refusal.reason.path.is_none());
+            assert!(!expected[0].path.exists());
+        };
+        for name in [registry::FILE, cargo_hive_doctor::CAPABILITIES_FILE] {
+            let file = state.root().join(name);
+            let valid = std::fs::read(&file).unwrap();
+
+            let mut oversized = valid.clone();
+            oversized.resize(cargo_hive_state::slots::MAX_BYTES as usize + 1, b' ');
+            std::fs::write(&file, oversized).unwrap();
+            assert!(CheckoutGc::prepare(&state, &lane, None).is_ok());
+            assert_strict_refusal();
+
+            let alternate = scratch.path().join(name);
+            std::fs::write(&alternate, &valid).unwrap();
+            std::fs::remove_file(&file).unwrap();
+            std::os::unix::fs::symlink(alternate, &file).unwrap();
+            assert!(CheckoutGc::prepare(&state, &lane, None).is_ok());
+            assert_strict_refusal();
+
+            std::fs::remove_file(&file).unwrap();
+            std::fs::create_dir(&file).unwrap();
+            assert_strict_refusal();
+            std::fs::remove_dir(&file).unwrap();
+
+            for invalid in [b"{".as_slice(), br#"{"layout":999}"#] {
+                std::fs::write(&file, invalid).unwrap();
+                assert_strict_refusal();
+                assert!(CheckoutGc::prepare(&state, &lane, None).is_err());
+            }
+
+            std::fs::write(&file, valid).unwrap();
+        }
+        assert!(checkout_gc_for_slot(&state, &lane, &expected, &|| false).is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_reports_cancellation_between_setup_reads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (_scratch, state, _, lane) = checkout_gc_fixture();
+        let expected = absent_roots(&lane);
+        let checks = AtomicUsize::new(0);
+        let cancel = || checks.fetch_add(1, Ordering::Relaxed) == 2;
+        let refusal = checkout_gc_for_slot(&state, &lane, &expected, &cancel)
+            .expect_err("cancellation after reading the registry stops setup");
+        assert_eq!(refusal.reason.code, 130);
+        assert_eq!(refusal.expected, expected);
+        assert!(matches!(*refusal.evidence, SlotGcFailure::Setup));
+        assert!(!expected[0].path.exists());
     }
 
     #[cfg(target_os = "macos")]
