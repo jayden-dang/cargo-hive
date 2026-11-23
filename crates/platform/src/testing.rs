@@ -14,6 +14,31 @@ use super::{
 
 type Hook<T> = Box<dyn Fn(&Path) -> T + Send + Sync>;
 
+pub struct PipeReadStatus {
+    pub flags: i32,
+    pub pending_bytes: usize,
+}
+
+/// Observes a test pipe without reading from it or changing its status flags.
+pub fn pipe_read_status(reader: &io::PipeReader) -> io::Result<PipeReadStatus> {
+    let fd = reader.as_raw_fd();
+    // SAFETY: the reader owns a valid descriptor for this call.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut pending: libc::c_int = 0;
+    // SAFETY: FIONREAD writes one integer to pending and does not consume pipe data.
+    if unsafe { libc::ioctl(fd, libc::FIONREAD, &mut pending) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let pending_bytes = usize::try_from(pending).map_err(|_| io::ErrorKind::InvalidData)?;
+    Ok(PipeReadStatus {
+        flags,
+        pending_bytes,
+    })
+}
+
 pub struct Hooked {
     pub inner: Box<dyn Fs>,
     pub compress: Option<Hook<CompressOutcome>>,

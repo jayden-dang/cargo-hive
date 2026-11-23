@@ -66,6 +66,10 @@ fn the_slot_help_lists_only_operator_commands() {
         .collect();
     assert_eq!(visible, ["init", "status", "recover"]);
     let help = slot.clone().render_long_help().to_string();
+    assert!(help.lines().any(|line| {
+        line.split_whitespace().next() == Some("recover")
+            && line.contains("unavailable in this version")
+    }));
     for private in [
         "key",
         "reserve",

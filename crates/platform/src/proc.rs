@@ -372,6 +372,55 @@ fn run_bounded_with(
     })
 }
 
+/// Reads at most `max` stdin bytes and requires EOF within `deadline`.
+/// A cancelled wait returns `Interrupted`. Intended for short-lived commands:
+/// a reader blocked in the OS can remain until process exit.
+pub fn read_stdin_complete(
+    max: usize,
+    deadline: Duration,
+    mut cancel: impl FnMut() -> bool,
+) -> io::Result<Vec<u8>> {
+    let until = Instant::now() + deadline;
+    let cap = max.checked_add(1).ok_or(io::ErrorKind::InvalidInput)?;
+    let (send, receive) = mpsc::channel();
+    // Keep the wait bounded even when a shared descriptor blocks, without changing its flags.
+    thread::Builder::new().spawn(move || {
+        let mut bytes = Vec::new();
+        let result = io::stdin()
+            .lock()
+            .take(cap as u64)
+            .read_to_end(&mut bytes)
+            .and_then(|_| {
+                if bytes.len() > max {
+                    Err(io::ErrorKind::InvalidData.into())
+                } else {
+                    Ok(bytes)
+                }
+            });
+        let _ = send.send(result);
+    })?;
+    let result = loop {
+        if cancel() {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let remaining = until.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        match receive.recv_timeout(remaining.min(Duration::from_millis(20))) {
+            Ok(result) => break result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+        }
+    };
+    if cancel() {
+        return Err(io::ErrorKind::Interrupted.into());
+    }
+    result
+}
+
 /// Runs `spec` with no deadline, honouring its stdin and process-group flags.
 pub fn output(spec: &Spec) -> io::Result<Output> {
     command(spec).output()

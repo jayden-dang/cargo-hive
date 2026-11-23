@@ -278,7 +278,7 @@ Usage: slot <COMMAND>
 Commands:
   init     Establish two unused paths for a registered repository
   status   Show current pool capacity, holds and next steps
-  recover  Check a held slot after the operator confirms quiescence and resolves work
+  recover  Recover a held slot (unavailable in this version)
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -511,7 +511,7 @@ Options:
   -h, --help
           Print help
 
-    cmd recover hidden=false about=Some("Check a held slot after the operator confirms quiescence and resolves work") long_about=None
+    cmd recover hidden=false about=Some("Recover a held slot (unavailable in this version)") long_about=None
       arg generation long=Some("generation") short=None hidden=false required=true defaults=[] help=Some("Expected slot generation") long_help=None
       arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
       arg op long=Some("op") short=None hidden=false required=true defaults=[] help=Some("Public operation ID") long_help=None
@@ -519,7 +519,7 @@ Options:
       arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
       arg slot long=Some("slot") short=None hidden=false required=true defaults=[] help=Some("Slot number within the pool") long_help=None
       long_help_render:
-Check a held slot after the operator confirms quiescence and resolves work
+Recover a held slot (unavailable in this version)
 
 Usage: recover [OPTIONS] --repo <MAIN> --pool <POOL> --slot <N> --generation <GEN> --op <ID>
 

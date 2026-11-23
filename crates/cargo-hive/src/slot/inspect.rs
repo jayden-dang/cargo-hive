@@ -16,7 +16,7 @@ use cargo_hive_state::slots::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, Metadata};
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -229,7 +229,7 @@ fn inventory(
     let fs = host_fs();
     let retained = retained_roots(scope, checkout, &tracked, fs.as_ref())?;
     let mut directories = BTreeSet::new();
-    for path in tracked.iter().chain(retained.keys()) {
+    for path in tracked.keys().chain(retained.keys()) {
         directories.extend(path.ancestors().skip(1).map(Path::to_path_buf));
     }
     let mut walk = CheckoutWalk {
@@ -322,13 +322,13 @@ fn nul_records(bytes: &[u8]) -> Result<impl Iterator<Item = &[u8]>, Refusal> {
     Ok(body.split(|byte| *byte == 0))
 }
 
-fn tracked_paths(checkout: &Path, oid_len: usize) -> Result<BTreeSet<PathBuf>, Refusal> {
+fn tracked_paths(checkout: &Path, oid_len: usize) -> Result<BTreeMap<PathBuf, EntryKind>, Refusal> {
     let bytes = inventory_git(
         checkout,
         &["ls-files", "--stage", "-v", "-z"],
         TRACKED_LIMIT,
     )?;
-    let mut tracked = BTreeSet::new();
+    let mut tracked = BTreeMap::new();
     if bytes.is_empty() {
         return Ok(tracked);
     }
@@ -345,9 +345,13 @@ fn tracked_paths(checkout: &Path, oid_len: usize) -> Result<BTreeSet<PathBuf>, R
         if *stage != "0" || *tag == "M" {
             return Err(Refusal::ReturnWork(UNFINISHED_GIT));
         }
+        let kind = match *mode {
+            "100644" | "100755" => EntryKind::File,
+            "120000" => EntryKind::Symlink,
+            _ => return Err(Refusal::ReturnUncertain(UNCERTAIN_INVENTORY)),
+        };
         let relative = Path::new(path);
         if *tag != "H"
-            || !matches!(*mode, "100644" | "100755" | "120000")
             || oid.len() != oid_len
             || !slots::object_id(oid)
             || !relative
@@ -356,7 +360,7 @@ fn tracked_paths(checkout: &Path, oid_len: usize) -> Result<BTreeSet<PathBuf>, R
             || path
                 .split('/')
                 .any(|part| part.is_empty() || part.eq_ignore_ascii_case(".git"))
-            || !tracked.insert(checkout.join(relative))
+            || tracked.insert(checkout.join(relative), kind).is_some()
         {
             return Err(Refusal::ReturnUncertain(UNCERTAIN_INVENTORY));
         }
@@ -419,7 +423,7 @@ impl<'a> From<&'a RootExpectation> for OutputRoot<'a> {
 fn retained_roots(
     scope: &SlotScope<'_>,
     checkout: &Path,
-    tracked: &BTreeSet<PathBuf>,
+    tracked: &BTreeMap<PathBuf, EntryKind>,
     fs: &dyn Fs,
 ) -> Result<BTreeMap<PathBuf, FileIdentity>, Refusal> {
     let incomplete = || Refusal::ReturnUncertain(UNCERTAIN_ROOT);
@@ -479,7 +483,7 @@ fn retained_roots(
             .any(|component| forbidden_output_name(component.as_os_str().as_encoded_bytes()))
             || probes
                 .iter()
-                .chain(tracked)
+                .chain(tracked.keys())
                 .any(|input| folded_overlap(path, input))
         {
             return Err(Refusal::ReturnWork(DISGUISED_OUTPUT));
@@ -546,7 +550,7 @@ struct CheckoutWalk<'a> {
     fs: &'a dyn Fs,
     checkout: &'a Path,
     device: u64,
-    tracked: &'a BTreeSet<PathBuf>,
+    tracked: &'a BTreeMap<PathBuf, EntryKind>,
     directories: BTreeSet<PathBuf>,
     retained: BTreeMap<PathBuf, FileIdentity>,
     remaining: usize,
@@ -594,11 +598,19 @@ impl CheckoutWalk<'_> {
                     self.visit(&path, depth + 1, generated)?;
                 }
                 EntryKind::File if generated => self.generated_file(&path)?,
-                EntryKind::File | EntryKind::Symlink
-                    if !generated && self.tracked.contains(&path) => {}
+                EntryKind::File | EntryKind::Symlink if !generated => {
+                    match self.tracked.get(&path) {
+                        Some(expected) if *expected == kind => {}
+                        Some(_) => return Err(Refusal::ReturnWork(UNFINISHED_GIT)),
+                        None => return Err(Refusal::ReturnWork(UNFINISHED_FILES)),
+                    }
+                }
                 _ if generated => return Err(Refusal::ReturnWork(DISGUISED_OUTPUT)),
                 _ => return Err(Refusal::ReturnWork(UNFINISHED_FILES)),
             }
+        }
+        if generated {
+            self.retain_cargo_locks(dir)?;
         }
         let after = fs::symlink_metadata(dir).map_err(|_| incomplete())?;
         if directory_stamp(&before) != directory_stamp(&after) {
@@ -615,26 +627,6 @@ impl CheckoutWalk<'_> {
         if entry.kind != EntryKind::File || entry.dev != self.device {
             return Err(Refusal::ReturnUncertain(UNCERTAIN_ROOT));
         }
-        if path.file_name().is_some_and(|name| {
-            matches!(
-                name.to_str(),
-                Some(".cargo-build-lock" | ".cargo-lock" | ".cargo-artifact-lock")
-            )
-        }) {
-            let refusal = || {
-                Refusal::ReturnUncertain(
-                    "An active or unverified Cargo lock prevents proving the slot is quiescent.",
-                )
-            };
-            let TryLock::Acquired(lock) = self.fs.try_lock_exclusive(path) else {
-                return Err(refusal());
-            };
-            let actual = self.fs.entry_stat(path).map_err(|_| refusal())?;
-            if lock.identity() != Some((actual.dev, actual.ino)) || actual != entry {
-                return Err(refusal());
-            }
-            self.output_locks.push(lock);
-        }
         if entry.nlink > 1 {
             let (expected, found) = self
                 .linked_outputs
@@ -644,6 +636,32 @@ impl CheckoutWalk<'_> {
                 return Err(Refusal::ReturnUncertain(UNCERTAIN_ROOT));
             }
             *found += 1;
+        }
+        Ok(())
+    }
+
+    fn retain_cargo_locks(&mut self, dir: &Path) -> Result<(), Refusal> {
+        let refusal = || {
+            Refusal::ReturnUncertain(
+                "An active or unverified Cargo lock prevents proving the slot is quiescent.",
+            )
+        };
+        // Resolve the names Cargo opens so the filesystem determines equivalent spellings.
+        for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
+            let path = dir.join(name);
+            let entry = match self.fs.entry_stat(&path) {
+                Ok(entry) if entry.kind == EntryKind::File && entry.dev == self.device => entry,
+                Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                _ => return Err(refusal()),
+            };
+            let TryLock::Acquired(lock) = self.fs.try_lock_exclusive(&path) else {
+                return Err(refusal());
+            };
+            let actual = self.fs.entry_stat(&path).map_err(|_| refusal())?;
+            if lock.identity() != Some((actual.dev, actual.ino)) || actual != entry {
+                return Err(refusal());
+            }
+            self.output_locks.push(lock);
         }
         Ok(())
     }

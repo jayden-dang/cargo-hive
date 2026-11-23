@@ -37,6 +37,19 @@ pub enum SlotGitError {
     Incomplete,
 }
 
+impl fmt::Display for SlotGitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Cancelled => "The slot Git check was cancelled.",
+            Self::Incomplete => {
+                "Could not establish a complete slot Git result. Check the repository and retry."
+            }
+        })
+    }
+}
+
+impl std::error::Error for SlotGitError {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorktreeRecord {
     pub path: PathBuf,
@@ -450,6 +463,21 @@ mod tests {
         assert!(!Git::at(dir).has_tracked_changes().unwrap());
         std::fs::write(dir.join("a"), "changed").unwrap();
         assert!(Git::at(dir).has_tracked_changes().unwrap());
+    }
+
+    #[test]
+    fn slot_git_errors_expose_only_sanitized_details() {
+        for (error, message) in [
+            (SlotGitError::Cancelled, "The slot Git check was cancelled."),
+            (
+                SlotGitError::Incomplete,
+                "Could not establish a complete slot Git result. Check the repository and retry.",
+            ),
+        ] {
+            let error: &dyn std::error::Error = &error;
+            assert_eq!(error.to_string(), message);
+            assert!(error.source().is_none());
+        }
     }
 
     #[test]

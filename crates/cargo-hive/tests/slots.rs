@@ -4,16 +4,17 @@
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod common;
 
+use cargo_hive_platform::testing::pipe_read_status;
 use common::{Hive, Scratch, git, init_repo, register};
 use serde_json::{Value, json};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CAP: usize = 1_048_576;
 
@@ -414,6 +415,32 @@ fn tracked_edits_leave_the_checkout_index_and_lease_untouched_until_resolved() {
 }
 
 #[test]
+fn return_requires_the_filesystem_type_recorded_in_the_git_index() {
+    let slot = LeasedSlot::new();
+    let tracked = slot.path.join("source-link");
+    symlink("src/lib.rs", &tracked).unwrap();
+    git(&slot.path, &["add", "source-link"]);
+    git(&slot.path, &["commit", "-qm", "record the symlink"]);
+    assert!(git(&slot.path, &["ls-files", "--stage", "source-link"]).starts_with("120000 "));
+    git(&slot.path, &["config", "core.symlinks", "false"]);
+    fs::remove_file(&tracked).unwrap();
+    fs::write(&tracked, b"src/lib.rs").unwrap();
+    let output = slot.path.join("target");
+    fs::create_dir(&output).unwrap();
+    fs::write(output.join("retained.rlib"), b"retained output").unwrap();
+    slot.retain(&output);
+    slot.assert_refused("tracked or index changes");
+
+    fs::remove_file(&tracked).unwrap();
+    symlink("src/lib.rs", &tracked).unwrap();
+    let protected = [&*slot.path, &*slot.admin];
+    let before = snapshot_paths(&protected);
+    let (out, result) = finish_private(slot.start("return"));
+    assert!(out.status.success(), "{result}");
+    assert_eq!(snapshot_paths(&protected), before);
+}
+
+#[test]
 fn an_unmerged_index_and_an_unfinished_git_operation_preserve_every_path() {
     let slot = LeasedSlot::new();
     git(&slot.path, &["switch", "-qc", "conflicting-lane"]);
@@ -608,6 +635,39 @@ fn return_refuses_an_active_cargo_lock_in_a_verified_retained_root() {
 }
 
 #[test]
+fn return_refuses_canonical_cargo_locks_with_filesystem_aliases() {
+    for alias in [".CARGO-BUILD-LOCK", ".cargo-build-locK"] {
+        let slot = LeasedSlot::new();
+        let root = slot.path.join("target");
+        let output = root.join("debug");
+        fs::create_dir_all(&output).unwrap();
+        let stored = output.join(alias);
+        let canonical = output.join(".cargo-build-lock");
+        fs::write(&stored, b"").unwrap();
+        match fs::metadata(&canonical) {
+            Ok(aliased) => {
+                let original = fs::metadata(&stored).unwrap();
+                assert_eq!(
+                    (aliased.dev(), aliased.ino()),
+                    (original.dev(), original.ino())
+                );
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                fs::rename(&stored, &canonical).unwrap();
+            }
+            Err(err) => panic!("could not inspect the canonical Cargo lock: {err}"),
+        }
+        slot.retain(&root);
+        let mut writer = common::KillOnDrop(slot.fixture.hive.hold_lock_child("flock", &canonical));
+        slot.assert_refused("Cargo lock");
+        writer.0.kill().unwrap();
+        writer.0.wait().unwrap();
+        let (out, returned) = finish_private(slot.start("return"));
+        assert!(out.status.success(), "{returned}");
+    }
+}
+
+#[test]
 fn return_refuses_checkout_substitution_symlink_and_overlapping_owner_paths() {
     let slot = LeasedSlot::new();
     let owner = slot.fixture._repo_dir.path.join("owner");
@@ -700,6 +760,53 @@ fn a_lost_return_reply_can_be_replayed_after_the_next_reservation() {
     assert_eq!(acknowledged["kind"], "acknowledged");
     let (out, stale) = finish_private(slot.start("return"));
     assert_eq!(out.status.code(), Some(1), "{stale}");
+}
+
+#[test]
+fn a_historical_return_refuses_a_different_repo_registered_at_the_same_path() {
+    let slot = LeasedSlot::new();
+    let (out, returned) = finish_private(slot.start("return"));
+    assert!(out.status.success(), "{returned}");
+    let main = &slot.fixture.repo;
+    let removed = slot
+        .fixture
+        .hive
+        .run(&["repo", "remove", main.to_str().unwrap()]);
+    assert!(removed.status.success(), "{removed:?}");
+    let original = main.with_file_name("original-main");
+    fs::rename(main, &original).unwrap();
+    init_repo(main, "");
+    git(
+        main,
+        &["commit", "--amend", "-qm", "replacement repository"],
+    );
+    register(&slot.fixture.hive, main);
+    let original_git = fs::metadata(original.join(".git")).unwrap();
+    let replacement_git = fs::metadata(main.join(".git")).unwrap();
+    assert_ne!(
+        (original_git.dev(), original_git.ino()),
+        (replacement_git.dev(), replacement_git.ino())
+    );
+
+    let state = slot.fixture.file();
+    let registry = slot.fixture.hive.home.path.join("registry.json");
+    let paths = [&*slot.path, &**main, &*original, &*state, &*registry];
+    let before = snapshot_paths(&paths);
+    for command in ["return", "outcome"] {
+        let (out, refused) = finish_private(slot.start(command));
+        assert_eq!(out.status.code(), Some(1), "{refused}");
+        assert_eq!(refused["kind"], "refused", "{refused}");
+        assert!(
+            refused["detail"]
+                .as_str()
+                .unwrap()
+                .contains("pool's identity"),
+            "{refused}"
+        );
+        assert!(refused["path"].is_null(), "{refused}");
+        assert_no_credential(&out, &slot.credential);
+        assert_eq!(snapshot_paths(&paths), before);
+    }
 }
 
 #[test]
@@ -1362,6 +1469,128 @@ fn a_reserve_from_an_old_namespace_cannot_claim_its_replacement() {
 }
 
 #[test]
+fn a_return_refuses_a_valid_credential_if_the_pipe_never_reaches_eof() {
+    let slot = LeasedSlot::new();
+    let state = slot.fixture.file();
+    let paths = [&*state, &*slot.path, &*slot.admin];
+    let before = snapshot_paths(&paths);
+    let mut child = slot
+        .fixture
+        .hive
+        .command(&[])
+        .args(
+            slot.fixture
+                .replay("return", &slot.pool, 1, 1, &slot.operation),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    writeln!(input, "{}", slot.credential).unwrap();
+    let out = common::wait_within(child, Duration::from_secs(5));
+    let refused: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{refused}");
+    assert_eq!(refused["kind"], "refused", "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .unwrap()
+            .contains("private slot credential"),
+        "{refused}"
+    );
+    assert_no_credential(&out, &slot.credential);
+    assert_eq!(snapshot_paths(&paths), before);
+    drop(input);
+
+    let (out, returned) = finish_private(start_private(
+        &slot.fixture.hive,
+        slot.fixture
+            .replay("return", &slot.pool, 1, 1, &slot.operation),
+        &format!("{}\n", slot.credential),
+    ));
+    assert!(out.status.success(), "{returned}");
+    assert_no_credential(&out, &slot.credential);
+}
+
+#[test]
+fn cancelling_a_return_while_waiting_for_credential_eof_preserves_input_flags() {
+    let slot = LeasedSlot::new();
+    let state = slot.fixture.file();
+    let paths = [&*state, &*slot.path, &*slot.admin];
+    let before = snapshot_paths(&paths);
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let original_flags = pipe_read_status(&reader).unwrap().flags;
+    writeln!(writer, "{}", slot.credential).unwrap();
+    let child = slot
+        .fixture
+        .hive
+        .command(&[])
+        .args(
+            slot.fixture
+                .replay("return", &slot.pool, 1, 1, &slot.operation),
+        )
+        .stdin(Stdio::from(reader.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut child = common::KillOnDrop(child);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let observed = pipe_read_status(&reader).unwrap();
+        if observed.pending_bytes == 0 {
+            assert_eq!(observed.flags, original_flags);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the child did not read the credential"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    common::interrupt(child.0.id());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the child did not handle SIGINT while waiting for EOF"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut out = Output {
+        status,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    };
+    child
+        .0
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut out.stdout)
+        .unwrap();
+    child
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_end(&mut out.stderr)
+        .unwrap();
+    assert_no_credential(&out, &slot.credential);
+    let cancelled: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(130), "{cancelled}");
+    assert_eq!(cancelled["kind"], "cancelled", "{cancelled}");
+    assert_eq!(cancelled["detail"], "The slot operation was cancelled.");
+    assert_eq!(pipe_read_status(&reader).unwrap().flags, original_flags);
+    assert_eq!(snapshot_paths(&paths), before);
+}
+
+#[test]
 fn reserve_refuses_inexact_commits_and_malformed_private_input() {
     let fixture = PoolFixture::new();
     let (out, initialized) = fixture.init();
@@ -1724,17 +1953,41 @@ fn a_lost_record_leaves_nested_checkout_namespaces_held() {
 }
 
 #[test]
-fn incomplete_nested_inventory_cannot_report_an_unconfigured_pool() {
+fn checkout_namespace_inventory_checks_depth_at_the_limit_and_one_past_it() {
     let fixture = PoolFixture::new();
     let mut deep = fixture.hive.secondary_root.path.clone();
-    for _ in 0..34 {
+    for _ in 0..32 {
         deep.push("nested");
     }
     fs::create_dir_all(&deep).unwrap();
     let (out, result) = fixture.status();
+    assert!(out.status.success(), "{result}");
+    assert_eq!(result["kind"], "unconfigured");
+    let extra = deep.join("one-too-deep");
+    fs::create_dir(&extra).unwrap();
+    let (out, result) = fixture.status();
     assert_eq!(out.status.code(), Some(1), "{result}");
     assert!(result.to_string().contains("inventory"), "{result}");
-    assert!(deep.is_dir());
+    assert!(extra.is_dir());
+    assert!(!fixture.file().exists());
+}
+
+#[test]
+fn checkout_namespace_inventory_checks_entries_at_the_limit_and_one_past_it() {
+    let fixture = PoolFixture::new();
+    let root = &fixture.hive.secondary_root.path;
+    for number in 0..4096 {
+        fs::File::create(root.join(number.to_string())).unwrap();
+    }
+    let (out, result) = fixture.status();
+    assert!(out.status.success(), "{result}");
+    assert_eq!(result["kind"], "unconfigured");
+    let extra = root.join("one-too-many");
+    fs::write(&extra, b"preserve").unwrap();
+    let (out, result) = fixture.status();
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert!(result.to_string().contains("inventory"), "{result}");
+    assert_eq!(fs::read(&extra).unwrap(), b"preserve");
     assert!(!fixture.file().exists());
 }
 

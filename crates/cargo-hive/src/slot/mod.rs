@@ -9,6 +9,7 @@ use cargo_hive_cargo::{
     registry::{self, Registry},
 };
 use cargo_hive_platform::flock::{duplicate_inherited_fd, private_file_metadata, try_exclusive};
+use cargo_hive_platform::proc::read_stdin_complete;
 use cargo_hive_platform::signals::{self, cancelled};
 use cargo_hive_state::slots::{
     self, CHECKOUT_NAMESPACE, FileIdentity, GitIdentity, LOCK_NAMESPACE, Lease, MAX_OUTCOMES,
@@ -20,9 +21,10 @@ use inspect::{CheckoutInventory, ExpectedCheckout, SlotScope, inspect_checkout};
 use result::{FRESH_FALLBACK, SlotResult, SlotStatus, SlotTransition};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Seek, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const HELD_ACTION: &str = "Preserve the slot files and ask the repository operator to inspect identity, quiescence and unfinished work. Create a separate fresh secondary checkout and run `cargo hive seed <checkout>` there.";
 const LOST_PROVENANCE: &str = "This slot does not regain warm capacity for these retained outputs in this version. Create a separate fresh secondary checkout and run `cargo hive seed <checkout>` there.";
@@ -32,6 +34,7 @@ const MAX_WORKTREES: usize = 256;
 const MAX_ROOT_ENTRIES: usize = 4096;
 const MAX_ROOT_DEPTH: usize = 32;
 const KEY_HEX_LEN: usize = 64;
+const CREDENTIAL_DEADLINE: Duration = Duration::from_secs(2);
 
 pub(super) fn dispatch(command: SlotCommand) -> i32 {
     let (name, repo, json, init) = match command {
@@ -214,7 +217,7 @@ fn refusal(command: &'static str, repo: &Path, err: Refusal) -> SlotResult {
         Refusal::State(StateError::Cancelled) => (
             "cancelled",
             130,
-            StateError::Cancelled.to_string(),
+            "The slot operation was cancelled.".into(),
             "Retry when ready.",
         ),
         Refusal::State(err) => ("refused", 1, err.to_string(), FRESH_FALLBACK),
@@ -258,20 +261,13 @@ struct SlotOperationInput {
 
 impl SlotOperationInput {
     fn read() -> Result<Self, Refusal> {
-        let mut stdin = io::stdin().lock();
-        let mut data = [0; KEY_HEX_LEN + 2];
-        let mut used = 0;
-        while used < data.len() {
-            check_cancelled()?;
-            match stdin.read(&mut data[used..]) {
-                Ok(0) => break,
-                Ok(size) => used += size,
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(credential_refusal()),
-            }
-        }
-        let data = &data[..used];
-        let key = data.strip_suffix(b"\n").unwrap_or(data);
+        let data = read_stdin_complete(KEY_HEX_LEN + 1, CREDENTIAL_DEADLINE, cancelled).map_err(
+            |err| match err.kind() {
+                io::ErrorKind::Interrupted => StateError::Cancelled.into(),
+                _ => credential_refusal(),
+            },
+        )?;
+        let key = data.strip_suffix(b"\n").unwrap_or(&data);
         let credential = std::str::from_utf8(key)
             .ok()
             .filter(|key| slots::hex(key, KEY_HEX_LEN))
@@ -447,6 +443,7 @@ fn return_slot(
     const COMMAND: &str = "slot return";
     let key = request_key(scope, generation, OperationKind::Return, operation, None)?;
     let input = SlotOperationInput::read()?;
+    let registered = verify_operation_repo(state, &scope.repo)?;
     let slot_index = usize::from(key.slot - 1);
     let matches_request =
         |outcome: &Outcome| outcome.kind == key.kind && outcome.credential == input.credential;
@@ -457,17 +454,8 @@ fn return_slot(
     };
     // A prior result carries no checkout authority and can outlive the holder's flock.
     let prior = with_slot_state(state, |tx| {
-        check_cancelled()?;
-        let Some(saved) = tx.read_slots()? else {
-            return Ok(None);
-        };
-        let Some(pool) = saved.pools.iter().find(|pool| {
-            pool.main.as_os_str() == scope.repo.as_os_str() && pool.pool_id == key.pool_id
-        }) else {
-            return Ok(None);
-        };
-        let registry: Registry = tx.read_slot_registry()?;
-        registered_repo(&scope.repo, &registry)?;
+        let (saved, index) = checked_pool(tx, state, scope, &registered)?;
+        let pool = &saved.pools[index];
         return_outcome(pool, &key)
             .filter(|outcome| matches_request(outcome))
             .map(|outcome| replay(tx, &saved, pool, outcome))
@@ -486,7 +474,6 @@ fn return_slot(
         .ok_or(Refusal::ReturnUncertain(
             "A writer may still hold the slot operation lock.",
         ))?;
-    let registered = verify_operation_repo(state, &scope.repo)?;
     let plan = with_slot_state(state, |tx| {
         let (saved, index) = checked_pool(tx, state, scope, &registered)?;
         let pool = &saved.pools[index];
