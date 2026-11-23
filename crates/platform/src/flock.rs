@@ -252,6 +252,15 @@ pub fn duplicate_inherited_fd(fd: RawFd) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(copy) })
 }
 
+/// Checks privacy on an already open descriptor without taking a lock on it.
+pub fn private_file_metadata(file: &File) -> io::Result<Metadata> {
+    let metadata = file.metadata()?;
+    LockFileIdentity::from_metadata(&metadata)?;
+    #[cfg(target_os = "macos")]
+    check_extended_acl(file, false)?;
+    Ok(metadata)
+}
+
 /// Outcome of a checked nonblocking flock.
 #[derive(Debug)]
 pub enum InheritedLock {
@@ -287,14 +296,13 @@ pub fn try_lock_inherited(
 }
 
 fn check_identity(file: &File, expected: LockFileIdentity) -> io::Result<()> {
-    if LockFileIdentity::from_metadata(&file.metadata()?)? != expected {
+    let metadata = private_file_metadata(file)?;
+    if metadata.dev() != expected.dev || metadata.ino() != expected.ino {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "private file descriptor does not match the expected inode",
         ));
     }
-    #[cfg(target_os = "macos")]
-    check_extended_acl(file, false)?;
     Ok(())
 }
 

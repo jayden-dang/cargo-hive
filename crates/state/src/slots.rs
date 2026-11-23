@@ -885,6 +885,27 @@ pub struct Outcome {
     pub result: TransitionResult,
 }
 
+/// Operation identity within a specific pool and slot generation.
+pub struct SlotRequestKey<'a> {
+    pub pool_id: &'a str,
+    pub slot: u8,
+    pub generation: u64,
+    pub attempt_id: Option<u64>,
+    pub kind: OperationKind,
+    pub operation: &'a str,
+}
+
+impl SlotRequestKey<'_> {
+    /// Finds the operation before checking kind, so a reused ID cannot hide a conflict.
+    pub fn matches_identity(&self, outcome: &Outcome) -> bool {
+        self.pool_id == outcome.pool_id
+            && self.slot == outcome.slot
+            && self.generation == outcome.generation
+            && self.attempt_id == outcome.attempt_id
+            && self.operation == outcome.operation
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
@@ -1434,14 +1455,14 @@ fn bounded_unique<T: Ord>(mut values: impl ExactSizeIterator<Item = T>) -> bool 
     (1..=MAX_PROFILE_ENTRIES).contains(&values.len()) && unique(&mut values)
 }
 
-fn hex(value: &str, size: usize) -> bool {
+pub fn hex(value: &str, size: usize) -> bool {
     value.len() == size
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn object_id(value: &str) -> bool {
+pub fn object_id(value: &str) -> bool {
     hex(value, 40) || hex(value, 64)
 }
 
@@ -1544,6 +1565,11 @@ pub fn checked_slot_lock(path: &Path) -> io::Result<FileIdentity> {
 pub fn random_pool_id() -> io::Result<String> {
     let bytes = random_slot_bytes()?;
     Ok(encode_hex(&bytes[..16]))
+}
+
+/// Returns a slot credential from 32 bytes of platform entropy.
+pub fn random_credential() -> io::Result<String> {
+    random_slot_bytes().map(|bytes| encode_hex(&bytes))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -2021,5 +2047,174 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn reservation_publication_faults_are_read_and_retried_in_a_new_process() {
+        const RESTART_CASE: &str = "CARGO_HIVE_TEST_RESERVATION_RESTART";
+        const RESTART_GENERATION: &str = "CARGO_HIVE_TEST_RESERVATION_GENERATION";
+        if let Some(root) = std::env::var_os(RESTART_CASE) {
+            let root = PathBuf::from(root);
+            assert_eq!(root.parent(), Some(Path::new("/private/tmp")));
+            assert!(
+                root.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("hive-slot-state-")
+            );
+            let generation = std::env::var(RESTART_GENERATION).unwrap().parse().unwrap();
+            retry_faulted_reservation(root, generation);
+            return;
+        }
+
+        for rename_visible in [false, true] {
+            let scratch = Scratch::new();
+            let state = State::open_at(scratch.0.clone()).unwrap();
+            let (initial, reserved) = reservation_records(state.root());
+            let expected = state.root().join("expected-reservation.json");
+            new_private_file(&expected)
+                .unwrap()
+                .write_all(&encode(&expected, &reserved).unwrap())
+                .unwrap();
+            state
+                .locked(|tx| {
+                    tx.commit_slots(None, &initial)?;
+                    let result = tx.commit_slots_with(Some(1), &reserved, |temp, final_path| {
+                        if rename_visible {
+                            fs::rename(temp, final_path)?;
+                        }
+                        Err(io::Error::other("injected reservation publication failure"))
+                    });
+                    assert_eq!(result.is_ok(), rename_visible);
+                    Ok(())
+                })
+                .unwrap();
+
+            let mut spec = cargo_hive_platform::proc::Spec::new(std::env::current_exe().unwrap());
+            spec.args.extend(["--exact".into(), "slots::tests::reservation_publication_faults_are_read_and_retried_in_a_new_process".into()]);
+            spec.env_set
+                .push((RESTART_CASE.into(), scratch.0.as_os_str().to_owned()));
+            spec.env_set.push((
+                RESTART_GENERATION.into(),
+                u8::from(rename_visible).to_string().into(),
+            ));
+            let observed = cargo_hive_platform::proc::run_bounded(
+                &spec,
+                std::time::Duration::from_secs(10),
+                cargo_hive_platform::proc::Capture {
+                    stdout_cap: 4096,
+                    stderr_cap: 4096,
+                },
+                || false,
+            )
+            .unwrap();
+            assert!(
+                observed.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&observed.stdout),
+                String::from_utf8_lossy(&observed.stderr_tail)
+            );
+            state
+                .locked(|tx| {
+                    assert!(tx.read_slots()?.as_ref() == Some(&reserved));
+                    assert!(tx.commit_slots(Some(1), &reserved).is_err());
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
+
+    fn retry_faulted_reservation(root: PathBuf, initial_generation: u64) {
+        let state = State::open_at(root).unwrap();
+        let expected = state.root().join("expected-reservation.json");
+        let file = open_exact_private(&expected).unwrap();
+        let proposed = decode(&expected, &read_bounded(&expected, file).unwrap()).unwrap();
+        state
+            .slot_locked_or_cancelled(
+                || false,
+                |tx| {
+                    let observed = tx.read_slots()?.unwrap();
+                    let slot = &observed.pools[0].slots[0];
+                    assert_eq!(slot.generation, initial_generation);
+                    if initial_generation == 0 {
+                        assert_eq!(observed.revision, 1);
+                        assert!(matches!(slot.phase, Phase::Vacant));
+                        assert!(slot.outcomes.is_empty());
+                        tx.commit_slots(Some(observed.revision), &proposed)?;
+                    } else {
+                        assert_eq!(observed.revision, 2);
+                        assert!(observed == proposed);
+                        tx.sync_slots(&observed)?;
+                    }
+                    let authoritative = tx.read_slots()?.unwrap();
+                    assert!(authoritative == proposed);
+                    let slot = &authoritative.pools[0].slots[0];
+                    assert_eq!(slot.generation, 1);
+                    assert_eq!(slot.outcomes.len(), 1);
+                    assert!(matches!(slot.phase, Phase::Reserved { .. }));
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    fn reservation_records(root: &Path) -> (SlotsFile, SlotsFile) {
+        let main = root.join("main");
+        let common = GitIdentity {
+            path: main.join(".git"),
+            dev: 1,
+            ino: 1,
+        };
+        let profile: PoolProfile = serde_json::from_value(serde_json::json!({
+            "schema": 1, "id": "fixture", "revision": 1, "common_git_id": common,
+            "graph_inputs": [{"locator": {"kind": "checkout", "path": "Cargo.lock"}, "expectation": {"kind": "absent"}}],
+            "invocations": [{"id": "check", "cargo": "cargo", "rustc": "rustc", "layout": "flat", "argv": ["check"], "cwd": ".", "environment": [], "target_root": "target", "build_root": "target"}],
+            "mutable_inputs": [{"id": "source", "locator": {"kind": "checkout", "path": "src/lib.rs"}, "presence": "present", "invocations": ["check"], "coverage": {"kind": "excluded", "proofs": ["fixture-proof"]}}],
+            "consumers": [],
+            "proofs": [{"id": "fixture-proof", "invocation": "check", "layout": "flat", "evidence": "fixture", "unaffected_unit": "fixture"}]
+        })).unwrap();
+        let pool_id = "a".repeat(32);
+        let pool = Pool {
+            pool_id: pool_id.clone(),
+            main,
+            common_git_id: common,
+            root: root.join("secondary"),
+            profile,
+            slots: [
+                Slot::unused(1, FileIdentity { dev: 1, ino: 2 }),
+                Slot::unused(2, FileIdentity { dev: 1, ino: 3 }),
+            ],
+        };
+        let initial = SlotsFile::new(1, vec![pool]);
+        let mut reserved = initial.clone();
+        reserved.revision = 2;
+        let slot = &mut reserved.pools[0].slots[0];
+        let operation = "1".repeat(32);
+        let credential = "b".repeat(64);
+        let commit = "c".repeat(40);
+        slot.generation = 1;
+        slot.phase = Phase::Reserved {
+            lease: Lease {
+                requested_commit: commit.clone(),
+                credential: credential.clone(),
+                reservation_op: operation.clone(),
+            },
+        };
+        slot.outcomes.push(Outcome {
+            pool_id,
+            slot: 1,
+            generation: 1,
+            operation,
+            kind: OperationKind::Reserve,
+            attempt_id: None,
+            request: OutcomeRequest::Reserve {
+                expected_generation: 0,
+                commit,
+            },
+            credential,
+            result: TransitionResult::Reserved,
+        });
+        (initial, reserved)
     }
 }

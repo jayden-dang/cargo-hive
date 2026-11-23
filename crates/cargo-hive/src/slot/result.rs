@@ -2,6 +2,7 @@
 
 use cargo_hive_core::receipt::{Receipt, Scope};
 use serde::Serialize;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 pub(super) const FRESH_FALLBACK: &str =
@@ -18,12 +19,23 @@ pub(super) struct SlotResult {
     pub pool_id: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub slots: Vec<SlotStatus>,
+    #[serde(flatten)]
+    pub transition: Option<SlotTransition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<&'static str>,
     #[serde(skip)]
     pub code: i32,
+}
+
+#[derive(Serialize)]
+pub(super) struct SlotTransition {
+    pub slot: u8,
+    pub generation: u64,
+    pub phase: &'static str,
+    pub commit: String,
+    pub current: bool,
 }
 
 #[derive(Serialize)]
@@ -50,6 +62,7 @@ impl SlotResult {
             repo: repo.filter(|path| path.to_str().is_some()),
             pool_id: None,
             slots: Vec::new(),
+            transition: None,
             detail: None,
             next_action: None,
             code,
@@ -62,7 +75,10 @@ impl SlotResult {
             checkouts: Vec::new(),
         };
         let mut receipt = Receipt::new(self.command, scope);
-        receipt.count("slots", self.slots.len() as u64);
+        receipt.count(
+            "slots",
+            self.slots.len() as u64 + u64::from(self.transition.is_some()),
+        );
         if self.code != 0 {
             receipt.finding("error", None, self.detail.as_deref().unwrap_or(self.kind));
         }
@@ -74,12 +90,23 @@ impl SlotResult {
 
     pub fn emit(&self, json: bool) -> i32 {
         if json {
-            match serde_json::to_string(self) {
-                Ok(line) => println!("{line}"),
+            let line = match serde_json::to_string(self) {
+                Ok(line) => line,
                 Err(_) => {
                     eprintln!("cargo-hive: could not encode the slot result");
                     return 1;
                 }
+            };
+            let mut stdout = io::stdout().lock();
+            if writeln!(stdout, "{line}")
+                .and_then(|()| stdout.flush())
+                .is_err()
+            {
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "cargo-hive: could not deliver the slot result"
+                );
+                return 1;
             }
             return self.code;
         }
@@ -88,6 +115,17 @@ impl SlotResult {
             Some(detail) if self.code != 0 => eprintln!("cargo-hive: {detail}"),
             Some(detail) => println!("{detail}"),
             None => println!("{}", self.kind),
+        }
+        if let Some(transition) = &self.transition {
+            let status = if transition.current {
+                "current"
+            } else {
+                "historical"
+            };
+            println!(
+                "  slot {} generation {} {} at {} ({status})",
+                transition.slot, transition.generation, transition.phase, transition.commit
+            );
         }
         for slot in &self.slots {
             println!(

@@ -2,32 +2,36 @@
 
 mod result;
 
-use crate::cli::SlotCommand;
+use crate::cli::{SlotCommand, SlotReplay, SlotScopeArgs};
 use cargo_hive_cargo::{
     env,
     registry::{self, Registry},
 };
+use cargo_hive_platform::flock::{duplicate_inherited_fd, private_file_metadata};
 use cargo_hive_platform::proc::{self, Capture, Spec};
 use cargo_hive_platform::signals::{self, cancelled};
 use cargo_hive_state::slots::{
-    self, CHECKOUT_NAMESPACE, FileIdentity, GitIdentity, LOCK_NAMESPACE, MAX_POOLS, Phase, Pool,
-    PoolProfile, Slot, SlotsFile,
+    self, CHECKOUT_NAMESPACE, FileIdentity, GitIdentity, LOCK_NAMESPACE, Lease, MAX_OUTCOMES,
+    MAX_POOLS, OperationKind, Outcome, OutcomeRequest, Phase, Pool, PoolProfile, Slot,
+    SlotRequestKey, SlotsFile, TransitionResult,
 };
 use cargo_hive_state::{State, StateError, Tx};
-use result::{FRESH_FALLBACK, SlotResult, SlotStatus};
+use result::{FRESH_FALLBACK, SlotResult, SlotStatus, SlotTransition};
 use std::collections::BTreeSet;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const HELD_ACTION: &str = "Preserve the slot files and ask the repository operator to inspect identity, quiescence and unfinished work. Create a separate fresh secondary checkout and run `cargo hive seed <checkout>` there.";
 const LOST_PROVENANCE: &str = "This slot does not regain warm capacity for these retained outputs in this version. Create a separate fresh secondary checkout and run `cargo hive seed <checkout>` there.";
+const OUTCOME_LIMIT_ACTION: &str = "Retry the exact unresolved request or have the guide confirm its delivered result before reserving.";
 const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
 const MAX_WORKTREES: usize = 256;
 const MAX_ROOT_ENTRIES: usize = 4096;
 const MAX_ROOT_DEPTH: usize = 32;
+const KEY_HEX_LEN: usize = 64;
 
 pub(super) fn dispatch(command: SlotCommand) -> i32 {
     let (name, repo, json, init) = match command {
@@ -41,9 +45,17 @@ pub(super) fn dispatch(command: SlotCommand) -> i32 {
         SlotCommand::Recover(op) => {
             return unavailable("slot recover", Some(op.scope.repo), op.out.json);
         }
-        SlotCommand::Key { out, .. } => return unavailable("slot key", None, out.json),
-        SlotCommand::Reserve { scope, out, .. } => {
-            return unavailable("slot reserve", Some(scope.repo), out.json);
+        SlotCommand::Key { out_fd, out } => return generate_key(out_fd).emit(out.json),
+        SlotCommand::Reserve {
+            scope,
+            expect,
+            commit,
+            op,
+            out,
+        } => {
+            return run_scoped("slot reserve", &scope.repo, out.json, |state| {
+                reserve(state, &scope, expect, &commit, &op)
+            });
         }
         SlotCommand::Begin(op) => {
             return unavailable(
@@ -72,33 +84,12 @@ pub(super) fn dispatch(command: SlotCommand) -> i32 {
         SlotCommand::Return(op) => {
             return unavailable("slot return", Some(op.scope.repo), op.out.json);
         }
-        SlotCommand::Outcome(op) => {
-            return unavailable(
-                "slot outcome",
-                Some(op.operation.scope.repo),
-                op.operation.out.json,
-            );
-        }
-        SlotCommand::Ack(op) => {
-            return unavailable(
-                "slot ack",
-                Some(op.operation.scope.repo),
-                op.operation.out.json,
-            );
-        }
+        SlotCommand::Outcome(op) => return dispatch_replay(&op, ReplayAction::Outcome),
+        SlotCommand::Ack(op) => return dispatch_replay(&op, ReplayAction::Acknowledge),
     };
-    if let Err(err) = signals::install() {
-        return refusal(
-            name,
-            repo,
-            Refusal::Scope(format!("Could not install signal handlers: {err}")),
-        )
-        .emit(json);
-    }
-    match State::open_slot_state() {
-        Ok(state) => run(&state, name, repo, json, init),
-        Err(err) => refusal(name, repo, err.into()).emit(json),
-    }
+    run_scoped(name, &repo, json, |state| {
+        with_slot_state(state, |tx| inspect_or_init(tx, state, name, &repo, init))
+    })
 }
 
 fn unavailable(command: &'static str, repo: Option<PathBuf>, json: bool) -> i32 {
@@ -108,29 +99,94 @@ fn unavailable(command: &'static str, repo: Option<PathBuf>, json: bool) -> i32 
     result.emit(json)
 }
 
-fn run(
+fn generate_key(fd: u32) -> SlotResult {
+    const COMMAND: &str = "slot key";
+    let result = match write_key(fd) {
+        Ok(()) => return SlotResult::new(COMMAND, "key_generated", None, 0),
+        Err(_) => {
+            "Could not deliver the slot credential. Pass a fresh owner-only 0600 file on a separate inherited descriptor."
+        }
+    };
+    let mut refused = SlotResult::new(COMMAND, "refused", None, 1);
+    refused.detail = Some(result.into());
+    refused.next_action = Some("Use the guide to create the private slot credential.");
+    refused
+}
+
+fn write_key(fd: u32) -> io::Result<()> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "invalid private output descriptor",
+        )
+    };
+    let fd = i32::try_from(fd)
+        .ok()
+        .filter(|&fd| fd > 2)
+        .ok_or_else(invalid)?;
+    let mut file = File::from(duplicate_inherited_fd(fd)?);
+    let metadata = private_file_metadata(&file)?;
+    let identity = FileIdentity::of(&metadata);
+    if metadata.mode() & 0o7777 != 0o600 || metadata.len() != 0 || file.stream_position()? != 0 {
+        return Err(invalid());
+    }
+    for standard in 0..=2 {
+        let metadata = File::from(duplicate_inherited_fd(standard)?).metadata()?;
+        if FileIdentity::of(&metadata) == identity {
+            return Err(invalid());
+        }
+    }
+    let mut key = slots::random_credential()?;
+    key.push('\n');
+    file.write_all(key.as_bytes())
+}
+
+fn with_slot_state<T>(
     state: &State,
+    action: impl FnOnce(&Tx<'_>) -> Result<T, Refusal>,
+) -> Result<T, Refusal> {
+    state.slot_locked_or_cancelled(cancelled, |tx| Ok(action(tx)))?
+}
+
+fn run_scoped(
     name: &'static str,
-    repo: PathBuf,
+    repo: &Path,
     json: bool,
-    init: Option<(PathBuf, PathBuf)>,
+    action: impl FnOnce(&State) -> Result<SlotResult, Refusal>,
 ) -> i32 {
-    let result = match state.slot_locked_or_cancelled(cancelled, |tx| {
-        Ok(inspect_or_init(tx, state, name, &repo, init))
-    }) {
-        Ok(Ok(result)) => result,
-        Ok(Err(err)) => refusal(name, repo, err),
-        Err(err) => refusal(name, repo, err.into()),
+    if let Err(err) = signals::install() {
+        return refusal(
+            name,
+            repo,
+            Refusal::Scope(format!("Could not install signal handlers: {err}")),
+        )
+        .emit(json);
+    }
+    let state = match State::open_slot_state() {
+        Ok(state) => state,
+        Err(err) => return refusal(name, repo, err.into()).emit(json),
+    };
+    let result = match action(&state) {
+        Ok(result) => result,
+        Err(err) => refusal(name, repo, err),
     };
     match serde_json::to_string(&result.audit_receipt()) {
         Ok(line) => {
             if let Err(err) = state.slot_locked_or_cancelled(cancelled, |tx| {
                 tx.append_slot_audit_line(&line).map(|_| ())
             }) {
-                eprintln!("cargo-hive: could not log the slot receipt: {err}");
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "cargo-hive: could not log the slot receipt: {err}"
+                );
             }
         }
-        Err(_) => eprintln!("cargo-hive: could not encode the slot receipt"),
+        Err(_) => {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "cargo-hive: could not encode the slot receipt"
+            );
+        }
     }
     result.emit(json)
 }
@@ -139,6 +195,8 @@ enum Refusal {
     State(StateError),
     Scope(String),
     Orphan(PathBuf, PathBuf),
+    Capacity(&'static str),
+    OutcomeLimit,
 }
 
 impl From<StateError> for Refusal {
@@ -147,7 +205,7 @@ impl From<StateError> for Refusal {
     }
 }
 
-fn refusal(command: &'static str, repo: PathBuf, err: Refusal) -> SlotResult {
+fn refusal(command: &'static str, repo: &Path, err: Refusal) -> SlotResult {
     let (kind, code, detail, next) = match err {
         Refusal::State(StateError::Cancelled) => (
             "cancelled",
@@ -157,6 +215,15 @@ fn refusal(command: &'static str, repo: PathBuf, err: Refusal) -> SlotResult {
         ),
         Refusal::State(err) => ("refused", 1, err.to_string(), FRESH_FALLBACK),
         Refusal::Scope(detail) => ("refused", 1, detail, FRESH_FALLBACK),
+        Refusal::Capacity(detail) => ("unavailable", 1, detail.into(), FRESH_FALLBACK),
+        Refusal::OutcomeLimit => (
+            "unavailable",
+            1,
+            format!(
+                "The slot already has {MAX_OUTCOMES} unacknowledged outcomes. {OUTCOME_LIMIT_ACTION}"
+            ),
+            FRESH_FALLBACK,
+        ),
         Refusal::Orphan(record, evidence) => (
             "held",
             1,
@@ -168,10 +235,359 @@ fn refusal(command: &'static str, repo: PathBuf, err: Refusal) -> SlotResult {
             FRESH_FALLBACK,
         ),
     };
-    let mut result = SlotResult::new(command, kind, Some(repo), code);
+    let mut result = SlotResult::new(command, kind, Some(repo.to_path_buf()), code);
     result.detail = Some(detail);
     result.next_action = Some(next);
     result
+}
+
+struct SlotOperationInput {
+    credential: String,
+}
+
+impl SlotOperationInput {
+    fn read() -> Result<Self, Refusal> {
+        let mut stdin = io::stdin().lock();
+        let mut data = [0; KEY_HEX_LEN + 2];
+        let mut used = 0;
+        while used < data.len() {
+            check_cancelled()?;
+            match stdin.read(&mut data[used..]) {
+                Ok(0) => break,
+                Ok(size) => used += size,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err(credential_refusal()),
+            }
+        }
+        let data = &data[..used];
+        let key = data.strip_suffix(b"\n").unwrap_or(data);
+        let credential = std::str::from_utf8(key)
+            .ok()
+            .filter(|key| slots::hex(key, KEY_HEX_LEN))
+            .ok_or_else(credential_refusal)?;
+        Ok(Self {
+            credential: credential.into(),
+        })
+    }
+}
+
+fn check_cancelled() -> Result<(), Refusal> {
+    if cancelled() {
+        return Err(StateError::Cancelled.into());
+    }
+    Ok(())
+}
+
+fn credential_refusal() -> Refusal {
+    Refusal::Scope("Could not verify the private slot credential. Use the guide's original credential or ask the repository operator to inspect the lease.".into())
+}
+
+fn request_key<'a>(
+    scope: &'a SlotScopeArgs,
+    generation: u64,
+    kind: OperationKind,
+    operation: &'a str,
+    attempt_id: Option<u64>,
+) -> Result<SlotRequestKey<'a>, Refusal> {
+    if !slots::hex(&scope.pool, 32) || !(1..=2).contains(&scope.slot) || !slots::hex(operation, 32)
+    {
+        return Err(Refusal::Scope("Name the current pool and slot from `cargo hive slot status` and supply a valid operation ID.".into()));
+    }
+    Ok(SlotRequestKey {
+        pool_id: &scope.pool,
+        slot: scope.slot,
+        generation,
+        attempt_id,
+        kind,
+        operation,
+    })
+}
+
+fn reserve(
+    state: &State,
+    scope: &SlotScopeArgs,
+    expected_generation: u64,
+    commit: &str,
+    operation: &str,
+) -> Result<SlotResult, Refusal> {
+    const COMMAND: &str = "slot reserve";
+    let generation = expected_generation.checked_add(1).ok_or(Refusal::Capacity(
+        "The slot generation counter is exhausted.",
+    ))?;
+    let key = request_key(scope, generation, OperationKind::Reserve, operation, None)?;
+    if !slots::object_id(commit) {
+        return Err(commit_refusal());
+    }
+    let input = SlotOperationInput::read()?;
+    let registered = verify_operation_repo(state, &scope.repo)?;
+    let commit_verified = match git_scope(
+        &scope.repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{commit}^{{commit}}"),
+        ],
+    ) {
+        Ok(resolved) => resolved.strip_suffix(b"\n") == Some(commit.as_bytes()),
+        Err(err @ Refusal::State(StateError::Cancelled)) => return Err(err),
+        Err(_) => false,
+    };
+    with_slot_state(state, |tx| {
+        let (mut saved, index) = checked_pool(tx, state, scope, &registered)?;
+        let pool = &mut saved.pools[index];
+        let slot_index = usize::from(key.slot - 1);
+        let slot = &pool.slots[slot_index];
+        let request = OutcomeRequest::Reserve {
+            expected_generation,
+            commit: commit.into(),
+        };
+        if let Some(outcome) = slot
+            .outcomes
+            .iter()
+            .find(|outcome| key.matches_identity(outcome))
+        {
+            if outcome.kind != key.kind
+                || outcome.request != request
+                || outcome.credential != input.credential
+            {
+                return Err(Refusal::Scope("The operation ID is already bound to a different request. Use the guide's exact original request.".into()));
+            }
+            let result =
+                reservation_result(COMMAND, "reserved", pool, slot, outcome, state.root())?;
+            tx.sync_slots(&saved)?;
+            return Ok(result);
+        }
+        if slot.outcomes.len() >= MAX_OUTCOMES {
+            return Err(Refusal::OutcomeLimit);
+        }
+        if !matches!(slot.phase, Phase::Vacant)
+            || slot.producer.lost()
+            || !slot_identity_present(state.root(), pool, slot)
+        {
+            return Err(Refusal::Capacity(
+                "The requested slot is unavailable. Check current pool capacity with `cargo hive slot status`.",
+            ));
+        }
+        if slot.generation != expected_generation {
+            return Err(Refusal::Scope("The slot generation is stale. Check the current pool with `cargo hive slot status`.".into()));
+        }
+        if !commit_verified {
+            return Err(commit_refusal());
+        }
+        check_cancelled()?;
+        let slot = &mut pool.slots[slot_index];
+        slot.generation = key.generation;
+        slot.phase = Phase::Reserved {
+            lease: Lease {
+                requested_commit: commit.into(),
+                credential: input.credential.clone(),
+                reservation_op: key.operation.into(),
+            },
+        };
+        let outcome = Outcome {
+            pool_id: pool.pool_id.clone(),
+            slot: key.slot,
+            generation: key.generation,
+            operation: key.operation.into(),
+            kind: key.kind,
+            attempt_id: key.attempt_id,
+            request,
+            credential: input.credential,
+            result: TransitionResult::Reserved,
+        };
+        let result = reservation_result(
+            COMMAND,
+            "reserved",
+            pool,
+            &pool.slots[slot_index],
+            &outcome,
+            state.root(),
+        )?;
+        pool.slots[slot_index].outcomes.push(outcome);
+        commit_slot_update(tx, &mut saved)?;
+        Ok(result)
+    })
+}
+
+fn commit_refusal() -> Refusal {
+    Refusal::Scope(
+        "Supply the full object ID of an existing commit in this registered repository.".into(),
+    )
+}
+
+enum ReplayAction {
+    Outcome,
+    Acknowledge,
+}
+
+fn dispatch_replay(replay: &SlotReplay, action: ReplayAction) -> i32 {
+    let command = match action {
+        ReplayAction::Outcome => "slot outcome",
+        ReplayAction::Acknowledge => "slot ack",
+    };
+    let request = &replay.operation;
+    run_scoped(command, &request.scope.repo, request.out.json, |state| {
+        replay_reservation(state, command, replay, action)
+    })
+}
+
+fn replay_reservation(
+    state: &State,
+    command: &'static str,
+    replay: &SlotReplay,
+    action: ReplayAction,
+) -> Result<SlotResult, Refusal> {
+    let request = &replay.operation;
+    let scope = &request.scope;
+    let key = request_key(
+        scope,
+        request.generation,
+        OperationKind::Reserve,
+        &request.op,
+        replay.attempt,
+    )?;
+    let missing = || {
+        Refusal::Scope("No matching unresolved reservation was found. Use the guide's original request or ask the repository operator to inspect the current slot.".into())
+    };
+    if key.attempt_id.is_some() {
+        return Err(missing());
+    }
+    let input = SlotOperationInput::read()?;
+    let registered = verify_operation_repo(state, &scope.repo)?;
+    with_slot_state(state, |tx| {
+        let (mut saved, pool_index) = checked_pool(tx, state, scope, &registered)?;
+        let pool = &saved.pools[pool_index];
+        let slot_index = usize::from(key.slot - 1);
+        let slot = &pool.slots[slot_index];
+        let (outcome_index, outcome) = slot
+            .outcomes
+            .iter()
+            .enumerate()
+            .find(|(_, outcome)| {
+                key.matches_identity(outcome)
+                    && outcome.kind == key.kind
+                    && outcome.credential == input.credential
+            })
+            .ok_or_else(missing)?;
+        let kind = match action {
+            ReplayAction::Outcome => "reserved",
+            ReplayAction::Acknowledge => "acknowledged",
+        };
+        let result = reservation_result(command, kind, pool, slot, outcome, state.root())?;
+        tx.sync_slots(&saved)?;
+        if matches!(action, ReplayAction::Acknowledge) {
+            check_cancelled()?;
+            saved.pools[pool_index].slots[slot_index]
+                .outcomes
+                .remove(outcome_index);
+            commit_slot_update(tx, &mut saved)?;
+        }
+        Ok(result)
+    })
+}
+
+fn commit_slot_update(tx: &Tx<'_>, saved: &mut SlotsFile) -> Result<(), Refusal> {
+    let previous = saved.revision;
+    saved.revision = previous.checked_add(1).ok_or_else(|| {
+        Refusal::Scope(
+            "slots.json has exhausted its revision counter. Ask the state owner to inspect it."
+                .into(),
+        )
+    })?;
+    tx.commit_slots(Some(previous), saved)?;
+    Ok(())
+}
+
+struct VerifiedRepo {
+    registration: registry::Repo,
+    main: FileIdentity,
+    common_git: GitIdentity,
+}
+
+fn verify_operation_repo(state: &State, main: &Path) -> Result<VerifiedRepo, Refusal> {
+    let registry: Registry = with_slot_state(state, |tx| Ok(tx.read_slot_registry()?))?;
+    let repo = registered_repo(main, &registry)?;
+    let metadata = slots::owner_directory(main).map_err(|err| path_refusal(main, err))?;
+    Ok(VerifiedRepo {
+        registration: repo.clone(),
+        main: FileIdentity::of(&metadata),
+        common_git: current_git_identity(repo)?,
+    })
+}
+
+fn checked_pool(
+    tx: &Tx<'_>,
+    state: &State,
+    scope: &SlotScopeArgs,
+    registered: &VerifiedRepo,
+) -> Result<(SlotsFile, usize), Refusal> {
+    check_cancelled()?;
+    let registry: Registry = tx.read_slot_registry()?;
+    if registered_repo(&scope.repo, &registry)? != &registered.registration {
+        return Err(git_scope_refusal(&scope.repo));
+    }
+    let missing = || {
+        Refusal::Scope("The pool namespace is stale or absent. Check the current pool with `cargo hive slot status`.".into())
+    };
+    let saved = tx.read_slots()?.ok_or_else(missing)?;
+    let index = saved
+        .pools
+        .iter()
+        .position(|pool| {
+            pool.main.as_os_str() == scope.repo.as_os_str() && pool.pool_id == scope.pool
+        })
+        .ok_or_else(missing)?;
+    let pool = &saved.pools[index];
+    let config = state.slot_config()?;
+    if pool.common_git_id != registered.common_git
+        || slots::owner_directory(&pool.common_git_id.path)
+            .ok()
+            .as_ref()
+            .map(FileIdentity::of)
+            != Some(pool.common_git_id.file_id())
+        || slots::owner_directory(&pool.main)
+            .ok()
+            .as_ref()
+            .map(FileIdentity::of)
+            != Some(registered.main)
+        || !accepted_root(&pool.root, &config.secondary_roots)
+        || slots::owner_directory(&pool.root).is_err()
+        || !pool_directories_present(state.root(), pool)
+    {
+        return Err(Refusal::Scope("The registered pool's identity or configured root could not be verified. Preserve its files and ask the repository operator to inspect it.".into()));
+    }
+    Ok((saved, index))
+}
+
+fn reservation_result(
+    command: &'static str,
+    kind: &'static str,
+    pool: &Pool,
+    slot: &Slot,
+    outcome: &Outcome,
+    state_root: &Path,
+) -> Result<SlotResult, Refusal> {
+    let OutcomeRequest::Reserve { commit, .. } = &outcome.request else {
+        return Err(Refusal::Scope(
+            "The recorded operation is not a reservation.".into(),
+        ));
+    };
+    let mut result = SlotResult::new(command, kind, Some(pool.main.clone()), 0);
+    result.pool_id = Some(pool.pool_id.clone());
+    let current = slot.generation == outcome.generation
+        && matches!(&slot.phase, Phase::Reserved { lease }
+            if lease.reservation_op == outcome.operation && lease.credential == outcome.credential)
+        && !slot.producer.lost()
+        && slot_identity_present(state_root, pool, slot);
+    result.transition = Some(SlotTransition {
+        slot: outcome.slot,
+        generation: outcome.generation,
+        phase: "reserved",
+        commit: commit.clone(),
+        current,
+    });
+    Ok(result)
 }
 
 fn inspect_or_init(
@@ -271,7 +687,11 @@ fn inspect_or_init(
 }
 
 fn registered_main(main: &Path, registry: &Registry) -> Result<GitIdentity, Refusal> {
-    let repo = registry
+    current_git_identity(registered_repo(main, registry)?)
+}
+
+fn registered_repo<'a>(main: &Path, registry: &'a Registry) -> Result<&'a registry::Repo, Refusal> {
+    registry
         .repos
         .iter()
         .find(|repo| repo.main.as_os_str() == main.as_os_str())
@@ -279,8 +699,7 @@ fn registered_main(main: &Path, registry: &Registry) -> Result<GitIdentity, Refu
             Refusal::Scope(
                 "Name an exact registered main checkout from `cargo hive repo list`.".into(),
             )
-        })?;
-    current_git_identity(repo)
+        })
 }
 
 fn current_git_identity(repo: &registry::Repo) -> Result<GitIdentity, Refusal> {
@@ -324,6 +743,7 @@ fn git_scope(main: &Path, args: &[&str]) -> Result<Vec<u8>, Refusal> {
     let mut spec = Spec::new("git");
     spec.args.extend([
         "--no-optional-locks".into(),
+        "--no-replace-objects".into(),
         "-c".into(),
         "core.fsmonitor=false".into(),
         "-C".into(),
@@ -740,6 +1160,25 @@ fn pool_directories_present(state: &Path, pool: &Pool) -> bool {
     .all(|path| check_private_dir(path).is_ok())
 }
 
+fn slot_identity_present(state: &Path, pool: &Pool, slot: &Slot) -> bool {
+    slots::checked_slot_lock(&pool.lock_path(state, slot)).ok() == Some(slot.lock_id)
+        && match &slot.checkout_id {
+            None => matches!(exists(&pool.checkout_path(slot)), Ok(false)),
+            Some(expected) => {
+                slots::owner_directory(&pool.checkout_path(slot))
+                    .ok()
+                    .as_ref()
+                    .map(FileIdentity::of)
+                    == Some(expected.directory)
+                    && slots::owner_directory(&expected.admin.path)
+                        .ok()
+                        .as_ref()
+                        .map(FileIdentity::of)
+                        == Some(expected.admin.file_id())
+            }
+        }
+}
+
 fn project_pool(
     command: &'static str,
     kind: &'static str,
@@ -754,28 +1193,13 @@ fn project_pool(
         .iter()
         .map(|slot| {
             let path = pool.checkout_path(slot);
-            let held = !scope_verified
-                || slots::checked_slot_lock(&pool.lock_path(state, slot)).ok()
-                    != Some(slot.lock_id)
-                || match &slot.checkout_id {
-                    None => !matches!(exists(&path), Ok(false)),
-                    Some(expected) => {
-                        slots::owner_directory(&path)
-                            .ok()
-                            .as_ref()
-                            .map(FileIdentity::of)
-                            != Some(expected.directory)
-                            || slots::owner_directory(&expected.admin.path)
-                                .ok()
-                                .as_ref()
-                                .map(FileIdentity::of)
-                                != Some(expected.admin.file_id())
-                    }
-                };
+            let held = !scope_verified || !slot_identity_present(state, pool, slot);
             let (phase, action) = if slot.producer.lost() {
                 ("held", Some(LOST_PROVENANCE))
             } else if held || matches!(slot.phase, Phase::Held { .. }) {
                 ("held", Some(HELD_ACTION))
+            } else if matches!(slot.phase, Phase::Vacant) && slot.outcomes.len() >= MAX_OUTCOMES {
+                ("held", Some(OUTCOME_LIMIT_ACTION))
             } else {
                 (
                     slot.phase.name(),
