@@ -31,6 +31,9 @@ Design: ./design.md
 
 | File | Responsibility |
 |---|---|
+| `crates/cargo/src/discover.rs` | Add strict bounded checkout and workspace discovery without changing standalone readers. |
+| `crates/core/src/ledger/account.rs` | Add final checked removal after accounting for strict callers. |
+| `crates/core/src/ledger/mod.rs` | Export the generic checked removal seam. |
 | `crates/state/src/lib.rs` | Extend bounded private state writes and named recovery without changing old readers. |
 | `crates/state/src/slots.rs` | New strict layout 2 record, checked revisions, transition/outcome I/O with fault tests. |
 | `crates/platform/src/flock.rs` | Check inherited writer and credential descriptors and owner-controlled paths for slot state. |
@@ -229,6 +232,9 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 ### Task 6: Prove exactly which roots checkout GC completed
 
 **Files:**
+- Modify: `crates/cargo/src/discover.rs`
+- Modify: `crates/core/src/ledger/account.rs`
+- Modify: `crates/core/src/ledger/mod.rs`
 - Modify: `crates/cargo-hive/src/cli.rs`
 - Modify: `crates/gc/src/checkout.rs`
 - Modify: `crates/cargo-hive/tests/checkout_gc.rs`
@@ -238,7 +244,10 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 **Interfaces:**
 - Consumes: existing CLI/GC operation, both independently resolved output-root identities and scoped ownership facts from the design.
 - Consumes (existing): `checkout::run(input: &CheckoutInput<'_>, cancel: &dyn Fn() -> bool) -> CheckoutReport`, and CLI `checkout_cmd(state: &State, checkout: &Path, out: &OutputArgs) -> i32`.
-- Produces (proposed): `checkout::run_with_evidence(input: &CheckoutInput<'_>, expected: &[RequiredRoot], cancel: &dyn Fn() -> bool) -> EvidencedCheckoutReport`, with root path, role and device/inode proof; `cli::checkout_gc_for_slot(state: &State, proof: &CheckoutProof, cancel: &dyn Fn() -> bool) -> Result<SlotGcReport, SlotRefusal>` brings in checkout/target scan faults. Exercise crate-private orchestration with in-module tests and preserve the existing public standalone seam.
+- Produces (proposed): `checkout::run_with_evidence(input: &CheckoutInput<'_>, expected: &[RequiredRoot], cancel: &dyn Fn() -> bool) -> EvidencedCheckoutReport`, with root path, role and device/inode proof; `cli::checkout_gc_for_slot(state: &State, checkout: &Path, expected: &[RequiredRoot], cancel: &(dyn Fn() -> bool + Sync)) -> Result<SlotGcReport, SlotGcRefusal>` brings in checkout/target scan faults. Exercise crate-private orchestration with in-module tests and preserve the existing public standalone seam.
+
+- Consumes (proposed): `discover::checkouts_complete` and `discover::targets_for_checkout_gc` for bounded complete inventory and all admitted manifest candidates, preserving the existing standalone discovery modes.
+- Produces (proposed): `ledger::remove_counted_guarded` with a final validation callback after accounting and immediately before removal; the existing `remove_counted` contract remains unchanged.
 
 **Depends-on:** Task 4.
 
