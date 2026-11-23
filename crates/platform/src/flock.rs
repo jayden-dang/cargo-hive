@@ -1,6 +1,7 @@
 //! Advisory flock helpers for independent opens and inherited open descriptions.
 
 use crate::slot::effective_uid;
+use std::ffi::{CString, OsStr};
 use std::fs::{File, Metadata, OpenOptions, symlink_metadata};
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
@@ -142,8 +143,14 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
 
 /// Checks the owner, mode and ACL on a descriptor for the named directory.
 pub fn checked_owner_directory(path: &Path) -> io::Result<Metadata> {
+    open_owner_directory(path).map(|(_, metadata)| metadata)
+}
+
+/// Opens the named directory and checks the owner, mode and ACL on that descriptor.
+pub fn open_owner_directory(path: &Path) -> io::Result<(File, Metadata)> {
     let (expected, file) = open_named_directory(path)?;
-    check_owned_inode(&file, &expected, Metadata::is_dir)
+    let metadata = check_owned_inode(&file, &expected, Metadata::is_dir)?;
+    Ok((file, metadata))
 }
 
 /// Checks that a directory above a private inode cannot be replaced or modified by another user.
@@ -171,6 +178,32 @@ fn open_named_directory(path: &Path) -> io::Result<(Metadata, File)> {
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     Ok((expected, file))
+}
+
+/// Opens a single named child directory without following links or opening a pipe.
+pub fn open_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
+    let name = name.as_encoded_bytes();
+    if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    let name = CString::new(name).map_err(|_| io::ErrorKind::InvalidInput)?;
+    // SAFETY: parent owns the open directory descriptor, and name is one NUL-terminated component.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY
+                | libc::O_DIRECTORY
+                | libc::O_NOFOLLOW
+                | libc::O_NONBLOCK
+                | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new owned descriptor.
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 /// Opens an independent descriptor for the legacy state lock, keeping its existing mode.

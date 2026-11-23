@@ -8,20 +8,21 @@ use cargo_hive_core::{
 };
 use cargo_hive_platform::{
     EntryKind, Fs,
-    flock::open_owner_state_file,
+    flock::{open_directory_at, open_owner_directory, open_owner_state_file},
     host_fs,
     proc::{Capture, ChildOutputError, Spec, run_bounded_complete},
     signals::cancelled,
 };
 use cargo_hive_state::slots::{
     AnchorWitness, CargoLayout, Consumer, Coverage, FileIdentity, Locator, PoolProfile, Producer,
-    object_id,
+    VerifiedRoot, object_id,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::Metadata,
+    fs::{File, Metadata},
+    io::ErrorKind,
     os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -280,9 +281,69 @@ struct UnitWitness {
     stamp: FileWitness,
     dep_info: FileWitness,
     source_digest: String,
+    namespace: UnitNamespace,
 }
 
 pub(super) struct UnitWitnesses(BTreeMap<PathBuf, BTreeMap<PathBuf, UnitWitness>>);
+
+#[derive(PartialEq, Eq, serde::Serialize)]
+struct UnitNamespace {
+    path: PathBuf,
+    parents: Vec<FileIdentity>,
+    identity: FileIdentity,
+}
+
+impl UnitNamespace {
+    fn read(root: &VerifiedRoot, path: PathBuf) -> Result<Self, Refusal> {
+        let (parent, parents) = Self::open_parent(root, &path)?;
+        let name = path.file_name().ok_or_else(unproved)?;
+        let metadata = open_directory_at(&parent, name)
+            .and_then(|directory| directory.metadata())
+            .map_err(|_| unproved())?;
+        let identity = FileIdentity::of(&metadata);
+        if identity.dev != root.identity.dev {
+            return Err(unproved());
+        }
+        Ok(Self {
+            path,
+            parents,
+            identity,
+        })
+    }
+
+    fn proved_absent(&self, root: &VerifiedRoot) -> Result<bool, Refusal> {
+        let (parent, identities) = Self::open_parent(root, &self.path)?;
+        let name = self.path.file_name().ok_or_else(unproved)?;
+        Ok(identities == self.parents
+            && open_directory_at(&parent, name).is_err_and(|err| err.kind() == ErrorKind::NotFound)
+            && Self::open_parent(root, &self.path)?.1 == self.parents)
+    }
+
+    fn open_parent(root: &VerifiedRoot, path: &Path) -> Result<(File, Vec<FileIdentity>), Refusal> {
+        let relative = path.strip_prefix(&root.path).map_err(|_| unproved())?;
+        let parent = relative.parent().ok_or_else(unproved)?;
+        let (mut directory, metadata) = open_owner_directory(&root.path).map_err(|_| unproved())?;
+        if FileIdentity::of(&metadata) != root.identity
+            || root.path.canonicalize().as_ref().ok() != Some(&root.path)
+        {
+            return Err(unproved());
+        }
+        let mut identities = Vec::new();
+        for component in parent.components() {
+            let Component::Normal(name) = component else {
+                return Err(unproved());
+            };
+            directory = open_directory_at(&directory, name).map_err(|_| unproved())?;
+            let metadata = directory.metadata().map_err(|_| unproved())?;
+            let identity = FileIdentity::of(&metadata);
+            if identity.dev != root.identity.dev {
+                return Err(unproved());
+            }
+            identities.push(identity);
+        }
+        Ok((directory, identities))
+    }
+}
 
 fn unit_names_anchor(
     fs: &dyn Fs,
@@ -432,6 +493,11 @@ fn cargo_units(
                     stamp,
                     dep_info,
                     source_digest,
+                    namespace: UnitNamespace::read(
+                        &roots.build,
+                        unit_path::unit_dir(&directory, &unit.loc)
+                            .unwrap_or_else(|| unit_path::fingerprint_dir(&directory, &unit.loc)),
+                    )?,
                 };
                 if let Some(previous) = witnesses.get(&stamp_path) {
                     if previous != &unit {
@@ -605,6 +671,9 @@ pub(super) fn after_gc(
     prior: &UnitWitnesses,
 ) -> Result<(), Refusal> {
     verify_touch(checkout, profile, producer, witnesses)?;
+    let Producer::Complete { roots, .. } = producer else {
+        return Ok(());
+    };
     let remaining = cargo_units(checkout, profile, producer, false)?;
     for proof in witnesses {
         let touched = proof.touched.ok_or_else(unproved)?;
@@ -615,6 +684,12 @@ pub(super) fn after_gc(
             .any(|(path, unit)| old.get(path) != Some(unit) || unit.stamp.mtime >= touched)
         {
             return Err(unproved());
+        }
+        for (path, unit) in old {
+            check_cancelled()?;
+            if !current.contains_key(path) && !unit.namespace.proved_absent(&roots.build)? {
+                return Err(unproved());
+            }
         }
     }
     Ok(())

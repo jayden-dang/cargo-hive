@@ -4464,6 +4464,130 @@ exec "$HIVE_TEST_BINARY" "$@"
 }
 
 #[test]
+fn changing_dep_info_during_gc_does_not_discard_a_surviving_unit() {
+    // Keep the probe's PATH in the producer evidence from the first build onward.
+    // The subprocess isolates that PATH from the other integration cases.
+    if std::env::var_os("HIVE_TEST_GC_DEP_INFO_CARGO").is_none() {
+        use cargo_hive_platform::proc::{Spec, output_with_deadline};
+
+        let bin = common::Scratch::new("gc-dep-info-cargo");
+        let cargo = Path::new(env!("CARGO"));
+        let shim = bin.path.join("cargo");
+        fs::write(
+            &shim,
+            r#"#!/bin/sh
+if [ "$1" = metadata ] && [ -n "$HIVE_TEST_GC_DEP_INFO" ] && [ ! -f "$HIVE_TEST_GC_CHANGED" ] &&
+    /usr/bin/grep -q '"stage"[[:space:]]*:[[:space:]]*"gc_in_progress"' "$HIVE_HOME/slots.json"; then
+    /bin/cp -p "$HIVE_TEST_GC_DEP_INFO" "$HIVE_TEST_GC_CHANGED" || exit 20
+    printf '%s: independent/src/lib.rs\n' "$HIVE_TEST_GC_DEP_INFO" > "$HIVE_TEST_GC_DEP_INFO" || exit 21
+    /usr/bin/touch -r "$HIVE_TEST_GC_CHANGED" "$HIVE_TEST_GC_DEP_INFO" || exit 22
+fi
+exec "$HIVE_TEST_GC_DEP_INFO_CARGO" "$@"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut path = bin.path.as_os_str().to_owned();
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap());
+        let mut child = Spec::new(std::env::current_exe().unwrap());
+        child.args = vec![
+            "--exact".into(),
+            "changing_dep_info_during_gc_does_not_discard_a_surviving_unit".into(),
+        ];
+        child.env_set = vec![
+            ("PATH".into(), path),
+            ("HIVE_TEST_GC_DEP_INFO_CARGO".into(), cargo.into()),
+        ];
+        let out = output_with_deadline(&child, Duration::from_secs(45), || false).unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        return;
+    }
+
+    use cargo_hive_core::{fingerprint, unit_path};
+    let (slot, key, next) = first_completed_workspace();
+    return_workspace(&slot, 1);
+    let profile = slot.path.join("target/debug");
+    let graph = fingerprint::read_profile(&profile).graph.unwrap();
+    let unit = graph
+        .units
+        .iter()
+        .find(|unit| unit.loc.package() == "fixture")
+        .unwrap();
+    let namespace = unit_path::fingerprint_dir(&profile, &unit.loc);
+    let stamp = unit_path::stamp(&profile, &unit.loc, unit.kind);
+    let output = unit_path::outputs(&profile, &unit.loc);
+    let dep_info = [
+        output.join(format!("fixture-{}.d", unit.loc.hex())),
+        output.join("fixture.d"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+    .unwrap();
+    let changed = slot.fixture._repo_dir.path.join("original-dep-info");
+    fs::File::open(&dep_info)
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000)),
+        )
+        .unwrap();
+    let before_dep_info = fs::metadata(&dep_info).unwrap().modified().unwrap();
+    let before_stamp = fs::metadata(&stamp).unwrap();
+    let child = packaged_take_command(&slot.fixture, &slot.pool, &next, &key, "take", "1")
+        .env("HIVE_TEST_GC_DEP_INFO", &dep_info)
+        .env("HIVE_TEST_GC_CHANGED", &changed)
+        .spawn()
+        .unwrap();
+    let out = common::wait_within(child, Duration::from_secs(30));
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(namespace.is_dir());
+    assert_ne!(fs::read(&dep_info).unwrap(), fs::read(&changed).unwrap());
+    assert_eq!(
+        fs::metadata(&dep_info).unwrap().modified().unwrap(),
+        before_dep_info
+    );
+    let after_stamp = fs::metadata(&stamp).unwrap();
+    assert_eq!(after_stamp.ino(), before_stamp.ino());
+    assert_eq!(
+        after_stamp.modified().unwrap(),
+        before_stamp.modified().unwrap()
+    );
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert!(result.get("path").is_none());
+    let saved = slot.fixture.record();
+    assert_eq!(
+        saved["pools"][0]["slots"][0]["phase"]["attempt"]["stage"],
+        "gc_in_progress"
+    );
+}
+
+#[test]
+fn a_fully_removed_consumer_unit_allows_retained_ready() {
+    let (slot, key, next) = first_completed_workspace();
+    return_workspace(&slot, 1);
+    let stamp = workspace_unit_stamp_path(&slot.path, "fixture");
+    let independent = workspace_unit_stamp(&slot.path, "independent");
+    let fingerprint = stamp.parent().unwrap();
+    fs::File::open(&stamp)
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000)),
+        )
+        .unwrap();
+    let (out, ready) = take_workspace(&slot, &key, &next, "1");
+    assert!(out.status.success(), "{ready}");
+    assert_eq!(ready["path"], json!(slot.path));
+    assert!(!fingerprint.exists());
+    assert_eq!(workspace_unit_stamp(&slot.path, "independent"), independent);
+}
+
+#[test]
 fn a_swapped_anchor_parent_receives_no_mtime_effect() {
     let (slot, key, _) = first_completed_workspace();
     return_workspace(&slot, 1);
