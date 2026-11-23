@@ -99,7 +99,16 @@ pub struct LockFileIdentity {
 impl LockFileIdentity {
     /// Reads the identity of the named lock file without following the final path component.
     pub fn from_path(path: &Path) -> io::Result<Self> {
-        Self::from_metadata(&symlink_metadata(path)?)
+        let expected = Self::from_metadata(&symlink_metadata(path)?)?;
+        #[cfg(target_os = "macos")]
+        {
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_EVTONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(path)?;
+            check_identity(&file, expected)?;
+        }
+        Ok(expected)
     }
 
     fn from_metadata(metadata: &Metadata) -> io::Result<Self> {
@@ -122,7 +131,7 @@ impl LockFileIdentity {
 
 /// Opens a private regular file for reading and verifies that the named inode survived the open.
 pub fn open_private_file(path: &Path) -> io::Result<File> {
-    let expected = LockFileIdentity::from_path(path)?;
+    let expected = LockFileIdentity::from_metadata(&symlink_metadata(path)?)?;
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -177,12 +186,42 @@ pub fn try_lock_inherited(
 }
 
 fn check_identity(file: &File, expected: LockFileIdentity) -> io::Result<()> {
-    if LockFileIdentity::from_metadata(&file.metadata()?)? == expected {
-        return Ok(());
+    if LockFileIdentity::from_metadata(&file.metadata()?)? != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "private file descriptor does not match the expected inode",
+        ));
     }
+    #[cfg(target_os = "macos")]
+    refuse_extended_acl(file)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn refuse_extended_acl(file: &File) -> io::Result<()> {
+    use libc::{c_int, c_void};
+
+    unsafe extern "C" {
+        fn acl_get_fd(fd: c_int) -> *mut c_void;
+        fn acl_free(acl: *mut c_void) -> c_int;
+    }
+
+    // SAFETY: file owns a live descriptor through the ACL query.
+    let acl = unsafe { acl_get_fd(file.as_raw_fd()) };
+    if acl.is_null() {
+        let err = io::Error::last_os_error();
+        // Darwin returns ENOENT for an absent ACL on the open descriptor.
+        return if err.raw_os_error() == Some(libc::ENOENT) {
+            Ok(())
+        } else {
+            Err(err)
+        };
+    }
+    // SAFETY: acl_get_fd returned this allocated ACL and acl_free disposes of it once.
+    unsafe { acl_free(acl) };
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
-        "private file descriptor does not match the expected inode",
+        "private file must not have an extended ACL",
     ))
 }
 

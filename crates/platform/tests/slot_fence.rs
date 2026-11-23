@@ -11,7 +11,7 @@ use cargo_hive_platform::slot::{effective_uid, parent_instance, random_slot_byte
 use cargo_hive_platform::{Fs, TempDir};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, RawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -37,6 +37,20 @@ fn stripped_descriptor_leaves_custody_uncertain_after_the_runner_is_killed() {
 }
 
 #[test]
+fn dropping_a_control_stream_keeps_the_inherited_endpoint_open() {
+    let scratch = scratch();
+    let (mut reader, endpoint) = UnixStream::pair().unwrap();
+    reader.set_read_timeout(Some(DEADLINE)).unwrap();
+    let mut child = Process::spawn(scratch.path(), "control-check", None, Some(&endpoint));
+    drop(endpoint);
+    assert!(child.wait().success());
+    let mut reply = [0];
+    assert_eq!(reader.read(&mut reply).unwrap(), 1);
+    assert_eq!(reply, *b"C");
+    assert_eq!(reader.read(&mut reply).unwrap(), 0);
+}
+
+#[test]
 fn private_file_reads_refuse_aliases_and_public_permissions() {
     let scratch = scratch();
     let path = scratch.path().join(LOCK);
@@ -57,6 +71,48 @@ fn private_file_reads_refuse_aliases_and_public_permissions() {
         .unwrap();
     assert!(open_private_file(&path).is_err());
     assert!(open_private_file(scratch.path()).is_err());
+}
+
+#[test]
+fn private_file_paths_refuse_extended_acls() {
+    let scratch = scratch();
+    let path = scratch.path().join(LOCK);
+    let lock = create_lock(&path);
+    assert!(LockFileIdentity::from_path(&path).is_ok());
+    assert!(open_private_file(&path).is_ok());
+    grant_everyone_access(&path, &lock);
+
+    let identity = LockFileIdentity::from_path(&path);
+    let opened = open_private_file(&path);
+    assert!(
+        matches!(&identity, Err(err) if err.kind() == io::ErrorKind::PermissionDenied)
+            && matches!(&opened, Err(err) if err.kind() == io::ErrorKind::PermissionDenied),
+        "ACL must refuse named identity and private open: {identity:?}, {opened:?}"
+    );
+}
+
+#[test]
+fn inherited_lock_refuses_an_extended_acl_added_to_the_open_inode() {
+    let scratch = scratch();
+    let path = scratch.path().join(LOCK);
+    let lock = create_lock(&path);
+    let identity = LockFileIdentity::from_path(&path).unwrap();
+    grant_everyone_access(&path, &lock);
+
+    let err = try_lock_inherited(lock.as_fd(), identity).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+}
+
+fn grant_everyone_access(path: &Path, file: &File) {
+    let mut spec = cargo_hive_platform::proc::Spec::new("/bin/chmod");
+    spec.args = ["+a".into(), "everyone allow read,write".into(), path.into()].into();
+    let result =
+        cargo_hive_platform::proc::output_with_deadline(&spec, DEADLINE, || false).unwrap();
+    assert!(result.status.success(), "{:?}", result.stderr);
+    let metadata = file.metadata().unwrap();
+    assert_eq!(metadata.mode() & 0o7777, 0o600);
+    assert_eq!(metadata.uid(), effective_uid());
+    assert_eq!(metadata.nlink(), 1);
 }
 
 #[test]
@@ -328,6 +384,12 @@ fn fixture_subprocess() {
             };
         }
         "writer" => writer(),
+        "control-check" => {
+            drop(writer_endpoint());
+            let fd = std::env::var(CONTROL).unwrap().parse::<RawFd>().unwrap();
+            let owned = duplicate_inherited_fd(fd).expect("the inherited endpoint remains open");
+            UnixStream::from(owned).write_all(b"C").unwrap();
+        }
         report @ ("identity-a" | "identity-b") => fs::write(report, parent_record()).unwrap(),
         role => panic!("unknown fixture role {role}"),
     }
@@ -347,8 +409,7 @@ fn inherited_file() -> Option<File> {
 
 fn writer_endpoint() -> UnixStream {
     let fd = std::env::var(CONTROL).unwrap().parse::<RawFd>().unwrap();
-    // SAFETY: Process::spawn transfers this socket endpoint exclusively to the new process.
-    unsafe { UnixStream::from_raw_fd(fd) }
+    UnixStream::from(duplicate_inherited_fd(fd).expect("duplicate fixture control descriptor"))
 }
 
 fn writer() {
