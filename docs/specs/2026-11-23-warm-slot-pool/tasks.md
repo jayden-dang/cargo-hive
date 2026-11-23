@@ -199,6 +199,8 @@ _Requirements: SLOTS-1.5, SLOTS-1.9, SLOTS-2.1, SLOTS-2.2, SLOTS-2.3, SLOTS-2.4,
 ### Task 5: Admit only proved producer history for a guarded checkout
 
 **Files:**
+- Modify: `crates/platform/src/slot.rs`
+- Modify: `crates/cargo-hive/src/slot/inspect.rs`
 - Create: `crates/cargo-hive/src/slot/profile.rs`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
 - Modify: `crates/state/src/slots.rs`
