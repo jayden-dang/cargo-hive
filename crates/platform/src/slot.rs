@@ -14,6 +14,15 @@ pub struct ProcessInstance {
     pub start_micros: u64,
 }
 
+/// Local samples for comparing a saved boot observation within the same pool.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BootWitness {
+    /// Kernel boot session UUID observed on both sides of the host lookup.
+    pub boot_session: String,
+    /// Domain-separated native host digest scoped to this pool.
+    pub host_binding: [u8; 32],
+}
+
 /// Verifies that a private protocol output descriptor was opened for writing.
 pub fn descriptor_writable(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<bool> {
     use std::os::fd::AsRawFd;
@@ -165,6 +174,102 @@ pub fn boot_session() -> io::Result<String> {
         io::ErrorKind::Unsupported,
         MACOS_ONLY_MESSAGE,
     ))
+}
+
+/// Observes the current boot and its pool-scoped native host binding.
+/// Establish observation order by binding the earlier witness to the previous writer.
+#[cfg(target_os = "macos")]
+pub fn boot_witness(pool_id: &str) -> io::Result<BootWitness> {
+    const POOL_ID_LEN: usize = 32;
+    if pool_id.len() != POOL_ID_LEN
+        || !pool_id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid pool ID for boot witness",
+        ));
+    }
+
+    let boot = boot_session()?;
+    let mut host_uuid: libc::uuid_t = [0; 16];
+    let timeout = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 250_000_000,
+    };
+    // SAFETY: host_uuid is writable for one UUID and timeout is an initialized timespec.
+    if unsafe { libc::gethostuuid(host_uuid.as_mut_ptr(), &timeout) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if host_uuid == [0; 16] {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native host identity unavailable",
+        ));
+    }
+    if boot != boot_session()? || boot.bytes().all(|byte| matches!(byte, b'0' | b'-')) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "boot session could not be verified during host lookup",
+        ));
+    }
+
+    const DOMAIN: &[u8] = b"cargo-hive/slot/host/v1\0";
+    let pool_end = DOMAIN.len() + POOL_ID_LEN;
+    let mut material = [0; DOMAIN.len() + POOL_ID_LEN + size_of::<libc::uuid_t>()];
+    material[..DOMAIN.len()].copy_from_slice(DOMAIN);
+    material[DOMAIN.len()..pool_end].copy_from_slice(pool_id.as_bytes());
+    material[pool_end..].copy_from_slice(&host_uuid);
+    Ok(BootWitness {
+        boot_session: boot,
+        host_binding: sha256(&material)?,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn boot_witness(_pool_id: &str) -> io::Result<BootWitness> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        MACOS_ONLY_MESSAGE,
+    ))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod boot_witness_tests {
+    use super::{boot_session, boot_witness};
+
+    #[test]
+    fn native_boot_witness_is_stable_and_bound_to_one_pool() {
+        let pool = "a".repeat(32);
+        let first = boot_witness(&pool).unwrap();
+        let again = boot_witness(&pool).unwrap();
+        let other = boot_witness(&"b".repeat(32)).unwrap();
+
+        assert!(first.boot_session == boot_session().unwrap());
+        assert!(first == again);
+        assert!(first.boot_session == other.boot_session);
+        assert!(first.host_binding != [0; 32]);
+        assert!(first.host_binding != other.host_binding);
+    }
+
+    #[test]
+    fn boot_witness_refuses_noncanonical_pool_ids_without_echoing_them() {
+        for pool in [
+            String::new(),
+            "a".repeat(31),
+            "a".repeat(33),
+            "A".repeat(32),
+            "g".repeat(32),
+            "é".repeat(16),
+        ] {
+            let Err(error) = boot_witness(&pool) else {
+                panic!("noncanonical pool ID accepted");
+            };
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(error.to_string(), "invalid pool ID for boot witness");
+        }
+    }
 }
 
 /// Identifies the current parent only while the same runner remains the parent.
