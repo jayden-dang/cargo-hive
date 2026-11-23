@@ -802,16 +802,85 @@ pub fn resolvers_of(scan: &TargetScan, target: &Path) -> Vec<PathBuf> {
 }
 
 /// Checks both configured output roles of foreign workspaces, even when no target row
-/// was requested for their destination. Metadata resolution supplies canonical paths.
+/// was requested for their destination.
 pub fn foreign_output_overlaps(scan: &TargetScan, checkout: &Path, root: &Path) -> bool {
+    let Some(root) = OutputPath::resolve(root) else {
+        return true;
+    };
     scan.workspaces.iter().any(|workspace| {
         workspace.checkout != checkout
             && workspace.result.as_ref().is_ok_and(|resolved| {
                 [&resolved.target_directory, &resolved.build_directory]
                     .into_iter()
-                    .any(|output| output.starts_with(root) || root.starts_with(output))
+                    .any(|output| {
+                        OutputPath::resolve(output).is_none_or(|path| root.overlaps(&path))
+                    })
             })
     })
+}
+
+struct OutputPath {
+    path: PathBuf,
+    existing_components: usize,
+}
+
+impl OutputPath {
+    fn resolve(path: &Path) -> Option<Self> {
+        use std::io::ErrorKind;
+        use std::path::Component;
+
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+        {
+            return None;
+        }
+        let mut missing = Vec::new();
+        for ancestor in path.ancestors() {
+            match ancestor.canonicalize() {
+                Ok(mut canonical) => {
+                    let existing_components = canonical.components().count();
+                    canonical.extend(missing.into_iter().rev());
+                    return Some(Self {
+                        path: canonical,
+                        existing_components,
+                    });
+                }
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    // A dangling symlink is not proof of a missing path component.
+                    if !std::fs::symlink_metadata(ancestor)
+                        .is_err_and(|err| err.kind() == ErrorKind::NotFound)
+                    {
+                        return None;
+                    }
+                    missing.push(ancestor.file_name()?);
+                }
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    fn overlaps(&self, other: &Self) -> bool {
+        let known = self.existing_components.min(other.existing_components);
+        self.path
+            .components()
+            .zip(other.path.components())
+            .enumerate()
+            .all(|(i, (left, right))| {
+                if left == right {
+                    return true;
+                }
+                if i < known {
+                    return false;
+                }
+                let left = left.as_os_str().as_encoded_bytes();
+                let right = right.as_os_str().as_encoded_bytes();
+                // Without an inode, non-ASCII equivalence under this volume is unproved.
+                !left.is_ascii() || !right.is_ascii() || left.eq_ignore_ascii_case(right)
+            })
+    }
 }
 
 pub fn failed_workspaces(scan: &TargetScan) -> Vec<(PathBuf, String)> {

@@ -1065,6 +1065,101 @@ fn checkout_gc_only_counts_an_absent_root_when_initial_absence_was_proved() {
 }
 
 #[test]
+fn strict_gc_requires_exclusive_ownership_of_missing_output_paths() {
+    use cargo_hive_cargo::{discover, registry};
+    let hive = hive_for_checkout_evidence();
+    let scratch = Scratch::new("absent-output-alias");
+    let checkout = init_repo(&scratch.path.join("slot"), "");
+    let other = init_repo(&scratch.path.join("other"), "");
+    register(&hive, &checkout);
+    register(&hive, &other);
+    let base = checkout.join("lane");
+    fs::create_dir(&base).unwrap();
+    let target = base.join("target/nested");
+    let build = checkout.join("build-output");
+    fs::create_dir_all(checkout.join(".cargo")).unwrap();
+    fs::write(
+        checkout.join(".cargo/config.toml"),
+        format!(
+            "[build]\ntarget-dir = {:?}\nbuild-dir = {:?}\n",
+            target, build
+        ),
+    )
+    .unwrap();
+    let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
+    let config = state.config().unwrap();
+    let reg: registry::Registry = state.read(registry::FILE).unwrap();
+    let mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
+    let checkouts: Vec<_> = reg
+        .repos
+        .iter()
+        .flat_map(|repo| discover::checkouts(repo, &mains, &config).0)
+        .collect();
+    let fs = cargo_hive_platform::current().unwrap().fs;
+    let required =
+        [(&target, RootRole::Target), (&build, RootRole::Build)].map(|(path, role)| RequiredRoot {
+            path: path.clone(),
+            role,
+            presence: RootPresence::InitiallyAbsent,
+        });
+    fs::create_dir_all(other.join(".cargo")).unwrap();
+    for (other_target, other_build, exclusive) in [
+        (base.join("TARGET"), other.join("build-output"), false),
+        (
+            other.join("target-output"),
+            base.join("TARGET/NESTED/child"),
+            false,
+        ),
+        (
+            other.join("target-output"),
+            checkout.join("BUILD-OUTPUT"),
+            false,
+        ),
+        (
+            base.join("target/nésted"),
+            other.join("build-output"),
+            false,
+        ),
+        (base.join("TARGETS"), checkout.join("BUILD-OUTPUTS"), true),
+    ] {
+        fs::write(
+            other.join(".cargo/config.toml"),
+            format!(
+                "[build]\ntarget-dir = {:?}\nbuild-dir = {:?}\n",
+                other_target, other_build
+            ),
+        )
+        .unwrap();
+        let scan =
+            discover::targets_for_checkout_gc(&checkouts, &[target.clone(), build.clone()], || {
+                false
+            });
+        assert!(scan.walk_faults.is_empty(), "strict discovery walk failed");
+        let foreign = scan
+            .workspaces
+            .iter()
+            .find(|row| row.checkout == other)
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap();
+        assert_eq!(foreign.target_directory, other_target);
+        assert_eq!(foreign.build_directory, other_build);
+        let (report, completed) =
+            checkout_with_evidence(fs.as_ref(), &scan, &checkout, &[], &required, &|| false);
+        if exclusive {
+            assert_eq!(completed, required, "{report:?}");
+        } else {
+            assert!(completed.is_empty() && report.failed, "{report:?}");
+        }
+        assert!(report.per_target.is_empty(), "{report:?}");
+        for path in [&target, &build, &other_target, &other_build] {
+            assert!(!path.exists(), "GC created {}", path.display());
+        }
+    }
+}
+
+#[test]
 fn checkout_gc_cannot_prove_a_cancelled_root() {
     let hive = hive_for_checkout_evidence();
     let repo = aged_binaries(&hive);
@@ -1077,6 +1172,121 @@ fn checkout_gc_cannot_prove_a_cancelled_root() {
     assert!(completed.is_empty(), "{report:?}");
     assert!(report.cancelled, "{report:?}");
     assert_eq!(tree(&target), before);
+}
+
+fn nested_output_fixture(root: &Path, entries: &[&str]) -> [PathBuf; 2] {
+    let profile = root.join("debug");
+    fs::create_dir_all(&profile).unwrap();
+    fs::write(root.join("CACHEDIR.TAG"), cargo_hive_core::target::TAG_LINE).unwrap();
+    fs::write(profile.join(".cargo-build-lock"), b"").unwrap();
+    [
+        ("one", "0123456789abcdef", 1),
+        ("two", "1123456789abcdef", 2),
+    ]
+    .map(|(package, hash, fingerprint)| {
+        let unit = plant_unit(
+            &profile,
+            UnitLayout::UnitDir,
+            package,
+            hash,
+            &format!("lib-{package}"),
+            fingerprint,
+            &[],
+            entries,
+        );
+        unit_path::outputs(&profile, &unit)
+    })
+}
+
+#[test]
+fn strict_object_listing_stops_at_the_first_cancelled_nested_listing() {
+    use cargo_hive_platform::{Fs, TryLock};
+    use std::cell::Cell;
+    let hive = hive_for_checkout_evidence();
+    let repo = RegistryRepo::new(&hive);
+    let target = repo.main.join("target");
+    let outputs = nested_output_fixture(&target, &["loose.0.rcgu.o"]);
+    let (real, scan, checkout, nested) = library_scan(&hive, &repo);
+    let required = provided_roots(real.as_ref(), &target, &target);
+    let lock = target.join("debug/.cargo-build-lock");
+    let visits = Cell::new(0);
+    let scoped = ListingFs {
+        real,
+        list: |real: &dyn Fs, path: &Path, cap| {
+            let entries = real.read_dir_bounded(path, cap)?;
+            if outputs.iter().any(|out| path == out) {
+                assert!(matches!(real.try_lock_exclusive(&lock), TryLock::Held));
+                visits.set(visits.get() + 1);
+            }
+            Ok(entries)
+        },
+    };
+    let before = tree(&target);
+    let (report, completed) =
+        checkout_with_evidence(&scoped, &scan, &checkout, &nested, &required, &|| {
+            visits.get() > 0
+        });
+    assert_eq!(visits.get(), 1, "{report:?}");
+    assert!(completed.is_empty() && report.cancelled, "{report:?}");
+    assert_eq!(report.totals.objects_deleted, 0, "{report:?}");
+    assert_eq!(tree(&target), before);
+    assert!(common::wait_until_lock_free(&lock, Duration::from_secs(5)));
+}
+
+#[test]
+fn strict_object_listing_spends_one_budget_across_nested_directories() {
+    use cargo_hive_platform::{EntryKind, Fs};
+    let hive = hive_for_checkout_evidence();
+    let repo = RegistryRepo::new(&hive);
+    let target = repo.main.join("target");
+    let outputs = nested_output_fixture(&target, &["fixture.o"]);
+    let (real, scan, checkout, nested) = library_scan(&hive, &repo);
+    let required = provided_roots(real.as_ref(), &target, &target);
+    let before = tree(&target);
+    let mut real = Some(real);
+    let budget = cargo_hive_core::caps::DEPS_CAP;
+    // Two entries in build, one package entry during unit-layout detection, two
+    // entries in the profile, then two build entries and one entry per package.
+    let outer_entries = 2 + 1 + 2 + 2 + 2;
+    for extra in [0, 1] {
+        let scoped = ListingFs {
+            real: real.take().unwrap(),
+            list: |fs: &dyn Fs, path: &Path, cap| {
+                let Some(index) = outputs.iter().position(|out| path == out) else {
+                    return fs.read_dir_bounded(path, cap);
+                };
+                let half = budget / 2;
+                let entries = if index == 0 {
+                    half
+                } else {
+                    half - outer_entries + extra
+                };
+                if entries > cap {
+                    return Err(std::io::Error::other("fixture listing exceeded its cap"));
+                }
+                Ok((0..entries)
+                    .map(|n| (format!("entry-{n}"), EntryKind::Dir))
+                    .collect())
+            },
+        };
+        let (report, completed) =
+            checkout_with_evidence(&scoped, &scan, &checkout, &nested, &required, &|| false);
+        if extra == 0 {
+            assert_eq!(completed, required, "{report:?}");
+        } else {
+            assert!(completed.is_empty(), "{report:?}");
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .any(|f| f.kind == "gc.objects_undecided"),
+                "{report:?}"
+            );
+        }
+        assert_eq!(report.totals.objects_deleted, 0, "{report:?}");
+        assert_eq!(tree(&target), before);
+        real = Some(scoped.real);
+    }
 }
 
 #[test]
@@ -2297,9 +2507,17 @@ fn an_out_cap_hit_or_unreadable_package_dir_names_the_dir_and_deletes_no_object(
     let keep = out_dir.join("keep.0.rcgu.o");
     let pkg = profile.join("build/probe");
     let objects_before = count_regular_files_under(&out_dir);
-    let fail = FailListFs {
+    let fail = ListingFs {
         real,
-        blocked: pkg.clone(),
+        list: |real: &dyn cargo_hive_platform::Fs, dir: &Path, cap| {
+            if dir == pkg {
+                return Err(std::io::Error::other(format!(
+                    "{}: permission denied",
+                    dir.display()
+                )));
+            }
+            real.read_dir_bounded(dir, cap)
+        },
     };
     let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
     let cfg = state.config().unwrap();
@@ -2335,12 +2553,19 @@ fn an_out_cap_hit_or_unreadable_package_dir_names_the_dir_and_deletes_no_object(
     );
 }
 
-struct FailListFs {
+struct ListingFs<F> {
     real: Box<dyn cargo_hive_platform::Fs>,
-    blocked: PathBuf,
+    list: F,
 }
 
-impl cargo_hive_platform::Fs for FailListFs {
+impl<F> cargo_hive_platform::Fs for ListingFs<F>
+where
+    F: Fn(
+        &dyn cargo_hive_platform::Fs,
+        &Path,
+        usize,
+    ) -> std::io::Result<Vec<(String, cargo_hive_platform::EntryKind)>>,
+{
     fn temp_dir(
         &self,
         parent: &Path,
@@ -2406,13 +2631,7 @@ impl cargo_hive_platform::Fs for FailListFs {
         dir: &Path,
         cap: usize,
     ) -> std::io::Result<Vec<(String, cargo_hive_platform::EntryKind)>> {
-        if dir == self.blocked {
-            return Err(std::io::Error::other(format!(
-                "{}: permission denied",
-                dir.display()
-            )));
-        }
-        self.real.read_dir_bounded(dir, cap)
+        (self.list)(self.real.as_ref(), dir, cap)
     }
     fn remove_tree(&self, path: &Path) -> std::io::Result<()> {
         self.real.remove_tree(path)
