@@ -201,7 +201,11 @@ impl Slot {
     }
 
     pub fn lock_name(&self) -> String {
-        format!("slot-{}.lock", self.number)
+        Self::lock_name_for(self.number)
+    }
+
+    pub fn lock_name_for(number: u8) -> String {
+        format!("slot-{number}.lock")
     }
 
     fn validate(&self, pool: &Pool) -> FormatResult {
@@ -685,6 +689,17 @@ pub struct InvocationEvidence {
     pub environment_digest: String,
 }
 
+impl InvocationEvidence {
+    fn is_valid_for(&self, profile: &PoolProfile) -> bool {
+        profile
+            .invocations
+            .iter()
+            .any(|item| item.id == self.invocation)
+            && hex(&self.graph_digest, 64)
+            && hex(&self.environment_digest, 64)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompletedInvocation {
@@ -735,12 +750,7 @@ impl Producer {
         };
         let validate_invocation = |evidence: &InvocationEvidence| {
             require(
-                pool.profile
-                    .invocations
-                    .iter()
-                    .any(|item| item.id == evidence.invocation)
-                    && hex(&evidence.graph_digest, 64)
-                    && hex(&evidence.environment_digest, 64),
+                evidence.is_valid_for(&pool.profile),
                 "invalid invocation evidence",
             )
         };
@@ -1037,14 +1047,7 @@ impl Outcome {
                 TransitionResult::ProducerComplete,
             ) => {
                 require(
-                    self.attempt_id.is_none()
-                        && pool
-                            .profile
-                            .invocations
-                            .iter()
-                            .any(|item| item.id == invocation.invocation)
-                        && hex(&invocation.graph_digest, 64)
-                        && hex(&invocation.environment_digest, 64),
+                    self.attempt_id.is_none() && invocation.is_valid_for(&pool.profile),
                     "invalid producer outcome",
                 )?;
                 runner.validate()

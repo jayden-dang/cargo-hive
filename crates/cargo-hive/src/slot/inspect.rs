@@ -76,9 +76,7 @@ pub(super) fn inspect_checkout(
         Err(Refusal::ReturnUncertain(detail)) => (CheckoutInventory::Uncertain(detail), Vec::new()),
         Err(err) => return Err(err),
     };
-    if owned_identity(&path) != Some(identity.directory)
-        || owned_identity(&identity.admin.path) != Some(identity.admin.file_id())
-        || !linked_git_files(&path, identity, &pool.common_git_id.path)
+    if !linked_checkout_identity_matches(&path, identity, &pool.common_git_id.path)
         || observed_head(&path)? != head
     {
         return Err(checkout_refusal());
@@ -97,7 +95,7 @@ fn checkout_refusal() -> Refusal {
     )
 }
 
-fn owned_identity(path: &Path) -> Option<FileIdentity> {
+pub(super) fn owned_identity(path: &Path) -> Option<FileIdentity> {
     slots::owner_directory(path)
         .ok()
         .as_ref()
@@ -125,9 +123,7 @@ fn verify_checkout_scope(
     };
     let identity = expected.identity;
     if !accepted_root(&pool.root, scope.secondary_roots)
-        || owned_identity(path) != Some(identity.directory)
-        || owned_identity(&identity.admin.path) != Some(identity.admin.file_id())
-        || !linked_git_files(path, identity, &pool.common_git_id.path)
+        || !linked_checkout_identity_matches(path, identity, &pool.common_git_id.path)
         || classify(&facts, &mains, scope.secondary_roots).0 != Class::Secondary
     {
         return Err(checkout_refusal());
@@ -138,9 +134,7 @@ fn verify_checkout_scope(
     for slot in &pool.slots {
         let sibling = pool.checkout_path(slot);
         if let Some(checkout) = &slot.checkout_id {
-            if owned_identity(&sibling) != Some(checkout.directory)
-                || owned_identity(&checkout.admin.path) != Some(checkout.admin.file_id())
-                || !linked_git_files(&sibling, checkout, &pool.common_git_id.path)
+            if !linked_checkout_identity_matches(&sibling, checkout, &pool.common_git_id.path)
                 || !records.iter().any(|record| record.path == sibling)
             {
                 return Err(checkout_refusal());
@@ -186,6 +180,16 @@ fn verify_checkout_scope(
         return Err(checkout_refusal());
     }
     Ok(head)
+}
+
+fn linked_checkout_identity_matches(
+    path: &Path,
+    identity: &CheckoutIdentity,
+    common: &Path,
+) -> bool {
+    owned_identity(path) == Some(identity.directory)
+        && owned_identity(&identity.admin.path) == Some(identity.admin.file_id())
+        && linked_git_files(path, identity, common)
 }
 
 fn linked_git_files(path: &Path, identity: &CheckoutIdentity, common: &Path) -> bool {
@@ -338,20 +342,26 @@ fn tracked_paths(checkout: &Path, oid_len: usize) -> Result<BTreeMap<PathBuf, En
         let (attributes, path) = record
             .split_once('\t')
             .ok_or(Refusal::ReturnUncertain(UNCERTAIN_INVENTORY))?;
-        let fields: Vec<_> = attributes.split(' ').collect();
-        let [tag, mode, oid, stage] = fields.as_slice() else {
+        let mut fields = attributes.split(' ');
+        let (Some(tag), Some(mode), Some(oid), Some(stage), None) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
             return Err(Refusal::ReturnUncertain(UNCERTAIN_INVENTORY));
         };
-        if *stage != "0" || *tag == "M" {
+        if stage != "0" || tag == "M" {
             return Err(Refusal::ReturnWork(UNFINISHED_GIT));
         }
-        let kind = match *mode {
+        let kind = match mode {
             "100644" | "100755" => EntryKind::File,
             "120000" => EntryKind::Symlink,
             _ => return Err(Refusal::ReturnUncertain(UNCERTAIN_INVENTORY)),
         };
         let relative = Path::new(path);
-        if *tag != "H"
+        if tag != "H"
             || oid.len() != oid_len
             || !slots::object_id(oid)
             || !relative
@@ -667,7 +677,7 @@ impl CheckoutWalk<'_> {
     }
 }
 
-fn directory_stamp(metadata: &Metadata) -> (FileIdentity, i64, i64, i64, i64) {
+pub(super) fn directory_stamp(metadata: &Metadata) -> (FileIdentity, i64, i64, i64, i64) {
     (
         FileIdentity::of(metadata),
         metadata.mtime(),

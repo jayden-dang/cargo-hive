@@ -6,9 +6,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::metadata::METADATA_DEADLINE;
+use crate::metadata::{METADATA_DEADLINE, TARGET_VARS};
 use cargo_hive_platform::proc::{self, Capture, ChildOutputError, Ran, Spec};
 use cargo_hive_platform::signals::cancelled;
+use cargo_hive_state::slots::object_id;
 
 #[derive(Debug)]
 pub enum GitError {
@@ -271,14 +272,7 @@ impl Git {
         let controlled = [("GIT_NO_LAZY_FETCH", "1"), ("GIT_ALLOW_PROTOCOL", "")];
         spec.env_remove
             .retain(|key| !controlled.iter().any(|(name, _)| key == *name));
-        spec.env_remove.extend(
-            [
-                "CARGO_TARGET_DIR",
-                "CARGO_BUILD_TARGET_DIR",
-                "CARGO_BUILD_BUILD_DIR",
-            ]
-            .map(Into::into),
-        );
+        spec.env_remove.extend(TARGET_VARS.map(Into::into));
         spec.env_set
             .extend(controlled.map(|(key, value)| (key.into(), value.into())));
         match proc::run_bounded_complete(
@@ -328,12 +322,7 @@ fn complete_worktrees(bytes: &[u8]) -> Option<Vec<WorktreeRecord>> {
                 return None;
             }
             let head = fields.next()?.strip_prefix("HEAD ")?;
-            if !matches!(head.len(), 40 | 64)
-                || *oid_len.get_or_insert(head.len()) != head.len()
-                || !head
-                    .bytes()
-                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-            {
+            if !object_id(head) || *oid_len.get_or_insert(head.len()) != head.len() {
                 return None;
             }
             let mut record = WorktreeRecord {

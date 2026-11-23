@@ -17,7 +17,10 @@ use cargo_hive_state::slots::{
     SlotRequestKey, SlotsFile, TransitionResult,
 };
 use cargo_hive_state::{State, StateError, Tx};
-use inspect::{CheckoutInventory, ExpectedCheckout, SlotScope, inspect_checkout};
+use inspect::{
+    CheckoutInventory, ExpectedCheckout, SlotScope, directory_stamp, inspect_checkout,
+    owned_identity,
+};
 use result::{FRESH_FALLBACK, SlotResult, SlotStatus, SlotTransition};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -466,7 +469,7 @@ fn return_slot(
     }
     let lock_dir = state.root().join(LOCK_NAMESPACE).join(key.pool_id);
     check_private_dir(&lock_dir).map_err(|err| path_refusal(&lock_dir, err))?;
-    let lock_path = lock_dir.join(format!("slot-{}.lock", key.slot));
+    let lock_path = lock_dir.join(Slot::lock_name_for(key.slot));
     let (file, lock_id) =
         slots::open_slot_lock(&lock_path).map_err(|err| path_refusal(&lock_path, err))?;
     let _guard = try_exclusive(&file)
@@ -475,7 +478,7 @@ fn return_slot(
             "A writer may still hold the slot operation lock.",
         ))?;
     let plan = with_slot_state(state, |tx| {
-        let (saved, index) = checked_pool(tx, state, scope, &registered)?;
+        let (mut saved, index) = checked_pool(tx, state, scope, &registered)?;
         let pool = &saved.pools[index];
         let slot = &pool.slots[slot_index];
         if slot.lock_id != lock_id || slots::checked_slot_lock(&lock_path).ok() != Some(lock_id) {
@@ -502,7 +505,7 @@ fn return_slot(
             return Err(Refusal::OutcomeLimit);
         }
         Ok(ReturnPlan::Inspect(Box::new(ReturnScope {
-            pool: pool.clone(),
+            pool: saved.pools.swap_remove(index),
             registry: tx.read_slot_registry()?,
             secondary_roots: state.slot_config()?.secondary_roots,
         })))
@@ -739,16 +742,8 @@ fn checked_pool(
     let pool = &saved.pools[index];
     let config = state.slot_config()?;
     if pool.common_git_id != registered.common_git
-        || slots::owner_directory(&pool.common_git_id.path)
-            .ok()
-            .as_ref()
-            .map(FileIdentity::of)
-            != Some(pool.common_git_id.file_id())
-        || slots::owner_directory(&pool.main)
-            .ok()
-            .as_ref()
-            .map(FileIdentity::of)
-            != Some(registered.main)
+        || owned_identity(&pool.common_git_id.path) != Some(pool.common_git_id.file_id())
+        || owned_identity(&pool.main) != Some(registered.main)
         || !accepted_root(&pool.root, &config.secondary_roots)
         || slots::owner_directory(&pool.root).is_err()
         || !pool_directories_present(state.root(), pool)
@@ -1235,19 +1230,7 @@ fn scan_checkout_roots(
         }
     }
     let after = fs::symlink_metadata(path).map_err(incomplete)?;
-    if FileIdentity::of(&before) != FileIdentity::of(&after)
-        || (
-            before.mtime(),
-            before.mtime_nsec(),
-            before.ctime(),
-            before.ctime_nsec(),
-        ) != (
-            after.mtime(),
-            after.mtime_nsec(),
-            after.ctime(),
-            after.ctime_nsec(),
-        )
-    {
+    if directory_stamp(&before) != directory_stamp(&after) {
         return Err(inventory_refusal(path));
     }
     Ok(())
@@ -1302,7 +1285,7 @@ fn provision_pool(
     slots::make_private_directory(&checkout_dir).map_err(|err| path_refusal(&checkout_dir, err))?;
 
     let unused = |number| {
-        let path = lock_dir.join(format!("slot-{number}.lock"));
+        let path = lock_dir.join(Slot::lock_name_for(number));
         slots::new_slot_lock(&path)
             .map(|lock| Slot::unused(number, lock))
             .map_err(|err| path_refusal(&path, err))
@@ -1335,16 +1318,8 @@ fn slot_identity_present(state: &Path, pool: &Pool, slot: &Slot) -> bool {
         && match &slot.checkout_id {
             None => matches!(exists(&pool.checkout_path(slot)), Ok(false)),
             Some(expected) => {
-                slots::owner_directory(&pool.checkout_path(slot))
-                    .ok()
-                    .as_ref()
-                    .map(FileIdentity::of)
-                    == Some(expected.directory)
-                    && slots::owner_directory(&expected.admin.path)
-                        .ok()
-                        .as_ref()
-                        .map(FileIdentity::of)
-                        == Some(expected.admin.file_id())
+                owned_identity(&pool.checkout_path(slot)) == Some(expected.directory)
+                    && owned_identity(&expected.admin.path) == Some(expected.admin.file_id())
             }
         }
 }
