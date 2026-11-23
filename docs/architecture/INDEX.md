@@ -25,7 +25,7 @@ package (A1-A6, D2-D5, D7, S1-S2, C1), the F9 amendment and SPIKES.md.
 ## Invariants
 
 - **ARCH-1** Stay out of the build path: install no rustc wrapper, cargo shim, Cargo config, environment variable or hook.
-- **ARCH-2** Write outside hive's state root and doctor's temp dir only by deleting from, or cloning into, a Cargo target dir, or by creating directories inside that target dir that those clones need; never write a repo file or `~/.cargo`.
+- **ARCH-2** Write outside hive's state root and doctor's temp dir only by deleting from, or cloning into, a Cargo target dir, or by creating directories inside that target dir that those clones need; never change repo file contents or write `~/.cargo`. A slot verifier may launch the guide's fixed timestamp action with a deadline on a verified regular consumer-anchor descriptor under the current preparation fence.
 - **ARCH-3** Never replace a build artifact in place.
 - **ARCH-4** On a protected checkout, only read or delete.
 - **ARCH-5** Seed only secondary checkouts.

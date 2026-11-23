@@ -313,17 +313,17 @@ _Requirements: SLOTS-3.6, SLOTS-3.7, SLOTS-3.10_
 - Consumes: Task 1 physical fence, Task 5 verified producer/anchor evidence, Task 6 typed checkout GC and prior witnessed clean HEAD.
 - Consumes (existing): `cargo_hive_seed::run` and its `Result<cargo_hive_seed::Outcome, cargo_hive_seed::Error>`, before exit/receipt projection.
 - Produces (proposed): `cli::initial_seed_for_slot(state: &State, proof: &CheckoutProof, cancel: &dyn Fn() -> bool) -> Result<SeedEvidence, SlotRefusal>`, binding typed seed outcome and verified first-root proof to the current guard.
-- Produces: `slot begin`, `step-check` and `ready` keyed by `SlotRequestKey`. The guide holds the physical fence, directly runs Git, mtime and foreground Cargo steps and passes its private runner nonce and evidence under the guard.
+- Produces: `slot begin`, `step-check` and `ready` keyed by `SlotRequestKey`. The guide holds the physical fence, runs Git and foreground Cargo steps, and authorizes each anchor touch. Hive verifies the anchor and launches the fixed descriptor-only timestamp action with a deadline. The guide passes its private runner nonce and evidence under the guard.
 
 **Depends-on:** Task 5, Task 6.
 
-- [ ] Test full reserve to first ready on proved empty roots and under optional typed registry-only seed from that same new empty-root fence. Inconclusive/no-op, partial or cancelled seed cannot attest seed-only output. Guard ordinary seed's contract. Test the actual guide's foreground producer lifecycle and child custody under the inherited guard.
-- [ ] Generate isolated Cargo fixtures for each admitted layout. For restored `.sqlx` including original mtime, and a newly created then removed `.env` read by a previously absent lookup, establish changed output and an unprotected warm result that really remains stale.
-- [ ] Test handoff against the independent clean reference. Require the affected consumer to rebuild or rerun and an unrelated workspace unit to stay fresh. Separately change one crate at the next commit and check the stable absolute path and unrelated unit reuse. Treat unsupported or noncausal controls as failures for that profile.
-- [ ] Add the next-commit, lost permit, lost ready reply and post-rename ready fault cases. Include prior HEAD mismatch, wrong runner, concurrent ready, late inventory/GC skips and interrupted effects. Show actual scoped deletion completes before good ready. A zero standalone exit with an advisory skip must still give incomplete slot handoff.
-- [ ] Run `cargo test -p cargo-hive --test slots --test slot_inputs --test skill` under installed `RUSTUP_TOOLCHAIN=1.97.1` (flat) and `RUSTUP_TOOLCHAIN=1.100.0` (unit-dir). Use existing `tests/common` scratch helpers. Capture independent fixture values and build events; do not enable a profile without causal lock and Cargo proofs.
-- [ ] Implement fenced stages, non-forcing Git/mtime, initial seed/empty verification, typed GC and durable ready, including the machine-readable guide-only use policy. Install the exact bundled version check before the helper first reserves or acts, with a mismatch smoke case at this seam. Add the precise helper inventory to the existing skill package guard in this same task. Re-run both layouts, the CLI skill test, the clean/stale/restored controls and state re-read in a new process; verify identical ready replay without a second effect.
-- [ ] Commit as `feat(slot): deliver verified warm handoffs`.
+- [x] Test full reserve to first ready on proved empty roots and under optional typed registry-only seed from that same new empty-root fence. Inconclusive/no-op, partial or cancelled seed cannot attest seed-only output. Guard ordinary seed's contract. Test the actual guide's foreground producer lifecycle and child custody under the inherited guard.
+- [x] Generate isolated Cargo fixtures for each admitted layout. For restored `.sqlx` including original mtime, and a newly created then removed `.env` read by a previously absent lookup, establish changed output and an unprotected warm result that really remains stale.
+- [x] Test handoff against the independent clean reference. Require the affected consumer to rebuild or rerun and an unrelated workspace unit to stay fresh. Separately change one crate at the next commit and check the stable absolute path and unrelated unit reuse. Treat unsupported or noncausal controls as failures for that profile.
+- [x] Add the next-commit, lost permit, lost ready reply and post-rename ready fault cases. Include prior HEAD mismatch, wrong runner, concurrent ready, late inventory/GC skips and interrupted effects. Show actual scoped deletion completes before good ready. A zero standalone exit with an advisory skip must still give incomplete slot handoff.
+- [x] Run `cargo test -p cargo-hive --test slots --test slot_inputs --test skill` under installed `RUSTUP_TOOLCHAIN=1.97.1` (flat) and `RUSTUP_TOOLCHAIN=1.100.0` (unit-dir). Use existing `tests/common` scratch helpers. Capture independent fixture values and build events; do not enable a profile without causal lock and Cargo proofs.
+- [x] Implement fenced stages, non-forcing Git/mtime, initial seed/empty verification, typed GC and durable ready, including the machine-readable guide-only use policy. Install the exact bundled version check before the helper first reserves or acts, with a mismatch smoke case at this seam. Add the precise helper inventory to the existing skill package guard in this same task. Re-run both layouts, the CLI skill test, the clean/stale/restored controls and state re-read in a new process; verify identical ready replay without a second effect.
+- [x] Commit as `feat(slot): deliver verified warm handoffs`.
 
 _Requirements: SLOTS-1.2, SLOTS-1.6, SLOTS-1.7, SLOTS-1.8, SLOTS-2.4, SLOTS-3.1, SLOTS-3.4, SLOTS-3.5, SLOTS-3.6, SLOTS-3.7, SLOTS-3.8, SLOTS-3.9, SLOTS-3.11, SLOTS-4.3, SLOTS-5.4_
 
@@ -332,6 +332,7 @@ _Requirements: SLOTS-1.2, SLOTS-1.6, SLOTS-1.7, SLOTS-1.8, SLOTS-2.4, SLOTS-3.1,
 ### Task 8: Recover an abandoned slot without replaying old authority
 
 **Files:**
+- Modify: `crates/platform/src/slot.rs`
 - Modify: `crates/cargo-hive/src/cli.rs`
 - Modify: `crates/cargo-hive/tests/cli_tree.rs`
 - Modify: `crates/cargo-hive/tests/fixtures/current/cli-tree.txt`

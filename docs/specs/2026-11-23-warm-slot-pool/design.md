@@ -19,8 +19,9 @@ demonstrate an authorized clean checkout at the requested commit. The supported
 build profile, targeted invalidation and causal fixture establish whether its
 retained output can be delivered. Git status alone misses temporary and restored
 inputs documented in SPIKES.md §4. The agent guide owns mutating Git and mtime
-steps, and hive only reads the checkout, changes its own state, and runs
-checkout-scoped GC.
+steps. Hive reads the checkout, changes its own state, and runs checkout-scoped GC.
+For the retained consumer-anchor step, it may also lend a verified descriptor
+to the guide's fixed timestamp action and launch that action with a deadline.
 
 The design scan covers the lock and state writer, scope, receipt, Git, and GC
 paths. Fresh subgraph retrieval had OWNS for 15 of 16 codes with no active OBS.
@@ -34,8 +35,9 @@ narrative files were present.
 ## Decisions
 
 1. **Lock.** A dirty return stays held and preserves work and outputs. The next
-   agent receives only a verified secondary pool slot. Git changes and mtime
-   touches stay in the guide, and cleanup remains scoped to that checkout.
+   agent receives only a verified secondary pool slot. The guide owns Git changes and authorizes anchor touches. Hive may launch
+   the fixed descriptor-only anchor action described below. Cleanup stays scoped
+   to that checkout.
 2. **Agent-decided.** Use an additive layout-tagged slot record under the state
    root, stable per-slot operation locks and a checked generation. Registry or
    receipt extensions as lease storage would alter shipped formats and cannot
@@ -363,8 +365,12 @@ switch if needed, and recheck the requested commit, worktree and both resolved
 output roots. Compute the conservative union of verified consumer anchors for
 every allowed possibly changed input, without depending on an end-state diff.
 Each anchor is an existing, tracked, in-slot regular file of the actual
-consumer, with identity and content preserved. The skill changes only its
-mtime. Validate a timestamp the admitted Cargo layout will recognize above
+consumer, with identity and content preserved. The guide authorizes each mtime
+action. The verifier checks the current attempt, lock, identity and content, opens
+the regular anchor without following links or waiting on a nonregular file, and
+lends that descriptor to the guide's single fixed Bash touch action. The action
+has a deadline and accepts no checkout pathname. The normal staged readiness
+checks verify its result. Validate a timestamp the admitted Cargo layout will recognize above
 the relevant prior fingerprint/invocation boundary. A future stamp,
 unsupported fingerprint, resolution ambiguity, unexpected symlink or failed
 verification prevents readiness. Never delete or edit fingerprints just to
