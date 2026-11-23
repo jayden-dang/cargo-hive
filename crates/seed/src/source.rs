@@ -628,9 +628,6 @@ fn unit_dir_dep_class(
         .map(|(name, _)| name)
         .collect();
     names.sort();
-    if names.is_empty() {
-        return Ok(DepClass::Absent);
-    }
     classify_dep_lines(
         names.into_iter().map(|name| read_dep_info(&out.join(name))),
         cargo_home,

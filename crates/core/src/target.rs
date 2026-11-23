@@ -146,7 +146,11 @@ fn read_tag_at(mut read: impl FnMut(u64, usize) -> io::Result<Vec<u8>>) -> io::R
         if part.is_empty() {
             break;
         }
-        tag.extend_from_slice(&part);
+        if tag.is_empty() {
+            tag = part;
+        } else {
+            tag.extend_from_slice(&part);
+        }
     }
     Ok(tag)
 }

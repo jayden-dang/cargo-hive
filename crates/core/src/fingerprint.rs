@@ -421,11 +421,10 @@ fn decode_unit(
     loc: UnitLoc,
     shared_features: &mut HashMap<String, Arc<str>>,
 ) -> Result<ParsedUnit, String> {
-    let json_name = format!("{stem}.json");
-    let value: Value = serde_json::from_slice(bytes).map_err(|e| format!("{json_name}: {e}"))?;
+    let value: Value = serde_json::from_slice(bytes).map_err(|e| format!("{stem}.json: {e}"))?;
     let obj = value
         .as_object()
-        .ok_or_else(|| format!("{json_name} is not a JSON object"))?;
+        .ok_or_else(|| format!("{stem}.json is not a JSON object"))?;
     let deps = check_types(obj)?;
     let features_raw = obj["features"]
         .as_str()
