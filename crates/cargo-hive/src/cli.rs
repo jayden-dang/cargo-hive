@@ -2640,7 +2640,7 @@ pub(crate) fn initial_seed_for_slot(
     if !scope.is_current(state) {
         return Err(refused);
     }
-    initialize_seed_locks(state, &scope, path, identity, &outcome.placed, cancel)?;
+    initialize_seed_locks(state, &destination, identity, &outcome.placed, cancel)?;
     if !scope.is_current(state) {
         return Err(refused);
     }
@@ -2666,18 +2666,20 @@ pub(crate) fn initial_seed_for_slot(
 
 fn initialize_seed_locks(
     state: &State,
-    scope: &SlotOutputScope,
-    root: &Path,
+    scope: &cargo_hive_seed::place::SlotDestination<'_>,
     root_id: cargo_hive_state::slots::FileIdentity,
     placed: &[cargo_hive_seed::place::SeededUnit],
     cancel: &dyn Fn() -> bool,
 ) -> Result<(), &'static str> {
     use cargo_hive_core::{caps::CRATE_DIR_CAP, target, unit_path::UnitLayout};
+    use cargo_hive_platform::flock::open_owner_state_file;
     use cargo_hive_state::slots::{FileIdentity, owner_directory};
+    use std::io;
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
     use std::path::Component;
 
     let refused = "Initial registry-only seed could not establish the native Cargo profile locks.";
+    let root = scope.target;
     let layout = match placed.first().ok_or(refused)?.unit_layout {
         UnitLayout::Flat => target::Layout::Fingerprint,
         UnitLayout::UnitDir => target::Layout::NewBuildDir,
@@ -2734,29 +2736,34 @@ fn initialize_seed_locks(
             owner_directory(root).is_ok_and(|meta| FileIdentity::of(&meta) == root_id)
                 && owner_directory(&profile).is_ok_and(|meta| FileIdentity::of(&meta) == identity)
                 && profile.canonicalize().as_ref().ok() == Some(&profile)
-                && scope.is_current(state)
                 && !cancel()
         };
         if identity.dev != root_id.dev || !checked() {
             return Err(refused);
         }
         for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
-            if !checked() {
-                return Err(refused);
-            }
-            let destination = profile.join(name);
-            fs.clone_file(&template, &destination)
+            scope
+                .with_effect(state, cancel, || {
+                    if !checked()
+                        || FileIdentity::of(&open_owner_state_file(&template)?.metadata()?)
+                            != template_id
+                    {
+                        return Err(io::Error::other(refused));
+                    }
+                    let destination = profile.join(name);
+                    fs.clone_file(&template, &destination)?;
+                    let clone = open_owner_state_file(&destination)?.metadata()?;
+                    if clone.len() != 0
+                        || clone.mode() & 0o7777 != 0o600
+                        || clone.dev() != root_id.dev
+                        || FileIdentity::of(&clone) == template_id
+                    {
+                        return Err(io::Error::other(refused));
+                    }
+                    Ok(())
+                })
+                .map_err(|_| refused)?
                 .map_err(|_| refused)?;
-            let clone = cargo_hive_platform::flock::open_owner_state_file(&destination)
-                .and_then(|file| file.metadata())
-                .map_err(|_| refused)?;
-            if clone.len() != 0
-                || clone.mode() & 0o7777 != 0o600
-                || clone.dev() != root_id.dev
-                || FileIdentity::of(&clone) == template_id
-            {
-                return Err(refused);
-            }
         }
         if !checked() {
             return Err(refused);
