@@ -5106,6 +5106,271 @@ fn exercise_external_recipe(
     }
 }
 
+fn fixture_sha(bytes: &[u8]) -> String {
+    cargo_hive_platform::slot::sha256(bytes)
+        .unwrap()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn fixture_inventory(root: &Path) -> String {
+    fn collect(root: &Path, directory: &Path, rows: &mut Vec<(PathBuf, u64, Option<String>)>) {
+        for item in fs::read_dir(directory).unwrap() {
+            let item = item.unwrap();
+            let path = item.path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if item.file_type().unwrap().is_dir() {
+                rows.push((relative, 0, None));
+                collect(root, &path, rows);
+            } else {
+                assert!(item.file_type().unwrap().is_file());
+                let bytes = fs::read(path).unwrap();
+                rows.push((relative, bytes.len() as u64, Some(fixture_sha(&bytes))));
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    collect(root, root, &mut rows);
+    rows.sort();
+    fixture_sha(&serde_json::to_vec(&rows).unwrap())
+}
+
+fn fixture_resolve_digest(metadata: &Value, checkout: &Path) -> String {
+    let ids: std::collections::BTreeMap<_, _> = metadata["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pkg| {
+            let id = pkg["id"].as_str().unwrap();
+            let logical = if pkg["source"].is_null() {
+                format!(
+                    "workspace:{}",
+                    Path::new(pkg["manifest_path"].as_str().unwrap())
+                        .strip_prefix(checkout)
+                        .unwrap()
+                        .display()
+                )
+            } else {
+                id.to_owned()
+            };
+            (id, logical)
+        })
+        .collect();
+    let nodes: std::collections::BTreeMap<_, _> = metadata["resolve"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| {
+            let mut features: Vec<_> = node["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|val| val.as_str().unwrap())
+                .collect();
+            features.sort();
+            let mut deps: Vec<_> = node["deps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|dep| {
+                    let mut kinds: Vec<_> = dep["dep_kinds"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|kind| (kind["kind"].as_str(), kind["target"].as_str()))
+                        .collect();
+                    kinds.sort();
+                    (
+                        dep["name"].as_str().unwrap(),
+                        &ids[dep["pkg"].as_str().unwrap()],
+                        kinds,
+                    )
+                })
+                .collect();
+            deps.sort();
+            (&ids[node["id"].as_str().unwrap()], (features, deps))
+        })
+        .collect();
+    fixture_sha(&serde_json::to_vec(&nodes).unwrap())
+}
+
+#[test]
+fn the_guarded_producer_binds_extracted_registry_bytes_before_writing() {
+    let fixture = reviewed_pool_fixture(Some(
+        "use pin_project_lite::pin_project;
+pin_project! { struct Sample { value: u32 } }
+pub fn answer() -> u32 { Sample { value: 42 }.value }
+",
+    ));
+    fixture.hive.write_ready_capabilities();
+    let cache = PathBuf::from(std::env::var_os("CARGO_HOME").unwrap());
+    let home = &fixture.hive.cargo_home.path;
+    let repository = "index.crates.io-1949cf8c6b5b557f";
+    let archive = format!("registry/cache/{repository}/pin-project-lite-0.2.17.crate");
+    for path in [
+        format!("registry/index/{repository}/config.json"),
+        format!("registry/index/{repository}/.cache/pi/n-/pin-project-lite"),
+        archive.clone(),
+    ] {
+        let output = home.join(&path);
+        fs::create_dir_all(output.parent().unwrap()).unwrap();
+        fs::copy(cache.join(path), output).unwrap();
+    }
+    let manifest = fixture.repo.join("Cargo.toml");
+    let updated = fs::read_to_string(&manifest).unwrap().replace(
+        "[dependencies]\n",
+        "[dependencies]\npin-project-lite = \"=0.2.17\"\n",
+    );
+    fs::write(manifest, updated).unwrap();
+    let cargo = |args: &[&str]| {
+        let out = fixture
+            .hive
+            .command_with(Path::new("cargo"), args)
+            .current_dir(&fixture.repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        out.stdout
+    };
+    cargo(&["generate-lockfile", "--offline"]);
+    git(
+        &fixture.repo,
+        &[
+            "commit",
+            "-qm",
+            "Pin the isolated dependency",
+            "--",
+            "Cargo.toml",
+            "Cargo.lock",
+        ],
+    );
+    let metadata: Value = serde_json::from_slice(&cargo(&[
+        "metadata",
+        "--format-version",
+        "1",
+        "--all-features",
+        "--locked",
+        "--offline",
+    ]))
+    .unwrap();
+    let package = metadata["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pkg| pkg["name"] == "pin-project-lite")
+        .unwrap();
+    let root = Path::new(package["manifest_path"].as_str().unwrap())
+        .parent()
+        .unwrap();
+    let pin = root.join("src/lib.rs");
+    let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+    for fact in profile["graph_inputs"].as_array_mut().unwrap() {
+        let path = fact["locator"]["path"].as_str().unwrap();
+        fact["expectation"]["identity"]["oid"] =
+            json!(git(&fixture.repo, &["rev-parse", &format!("HEAD:{path}")]));
+    }
+    fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let args = [
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+    ];
+    external_fixture_seal(&fixture, &head, "clippy", &args);
+    let seal = fixture._repo_dir.path.join("external-recipe.json");
+    let mut closure: Value = serde_json::from_slice(&fs::read(&seal).unwrap()).unwrap();
+    closure["packages"][0]["dependencies"] = json!(["pin-project-lite"]);
+    closure["materialized"] = json!({"resolve_sha256":fixture_resolve_digest(&metadata, &fixture.repo),
+        "packages":[{"id":package["id"],"name":"pin-project-lite","version":"0.2.17", "source":package["source"],
+            "root":root.strip_prefix(home).unwrap(), "inventory_sha256":fixture_inventory(root),
+            "origin":{"kind":"registry","checksum":fixture_sha(&fs::read(home.join(archive)).unwrap())}}]});
+    let bytes = serde_json::to_vec(&closure).unwrap();
+    fs::write(&seal, &bytes).unwrap();
+    let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+    profile["graph_inputs"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap()["expectation"]["identity"]["sha256"] = json!(fixture_sha(&bytes));
+    profile["proofs"][0]["evidence"] = json!(format!("closure-v1:sha256={}", fixture_sha(&bytes)));
+    fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let key = fixture._repo_dir.path.join("registry-material-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let out = run_packaged_take(&fixture, pool, &head, &key, "take");
+    assert!(out.status.success(), "{out:?}");
+    let produce = |operation: &str| {
+        let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
+        let mut cmd = fixture
+            .hive
+            .command_with(Path::new("/bin/bash"), &["--noprofile", "--norc"]);
+        producer_environment(&mut cmd);
+        let child = cmd
+            .arg(helper)
+            .args(["produce", env!("CARGO_BIN_EXE_cargo-hive")])
+            .arg(&fixture.repo)
+            .args([pool, "1", "1", operation, "check"])
+            .stdin(fs::File::open(&key).unwrap())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        common::wait_within(child, Duration::from_secs(50))
+    };
+    let original = fs::read(&pin).unwrap();
+    let modified = fs::metadata(&pin).unwrap().modified().unwrap();
+    fs::write(
+        &pin,
+        [original.as_slice(), b"\n// altered cached source\n"].concat(),
+    )
+    .unwrap();
+    fs::File::open(&pin)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let out = produce(&"5".repeat(32));
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!checkout.join("target").exists());
+    fs::write(&pin, original).unwrap();
+    fs::File::open(&pin)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let added = root.join("unreviewed-input");
+    fs::write(&added, b"outside the approved package inventory").unwrap();
+    assert_eq!(produce(&"6".repeat(32)).status.code(), Some(1));
+    assert!(!checkout.join("target").exists());
+    fs::remove_file(added).unwrap();
+    let out = produce(&"7".repeat(32));
+    assert!(out.status.success(), "{out:?}");
+    let record: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(record["kind"], "producer_complete");
+    let built = cargo_hive_core::fingerprint::read_profile(&checkout.join("target/debug"))
+        .graph
+        .unwrap();
+    assert!(
+        built
+            .units
+            .iter()
+            .any(|unit| unit.loc.package() == "pin-project-lite")
+    );
+}
+
 #[test]
 fn the_gateways_nextest_recipe_lists_only_the_exact_selected_package() {
     let args = [

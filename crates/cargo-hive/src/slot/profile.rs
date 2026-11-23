@@ -1,6 +1,6 @@
 //! Admits only the actual command and graph covered by the pool's reviewed profile.
 
-use super::admission::{NativeBuild, NativePackage, NativeTarget};
+use super::admission::{MaterializedGraph, NativeBuild, NativePackage, NativeTarget};
 use super::{CheckoutProof, Refusal, canonical_worktree_path, check_cancelled, exists, git_scope};
 use cargo_hive_cargo::metadata;
 use cargo_hive_platform::{
@@ -289,6 +289,11 @@ pub(super) fn check_invocation(
             ));
         }
     }
+    let material_before = native
+        .as_ref()
+        .and_then(NativeBuild::materialized)
+        .map(|material| material.verify_material(&cargo_home, &checkout.path))
+        .transpose()?;
     let discovered = discover(&cargo, &cwd, &environment)?;
     if tools_before != tool_identities(&cargo, &rustc)? {
         return Err(refused(
@@ -322,9 +327,24 @@ pub(super) fn check_invocation(
             "The actual workspace or Cargo output roots differ from the reviewed slot paths.",
         ));
     }
-    if let Some(seal) = &native {
-        verify_native_graph(&discovered, &checkout.path, seal.packages())?;
-    }
+    let dependency_witness = if let Some(seal) = &native {
+        let material = seal.materialized();
+        verify_native_graph(&discovered, &checkout.path, seal.packages(), material)?;
+        if let Some(material) = material {
+            verify_materialized_graph(&discovered, &checkout.path, &cargo_home, material)?;
+            let after = material.verify_material(&cargo_home, &checkout.path)?;
+            if material_before.as_ref() != Some(&after) {
+                return Err(refused(
+                    "The reviewed dependency material changed during Cargo discovery.",
+                ));
+            }
+            Some(after)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let reviewed_sources = reviewed_source_facts(
         &inputs,
         &discovered,
@@ -335,7 +355,15 @@ pub(super) fn check_invocation(
     )?;
     let seal_digest = native.as_ref().map(|seal| &seal.seal_digest);
     let graph_parts = (&inputs, reviewed_sources, &cargo, &rustc, &tools_before);
-    let graph_bytes = if seal_digest.is_some() {
+    let graph_bytes = if dependency_witness.is_some() {
+        serde_json::to_vec(&(
+            &graph_parts,
+            seal_digest,
+            &native_tools,
+            variants,
+            &dependency_witness,
+        ))
+    } else if seal_digest.is_some() {
         serde_json::to_vec(&(&graph_parts, seal_digest, &native_tools, variants))
     } else {
         serde_json::to_vec(&graph_parts)
@@ -364,7 +392,14 @@ pub(super) fn check_invocation(
         &cwd,
         fixed_environment,
     );
-    let stable_bytes = if seal_digest.is_some() {
+    let stable_bytes = if dependency_witness.is_some() {
+        serde_json::to_vec(&(
+            &stable_parts,
+            seal_digest,
+            &native_tools,
+            &dependency_witness,
+        ))
+    } else if seal_digest.is_some() {
         serde_json::to_vec(&(&stable_parts, seal_digest, &native_tools))
     } else {
         serde_json::to_vec(&stable_parts)
@@ -944,6 +979,7 @@ fn verify_native_graph(
     graph: &Discovered,
     checkout: &Path,
     expected: &[NativePackage],
+    materialized: Option<&MaterializedGraph>,
 ) -> Result<(), Refusal> {
     let unproved = || refused("The actual Cargo graph differs from the sealed native build.");
     let ids: BTreeMap<_, _> = graph
@@ -953,36 +989,45 @@ fn verify_native_graph(
         .collect();
     let members: BTreeSet<_> = graph.workspace_members.iter().collect();
     let nodes: BTreeMap<_, _> = graph.nodes.iter().map(|node| (&node.id, node)).collect();
-    if graph.packages.len() != expected.len()
-        || ids.len() != expected.len()
-        || graph.nodes.len() != expected.len()
-        || nodes.len() != expected.len()
+    let total = expected.len() + materialized.map_or(0, |graph| graph.packages.len());
+    if graph.packages.len() != total
+        || ids.len() != total
+        || graph.nodes.len() != total
+        || nodes.len() != total
         || graph.workspace_members.len() != expected.len()
         || members.len() != expected.len()
     {
         return Err(unproved());
     }
     for package in &graph.packages {
-        if package.source.is_some() || !members.contains(&package.id) {
+        if package.source.is_some() {
+            if materialized.is_none() || members.contains(&package.id) {
+                return Err(unproved());
+            }
+            continue;
+        }
+        if !members.contains(&package.id) {
             return Err(unproved());
         }
         let node = nodes.get(&package.id).ok_or_else(unproved)?;
-        if !node.features.is_empty() {
+        if materialized.is_none() && !node.features.is_empty() {
             return Err(unproved());
         }
         let mut dependencies = Vec::new();
         for dependency in &node.deps {
             let name = ids.get(&dependency.pkg).ok_or_else(unproved)?;
-            if dependency.name != **name
-                || dependency.dep_kinds.len() != 1
-                || dependency.dep_kinds[0].kind.is_some()
-                || dependency.dep_kinds[0].target.is_some()
+            if materialized.is_none()
+                && (dependency.name != **name
+                    || dependency.dep_kinds.len() != 1
+                    || dependency.dep_kinds[0].kind.is_some()
+                    || dependency.dep_kinds[0].target.is_some())
             {
                 return Err(unproved());
             }
             dependencies.push((*name).clone());
         }
         dependencies.sort();
+        dependencies.dedup();
         let mut targets = Vec::new();
         for target in &package.targets {
             let [kind] = target.kind.as_slice() else {
@@ -1013,6 +1058,88 @@ fn verify_native_graph(
         if !expected.contains(&actual) {
             return Err(unproved());
         }
+    }
+    Ok(())
+}
+
+fn verify_materialized_graph(
+    graph: &Discovered,
+    checkout: &Path,
+    home: &Path,
+    materialized: &MaterializedGraph,
+) -> Result<(), Refusal> {
+    let unproved = || {
+        refused(
+            "The resolved Cargo package, source or edges differ from the sealed dependency graph.",
+        )
+    };
+    let packages: BTreeMap<_, _> = materialized
+        .packages
+        .iter()
+        .map(|pkg| (&pkg.id, pkg))
+        .collect();
+    let mut keys = BTreeMap::new();
+    for pkg in &graph.packages {
+        let key = if let Some(source) = &pkg.source {
+            let expected = packages.get(&pkg.id).ok_or_else(unproved)?;
+            let root = home.join(&expected.root);
+            if expected.name != pkg.name
+                || expected.version != pkg.version
+                || &expected.source != source
+                || pkg.manifest_path != root.join("Cargo.toml")
+                || root.canonicalize().as_ref().ok() != Some(&root)
+                || pkg.targets.iter().any(|target| {
+                    !target.src_path.starts_with(&root)
+                        || target.src_path.canonicalize().as_ref().ok() != Some(&target.src_path)
+                        || target.kind.iter().any(|kind| {
+                            !matches!(
+                                kind.as_str(),
+                                "lib" | "rlib" | "bin" | "test" | "example" | "bench"
+                            )
+                        })
+                })
+            {
+                return Err(unproved());
+            }
+            pkg.id.clone()
+        } else {
+            let manifest = pkg
+                .manifest_path
+                .strip_prefix(checkout)
+                .map_err(|_| unproved())?;
+            format!("workspace:{}", manifest.to_str().ok_or_else(unproved)?)
+        };
+        if keys.insert(&pkg.id, key).is_some() {
+            return Err(unproved());
+        }
+    }
+    if keys.values().collect::<BTreeSet<_>>().len() != keys.len() {
+        return Err(unproved());
+    }
+    let mut nodes = BTreeMap::new();
+    for node in &graph.nodes {
+        let node_id = keys.get(&node.id).ok_or_else(unproved)?;
+        let mut features = node.features.clone();
+        features.sort();
+        let mut dependencies = Vec::new();
+        for dependency in &node.deps {
+            let id = keys.get(&dependency.pkg).ok_or_else(unproved)?;
+            let mut kinds: Vec<_> = dependency
+                .dep_kinds
+                .iter()
+                .map(|kind| (kind.kind.as_deref(), kind.target.as_deref()))
+                .collect();
+            kinds.sort();
+            dependencies.push((dependency.name.as_str(), id, kinds));
+        }
+        dependencies.sort();
+        if nodes.insert(node_id, (features, dependencies)).is_some() {
+            return Err(unproved());
+        }
+    }
+    let verified = digest(&serde_json::to_vec(&nodes).map_err(|_| unproved())?)?;
+    if verified != materialized.resolve_sha256 {
+        return Err(unproved());
     }
     Ok(())
 }
