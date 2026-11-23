@@ -210,13 +210,7 @@ impl Fixture {
         }
     }
 
-    fn touch_consumer(checkout: &Path, target: &Path) {
-        assert_eq!(
-            git(checkout, &["ls-files", "--error-unmatch", "--", ANCHOR]),
-            ANCHOR
-        );
-        let anchor = checkout.join(ANCHOR);
-        let old_mtime = fs::metadata(&anchor).unwrap().modified().unwrap();
+    fn consumer_stamp(target: &Path) -> SystemTime {
         let profile = target.join("debug");
         let report = fingerprint::read_profile(&profile);
         let units = report.graph.unwrap().units;
@@ -224,8 +218,17 @@ impl Fixture {
         let consumer = consumers.next().unwrap();
         assert!(consumers.next().is_none());
         let stamp = unit_path::stamp(&profile, &consumer.loc, consumer.kind);
-        let build_mtime = fs::metadata(stamp).unwrap().modified().unwrap();
-        let before = old_mtime.max(build_mtime);
+        fs::metadata(stamp).unwrap().modified().unwrap()
+    }
+
+    fn touch_consumer(checkout: &Path, target: &Path) {
+        assert_eq!(
+            git(checkout, &["ls-files", "--error-unmatch", "--", ANCHOR]),
+            ANCHOR
+        );
+        let anchor = checkout.join(ANCHOR);
+        let old_mtime = fs::metadata(&anchor).unwrap().modified().unwrap();
+        let before = old_mtime.max(Self::consumer_stamp(target));
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             set_mtime(&anchor, SystemTime::now());
@@ -675,58 +678,49 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
     let fixture = Fixture::new("guided-native-seal");
     let head = git(&fixture.main, &["rev-parse", "HEAD"]);
     let profile = fixture_seal(&fixture, &head, SealFault::None);
-    fixture.hive.config(
-        &serde_json::json!({"secondary_roots":[fixture.hive.secondary_root.path]}).to_string(),
-    );
-    fixture.hive.write_ready_capabilities();
-    fs::create_dir(fixture.hive.home.path.join("no-cache")).unwrap();
-    common::register(&fixture.hive, &fixture.main);
-    let (created, initialized) = fixture.hive.json(&[
-        "slot",
-        "init",
-        "--repo",
-        fixture.main.to_str().unwrap(),
-        "--root",
-        fixture.hive.secondary_root.path.to_str().unwrap(),
-        "--profile",
-        profile.to_str().unwrap(),
-    ]);
-    assert!(created.status.success(), "{initialized}");
-    let pool = initialized["pool_id"].as_str().unwrap();
-    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let (pool, checkout) = initialize_sealed_slot(&fixture, &profile);
     let key = "e".repeat(64);
-    let first = packaged(
-        &fixture,
-        &[
-            "take",
-            fixture.main.to_str().unwrap(),
-            pool,
-            "1",
-            "0",
-            &head,
-            &"a".repeat(32),
-            &"b".repeat(32),
-            &"c".repeat(32),
-        ],
-        &key,
-    );
-    assert!(first.status.success(), "{first:?}");
-    let spawn_producer = |op: &str| {
+    let take = |expected: u64| {
+        let output = packaged(
+            &fixture,
+            &[
+                "take",
+                fixture.main.to_str().unwrap(),
+                &pool,
+                "1",
+                &expected.to_string(),
+                &head,
+                &format!("{expected:031x}a"),
+                &format!("{expected:031x}b"),
+                &format!("{expected:031x}c"),
+            ],
+            &key,
+        );
+        assert!(output.status.success(), "{output:?}");
+        let ready: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(ready["kind"], "ready");
+        assert_eq!(ready["commit"], head);
+        assert_eq!(ready["generation"], expected + 1);
+        assert_eq!(ready["path"], serde_json::json!(checkout));
+        assert_eq!(ready["use_policy"], "guide_guarded_cargo_only");
+    };
+    take(0);
+    let spawn_producer = |generation: u64, op: &str| {
         start_packaged(
             &fixture,
             &[
                 "produce",
                 fixture.main.to_str().unwrap(),
-                pool,
+                &pool,
                 "1",
-                "1",
+                &generation.to_string(),
                 op,
                 "build-fixture",
             ],
             &key,
         )
     };
-    let produce = |op: &str| finish_packaged(spawn_producer(op), &key);
+    let produce = |op: &str| finish_packaged(spawn_producer(1, op), &key);
     let seal = fixture._scratch.path.join("reviewed-closure.json");
     let original = fs::read(&seal).unwrap();
     let mut tampered = original.clone();
@@ -743,11 +737,11 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
     assert!(!checkout.join("target").exists());
     fs::remove_file(rejected).unwrap();
     let retained = checkout.join("target");
-    let run = |op: char| {
+    let run = |generation: u64, op: char| {
         let operation = op.to_string().repeat(32);
-        let mut child = spawn_producer(&operation);
+        let mut child = spawn_producer(generation, &operation);
         let owns_lock =
-            (op == 'f').then(|| observe_writer_lock(&fixture, pool, &retained, &mut child));
+            (op == 'f').then(|| observe_writer_lock(&fixture, &pool, &retained, &mut child));
         let out = finish_packaged(child, &key);
         assert!(
             out.status.success(),
@@ -764,6 +758,7 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
                 .unwrap();
         let producer = &record["pools"][0]["slots"][0]["producer"];
         assert_eq!(producer["kind"], "complete");
+        assert_eq!(producer["generation"], generation);
         let invocations = producer["invocations"].as_array().unwrap();
         let latest = invocations.last().unwrap();
         assert_eq!(latest["operation"], operation);
@@ -784,8 +779,17 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
             evidence.clone(),
         )
     };
-    let (baseline, original) = run('f');
+    let mut generation = 1;
+    let (baseline, original) = run(generation, 'f');
     baseline.check("guided baseline", ORIGINAL, false, false);
+    let identity = |path: &Path| {
+        let metadata = fs::metadata(path).unwrap();
+        (metadata.dev(), metadata.ino())
+    };
+    let checkout_identity = identity(&checkout);
+    let target_identity = identity(&retained);
+    let anchor = checkout.join(ANCHOR);
+    let anchor_identity = identity(&anchor);
     let query = checkout.join(QUERY);
     let original_mtime = fs::metadata(&query).unwrap().modified().unwrap();
     let dotenv = checkout.join(".env");
@@ -807,7 +811,7 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
             ChangedInput::Dotenv => fs::write(&dotenv, "FIXTURE_VALUE=present\n").unwrap(),
         }
         Fixture::touch_consumer(&checkout, &retained);
-        let (build, changed_evidence) = run(op[0]);
+        let (build, changed_evidence) = run(generation, op[0]);
         build.check("guided changed input", changed, false, true);
         assert_ne!(changed_evidence["graph_digest"], original["graph_digest"]);
         assert_eq!(changed_evidence["stable_digest"], original["stable_digest"]);
@@ -823,14 +827,32 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
             original_mtime
         );
         assert!(!dotenv.exists());
-        let (stale, restored_evidence) = run(op[1]);
+        let (stale, restored_evidence) = run(generation, op[1]);
         stale.check("guided unprotected restored input", changed, true, true);
         assert_eq!(restored_evidence, original);
-        // The later retained-take test replaces this manual causal control with guide invalidation.
-        Fixture::touch_consumer(&checkout, &retained);
-        let (protected, final_evidence) = run(op[2]);
+        assert_ne!(stale.value, reference.value);
+        let stale_stamp = Fixture::consumer_stamp(&retained);
+        let anchor_mtime = fs::metadata(&anchor).unwrap().modified().unwrap();
+        let returned = return_sealed_slot(&fixture, &pool, generation, &key);
+        assert_eq!(returned["commit"], head);
+        take(generation);
+        generation += 1;
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            git(&checkout, &["rev-parse", "--show-toplevel"]),
+            checkout.to_str().unwrap()
+        );
+        assert_eq!(identity(&checkout), checkout_identity);
+        assert_eq!(identity(&retained), target_identity);
+        assert_eq!(identity(&anchor), anchor_identity);
+        assert_eq!(fs::read_to_string(&anchor).unwrap(), CONSUMER);
+        assert!(
+            fs::metadata(&anchor).unwrap().modified().unwrap() > stale_stamp.max(anchor_mtime),
+            "the steady guide must invalidate its reviewed consumer before Ready"
+        );
+        let (protected, final_evidence) = run(generation, op[2]);
         protected.check(
-            "guided build after manual anchor control",
+            "guided build after steady handoff",
             &reference.value,
             false,
             true,
@@ -838,7 +860,10 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
         assert_eq!(final_evidence, original);
     }
     assert!(git(&checkout, &["status", "--porcelain"]).is_empty());
-    let op = "9".repeat(32);
+    return_sealed_slot(&fixture, &pool, generation, &key);
+}
+
+fn return_sealed_slot(fixture: &Fixture, pool: &str, generation: u64, key: &str) -> Value {
     let mut child = fixture
         .hive
         .command(&[
@@ -851,9 +876,9 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
             "--slot",
             "1",
             "--generation",
-            "1",
+            &generation.to_string(),
             "--op",
-            &op,
+            &format!("{generation:031x}d"),
             "--json",
         ])
         .stdin(Stdio::piped())
@@ -869,6 +894,9 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
     assert!(out.status.success(), "{out:?}");
     let returned: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(returned["kind"], "returned");
+    assert_eq!(returned["generation"], generation);
+    assert_eq!(returned["phase"], "vacant");
+    returned
 }
 
 fn initialize_sealed_slot(fixture: &Fixture, profile: &Path) -> (String, PathBuf) {
