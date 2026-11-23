@@ -1183,8 +1183,11 @@ pub struct Proof {
 impl PoolProfile {
     /// Reads the submitted structural profile without writing to its source.
     pub fn read(path: &Path) -> Result<Self, StateError> {
-        owner_directory(parent(path).map_err(|err| io_err(path, err))?)
-            .map_err(|err| io_err(path, err))?;
+        let directory = parent(path).map_err(|err| io_err(path, err))?;
+        if !absolute(directory) {
+            return Err(io_err(path, noncanonical_directory()));
+        }
+        check_stable_ancestors(path).map_err(|err| io_err(path, err))?;
         let file = open_owner_state_file(path).map_err(|err| io_err(path, err))?;
         if path
             .canonicalize()
@@ -1485,25 +1488,31 @@ fn valid_components(path: &Path) -> bool {
 }
 
 pub fn owner_directory(path: &Path) -> io::Result<fs::Metadata> {
-    let noncanonical = || {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "expected a canonical owner-controlled directory",
-        )
-    };
     if !absolute(path) {
-        return Err(noncanonical());
+        return Err(noncanonical_directory());
     }
+    check_stable_ancestors(path)?;
+    let metadata = checked_owner_directory(path)?;
+    if path.canonicalize()?.as_os_str() != path.as_os_str() {
+        return Err(noncanonical_directory());
+    }
+    Ok(metadata)
+}
+
+fn noncanonical_directory() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "expected a canonical owner-controlled directory",
+    )
+}
+
+fn check_stable_ancestors(path: &Path) -> io::Result<()> {
     let ancestors = path.ancestors().skip(1).collect::<Vec<_>>();
     for ancestor in ancestors.into_iter().rev() {
         checked_stable_ancestor(ancestor)
             .map_err(|err| io::Error::new(err.kind(), format!("{}: {err}", ancestor.display())))?;
     }
-    let metadata = checked_owner_directory(path)?;
-    if path.canonicalize()?.as_os_str() != path.as_os_str() {
-        return Err(noncanonical());
-    }
-    Ok(metadata)
+    Ok(())
 }
 
 pub fn make_private_directory(path: &Path) -> io::Result<()> {

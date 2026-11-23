@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 const CAP: usize = 1_048_576;
@@ -504,6 +504,68 @@ fn chmod_acl(args: &[&str], path: &Path) {
     )
     .unwrap();
     assert!(out.status.success(), "{:?}", out.stderr);
+}
+
+#[test]
+fn reviewed_profile_accepts_a_deny_only_parent_and_refuses_a_shared_writable_parent() {
+    let mut fixture = PoolFixture::new();
+    let home = Scratch::new("slot-profile-home");
+    let parent = &home.path;
+    let profile = parent.join("reviewed.json");
+    fs::rename(&fixture.profile, &profile).unwrap();
+    fixture.profile = profile;
+    fs::set_permissions(&fixture.profile, fs::Permissions::from_mode(0o600)).unwrap();
+    let bytes = fs::read(&fixture.profile).unwrap();
+
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o777)).unwrap();
+    let (out, result) = fixture.init();
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert_eq!(result["kind"], "refused");
+    assert!(
+        result["detail"].as_str().unwrap().contains("reviewed.json"),
+        "{result}"
+    );
+    assert!(!fixture.file().exists());
+    assert!(!fixture.hive.home.path.join("slot-locks").exists());
+
+    chmod_acl(&["+a", "everyone deny delete"], parent);
+    let (out, result) = fixture.init();
+    chmod_acl(&["-N"], parent);
+    assert!(out.status.success(), "{result}");
+    assert_eq!(result["kind"], "initialized");
+    assert_eq!(fs::read(&fixture.profile).unwrap(), bytes);
+}
+
+#[test]
+fn reviewed_profile_accepts_a_root_owned_sticky_parent() {
+    struct RemoveProfileOnDrop<'a>(&'a Path);
+    impl Drop for RemoveProfileOnDrop<'_> {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(self.0);
+        }
+    }
+
+    let mut fixture = PoolFixture::new();
+    let profile = fixture._repo_dir.path.with_extension("reviewed.json");
+    let parent = fs::metadata(profile.parent().unwrap()).unwrap();
+    assert_eq!(parent.uid(), 0);
+    assert_eq!(parent.mode() & 0o7777, 0o1777);
+
+    let mut copy = fs::File::options()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&profile)
+        .unwrap();
+    let _cleanup = RemoveProfileOnDrop(&profile);
+    std::io::copy(&mut fs::File::open(&fixture.profile).unwrap(), &mut copy).unwrap();
+    drop(copy);
+    fixture.profile.clone_from(&profile);
+
+    let (out, result) = fixture.init();
+    assert!(out.status.success(), "{result}");
+    assert_eq!(result["kind"], "initialized");
 }
 
 #[test]
