@@ -1023,6 +1023,16 @@ fn checkout_gc_binds_split_roots_and_preserves_an_earlier_effect_on_a_later_skip
         "{report:?}"
     );
     assert_eq!(tree(&build), before);
+    for root in [&target, &build] {
+        for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
+            let lock = root.join("debug").join(name);
+            assert!(
+                common::wait_until_lock_free(&lock, Duration::from_secs(5)),
+                "the fixture lock did not become available: {}",
+                lock.display()
+            );
+        }
+    }
 
     let (report, completed) =
         checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
