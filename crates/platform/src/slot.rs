@@ -659,61 +659,60 @@ mod foreground {
         Ok(environment)
     }
 
+    const NATIVE_BOOTSTRAP_KEYS: [&[u8]; 11] = [
+        b"pfz",
+        b"stack_guard",
+        b"malloc_entropy",
+        b"ptr_munge",
+        b"main_stack",
+        b"executable_file",
+        b"dyld_file",
+        b"executable_cdhash",
+        b"executable_boothash",
+        b"th_port",
+        b"security_config",
+    ];
+
+    fn bootstrap_key(field: &[u8]) -> Option<&[u8]> {
+        field
+            .iter()
+            .position(|byte| *byte == b'=')
+            .map(|equal| &field[..equal])
+    }
+
     fn validate_bootstrap_tail<'a>(parts: impl Iterator<Item = &'a [u8]>) -> io::Result<()> {
-        // During exec, applev may immediately follow envp. Dyld later clears some
-        // bootstrap strings, leaving zero-filled gaps among the remaining entries.
-        let mut keys = std::collections::BTreeSet::new();
+        // Exec's envp alignment can leave no separator before applev. In that case only
+        // the whole observed native sequence can establish the boundary.
         let mut parts = parts.peekable();
-        let delimited = parts.peek().is_some_and(|field| field.is_empty());
-        if !delimited
-            && !parts
-                .peek()
-                .is_some_and(|field| field.starts_with(b"executable_file="))
-        {
-            return Err(invalid("ambiguous foreground environment boundary"));
+        if !parts.peek().is_some_and(|field| field.is_empty()) {
+            for key in NATIVE_BOOTSTRAP_KEYS {
+                if parts.next().and_then(bootstrap_key) != Some(key) {
+                    return Err(invalid("ambiguous foreground environment boundary"));
+                }
+            }
+            if !parts.peek().is_some_and(|field| field.is_empty()) || !parts.all(<[u8]>::is_empty) {
+                return Err(invalid("unexplained foreground process argument tail"));
+            }
+            return Ok(());
         }
+
+        // Dyld can clear individual bootstrap strings after a genuine envp delimiter.
+        let mut seen = std::collections::BTreeSet::new();
         let mut terminated = false;
         for field in parts {
             terminated = field.is_empty();
             if terminated {
                 continue;
             }
-            let equal = field
-                .iter()
-                .position(|byte| *byte == b'=')
+            let key = bootstrap_key(field)
                 .ok_or_else(|| invalid("unexplained foreground process argument tail"))?;
-            let key = &field[..equal];
-            if !matches!(
-                key,
-                b"executable_path"
-                    | b"executable_file"
-                    | b"executable_boothash"
-                    | b"executable_cdhash"
-                    | b"dyld_file"
-                    | b"main_stack"
-                    | b"stack_guard"
-                    | b"malloc_entropy"
-                    | b"security_config"
-                    | b"ptr_munge"
-                    | b"th_port"
-                    | b"pfz"
-            ) || !keys.insert(key)
+            if !(NATIVE_BOOTSTRAP_KEYS.contains(&key) || key == b"executable_path")
+                || !seen.insert(key)
             {
                 return Err(invalid("unexplained foreground process argument tail"));
             }
         }
-        if !terminated
-            || (!delimited
-                && ![
-                    b"executable_file".as_slice(),
-                    b"dyld_file",
-                    b"main_stack",
-                    b"stack_guard",
-                    b"malloc_entropy",
-                ]
-                .into_iter()
-                .all(|key| keys.contains(key)))
-        {
+        if !terminated {
             return Err(invalid("incomplete Darwin bootstrap argument tail"));
         }
         Ok(())
@@ -752,13 +751,21 @@ mod foreground {
             let fds = match descriptors_for(pid, &mut descriptors) {
                 Ok(fds) => fds,
                 Err(error) if inaccessible_preexisting(pid, guide, &error) => continue,
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        "could not verify the descriptor table of a local process",
+                    ));
+                }
             };
             remaining = remaining
                 .checked_sub(fds.len())
                 .filter(|_| Instant::now() < until)
                 .ok_or_else(|| invalid("slot custody scan exceeded its bound"))?;
             for fd in fds {
+                if Instant::now() >= until {
+                    return Err(invalid("slot custody scan exceeded its bound"));
+                }
                 if fd.proc_fdtype != libc::PROX_FDTYPE_VNODE as u32 {
                     continue;
                 }
@@ -766,9 +773,17 @@ mod foreground {
                     Ok(true) => return Ok(true),
                     Ok(false) => (),
                     Err(error) if inaccessible_preexisting(pid, guide, &error) => (),
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        return Err(io::Error::new(
+                            error.kind(),
+                            "could not verify a vnode descriptor of a local process",
+                        ));
+                    }
                 }
             }
+        }
+        if Instant::now() >= until {
+            return Err(invalid("slot custody scan exceeded its bound"));
         }
         Ok(false)
     }
@@ -808,10 +823,12 @@ mod foreground {
                     .is_ok_and(|info| info.pbi_status == libc::SZOMB || info.pbi_nfiles == 0)
             {
                 Ok(&[])
-            } else {
+            } else if error.raw_os_error() == Some(0) {
                 Err(invalid(
-                    "could not verify all descriptors of a local process",
+                    "native descriptor inventory returned no verifiable entries",
                 ))
+            } else {
+                Err(error)
             };
         }
         if count as usize >= capacity
@@ -908,36 +925,54 @@ mod foreground {
             assert!(parse_environment(separated.into_iter(), Some(1)).is_err());
         }
 
+        const NATIVE_BOOTSTRAP: [&[u8]; 12] = [
+            b"pfz=fixture",
+            b"stack_guard=fixture",
+            b"malloc_entropy=fixture",
+            b"ptr_munge=fixture",
+            b"main_stack=fixture",
+            b"executable_file=fixture",
+            b"dyld_file=fixture",
+            b"executable_cdhash=fixture",
+            b"executable_boothash=fixture",
+            b"th_port=fixture",
+            b"security_config=fixture",
+            b"",
+        ];
+
         #[test]
         fn an_optional_apple_key_cannot_open_an_undelimited_bootstrap_tail() {
-            let parts = [
-                b"HOME=/private/tmp".as_slice(),
-                b"executable_boothash=unreviewed",
-                b"executable_file=test",
-                b"dyld_file=test",
-                b"main_stack=test",
-                b"stack_guard=test",
-                b"malloc_entropy=test",
-                b"",
-            ];
-            assert!(parse_environment(parts.into_iter(), Some(1)).is_err());
+            for unexpected in [
+                b"executable_boothash=unreviewed".as_slice(),
+                b"pfz=unreviewed",
+                b"UNREVIEWED=value",
+            ] {
+                let parts = [b"HOME=/private/tmp".as_slice(), unexpected]
+                    .into_iter()
+                    .chain(NATIVE_BOOTSTRAP);
+                assert!(parse_environment(parts, Some(1)).is_err());
+            }
+            let mixed = [b"HOME=/private/tmp".as_slice(), b"pfz=unreviewed", b""]
+                .into_iter()
+                .chain(NATIVE_BOOTSTRAP);
+            assert!(parse_environment(mixed, Some(1)).is_err());
         }
 
         #[test]
         fn darwin_bootstrap_record_is_outside_the_cargo_environment() {
-            let parts = [
-                b"HOME=/private/tmp".as_slice(),
-                b"executable_file=test",
-                b"dyld_file=test",
-                b"main_stack=test",
-                b"stack_guard=test",
-                b"malloc_entropy=test",
-                b"",
-            ];
-            let values = parse_environment(parts.into_iter(), Some(1)).unwrap();
+            let parts = [b"HOME=/private/tmp".as_slice()]
+                .into_iter()
+                .chain(NATIVE_BOOTSTRAP);
+            let values = parse_environment(parts, Some(1)).unwrap();
             assert_eq!(values.len(), 1);
             assert!(values.contains_key(std::ffi::OsStr::new("HOME")));
-            let residual = [b"HOME=/private/tmp".as_slice(), b"", b"", b"pfz=test", b""];
+            let residual = [
+                b"HOME=/private/tmp".as_slice(),
+                b"",
+                b"",
+                b"pfz=fixture",
+                b"",
+            ];
             assert_eq!(
                 parse_environment(residual.into_iter(), Some(1)).unwrap(),
                 values

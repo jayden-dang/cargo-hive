@@ -2116,10 +2116,14 @@ fn slot_identity_present(state: &Path, pool: &Pool, slot: &Slot) -> bool {
 }
 
 fn slot_producer_is_eligible(slot: &Slot) -> bool {
-    match slot.checkout_id {
+    let generation = match slot.phase {
+        Phase::Vacant => slot.generation.checked_add(1),
+        _ => Some(slot.generation),
+    };
+    generation.is_some_and(|generation| match slot.checkout_id {
         None => matches!(slot.producer, Producer::NeverBuilt { evidence: None }),
-        Some(_) => slot.producer.has_eligible_evidence(slot.generation),
-    }
+        Some(_) => slot.producer.has_eligible_evidence(generation),
+    })
 }
 
 fn project_pool(

@@ -9,9 +9,9 @@ use cargo_hive_platform::{
     slot::sha256,
 };
 use cargo_hive_state::slots::{
-    self, CargoLayout, EligibleProducer, EnvironmentExpectation, GraphExpectation, InputIdentity,
-    Invocation, InvocationEvidence, Locator, OutputRoots, PoolProfile, Producer, ProfileBinding,
-    RootExpectation, VerifiedRoot,
+    self, CargoLayout, Coverage, EligibleProducer, EnvironmentExpectation, GraphExpectation,
+    InputIdentity, Invocation, InvocationEvidence, Locator, OutputRoots, PoolProfile, Producer,
+    ProfileBinding, RootExpectation, VerifiedRoot,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
@@ -57,24 +57,15 @@ pub(super) fn mutable_checkout_paths(
     invocation: &Invocation,
     checkout: &Path,
 ) -> BTreeSet<PathBuf> {
-    let mut paths = BTreeSet::new();
-    for input in profile
+    profile
         .mutable_inputs
         .iter()
         .filter(|input| input.invocations.contains(&invocation.id))
-    {
-        match &input.locator {
-            Locator::Checkout { path } => {
-                paths.insert(checkout.join(path));
-            }
-            Locator::DirectoryMembers { path, members } => {
-                let directory = checkout.join(path);
-                paths.extend(members.iter().map(|member| directory.join(member)));
-            }
-            _ => (),
-        }
-    }
-    paths
+        .filter_map(|input| match &input.locator {
+            Locator::Checkout { path } => Some(checkout.join(path)),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(super) fn completed_roots(
@@ -132,7 +123,7 @@ pub(super) fn reviewed_shape<'a>(
             "The requested producer profile revision is not current.",
         ));
     }
-    profile
+    let invocation = profile
         .invocations
         .iter()
         .find(|invocation| {
@@ -143,17 +134,32 @@ pub(super) fn reviewed_shape<'a>(
         })
         .ok_or_else(|| {
             refused("The producer command or working directory is outside the reviewed invocation.")
-        })
+        })?;
+    for mutable in profile
+        .mutable_inputs
+        .iter()
+        .filter(|item| item.invocations.contains(&invocation.id))
+    {
+        let approved = matches!((&mutable.locator, &mutable.coverage),
+            (Locator::Checkout { path }, Coverage::Consumers { ids })
+                if profile.consumers.iter().any(|consumer| {
+                    consumer.invocation == invocation.id && consumer.anchor == *path && ids.contains(&consumer.id)
+                })
+        );
+        if !approved {
+            return Err(refused(
+                "A mutable input is outside the finite reviewed target-entry source coverage.",
+            ));
+        }
+    }
+    Ok(invocation)
 }
 
 fn supported_args(args: &[String]) -> bool {
     let Some((command, options)) = args.split_first() else {
         return false;
     };
-    if !matches!(command.as_str(), "check" | "build" | "test")
-        || !options.iter().any(|arg| arg == "--locked")
-        || (command == "test" && !options.iter().any(|arg| arg == "--no-run"))
-    {
+    if command != "check" || !options.iter().any(|arg| arg == "--locked") {
         return false;
     }
 
@@ -163,7 +169,6 @@ fn supported_args(args: &[String]) -> bool {
             "--locked"
             | "--offline"
             | "--frozen"
-            | "--no-run"
             | "--all-targets"
             | "--all-features"
             | "--no-default-features"
@@ -175,20 +180,22 @@ fn supported_args(args: &[String]) -> bool {
             | "--examples"
             | "--benches"
             | "--quiet" => (),
-            "--package" | "-p" | "--exclude" | "--features" | "-F" | "--profile" | "--target"
-            | "--bin" | "--example" | "--test" | "--bench" => {
+            "--target" => {
+                if options
+                    .next()
+                    .is_none_or(|target| target != &native_target())
+                {
+                    return false;
+                }
+            }
+            "--package" | "-p" | "--exclude" | "--features" | "-F" | "--profile" | "--bin"
+            | "--example" | "--test" | "--bench" => {
                 if !options.next().is_some_and(|value| {
                     !value.starts_with('-')
                         && !value.is_empty()
-                        && if arg == "--target" {
-                            value
-                                .bytes()
-                                .all(|ch| ch.is_ascii_alphanumeric() || b"-_".contains(&ch))
-                        } else {
-                            value
-                                .bytes()
-                                .all(|ch| ch.is_ascii_alphanumeric() || b" _.-,/+:".contains(&ch))
-                        }
+                        && value
+                            .bytes()
+                            .all(|ch| ch.is_ascii_alphanumeric() || b" _.-,/+:".contains(&ch))
                 }) {
                     return false;
                 }
@@ -216,7 +223,7 @@ pub(super) fn check_invocation(
         .map_err(|_| refused("Could not verify the reviewed working directory."))?;
 
     let environment: BTreeMap<_, _> = std::env::vars_os().collect();
-    let mut environment = check_environment(profile, invocation, &environment)?;
+    let mut environment = check_environment(invocation, &environment)?;
     let cargo_home = environment
         .get(std::ffi::OsStr::new("CARGO_HOME"))
         .map(PathBuf::from)
@@ -279,10 +286,10 @@ pub(super) fn check_invocation(
             "The actual workspace or Cargo output roots differ from the reviewed slot paths.",
         ));
     }
-    check_graph_members(&inputs, &discovered, checkout, profile, invocation)?;
-    let mutable_facts = mutable_facts(profile, invocation, checkout)?;
+    let reviewed_sources =
+        reviewed_source_facts(&inputs, &discovered, checkout, profile, invocation)?;
     let graph_digest = digest(
-        &serde_json::to_vec(&(&inputs, mutable_facts, &cargo, &rustc, tools_before))
+        &serde_json::to_vec(&(&inputs, reviewed_sources, &cargo, &rustc, tools_before))
             .map_err(|_| refused("Could not bind the producer graph evidence."))?,
     )?;
 
@@ -299,7 +306,6 @@ pub(super) fn check_invocation(
 }
 
 fn check_environment(
-    profile: &PoolProfile,
     invocation: &Invocation,
     environment: &BTreeMap<std::ffi::OsString, std::ffi::OsString>,
 ) -> Result<BTreeMap<std::ffi::OsString, std::ffi::OsString>, Refusal> {
@@ -351,13 +357,7 @@ fn check_environment(
         let matches = match &variable.expectation {
             EnvironmentExpectation::Present { value: expected } => value == Some(expected.as_str()),
             EnvironmentExpectation::Absent => value.is_none(),
-            EnvironmentExpectation::Mutable { input } => {
-                profile.mutable_inputs.iter().any(|item| {
-                    &item.id == input
-                        && (value.is_some()
-                            || item.presence == slots::MutablePresence::PresentOrAbsent)
-                })
-            }
+            EnvironmentExpectation::Mutable { .. } => false,
         };
         if !matches {
             return Err(denied());
@@ -388,6 +388,7 @@ fn compiler_override(name: &str) -> bool {
         name,
         "RUSTFLAGS"
             | "RUSTDOCFLAGS"
+            | "RUST_TARGET_PATH"
             | "CARGO_ENCODED_RUSTFLAGS"
             | "CARGO_ENCODED_RUSTDOCFLAGS"
             | "CARGO_BUILD_TARGET"
@@ -606,6 +607,10 @@ fn simple_output_path(value: &str) -> bool {
         })
 }
 
+fn native_target() -> String {
+    format!("{}-apple-darwin", std::env::consts::ARCH)
+}
+
 fn release_for(layout: CargoLayout) -> &'static str {
     match layout {
         CargoLayout::Flat => "1.97.1",
@@ -621,7 +626,7 @@ fn verified_executables(
     let uncertain =
         || refused("Could not establish the exact reviewed Cargo and rustc executables or layout.");
     let release = release_for(invocation.layout);
-    let toolchain = format!("{release}-{}-apple-darwin", std::env::consts::ARCH);
+    let toolchain = format!("{release}-{}", native_target());
     let get = |name| environment.get(OsStr::new(name));
     if get("RUSTUP_TOOLCHAIN")
         .is_some_and(|actual| actual != release && actual != toolchain.as_str())
@@ -688,12 +693,16 @@ fn verify_tools(
     let rustc_info = std::str::from_utf8(&output).map_err(|_| incorrect())?;
     let rustc_version = rustc_info.lines().next().ok_or_else(incorrect)?;
     let release = release_for(invocation.layout);
+    let native = native_target();
     if !version_matches(&invocation.cargo, cargo_version)
         || !version_matches(&format!("cargo {release}"), cargo_version)
         || !version_matches(&invocation.rustc, rustc_version)
         || !rustc_info
             .lines()
             .any(|line| line.strip_prefix("release: ") == Some(release))
+        || !rustc_info
+            .lines()
+            .any(|line| line.strip_prefix("host: ") == Some(native.as_str()))
     {
         return Err(incorrect());
     }
@@ -803,13 +812,13 @@ fn discover(
     })
 }
 
-fn check_graph_members(
+fn reviewed_source_facts(
     inputs: &BTreeMap<PathBuf, Option<String>>,
     graph: &Discovered,
     checkout: &CheckoutProof,
     profile: &PoolProfile,
     invocation: &Invocation,
-) -> Result<(), Refusal> {
+) -> Result<BTreeMap<PathBuf, String>, Refusal> {
     let unproved = || {
         refused(
             "The actual Cargo graph has an unreviewed manifest, local build script or consumer anchor.",
@@ -854,6 +863,7 @@ fn check_graph_members(
             return Err(unproved());
         }
     }
+    let mut sources = BTreeMap::new();
     for consumer in profile
         .consumers
         .iter()
@@ -881,87 +891,15 @@ fn check_graph_members(
         if !approved {
             return Err(unproved());
         }
-    }
-
-    Ok(())
-}
-
-fn mutable_facts(
-    profile: &PoolProfile,
-    invocation: &Invocation,
-    checkout: &CheckoutProof,
-) -> Result<BTreeMap<PathBuf, Option<String>>, Refusal> {
-    let mut facts = BTreeMap::new();
-    for input in profile
-        .mutable_inputs
-        .iter()
-        .filter(|item| item.invocations.contains(&invocation.id))
-    {
-        let paths = match &input.locator {
-            Locator::Checkout { path } => vec![checkout.path.join(path)],
-            Locator::External { path } => vec![path.clone()],
-            Locator::DirectoryMembers { path, members } => {
-                let dir = checkout.path.join(path);
-                let reviewed = members
-                    .iter()
-                    .map(|member| dir.join(member))
-                    .collect::<BTreeSet<_>>();
-                check_members(&dir, &reviewed, &mut 0)?;
-                reviewed.into_iter().collect()
-            }
-            Locator::Environment { .. } => continue,
-        };
-        for path in paths {
-            if path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
-                && !profile.consumers.iter().any(|consumer| {
-                    consumer.invocation == invocation.id
-                        && checkout.path.join(&consumer.anchor) == path
-                })
-            {
-                return Err(refused(
-                    "A mutable Rust source does not have a reviewed consumer anchor.",
-                ));
-            }
-            let fact = read_input(&path)?.map(|bytes| digest(&bytes)).transpose()?;
-            if fact.is_none() && input.presence == slots::MutablePresence::Present {
-                return Err(refused("A required mutable input is missing."));
-            }
-            if facts.insert(path, fact).is_some() {
-                return Err(refused("The reviewed mutable input paths overlap."));
-            }
-        }
-    }
-    Ok(facts)
-}
-
-fn check_members(
-    dir: &Path,
-    reviewed: &BTreeSet<PathBuf>,
-    visited: &mut usize,
-) -> Result<(), Refusal> {
-    let unproved =
-        || refused("A reviewed input directory contains an undeclared or unverified member.");
-    if !exists(dir).map_err(|_| unproved())? {
-        return Ok(());
-    }
-    slots::owner_directory(dir).map_err(|_| unproved())?;
-    for entry in fs::read_dir(dir).map_err(|_| unproved())? {
-        *visited += 1;
-        if *visited > 4096 {
-            return Err(unproved());
-        }
-        let entry = entry.map_err(|_| unproved())?;
-        let path = entry.path();
-        let kind = entry.file_type().map_err(|_| unproved())?;
-        if kind.is_dir() && reviewed.iter().any(|member| member.starts_with(&path)) {
-            check_members(&path, reviewed, visited)?;
-        } else if !kind.is_file() || !reviewed.contains(&path) {
+        let digest = digest(&actual)?;
+        if sources
+            .insert(anchor, digest.clone())
+            .is_some_and(|previous| previous != digest)
+        {
             return Err(unproved());
         }
     }
-    Ok(())
+    Ok(sources)
 }
 
 fn digest(bytes: &[u8]) -> Result<String, Refusal> {
