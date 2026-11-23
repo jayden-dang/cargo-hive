@@ -47,6 +47,16 @@ const NEXTEST_WORKSPACE_ARGV: [&str; 8] = [
     "--user-config-file",
     "none",
 ];
+const NEXTEST_GATEWAYS_ARGV: [&str; 8] = [
+    "nextest",
+    "run",
+    "-p",
+    "gateways",
+    "--no-run",
+    "--locked",
+    "--user-config-file",
+    "none",
+];
 const FILE_LIMIT: u64 = 256 * 1024 * 1024;
 const TOTAL_MATERIAL_LIMIT: u64 = 1024 * 1024 * 1024;
 const ENTRY_LIMIT: usize = 256;
@@ -73,6 +83,7 @@ enum Recipe {
     NativeBuild,
     Clippy,
     NextestWorkspace,
+    NextestGateways,
 }
 
 impl Recipe {
@@ -81,11 +92,12 @@ impl Recipe {
             Self::NativeBuild => &NATIVE_ARGV,
             Self::Clippy => &CLIPPY_ARGV,
             Self::NextestWorkspace => &NEXTEST_WORKSPACE_ARGV,
+            Self::NextestGateways => &NEXTEST_GATEWAYS_ARGV,
         }
     }
 
     fn is_nextest(self) -> bool {
-        matches!(self, Self::NextestWorkspace)
+        matches!(self, Self::NextestWorkspace | Self::NextestGateways)
     }
 }
 
@@ -310,7 +322,9 @@ impl NativeBuild {
         }
         match self.seal.recipe {
             Recipe::Clippy => self.verify_clippy_config(&checkout.path)?,
-            Recipe::NextestWorkspace => self.verify_default_harness(&checkout.path)?,
+            Recipe::NextestWorkspace | Recipe::NextestGateways => {
+                self.verify_default_harness(&checkout.path)?
+            }
             Recipe::NativeBuild => (),
         }
         let mut observed = BTreeMap::new();
@@ -384,6 +398,15 @@ impl NativeBuild {
                 "The sealed nextest recipe requires the reviewed default native harness and package scope.",
             )
         };
+        if matches!(self.seal.recipe, Recipe::NextestGateways)
+            && !self
+                .seal
+                .packages
+                .iter()
+                .any(|package| package.name == "gateways")
+        {
+            return Err(unproved());
+        }
         for package in &self.seal.packages {
             let bytes = read_input_bounded(&checkout.join(&package.manifest), 64 * 1024)?
                 .ok_or_else(unproved)?;
@@ -527,7 +550,7 @@ impl NativeBuild {
                 .cargo_clippy
                 .as_ref()
                 .map(|tool| tool.path.as_path()),
-            Recipe::NextestWorkspace => self
+            Recipe::NextestWorkspace | Recipe::NextestGateways => self
                 .seal
                 .tools
                 .cargo_nextest
@@ -629,7 +652,7 @@ impl Tools {
         match recipe {
             Recipe::NativeBuild => no_clippy && self.cargo_nextest.is_none(),
             Recipe::Clippy => clippy && self.cargo_nextest.is_none() && self.otool.is_some(),
-            Recipe::NextestWorkspace => {
+            Recipe::NextestWorkspace | Recipe::NextestGateways => {
                 no_clippy && self.cargo_nextest.is_some() && self.otool.is_some()
             }
         }
