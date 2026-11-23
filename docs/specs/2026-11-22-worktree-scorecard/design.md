@@ -3,6 +3,7 @@
 Feature code: SCORECARD
 Status: Approved
 Approved: 2026-11-22 12:46 by the operator (Jayden), "approve" on the spec sheet for #16 at feat/worktree-scorecard 226a925, relayed by the conductor (/Users/jayden/Developer/experiments/cargo-zip/.skills/_pending-worktree-scorecard/auto/operator-reply.md). The reply approves the sheet as a whole; the Open Questions O1 and O2 stay open as listed, and Task 9 still waits for the operator's own go-ahead.
+Re-approved: 2026-11-23 by the operator (Jayden), with one bare "đồng ý" to a four-item plan: the realign changes listed in the PR #38 description; the 8.7 and Task 11 fixes; the new requirement 8.11 and Task 12 with the closure of O4; and the goal-backed targets in docs/scorecard.md. The same plan included the ARCH-10 and vision clarification (commit 706e2c0). It was one reply to that plan, on 2026-11-23.
 Date: 2026-11-22
 Realigned: 2026-11-23, to docs/scorecard.md at 99186de and .skills/SCORECARD/implementation-notes.md. Approval above is unchanged.
 Requirements: ./requirements.md
@@ -174,7 +175,7 @@ SCORECARD-10.1 is met by the env-file split in Decision 2. The doc's text never 
 
 ### Rerun preflight
 
-Satisfies: SCORECARD-8.1, SCORECARD-8.2, SCORECARD-8.3, SCORECARD-8.9
+Satisfies: SCORECARD-8.1, SCORECARD-8.2, SCORECARD-8.3, SCORECARD-8.9, SCORECARD-8.11
 Reuse: rung 2 — the shipped CLI (`cargo hive doctor`, `cargo hive repo add`, `cargo hive bench --help`; crates/cargo-hive/src/cli.rs:75-90)
 Interface: one block. It sources `.skills/verify/scorecard.env`, then checks `cargo hive doctor --json` passed and that `$MAIN` is registered. It then greps `cargo hive bench --help` for each quoted flag (`--cold`, `--seeded`, `--build-cmd`, `--json`) and stops on the first missing one, naming the step to fix in the same commit
 Depth: callers keep knowing only "source the env file, then run preflight"; the flag list is the one thing to update when bench changes
@@ -184,6 +185,10 @@ The block also:
 - resolves `TC` in `$MAIN` and runs `RUSTUP_TOOLCHAIN=$TC cargo hive doctor --json`. Doctor resolves its toolchain from the state root with any directory toolchain dropped (cli.rs:440; cargo/src/toolchain.rs:73-80), so without the variable it records the rustup default, not the workspace's;
 - records `command -v cargo-hive`, `cargo hive --version` and, as its third line, `build profile:`
   (`debug` when the binary lies under `target/debug/`) in `$RUN/hive.txt`;
+- when the profile is `debug`, prints one warning line to stderr and appends the same line to
+  `$RUN/hive.txt` (SCORECARD-8.11); an `unknown` profile (neither `target/debug/` nor
+  `target/release/`) gets a different one-line note, printed and recorded the same way. It never
+  stops the run: the operator chose record-and-warn on 2026-11-23 (closing requirements O4). The cold arm is unaffected, since hive does no work in its timed window;
 - runs `check_inputs`, shared with `bench_row` and `pipeline` (SCORECARD-8.9): `P` is non-empty,
   alphanumeric first, letters, digits, `_` and `-` only; `FILE` is non-empty; `rel_ok` holds for
   `FILE`, `PROBE` and each `UNTRACKED_COPY` entry (relative, no `..` segment);
@@ -407,7 +412,7 @@ runs and records in evidence.
 
 | Seam | Kind | Covers |
 |---|---|---|
-| `docs/scorecard.md` text, by fixed commands. `grep -c '^| R[0-9]' ` per table = 10. Each `R1`…`R10` appears exactly once per table. The grep of 10.1's patterns finds nothing. Target cells read `open — operator` | manual (inspection) | SCORECARD-1.1–1.9, 10.1, 8.4, 8.5 |
+| `docs/scorecard.md` text, by fixed commands. `grep -c '^| R[0-9]' ` per table = 10. Each `R1`…`R10` appears exactly once per table. The grep of 10.1's patterns finds nothing. Target slots not yet set read `open — operator` (20 when Task 1 ran; 16 after the 2026-11-23 targets, with R8, R9 seeded and R10 seeded set) | manual (inspection) | SCORECARD-1.1–1.9, 10.1, 8.4, 8.5 |
 | Dry run of the Rerun blocks with `$MAIN` set to a fresh `git clone` of this repo under `/private/tmp`, a scratch `HIVE_HOME`, and worktrees under `/private/tmp`. No real checkout and no `~/.hive` is touched. Deps must already be cached, since every build is `--offline`. R9 records "probe input absent", since this repo has no `.sqlx` | e2e (manual) | SCORECARD-2.1–2.4, 3.1–3.5, 4.1–4.4, 5.1–5.3, 6.3, 8.1–8.3, 8.6–8.8 |
 | First run on the measured repo, from its main checkout, with evidence in `$RUN`. It runs only once the operator says to, since it takes hours of builds on the owner's machine; committing its numbers waited on O2, now answered, and on the operator setting `SCORECARD_NUMBERS_PUBLIC` (SCORECARD-9.3) | e2e (manual) | SCORECARD-6.1, 6.2, 6.4, 7.1, 9.1, 9.3 |
 | `scripts/gate.sh` green, and `git diff --stat main` lists no path under crates/, plugin/ or scripts/ | integration (existing gate) | SCORECARD-11.3 |
@@ -417,7 +422,7 @@ runs and records in evidence.
 
 Every ID in requirements.md appears in exactly one Satisfies line:
 - Values and Provenance tables: 1.1–1.9, 10.1
-- Rerun preflight: 8.1–8.3, 8.9
+- Rerun preflight: 8.1–8.3, 8.9, 8.11
 - Bench rows: 2.1–2.4
 - By-hand pipeline: 3.1–3.5, 4.1–4.4, 5.1–5.3, 6.1–6.4
 - Recording a run: 8.4–8.8, 8.10, 9.1, 9.3

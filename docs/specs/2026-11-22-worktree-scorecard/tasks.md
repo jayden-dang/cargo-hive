@@ -10,6 +10,7 @@
 Feature code: SCORECARD
 Status: Approved
 Approved: 2026-11-22 12:46 by the operator (Jayden), "approve" on the spec sheet for #16 at feat/worktree-scorecard 226a925, relayed by the conductor (/Users/jayden/Developer/experiments/cargo-zip/.skills/_pending-worktree-scorecard/auto/operator-reply.md). The reply approves the sheet as a whole; the Open Questions O1 and O2 stay open as listed, and Task 9 still waits for the operator's own go-ahead.
+Re-approved: 2026-11-23 by the operator (Jayden), with one bare "đồng ý" to a four-item plan: the realign changes listed in the PR #38 description; the 8.7 and Task 11 fixes; the new requirement 8.11 and Task 12 with the closure of O4; and the goal-backed targets in docs/scorecard.md. The same plan included the ARCH-10 and vision clarification (commit 706e2c0). It was one reply to that plan, on 2026-11-23.
 Date: 2026-11-22
 Execution-mode: continuous
 Delivered-by: PR #38
@@ -123,9 +124,9 @@ succeed (plan-review F3, P1).
 
 **Depends-on:** none
 
-- [x] **Step 1: Write the failing check.** `test -f docs/scorecard.md && [ "$(grep -cE '^\| R([1-9]|10) \|' docs/scorecard.md)" = 20 ] && [ "$(grep -o 'open — operator' docs/scorecard.md | wc -l | tr -d ' ')" = 20 ] && grep -q '^## Targets' docs/scorecard.md && grep -q 'zsh on macOS' docs/scorecard.md && ! grep -nE '/Users/|/private/|SCORECARD-|\$HOME' docs/scorecard.md`. Run it and expect a non-zero exit, because the file is absent.
+- [x] **Step 1: Write the failing check.** `test -f docs/scorecard.md && [ "$(grep -cE '^\| R([1-9]|10) \|' docs/scorecard.md)" = 20 ] && [ "$(grep -o 'open — operator' docs/scorecard.md | wc -l | tr -d ' ')" = 20 ] && grep -q '^## Targets' docs/scorecard.md && grep -q 'zsh on macOS' docs/scorecard.md && ! grep -nE '/Users/|/private/|SCORECARD-|\$HOME' docs/scorecard.md`. Run it and expect a non-zero exit, because the file is absent. (The count of 20 `open — operator` was Task 1's check at the time: 20 when it ran; 16 after the 2026-11-23 targets.)
 - [x] **Step 2: Write the file.** Write the header paragraph, then the Values and Provenance tables, with one line per R1–R10 in each and the Metric names from SCORECARD-1.1. Fill the cells:
-  - Every measured value cell reads `not yet measured`, and every target slot reads `open — operator`.
+  - Every measured value cell reads `not yet measured`, and every target slot not yet set reads `open — operator` (all of them when Task 1 ran; the three rows with a target set on 2026-11-23 are the exception).
   - Target set is empty.
   - Source cells: R1–R5 name `cold_build_ms_median` / `seeded_total_ms_median`; R6 reads `by hand (outside bench)`; R7 reads `by hand (outside bench): free space`; R8 reads `by hand (outside bench): cargo -v after gc --checkout`; R9 reads `by hand (outside bench): cargo -v after probe`; R10 reads `listed`.
   - R10's n and median cells read `—`.
@@ -371,7 +372,7 @@ _Requirements: SCORECARD-6.1, SCORECARD-6.2, SCORECARD-6.3, SCORECARD-6.4_
   - `$DRY/summary.txt` has exactly 10 lines starting `R1`…`R10`.
   - R1's cold median equals `jq .counts.cold_build_ms_median $RUN/R1.json`.
   - A by-hand median of `[5,1,4,2]` gives 3.
-  - Apply the Record step to a scratch copy of `docs/scorecard.md`. `diff` against the original changes only lines matching `^\| R([1-9]|10) \|` and leaves every `open — operator` cell. `grep -o 'open — operator' | wc -l` is still 20.
+  - Apply the Record step to a scratch copy of `docs/scorecard.md`. `diff` against the original changes only lines matching `^\| R([1-9]|10) \|` and leaves every `open — operator` cell. `grep -o 'open — operator' | wc -l` is still 20 (20 when it ran; 16 after the 2026-11-23 targets).
   - After the run, `git -C $DRY/main worktree list` shows only the main, and `ls ~/.hive` is unchanged, since the run used the scratch `HIVE_HOME`.
   - `$DRY/summary.txt` also gives min, max and spread per arm for every measured row, as evidence only (B5).
   - Then set the catalog Status to Implemented. Implemented means the doc and its steps work; it does not complete #16, which needs Task 9's first measured run. Landing this branch must not close #16, overriding the default landing action in `docs/agents/project.md` ("closes the tickets it completed"). Run `refresh-lanes`. Record its printed word; on this branch it is expected to be `not on main` (plan-review F6).
@@ -457,11 +458,34 @@ below record it as done; the evidence is in `.skills/SCORECARD/close-fix-report.
 `.skills/SCORECARD/dryrun3-report.md` (local).
 
 - [x] **Step 1: Validation.** `check_inputs` rejects an empty or malformed `P`, an empty `FILE`, and an absolute or `..` `FILE`, `PROBE` or `UNTRACKED_COPY` entry; `bench_row` accepts R1 to R5 only; `bench_row` and `pipeline` refuse without `PREFLIGHT_OK`. Checked in dry-run shells, one per bad input (commits 97181bd, 94f9628).
-- [x] **Step 2: Interrupt.** A real INT during a child stops the run: cleanup, flag, 130 from the wrappers, loops break, `preflight` clears the flag. Checked by dry run 3 at 99186de (D1 to D6, all PASS); the preflight-`doctor` gap is requirements O3.
+- [x] **Step 2: Interrupt.** A real INT during a child stops the run: cleanup, flag, 130 from the wrappers, loops break, `preflight` clears the flag. Checked by dry run 3 at 99186de (D1 to D8 pass, plus the one minor, D9); the preflight-`doctor` gap is requirements O3.
 - [x] **Step 3: Load.** `summarize` writes `load-end.txt` and warns on a high or missing start load. Checked in the dry harness (stubbed load values 20.00 and a missing file warn; 8.99 and 5.75 do not).
 - [x] **Step 4: Commits.** `docs(scorecard): address the whole-branch review`, `docs(scorecard): make bench_row and pipeline refuse after a failed preflight`, `docs(scorecard): stop the run when it is interrupted`.
 
 _Requirements: SCORECARD-8.7, SCORECARD-8.9, SCORECARD-8.10_
+
+---
+
+### Task 12: Warn when a rerun uses a debug build of hive (added 2026-11-23 after O4)
+
+**Files:**
+- Modify: `docs/scorecard.md` (`preflight` and the prose under it)
+
+**Reuse:** rung 2 — the profile detection already in `preflight` (Task 3)
+
+**Interfaces:**
+- Consumes: `prof` in `preflight`, `$RUN/hive.txt`
+- Produces: a one-line stderr warning for `debug`, a different note for `unknown`, the same line recorded in `$RUN/hive.txt`
+
+**Depends-on:** Task 11
+
+`preflight` already wrote `build profile:` to `$RUN/hive.txt`. It now also warns on a debug build and notes an unknown one, and it never stops the run (the operator chose record-and-warn on 2026-11-23, closing requirements O4).
+
+- [x] **Step 1: Warning.** When `prof` is `debug`, `preflight` prints one line to stderr and appends the same line to `$RUN/hive.txt`; an `unknown` profile gets a different one-line note, printed and recorded the same way; `release` prints nothing. The doc's prose says the cold arm is unaffected.
+- [x] **Step 2: Check, as an isolated snippet.** The profile-detection and warning lines were extracted from the Rerun blocks into a scratch script and run in pure zsh under `zsh -e` with `hbin` set to a path containing `/target/debug/`, `/target/release/` and one containing neither. Debug: the warning on stderr and in the scratch `hive.txt`, exit 0. Release: nothing printed or recorded, exit 0. Unknown: the note on stderr and in `hive.txt`, exit 0. `zsh -n` on the whole extracted Rerun script passed. The full `preflight` chain was not rerun for this change: no dev build of hive exists in this worktree, so only the snippet was checked.
+- [x] **Step 3: Commit.** `docs(scorecard): warn when a rerun uses a debug build of hive`.
+
+_Requirements: SCORECARD-8.11_
 
 ---
 
@@ -475,3 +499,5 @@ The plan text above is left as approved; what was built differs in these recorde
 - The `.env` probe edit inserts `x` before a closing quote (design Decision 5); an untracked probe file is restored by copying from the main.
 - The Values column is `Cost`, not `Metric`; "measured workspace" became "measured repo"; the hive used in the first run was a debug build (requirements O4).
 - Task 11 and requirements 8.9 and 8.10 were added for the validation and load work.
+- The 2026-11-23 targets (R8, R9 seeded, R10 seeded) made `open — operator` count 16, not 20, and made requirements O1 answered; the sentences of Task 1 and Task 8 that count 20 describe the check as it ran, and the standing rule is that unset slots read `open — operator`.
+- Task 12 and requirement 8.11 were added after the realign, when O4 was closed with record-and-warn.

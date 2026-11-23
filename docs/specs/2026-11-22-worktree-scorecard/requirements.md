@@ -3,6 +3,7 @@
 Feature code: SCORECARD
 Status: Implemented
 Approved: 2026-11-22 12:46 by the operator (Jayden), "approve" on the spec sheet for #16 at feat/worktree-scorecard 226a925, relayed by the conductor (/Users/jayden/Developer/experiments/cargo-zip/.skills/_pending-worktree-scorecard/auto/operator-reply.md). The reply approves the sheet as a whole; the Open Questions O1 and O2 stay open as listed, and Task 9 still waits for the operator's own go-ahead.
+Re-approved: 2026-11-23 by the operator (Jayden), with one bare "đồng ý" to a four-item plan: the realign changes listed in the PR #38 description; the 8.7 and Task 11 fixes; the new requirement 8.11 and Task 12 with the closure of O4; and the goal-backed targets in docs/scorecard.md. The same plan included the ARCH-10 and vision clarification (commit 706e2c0). It was one reply to that plan, on 2026-11-23.
 Date: 2026-11-22
 Realigned: 2026-11-23, to what was built (docs/scorecard.md at 99186de). O1 and O2 are answered on ticket #16 (2026-11-22); see Open Questions.
 
@@ -248,8 +249,9 @@ feature ships, so that the new numbers replace the old ones in the same rows.
   evidence is local to the measuring machine: git ignores the directory, no clone can open it, and
   the committed values are copies of that run's `summary.txt`.
 - **SCORECARD-8.7** WHEN the steps make worktrees for a run THE SYSTEM SHALL have them removed
-  with `git worktree remove` at the end of the run, followed by `git worktree prune`. WHEN the run
-  is interrupted (Ctrl-C) THE SYSTEM SHALL do the same cleanup and then stop the run: the
+  with `git worktree remove` at the end of the run, and on an aborted run as well, followed by
+  `git worktree prune`. WHEN the run is interrupted (Ctrl-C) THE SYSTEM SHALL do the same cleanup
+  and then stop the run: the
   interrupt trap sets `SCORECARD_INTERRUPTED`, `bench_row` and `pipeline` return exit status 130
   and refuse to start while it is set, and the doc's loops break. `preflight` clears the flag.
   The exit and interrupt traps are separate, and the interrupt trap does not exit an interactive
@@ -269,6 +271,12 @@ feature ships, so that the new numbers replace the old ones in the same rows.
   `load-end.txt`, and print a warning to stderr, not a failure, when the start load in
   `load-start.txt` is above half the logical core count or the file is missing. Added at realign
   2026-11-23; built in 97181bd.
+- **SCORECARD-8.11** WHEN `preflight` finds hive's binary under a debug build directory
+  (`target/debug/`) THE SYSTEM SHALL print one warning line to stderr and record the same line in
+  `$RUN/hive.txt`, and SHALL continue; WHEN the path matches neither `target/debug/` nor
+  `target/release/` it SHALL print and record a different one-line note, and continue. It SHALL
+  also record the build profile (`debug`, `release` or `unknown`) in `$RUN/hive.txt`. Added
+  2026-11-23 after O4; the cold arm is unaffected, since hive does no work in its timed window.
 
 ## 9. The first run replaces today's headline
 
@@ -347,7 +355,12 @@ The guards:
   operator. Date: 2026-11-22. Forbid-guess: no session or agent writes a target value.
   **Answered 2026-11-22 on ticket #16, in part:** targets stay `open — operator` until the first
   measured run is recorded; after that the owner sets them, and a rerun never changes them. The
-  first run was recorded 2026-11-23, so the owner's targets are still to come. No target is written.
+  first run was recorded 2026-11-23, so the owner's targets were still to come then.
+  **Answered 2026-11-23 on a plan the operator agreed to:** only goal-backed targets are set now.
+  R8 takes `0 rebuilt` in both slots, R9 seeded `no more stale than cold`, and R10 seeded
+  `nothing installed or changed`, each dated 2026-11-23; R9 cold and R10 cold stay open. The time
+  rows R1 to R6 and R7 stay open, for the reasons now in docs/scorecard.md `## Targets`. Their
+  owner sets them later, and a rerun never changes any target.
 - O2 Whether the scorecard may name the measured workspace and hold its numbers and paths in
   this public repo. Owner: operator. Date: 2026-11-22. Forbid-guess: until it is
   answered, SCORECARD-9.3 holds. **Answered 2026-11-22 on ticket #16:** the scorecard may hold
@@ -359,7 +372,7 @@ The guards:
   `bench_row` and `pipeline` calls still refuse, so no wrong number can be measured, but the
   exit status is misleading, because `preflight` has no wrapper like the other two. `summarize`
   and `record` are not interrupt-aware either. Owner: operator (fix, or accept).
-- O4 Decision for the owner: the first run used a debug build of hive, so the seeded values of R1
-  to R5 and R7 carry a debug-built seed. The scorecard says so in its Latest run paragraph and
-  `hive.txt` records the build profile, but no requirement forces a rerun to state it. Add one,
-  or leave it to the Latest run paragraph?
+- O4 Closed 2026-11-23: the first run used a debug build of hive, so the seeded values of R1 to
+  R5 and R7 carried a debug-built seed. The operator chose to record and warn, not stop:
+  `preflight` prints and records a one-line warning for a debug build and continues
+  (SCORECARD-8.11). The Latest run paragraph still names the build the numbers came from.

@@ -13,9 +13,9 @@ What an agent worktree costs, cold and seeded, on the measured repo. A cold chec
 | R5 | First-command time for `check -p <package> --lib` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 37232 | 4 | 29608 | open — operator | open — operator |  |
 | R6 | Next build after a one-file edit in a workspace crate (ms) | by hand (outside bench) | 4 | 6625 | 4 | 6702 | open — operator | open — operator |  |
 | R7 | Private bytes each new worktree adds (bytes) | by hand (outside bench): free space | 4 | 5197094912 | 4 | 3262543872 | open — operator | open — operator |  |
-| R8 | Units rebuilt because of a hive deletion | by hand (outside bench): cargo -v after gc --checkout | 4 | 0 rebuilt over 4 non-vacuous samples; 0 vacuous | 4 | 0 rebuilt over 4 non-vacuous samples; 0 vacuous | open — operator | open — operator |  |
-| R9 | Stale results on a probe that changes a file a proc macro reads without declaring it | by hand (outside bench): cargo -v after probe | 4 | 4 stale of 4 | 4 | 4 stale of 4 | open — operator | open — operator |  |
-| R10 | Setup footprint | listed | — | nothing | — | `cargo install cargo-hive`, `cargo hive doctor`, `cargo hive repo add <main>`; Cargo config files 0, environment variables 0, rustc wrappers 0, cargo shims 0; files outside the state root: 0, beyond clones into target dirs | open — operator | open — operator |  |
+| R8 | Units rebuilt because of a hive deletion | by hand (outside bench): cargo -v after gc --checkout | 4 | 0 rebuilt over 4 non-vacuous samples; 0 vacuous | 4 | 0 rebuilt over 4 non-vacuous samples; 0 vacuous | 0 rebuilt | 0 rebuilt | 2026-11-23 |
+| R9 | Stale results on a probe that changes a file a proc macro reads without declaring it | by hand (outside bench): cargo -v after probe | 4 | 4 stale of 4 | 4 | 4 stale of 4 | open — operator | no more stale than cold | 2026-11-23 |
+| R10 | Setup footprint | listed | — | nothing | — | `cargo install cargo-hive`, `cargo hive doctor`, `cargo hive repo add <main>`; Cargo config files 0, environment variables 0, rustc wrappers 0, cargo shims 0; files outside the state root: 0, beyond clones into target dirs | open — operator | nothing installed or changed | 2026-11-23 |
 
 R8 cells read `R rebuilt over k non-vacuous samples; m vacuous`, or `all vacuous`. R9 cells read `s stale of n`.
 
@@ -45,6 +45,8 @@ Medians are only as quiet as the machine they were measured on. Preflight record
 ## Targets
 
 The operator sets a target by editing that row's Target cell and its Target set date in a plain commit. A rerun never touches either.
+
+Only targets that the operator's agreed goals back are set: R8 (no unit rebuilds because of a deletion), R9 (the seeded arm is no more stale than the cold arm, which is the control) and R10 (the seeded arm installs and changes nothing). Rows R1 to R7 stay open. R1 to R6 are times: a run-to-run spread of up to about 17 percent in the cold arm (the cold medians of R2 moved by 17.4 percent between two runs) means a target closer to the baseline than that cannot be judged by one rerun, and a seeded time target below the seeded build time itself (about 25 to 71 s in the release run) needs a warm worktree that the current two arms do not have. R7 is bytes, the drop in free space of a whole worktree, which the seed cannot shrink below the cost of compiling workspace crates; its target waits for a warm worktree too. The owner sets them when that exists.
 
 ## Notes per row
 
@@ -97,6 +99,8 @@ SCORECARD_NUMBERS_PUBLIC=
 - `SCORECARD_NUMBERS_PUBLIC`: the operator's switch to let `record` write the measured values into this file. Unset by default; the operator sets it to `yes` only after agreeing that the measured repo's numbers may be committed.
 
 `preflight` rejects an empty `P` or `FILE`, a `P` that is not letters, digits, `_` and `-` or that starts with `-`, and a `FILE`, `PROBE` or `UNTRACKED_COPY` entry that is absolute or has a `..` segment. A failed preflight must be fixed and rerun before anything else: it sets `PREFLIGHT_OK` only when every check passed, and `bench_row` and `pipeline` refuse to run without it and re-check these inputs themselves.
+
+When hive's binary lies under `target/debug/`, `preflight` prints one warning line to stderr (hive is a debug build: seed times in the seeded arm run slower than a release build; use `target/release` for a baseline) and records the same line in `$RUN/hive.txt`; it never stops the run. A path under neither `target/debug/` nor `target/release/` gets a different one-line note, printed and recorded the same way. The cold arm is unaffected, since hive does no work in its timed window.
 
 The evidence directory is named for the date preflight runs on. A run that crosses midnight would start a second directory in a new shell. To keep one directory, finish before midnight, or set `RUN` to the earlier directory (`RUN=.skills/verify/<date>-scorecard`) before `preflight`: preflight keeps a `RUN` already set in the shell, including a leftover one from an earlier run in the same shell, so `unset RUN` before a new run. Ctrl-C stops the run after cleaning up: the interrupt trap removes the worktrees and sets `SCORECARD_INTERRUPTED`, and `bench_row` and `pipeline` return 130 and refuse to start while it is set. The interrupt trap's `return` ends only the function that was running and loses its status, so `bench_row` and `pipeline` are thin wrappers that turn the flag into 130. A rerunner clears the flag by rerunning `preflight`, and in a loop must test `intr` after each call, because a trailing `|| true` hides the 130. A second preflight overwrites `load-start.txt`, and `summarize` writes the date it runs on. When resuming, run only the pipelines still missing: the pipelines block moves an existing `pipe.jsonl` aside.
 
@@ -158,6 +162,12 @@ preflight() {
   [[ $hbin == */target/debug/* ]] && prof=debug
   [[ $hbin == */target/release/* ]] && prof=release
   { print -r -- $hbin; cargo hive --version && print "build profile: $prof (from the binary's path)"; } > $RUN/hive.txt || { print "preflight stopped: cargo hive --version failed" | tee $RUN/preflight-fail.txt >&2; return 1 }
+  case $prof in
+    debug) msg='hive is a debug build: seed times in the seeded arm run slower than a release build; use target/release for a baseline' ;;
+    unknown) msg="hive's build profile is unknown: its path has neither target/debug nor target/release, so seed times may not match a release build" ;;
+    *) msg= ;;
+  esac
+  [[ -z $msg ]] || { print -u2 -r -- $msg; print -r -- $msg >> $RUN/hive.txt }
 
   local doctor_rc=0
   if [[ -n $TC ]]; then

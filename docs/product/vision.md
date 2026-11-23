@@ -51,7 +51,7 @@ Receipts are also the data Cargo lacks for a default target-dir GC policy (cargo
 - Editing repo files.
 - Replacing artifacts in place.
 - Claude Code hooks.
-- Time claims outside `cargo hive bench`.
+- Time claims outside `cargo hive bench`. Hive makes none in its own output; a hand-timed duration in a person's own measurement document, labelled as outside bench, is not hive's claim (ARCH-10, clarified 2026-11-23).
 - Claiming that main is protected from agents.
 - A human approval step for a plan.
 - Build-on-host / jayden-host.
