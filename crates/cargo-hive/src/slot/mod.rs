@@ -28,7 +28,7 @@ use cargo_hive_state::slots::{
     PendingProducer, Phase, Pool, PoolProfile, Producer, ProvenanceLoss, RootExpectation, Runner,
     Slot, SlotRequestKey, SlotsFile, TransitionResult,
 };
-use cargo_hive_state::{State, StateError, Tx};
+use cargo_hive_state::{Config, State, StateError, Tx};
 pub(crate) use inspect::CheckoutProof;
 use inspect::{
     CheckoutInventory, ExpectedCheckout, ProducerInventory, SlotScope, directory_stamp,
@@ -490,7 +490,7 @@ fn commit_refusal() -> Refusal {
 struct ReturnScope {
     pool: Pool,
     registry: Registry,
-    secondary_roots: Vec<PathBuf>,
+    config: Config,
 }
 
 #[derive(Deserialize)]
@@ -732,7 +732,7 @@ impl ProducerCommand<'_> {
             Ok(ReturnScope {
                 pool: saved.pools.swap_remove(index),
                 registry: tx.read_slot_registry()?,
-                secondary_roots: self.state.slot_config()?.secondary_roots,
+                config: self.state.slot_config()?,
             })
         })
     }
@@ -763,7 +763,7 @@ impl ProducerCommand<'_> {
         if current.slots[slot_index] != snapshot.pool.slots[slot_index]
             || current.profile != snapshot.pool.profile
             || tx.read_slot_registry::<Registry>()? != snapshot.registry
-            || self.state.slot_config()?.secondary_roots != snapshot.secondary_roots
+            || self.state.slot_config()? != snapshot.config
             || producer_runner(&self.runner.nonce)? != self.runner
             || !slot_identity_present(self.state.root(), current, &current.slots[slot_index])
         {
@@ -814,6 +814,7 @@ impl ProducerCommand<'_> {
                 "This reviewed producer requires the packaged guide's checked launch.",
             ));
         }
+        self.prove_output_scope(snapshot, &proof.path, &roots, empty_proof(&prior))?;
         let permit = control
             .as_ref()
             .map(|_| launch_permit(&checked, &input.shape.argv))
@@ -993,7 +994,7 @@ impl ProducerCommand<'_> {
                 pool,
                 slot,
                 registry: &snapshot.registry,
-                secondary_roots: &snapshot.secondary_roots,
+                secondary_roots: &snapshot.config.secondary_roots,
             },
             &ExpectedCheckout {
                 identity: checkout,
@@ -1007,6 +1008,40 @@ impl ProducerCommand<'_> {
         )?;
         check_producer_inventory(&proof)?;
         Ok(proof)
+    }
+
+    fn prove_output_scope(
+        &self,
+        snapshot: &ReturnScope,
+        path: &Path,
+        roots: &OutputRoots<RootExpectation>,
+        initial_empty: Option<&slots::EmptyEpoch>,
+    ) -> Result<(), Refusal> {
+        let expected = match initial_empty {
+            Some(empty) => empty_gc_roots(empty),
+            None => present_gc_roots(roots)?,
+        };
+        let parent = runner_instance(&self.runner);
+        let cancel = || cancelled() || parent_instance().as_ref().ok() != Some(&parent);
+        let ownership = crate::cli::verify_slot_output_scope(
+            self.state,
+            path,
+            &expected,
+            &cancel,
+        )
+        .map_err(|err| {
+            if err.is_cancelled() {
+                Refusal::State(StateError::Cancelled)
+            } else {
+                Refusal::ReturnUncertain(
+                    "Could not prove exclusive current ownership of both producer output roots.",
+                )
+            }
+        })?;
+        if ownership.registry != snapshot.registry || ownership.config != snapshot.config {
+            return Err(producer_fence_refusal());
+        }
+        Ok(())
     }
 
     fn watch(
@@ -1091,6 +1126,12 @@ impl ProducerCommand<'_> {
                 "The stopped guide child's executable, arguments or environment allowlist differs from the reviewed Cargo launch.",
             ));
         }
+        self.prove_output_scope(
+            &snapshot,
+            &proof.path,
+            &pending.roots,
+            empty_proof(&pending.prior),
+        )?;
         let child = watcher.child();
         let child = ForegroundInstance {
             pid: child.pid,
@@ -1183,6 +1224,7 @@ impl ProducerCommand<'_> {
             profile::reviewed_shape(&pool.profile, &input.shape)?,
             &roots.build.path,
         )?;
+        self.prove_output_scope(snapshot, &proof.path, &roots_for_check, None)?;
         let mut invocations = pending
             .prior
             .completed_in_generation(pending.generation)
@@ -1479,7 +1521,7 @@ fn begin(
         Ok(ReturnPlan::Inspect(Box::new(ReturnScope {
             pool: saved.pools.swap_remove(index),
             registry: tx.read_slot_registry()?,
-            secondary_roots: state.slot_config()?.secondary_roots,
+            config: state.slot_config()?,
         })))
     })?;
     let snapshot = match plan {
@@ -1532,7 +1574,7 @@ fn begin(
         if &current.slots[slot_index] != slot
             || current.profile != pool.profile
             || tx.read_slot_registry::<Registry>()? != snapshot.registry
-            || state.slot_config()?.secondary_roots != snapshot.secondary_roots
+            || state.slot_config()?.secondary_roots != snapshot.config.secondary_roots
             || !slot_identity_present(state.root(), current, slot)
         {
             return Err(producer_fence_refusal());
@@ -1746,7 +1788,7 @@ impl<'a> PreparationFence<'a> {
             Ok(ReturnScope {
                 pool: saved.pools.swap_remove(index),
                 registry: tx.read_slot_registry()?,
-                secondary_roots: self.state.slot_config()?.secondary_roots,
+                config: self.state.slot_config()?,
             })
         })
     }
@@ -1763,7 +1805,7 @@ impl<'a> PreparationFence<'a> {
             if slot != &snapshot.pool.slots[self.index()]
                 || pool.profile != snapshot.pool.profile
                 || tx.read_slot_registry::<Registry>()? != snapshot.registry
-                || self.state.slot_config()?.secondary_roots != snapshot.secondary_roots
+                || self.state.slot_config()?.secondary_roots != snapshot.config.secondary_roots
             {
                 return Err(producer_fence_refusal());
             }
@@ -1937,7 +1979,7 @@ fn step_check(
                     pool: &snapshot.pool,
                     slot,
                     registry: &snapshot.registry,
-                    secondary_roots: &snapshot.secondary_roots,
+                    secondary_roots: &snapshot.config.secondary_roots,
                 },
                 &ExpectedCheckout {
                     identity: checkout,
@@ -2181,7 +2223,7 @@ fn inspect_prepared_checkout(
             pool,
             slot,
             registry: &scope.registry,
-            secondary_roots: &scope.secondary_roots,
+            secondary_roots: &scope.config.secondary_roots,
         },
         &ExpectedCheckout {
             identity,
@@ -2473,7 +2515,7 @@ fn replay_ready(
             ReturnScope {
                 pool: saved.pools.swap_remove(index),
                 registry: tx.read_slot_registry()?,
-                secondary_roots: state.slot_config()?.secondary_roots,
+                config: state.slot_config()?,
             },
         )))
     })?;
@@ -2505,7 +2547,7 @@ fn replay_ready(
                 pool,
                 slot,
                 registry: &snapshot.registry,
-                secondary_roots: &snapshot.secondary_roots,
+                secondary_roots: &snapshot.config.secondary_roots,
             },
             &checkout,
             &ExpectedCheckout {
@@ -2524,7 +2566,7 @@ fn replay_ready(
         if &current.slots[slot_index] != slot
             || current.profile != pool.profile
             || tx.read_slot_registry::<Registry>()? != snapshot.registry
-            || state.slot_config()?.secondary_roots != snapshot.secondary_roots
+            || state.slot_config()?.secondary_roots != snapshot.config.secondary_roots
             || (path.is_some() && !slot_identity_present(state.root(), pool, slot))
         {
             return Err(producer_fence_refusal());
@@ -2619,7 +2661,7 @@ fn return_slot(
         Ok(ReturnPlan::Inspect(Box::new(ReturnScope {
             pool: saved.pools.swap_remove(index),
             registry: tx.read_slot_registry()?,
-            secondary_roots: state.slot_config()?.secondary_roots,
+            config: state.slot_config()?,
         })))
     })?;
     let snapshot = match plan {
@@ -2636,7 +2678,7 @@ fn return_slot(
             pool,
             slot,
             registry: &snapshot.registry,
-            secondary_roots: &snapshot.secondary_roots,
+            secondary_roots: &snapshot.config.secondary_roots,
         },
         &ExpectedCheckout {
             identity: checkout,
@@ -2667,7 +2709,7 @@ fn return_slot(
         let current = &saved.pools[index];
         if current != pool
             || tx.read_slot_registry::<Registry>()? != snapshot.registry
-            || state.slot_config()?.secondary_roots != snapshot.secondary_roots
+            || state.slot_config()?.secondary_roots != snapshot.config.secondary_roots
             || current.checkout_path(&current.slots[slot_index]) != proof.path
             || !slot_identity_present(state.root(), current, &current.slots[slot_index])
         {

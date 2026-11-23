@@ -859,11 +859,7 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
     assert_eq!(returned["kind"], "returned");
 }
 
-#[test]
-fn a_matching_seal_cannot_substitute_unproved_compiler_material() {
-    let fixture = Fixture::new("guided-native-invalid-driver");
-    let head = git(&fixture.main, &["rev-parse", "HEAD"]);
-    let profile = fixture_seal(&fixture, &head, true);
+fn initialize_sealed_slot(fixture: &Fixture, profile: &Path) -> (String, PathBuf) {
     fixture.hive.config(
         &serde_json::json!({"secondary_roots":[fixture.hive.secondary_root.path]}).to_string(),
     );
@@ -881,14 +877,97 @@ fn a_matching_seal_cannot_substitute_unproved_compiler_material() {
         profile.to_str().unwrap(),
     ]);
     assert!(created.status.success(), "{initialized}");
-    let pool = initialized["pool_id"].as_str().unwrap();
+    let pool = initialized["pool_id"].as_str().unwrap().to_owned();
     let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    (pool, checkout)
+}
+
+#[test]
+fn a_late_foreign_resolver_prevents_the_guided_writer() {
+    let fixture = Fixture::new("guided-native-foreign-root");
+    let head = git(&fixture.main, &["rev-parse", "HEAD"]);
+    let profile = fixture_seal(&fixture, &head, false);
+    let (pool, checkout) = initialize_sealed_slot(&fixture, &profile);
+    let key = "f".repeat(64);
     let out = packaged(
         &fixture,
         &[
             "take",
             fixture.main.to_str().unwrap(),
-            pool,
+            &pool,
+            "1",
+            "0",
+            &head,
+            &"a".repeat(32),
+            &"b".repeat(32),
+            &"c".repeat(32),
+        ],
+        &key,
+    );
+    assert!(out.status.success(), "{out:?}");
+    let target = checkout.join("target");
+    assert!(!target.exists());
+    let competitor = common::init_repo(&fixture._scratch.path.join("competitor"), "");
+    fs::create_dir(competitor.join(".cargo")).unwrap();
+    fs::write(
+        competitor.join(".cargo/config.toml"),
+        format!("[build]\ntarget-dir = {:?}\n", target),
+    )
+    .unwrap();
+    fs::write(
+        competitor.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    git(&competitor, &["add", "-A"]);
+    git(
+        &competitor,
+        &["commit", "-qm", "Resolve foreign slot output"],
+    );
+    common::register(&fixture.hive, &competitor);
+    let slots = fixture.hive.home.path.join("slots.json");
+    let before = fs::read(&slots).unwrap();
+    let out = packaged(
+        &fixture,
+        &[
+            "produce",
+            fixture.main.to_str().unwrap(),
+            &pool,
+            "1",
+            "1",
+            &"d".repeat(32),
+            "build-fixture",
+        ],
+        &key,
+    );
+    assert_eq!(
+        (out.status.success(), target.exists()),
+        (false, false),
+        "a competing registered resolver admitted a writer",
+    );
+    let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        reply["detail"]
+            .as_str()
+            .unwrap()
+            .contains("exclusive current ownership"),
+        "{reply}"
+    );
+    assert_eq!(fs::read(slots).unwrap(), before);
+}
+
+#[test]
+fn a_matching_seal_cannot_substitute_unproved_compiler_material() {
+    let fixture = Fixture::new("guided-native-invalid-driver");
+    let head = git(&fixture.main, &["rev-parse", "HEAD"]);
+    let profile = fixture_seal(&fixture, &head, true);
+    let (pool, checkout) = initialize_sealed_slot(&fixture, &profile);
+    let out = packaged(
+        &fixture,
+        &[
+            "take",
+            fixture.main.to_str().unwrap(),
+            &pool,
             "1",
             "0",
             &head,

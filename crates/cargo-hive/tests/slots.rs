@@ -368,6 +368,7 @@ fn producer_slot_with_source(source: Option<&str>) -> LeasedSlot {
 
 fn reviewed_pool_fixture(source: Option<&str>) -> PoolFixture {
     let fixture = PoolFixture::new();
+    fixture.hive.write_ready_capabilities();
     if let Some(source) = source {
         fs::write(fixture.repo.join("src/lib.rs"), source).unwrap();
     }
