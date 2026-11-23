@@ -802,16 +802,117 @@ pub fn resolvers_of(scan: &TargetScan, target: &Path) -> Vec<PathBuf> {
 }
 
 /// Checks both configured output roles of foreign workspaces, even when no target row
-/// was requested for their destination. Metadata resolution supplies canonical paths.
+/// was requested for their destination.
 pub fn foreign_output_overlaps(scan: &TargetScan, checkout: &Path, root: &Path) -> bool {
+    let Some(root) = OutputPath::resolve(root) else {
+        return true;
+    };
     scan.workspaces.iter().any(|workspace| {
         workspace.checkout != checkout
             && workspace.result.as_ref().is_ok_and(|resolved| {
                 [&resolved.target_directory, &resolved.build_directory]
                     .into_iter()
-                    .any(|output| output.starts_with(root) || root.starts_with(output))
+                    .any(|output| {
+                        OutputPath::resolve(output).is_none_or(|path| root.overlaps(&path))
+                    })
             })
     })
+}
+
+const MAX_OUTPUT_COMPONENTS: usize = 256;
+
+struct OutputPath {
+    path: PathBuf,
+    existing: Vec<(u64, u64)>,
+}
+
+impl OutputPath {
+    fn resolve(path: &Path) -> Option<Self> {
+        use std::io::ErrorKind;
+        use std::os::unix::fs::MetadataExt as _;
+        use std::path::Component;
+
+        if !path.is_absolute()
+            || path.components().take(MAX_OUTPUT_COMPONENTS + 1).count() > MAX_OUTPUT_COMPONENTS
+            || path
+                .components()
+                .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+        {
+            return None;
+        }
+        let mut missing = Vec::new();
+        for ancestor in path.ancestors() {
+            match ancestor.canonicalize() {
+                Ok(mut canonical) => {
+                    let mut existing = canonical
+                        .ancestors()
+                        .take(MAX_OUTPUT_COMPONENTS + 1)
+                        .map(|dir| {
+                            let stat = std::fs::symlink_metadata(dir).ok()?;
+                            stat.is_dir().then_some((stat.dev(), stat.ino()))
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    if existing.len() + missing.len() > MAX_OUTPUT_COMPONENTS
+                        || existing.iter().copied().collect::<BTreeSet<_>>().len() != existing.len()
+                    {
+                        return None;
+                    }
+                    existing.reverse();
+                    canonical.extend(missing.into_iter().rev());
+                    return Some(Self {
+                        path: canonical,
+                        existing,
+                    });
+                }
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    // A dangling symlink is not proof of a missing path component.
+                    if !std::fs::symlink_metadata(ancestor)
+                        .is_err_and(|err| err.kind() == ErrorKind::NotFound)
+                    {
+                        return None;
+                    }
+                    missing.push(ancestor.file_name()?);
+                }
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    fn overlaps(&self, other: &Self) -> bool {
+        // Firmlinks can give one directory two canonical names at different depths.
+        let mut common = None;
+        for (left, identity) in self.existing.iter().enumerate() {
+            if let Some(right) = other.existing.iter().position(|item| item == identity) {
+                if common.is_some_and(|(_, previous)| right <= previous) {
+                    return true;
+                }
+                common = Some((left, right));
+            }
+        }
+        let Some((left_ancestor, right_ancestor)) = common else {
+            return true;
+        };
+        let (left_start, right_start) = (left_ancestor + 1, right_ancestor + 1);
+        self.path
+            .components()
+            .skip(left_start)
+            .zip(other.path.components().skip(right_start))
+            .enumerate()
+            .all(|(offset, (left, right))| {
+                if let Some((left, right)) = self
+                    .existing
+                    .get(left_start + offset)
+                    .zip(other.existing.get(right_start + offset))
+                {
+                    return left == right;
+                }
+                let left = left.as_os_str().as_encoded_bytes();
+                let right = right.as_os_str().as_encoded_bytes();
+                // Without an inode, non-ASCII equivalence under this volume is unproved.
+                !left.is_ascii() || !right.is_ascii() || left.eq_ignore_ascii_case(right)
+            })
+    }
 }
 
 pub fn failed_workspaces(scan: &TargetScan) -> Vec<(PathBuf, String)> {
@@ -1503,6 +1604,86 @@ mod tests {
             let scan = scan_with(vec![own(), foreign], Vec::new());
             assert_eq!(resolvers_of(&scan, &root), [lane]);
             assert_eq!(super::foreign_output_overlaps(&scan, lane, &root), overlaps);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn foreign_output_overlap_matches_firmlink_ancestors_with_distinct_canonical_names() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let scratch = cargo_hive_platform::host_fs()
+            .temp_dir(Path::new("/private/tmp"), "hive-output-firmlink")
+            .unwrap();
+        let lane = scratch.path().canonicalize().unwrap();
+        let spelled_alias = Path::new("/System/Volumes/Data").join(lane.strip_prefix("/").unwrap());
+        let Ok(alias) = spelled_alias.canonicalize() else {
+            return;
+        };
+        let lane_stat = std::fs::metadata(&lane).unwrap();
+        let alias_stat = std::fs::metadata(&alias).unwrap();
+        if lane == alias
+            || (lane_stat.dev(), lane_stat.ino()) != (alias_stat.dev(), alias_stat.ino())
+        {
+            return;
+        }
+
+        for dir in ["target/objects", "target-other", "foreign"] {
+            std::fs::create_dir_all(lane.join(dir)).unwrap();
+        }
+        let foreign = lane.join("foreign");
+        let disjoint = alias.join("foreign/target");
+        for (required, target_directory, build_directory, expected) in [
+            (
+                lane.join("target/missing"),
+                alias.join("target/MISSING/child"),
+                disjoint.clone(),
+                true,
+            ),
+            (
+                lane.join("target"),
+                disjoint.clone(),
+                alias.join("target/objects"),
+                true,
+            ),
+            (
+                alias.join("target/objects"),
+                lane.join("target"),
+                disjoint.clone(),
+                true,
+            ),
+            (
+                lane.join("target"),
+                alias.join("target-other"),
+                disjoint.clone(),
+                false,
+            ),
+            (
+                lane.join("target/missing"),
+                alias.join("target-other/missing"),
+                disjoint.clone(),
+                false,
+            ),
+        ] {
+            let scan = scan_with(
+                vec![WorkspaceResolution {
+                    checkout: foreign.clone(),
+                    dir: foreign.clone(),
+                    result: Ok(Resolved {
+                        workspace_root: foreign.clone(),
+                        target_directory,
+                        build_directory,
+                    }),
+                }],
+                Vec::new(),
+            );
+            assert_eq!(
+                foreign_output_overlaps(&scan, &lane, &required),
+                expected,
+                "required {} through Data alias {}",
+                required.display(),
+                alias.display()
+            );
         }
     }
 
