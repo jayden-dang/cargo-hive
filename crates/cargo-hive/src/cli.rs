@@ -1,13 +1,16 @@
 //! Thin adapter: arguments → library calls → one receipt.
 
 use crate::bench::command::BuildCmd;
+use cargo_hive_cargo::discover::{self, Checkout, Snapshot, TargetScan, WalkFault};
 use cargo_hive_cargo::registry::{self, Registry};
 use cargo_hive_core::receipt::{PlanRecord, PlanTierBody, Receipt, ReceiptBuilder, Scope};
+use cargo_hive_gc::checkout::{self, CheckoutInput};
 use cargo_hive_platform::{self as platform, MACOS_ONLY_MESSAGE};
-use cargo_hive_state::{State, StateError};
+use cargo_hive_state::{Config, State, StateError};
 use clap::{Args, Parser, Subcommand};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 #[derive(Parser)]
 #[command(
@@ -1331,13 +1334,222 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
     emit(state, out, b.finish(), &human, code)
 }
 
-fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 {
-    use cargo_hive_cargo::discover::{self, SNAPSHOT_FILE, Snapshot};
-    use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
-    use cargo_hive_gc::checkout::{self, CheckoutInput};
-    use cargo_hive_state::window_days;
+enum CheckoutGcError {
+    State(StateError),
+    Unsupported,
+    Refused {
+        release: Option<String>,
+        reason: Refusal,
+    },
+}
+
+struct CheckoutGc {
+    fs: Box<dyn platform::Fs>,
+    cfg: Config,
+    snapshot: Snapshot,
+    scope: Scope,
+    checkout: PathBuf,
+    live: Vec<Checkout>,
+    nested: Vec<PathBuf>,
+    checkout_faults: Vec<WalkFault>,
+    release: Option<String>,
+    window: Duration,
+    account_bytes: bool,
+}
+
+impl CheckoutGc {
+    fn prepare(state: &State, path: &Path, standalone: bool) -> Result<Self, CheckoutGcError> {
+        use cargo_hive_core::classify::Class;
+        use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
+
+        let loaded = (|| -> Result<_, StateError> {
+            Ok((
+                state.read::<Registry>(registry::FILE)?,
+                state.config()?,
+                state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+                if standalone {
+                    state.read::<Snapshot>(discover::SNAPSHOT_FILE)?
+                } else {
+                    Snapshot::default()
+                },
+            ))
+        })();
+        let (reg, cfg, caps, snapshot) = loaded.map_err(CheckoutGcError::State)?;
+        let platform = platform::current().map_err(|_| CheckoutGcError::Unsupported)?;
+        let days = cargo_hive_state::window_days(cfg.gc_window_days).map_err(|err| {
+            CheckoutGcError::Refused {
+                release: None,
+                reason: Refusal {
+                    kind: "refusal",
+                    path: None,
+                    detail: err.to_string(),
+                    code: 1,
+                },
+            }
+        })?;
+        let release = cargo_hive_cargo::toolchain::resolve_toolchain(state.root())
+            .ok()
+            .map(|t| t.release);
+        for cap in [Capability::FingerprintReading, Capability::Deletion] {
+            if let Err(refusal) = doctor::require(&caps, cap, release.as_deref()) {
+                return Err(CheckoutGcError::Refused {
+                    release,
+                    reason: Refusal {
+                        kind: "refusal",
+                        path: None,
+                        detail: refusal.to_string(),
+                        code: 1,
+                    },
+                });
+            }
+        }
+        let Found {
+            repo,
+            row,
+            mut rows,
+            mut faults,
+        } = find_checkout(&reg, &cfg, path).map_err(|mut reason| {
+            if let Some((p, owner)) = reason
+                .path
+                .as_ref()
+                .and_then(|p| owning_repo(&reg, p).map(|owner| (p, owner)))
+            {
+                reason.detail = format!(
+                    "{path} is not a checkout of {main}; name the checkout's root directory",
+                    path = p.display(),
+                    main = owner.main.display(),
+                );
+            }
+            CheckoutGcError::Refused {
+                release: release.clone(),
+                reason,
+            }
+        })?;
+        if !standalone {
+            if row.path != path || row.class != Class::Secondary {
+                return Err(CheckoutGcError::Refused {
+                    release,
+                    reason: Refusal {
+                        kind: "refusal",
+                        path: None,
+                        detail: "could not verify the exact secondary checkout for cleanup".into(),
+                        code: 1,
+                    },
+                });
+            }
+            let mains: Vec<_> = reg.repos.iter().map(|entry| entry.main.clone()).collect();
+            for other in reg.repos.iter().filter(|entry| entry.main != repo.main) {
+                let (mut found, mut unreadable) = discover::checkouts(other, &mains, &cfg);
+                rows.append(&mut found);
+                faults.append(&mut unreadable);
+            }
+            for row in &rows {
+                if row.reason.starts_with("unclassifiable:") {
+                    faults.push(WalkFault {
+                        path: row.path.clone(),
+                        detail: row.reason.clone(),
+                        cannot_enter: false,
+                    });
+                }
+            }
+        }
+        let live: Vec<_> = rows.into_iter().filter(|c| !c.missing).collect();
+        let nested = live
+            .iter()
+            .map(|c| c.path.clone())
+            .filter(|p| p != &row.path && p.starts_with(&row.path))
+            .collect();
+        Ok(Self {
+            fs: platform.fs,
+            cfg,
+            snapshot,
+            scope: Scope {
+                repos: vec![repo.main],
+                checkouts: vec![row.path.clone()],
+            },
+            checkout: row.path,
+            live,
+            nested,
+            checkout_faults: faults,
+            release,
+            window: Duration::from_secs(days.saturating_mul(86_400)),
+            account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
+        })
+    }
+
+    fn scan(&mut self, cancel: impl Fn() -> bool + Sync) -> TargetScan {
+        discover::targets(&self.live, &self.cfg, false, &mut self.snapshot, cancel)
+    }
+
+    fn input<'a>(&'a self, scan: &'a TargetScan) -> CheckoutInput<'a> {
+        CheckoutInput {
+            fs: &*self.fs,
+            scan,
+            checkout: &self.checkout,
+            nested: &self.nested,
+            now: SystemTime::now(),
+            window: self.window,
+            account_bytes: self.account_bytes,
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[derive(Debug)]
+pub(crate) struct SlotGcReport {
+    pub(crate) completed: [checkout::RequiredRoot; 2],
+}
+
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn checkout_gc_for_slot(
+    state: &State,
+    path: &Path,
+    expected: &[checkout::RequiredRoot],
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<SlotGcReport, Refusal> {
+    let refuse = |detail: &str| Refusal {
+        kind: "refusal",
+        path: None,
+        detail: detail.into(),
+        code: 1,
+    };
+    let cancelled = || Refusal {
+        kind: "error",
+        path: None,
+        detail: "gc was cancelled".into(),
+        code: 130,
+    };
+    if cancel() {
+        return Err(cancelled());
+    }
+    let mut operation = CheckoutGc::prepare(state, path, false)
+        .map_err(|_| refuse("could not establish scoped cleanup inputs and capabilities"))?;
+    if cancel() {
+        return Err(cancelled());
+    }
+    if !operation.checkout_faults.is_empty() {
+        return Err(refuse("checkout discovery was incomplete"));
+    }
+    let scan = operation.scan(cancel);
+    if cancel() {
+        return Err(cancelled());
+    }
+    if !scan.walk_faults.is_empty() || !discover::failed_workspaces(&scan).is_empty() {
+        return Err(refuse("Cargo target discovery or ownership was incomplete"));
+    }
+    let evidence = checkout::run_with_evidence(&operation.input(&scan), expected, cancel);
+    if evidence.report.cancelled || cancel() {
+        return Err(cancelled());
+    }
+    let completed = evidence.into_complete().ok_or_else(|| {
+        refuse("scoped cleanup could not prove completion for both Cargo output roots")
+    })?;
+    Ok(SlotGcReport { completed })
+}
+
+fn checkout_cmd(state: &State, path: &Path, out: &OutputArgs) -> i32 {
+    use cargo_hive_cargo::discover::SNAPSHOT_FILE;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::time::Duration;
     let command = "gc --checkout";
     if let Err(e) = platform::signals::install() {
         return emit_failure(
@@ -1349,95 +1561,38 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
         );
     }
     let cancelled = || platform::signals::cancelled();
-    let loaded = (|| -> Result<_, StateError> {
-        Ok((
-            state.read::<Registry>(registry::FILE)?,
-            state.config()?,
-            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
-            state.read::<Snapshot>(SNAPSHOT_FILE)?,
-        ))
-    })();
-    let (reg, cfg, caps, mut snapshot) = match loaded {
-        Ok(v) => v,
-        Err(e) => return emit_failure(state, *out, command, &e.to_string(), 1),
-    };
-    let Ok(platform) = platform::current() else {
-        eprintln!("{MACOS_ONLY_MESSAGE}");
-        return 2;
-    };
-    let days = match window_days(cfg.gc_window_days) {
-        Ok(days) => days,
-        Err(err) => {
-            let mut b = Receipt::new(command, Scope::default());
-            b.finding("refusal", None, err.to_string());
-            return emit(state, *out, b.finish(), &format!("refused: {err}\n"), 1);
+    let mut operation = match CheckoutGc::prepare(state, path, true) {
+        Ok(operation) => operation,
+        Err(CheckoutGcError::State(err)) => {
+            return emit_failure(state, *out, command, &err.to_string(), 1);
         }
-    };
-    let release = cargo_hive_cargo::toolchain::resolve_toolchain(state.root())
-        .ok()
-        .map(|t| t.release);
-    for cap in [Capability::FingerprintReading, Capability::Deletion] {
-        if let Err(refusal) = doctor::require(&caps, cap, release.as_deref()) {
-            let mut b = Receipt::new(command, Scope::default());
-            b.toolchain(release.clone());
-            b.finding("refusal", None, refusal.to_string());
-            return emit(state, *out, b.finish(), &format!("refused: {refusal}\n"), 1);
+        Err(CheckoutGcError::Unsupported) => {
+            eprintln!("{MACOS_ONLY_MESSAGE}");
+            return 2;
         }
-    }
-    let Found {
-        repo,
-        row,
-        rows: all_rows,
-        faults: checkout_faults,
-    } = match find_checkout(&reg, &cfg, path) {
-        Ok(v) => v,
-        Err(r) => {
-            let detail = match r
-                .path
-                .as_ref()
-                .and_then(|p| owning_repo(&reg, p).map(|owner| (p, owner)))
-            {
-                Some((p, owner)) => format!(
-                    "{path} is not a checkout of {main}; name the checkout's root directory",
-                    path = p.display(),
-                    main = owner.main.display()
-                ),
-                None => r.detail.clone(),
-            };
+        Err(CheckoutGcError::Refused { release, reason }) => {
             let mut b = Receipt::new(command, Scope::default());
-            b.toolchain(release.clone());
-            b.finding(r.kind, r.path, detail.clone());
+            b.toolchain(release);
+            b.finding(reason.kind, reason.path, reason.detail.clone());
             return emit(
                 state,
                 *out,
                 b.finish(),
-                &format!("refused: {detail}\n"),
-                r.code,
+                &format!("refused: {}\n", reason.detail),
+                reason.code,
             );
         }
     };
-    let mut b = Receipt::new(
-        command,
-        Scope {
-            repos: vec![repo.main.clone()],
-            checkouts: vec![row.path.clone()],
-        },
-    );
-    b.toolchain(release.clone());
-    for fault in &checkout_faults {
+    let mut b = Receipt::new(command, operation.scope.clone());
+    b.toolchain(operation.release.clone());
+    for fault in &operation.checkout_faults {
         b.finding(
             "walk.unreadable",
             Some(fault.path.clone()),
             fault.detail.clone(),
         );
     }
-    let live: Vec<_> = all_rows.into_iter().filter(|c| !c.missing).collect();
-    let nested: Vec<_> = live
-        .iter()
-        .map(|c| c.path.clone())
-        .filter(|p| p != &row.path && p.starts_with(&row.path))
-        .collect();
-    let scan = discover::targets(&live, &cfg, false, &mut snapshot, cancelled);
+    let scan = operation.scan(cancelled);
     if cancelled() {
         b.finding("error", None, "gc was cancelled");
         return emit(state, *out, b.finish(), "gc was cancelled\n", 130);
@@ -1452,7 +1607,6 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
     for var in &scan.ignored_vars {
         b.note(format!("{var} is set in the caller's environment and was ignored: ownership comes from each checkout's own Cargo configuration"));
     }
-    let account_bytes = !caps.disabled.contains_key(&Capability::EvictionAccounting);
     let volumes = |fs: &dyn platform::Fs| -> BTreeMap<String, (std::path::PathBuf, u64)> {
         scan.targets
             .iter()
@@ -1460,25 +1614,14 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
             .map(|v| (v.container, (v.mount, v.available_bytes)))
             .collect()
     };
-    let before = volumes(&*platform.fs);
-    let report = checkout::run(
-        &CheckoutInput {
-            fs: &*platform.fs,
-            scan: &scan,
-            checkout: &row.path,
-            nested: &nested,
-            now: std::time::SystemTime::now(),
-            window: Duration::from_secs(days.saturating_mul(86_400)),
-            account_bytes,
-        },
-        &cancelled,
-    );
-    let after = volumes(&*platform.fs);
+    let before = volumes(&*operation.fs);
+    let report = checkout::run(&operation.input(&scan), &cancelled);
+    let after = volumes(&*operation.fs);
     let touched: BTreeSet<String> = report
         .per_target
         .iter()
         .filter(|(_, c)| c.units_deleted + c.unit_files_deleted + c.objects_deleted > 0)
-        .filter_map(|(p, _)| platform.fs.volume(p).ok().map(|v| v.container))
+        .filter_map(|(p, _)| operation.fs.volume(p).ok().map(|v| v.container))
         .collect();
     for note in cargo_hive_gc::plan_tier::apply::cross_check_notes(&before, &after, &touched) {
         b.note(note);
@@ -1497,7 +1640,7 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
                 .unwrap_or_default()
         ));
     }
-    if !account_bytes {
+    if !operation.account_bytes {
         for name in ["freed_bytes", "deleted_bytes_still_shared"] {
             b.unmeasured(name, "doctor check (c) did not pass");
         }
@@ -1528,7 +1671,7 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
         let disk = tx.read(SNAPSHOT_FILE)?;
         tx.write(
             SNAPSHOT_FILE,
-            &discover::merge_snapshot(snapshot, disk, &scan.cleared_profiles),
+            &discover::merge_snapshot(operation.snapshot, disk, &scan.cleared_profiles),
         )?;
         Ok(true)
     }) {
@@ -2345,6 +2488,199 @@ mod tests {
     use cargo_hive_state::Config;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_refuses_incomplete_discovery() {
+        let fs = platform::current().unwrap().fs;
+        let scratch = fs
+            .temp_dir(Path::new("/private/tmp"), "slot-checkout-gc")
+            .unwrap();
+        let state = State::open_at(scratch.path().join("hive")).unwrap();
+        let main = scratch.path().join("main");
+        let lane = main.join("lane");
+        let cache = scratch.path().join("missing-cache");
+        std::fs::create_dir(&main).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&main)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::write(
+            main.join("Cargo.toml"),
+            "[package]\nname = \"slot-fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(main.join("src")).unwrap();
+        std::fs::write(main.join("src/lib.rs"), "").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "fixture",
+        ]);
+        git(&["worktree", "add", "-q", "--detach", lane.to_str().unwrap()]);
+        let roots = Git::at(&main).root_commits().unwrap();
+        let reg = Registry {
+            repos: vec![registry::Repo {
+                main,
+                root_commits: roots,
+            }],
+            ..Default::default()
+        };
+        let caps = Capabilities {
+            toolchain_release: Some(
+                cargo_hive_cargo::toolchain::resolve_toolchain(state.root())
+                    .unwrap()
+                    .release,
+            ),
+            lock_check: cargo_hive_doctor::LOCK_CHECK_VERSION,
+            ..Capabilities::default()
+        };
+        state
+            .locked(|tx| {
+                tx.write(registry::FILE, &reg)?;
+                tx.write(cargo_hive_doctor::CAPABILITIES_FILE, &caps)?;
+                tx.write(
+                    "config.json",
+                    &serde_json::json!({ "secondary_roots": [], "cache_roots": [cache] }),
+                )
+            })
+            .unwrap();
+        let required = [checkout::RootRole::Target, checkout::RootRole::Build].map(|role| {
+            checkout::RequiredRoot {
+                path: lane.join("target"),
+                role,
+                presence: checkout::RootPresence::InitiallyAbsent,
+            }
+        });
+        let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .err()
+            .unwrap();
+        assert_eq!(refusal.code, 1);
+        assert!(
+            refusal.detail.contains("target discovery"),
+            "{}",
+            refusal.detail
+        );
+
+        std::fs::create_dir(&cache).unwrap();
+        let positive = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .ok()
+            .unwrap();
+        assert_eq!(positive.completed, required);
+        assert!(!state.root().join(discover::SNAPSHOT_FILE).exists());
+        assert!(!required[0].path.exists());
+
+        let missing = scratch.path().join("missing-secondary");
+        state
+            .locked(|tx| {
+                tx.write(
+                    "config.json",
+                    &serde_json::json!({
+                        "secondary_roots": [missing], "cache_roots": [cache]
+                    }),
+                )
+            })
+            .unwrap();
+        let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .err()
+            .unwrap();
+        assert_eq!(refusal.code, 1);
+        assert!(
+            refusal.detail.contains("checkout discovery"),
+            "{}",
+            refusal.detail
+        );
+
+        let other = scratch.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::create_dir(other.join("src")).unwrap();
+        std::fs::create_dir(other.join(".cargo")).unwrap();
+        std::fs::write(
+            other.join("Cargo.toml"),
+            "[package]\nname = \"separate-repository\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(other.join("src/lib.rs"), "").unwrap();
+        std::fs::write(
+            other.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = {:?}", required[0].path),
+        )
+        .unwrap();
+        let other_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&other)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        other_git(&["init", "-q"]);
+        other_git(&["add", "."]);
+        other_git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "other",
+        ]);
+        let mut reg = reg;
+        reg.repos.push(registry::Repo {
+            root_commits: Git::at(&other).root_commits().unwrap(),
+            main: other,
+        });
+        state
+            .locked(|tx| {
+                tx.write(registry::FILE, &reg)?;
+                tx.write(
+                    "config.json",
+                    &serde_json::json!({
+                        "secondary_roots": [], "cache_roots": [cache]
+                    }),
+                )
+            })
+            .unwrap();
+        let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .err()
+            .unwrap();
+        assert_eq!(refusal.code, 1);
+        assert!(
+            refusal.detail.contains("prove completion"),
+            "{}",
+            refusal.detail
+        );
+        assert!(!required[0].path.exists());
+
+        std::fs::write(reg.repos[1].main.join("Cargo.toml"), "[broken").unwrap();
+        let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .err()
+            .unwrap();
+        assert_eq!(refusal.code, 1);
+        assert!(refusal.detail.contains("ownership"), "{}", refusal.detail);
+    }
 
     #[test]
     fn locating_a_missing_path_refuses_with_the_path_as_given() {

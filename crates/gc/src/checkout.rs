@@ -15,7 +15,7 @@ use cargo_hive_core::unit_path;
 use cargo_hive_platform::{EntryKind, Fs};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 pub struct CheckoutInput<'a> {
@@ -37,6 +37,44 @@ pub struct CheckoutReport {
     pub unmeasured_more: u64,
     pub cancelled: bool,
     pub failed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RootRole {
+    Target,
+    Build,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootPresence {
+    Present { dev: u64, ino: u64 },
+    InitiallyAbsent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequiredRoot {
+    pub path: PathBuf,
+    pub role: RootRole,
+    pub presence: RootPresence,
+}
+
+#[derive(Debug)]
+pub struct EvidencedCheckoutReport {
+    pub report: CheckoutReport,
+    completed: Vec<RequiredRoot>,
+}
+
+impl EvidencedCheckoutReport {
+    pub fn completed(&self) -> &[RequiredRoot] {
+        &self.completed
+    }
+
+    pub fn into_complete(self) -> Option<[RequiredRoot; 2]> {
+        if self.report.failed || self.report.cancelled {
+            return None;
+        }
+        self.completed.try_into().ok()
+    }
 }
 
 #[derive(Debug)]
@@ -163,6 +201,244 @@ pub fn select_targets(scan: &TargetScan, checkout: &Path, nested: &[PathBuf]) ->
 }
 
 pub fn run(input: &CheckoutInput, cancel: &dyn Fn() -> bool) -> CheckoutReport {
+    let selected = select_targets(input.scan, input.checkout, input.nested);
+    let mut report = selection_report(input, &selected);
+    if report.failed {
+        return report;
+    }
+    for path in &selected.own {
+        if cancel() {
+            report.cancelled = true;
+            break;
+        }
+        let (counts, _) = clean_target(input, path, None, cancel, &mut report);
+        report.totals.add_target(&counts);
+        report.per_target.push((path.clone(), counts));
+        if report.cancelled {
+            break;
+        }
+    }
+    report
+}
+
+/// Proves both Cargo output roles against fresh discovery. A shared path is
+/// cleaned once and earns evidence for both roles only when their identities agree.
+pub fn run_with_evidence(
+    input: &CheckoutInput<'_>,
+    expected: &[RequiredRoot],
+    cancel: &dyn Fn() -> bool,
+) -> EvidencedCheckoutReport {
+    let selected = select_targets(input.scan, input.checkout, input.nested);
+    let mut result = EvidencedCheckoutReport {
+        report: selection_report(input, &selected),
+        completed: Vec::new(),
+    };
+    let report = &mut result.report;
+    if cancel() {
+        report.cancelled = true;
+        return result;
+    }
+    if report.failed {
+        return result;
+    }
+    if input.scan.metadata_cache_hits > 0 {
+        incomplete_root(
+            report,
+            None,
+            "checkout GC evidence requires uncached Cargo metadata",
+        );
+        return result;
+    }
+    for fault in &input.scan.walk_faults {
+        report.findings.push(Finding {
+            kind: "walk.unreadable".into(),
+            path: Some(fault.path.clone()),
+            detail: fault.detail.clone(),
+            measured: BTreeMap::new(),
+        });
+    }
+    if !input.scan.walk_faults.is_empty() {
+        report.failed = true;
+        return result;
+    }
+    let Some(roots) = required_roots(input, &selected, expected, report) else {
+        return result;
+    };
+    for same_path in roots.chunk_by(|a, b| a.path == b.path) {
+        if cancel() {
+            report.cancelled = true;
+            break;
+        }
+        let root = same_path[0];
+        if root.presence == RootPresence::InitiallyAbsent {
+            continue;
+        }
+        let (counts, complete) = clean_target(input, &root.path, Some(root), cancel, report);
+        report.totals.add_target(&counts);
+        report.per_target.push((root.path.clone(), counts));
+        if complete {
+            result
+                .completed
+                .extend(same_path.iter().map(|&root| root.clone()));
+        }
+        if report.cancelled {
+            break;
+        }
+    }
+    if !report.cancelled {
+        report.cancelled = cancel();
+    }
+    if !report.cancelled {
+        for root in roots {
+            if root.presence == RootPresence::InitiallyAbsent && check_root(input, root, report) {
+                result.completed.push(root.clone());
+            }
+        }
+    }
+    result.completed.sort_by_key(|root| root.role);
+    result
+}
+
+fn required_roots<'a>(
+    input: &CheckoutInput<'_>,
+    selection: &Selection,
+    expected: &'a [RequiredRoot],
+    report: &mut CheckoutReport,
+) -> Option<[&'a RequiredRoot; 2]> {
+    let [first, second] = expected else {
+        incomplete_root(
+            report,
+            None,
+            "expected exactly one target and one build root",
+        );
+        return None;
+    };
+    let mut roots = [first, second];
+    roots.sort_by_key(|root| root.role);
+    let [target, build] = roots;
+    if target.role != RootRole::Target
+        || build.role != RootRole::Build
+        || (target.path == build.path && target.presence != build.presence)
+        || (target.path != build.path
+            && (target.path.starts_with(&build.path) || build.path.starts_with(&target.path)))
+    {
+        incomplete_root(
+            report,
+            None,
+            "the required root roles or identities conflict",
+        );
+        return None;
+    }
+    let resolves_pair = input.scan.workspaces.iter().any(|workspace| {
+        workspace.checkout == input.checkout
+            && workspace.result.as_ref().is_ok_and(|resolved| {
+                resolved.workspace_root.starts_with(input.checkout)
+                    && resolved.target_directory == target.path
+                    && resolved.build_directory == build.path
+            })
+    });
+    if !resolves_pair {
+        incomplete_root(
+            report,
+            None,
+            "fresh workspace metadata did not resolve the required root roles",
+        );
+        return None;
+    }
+    for root in roots {
+        let path = &root.path;
+        if path == input.checkout
+            || !path.starts_with(input.checkout)
+            || input
+                .nested
+                .iter()
+                .any(|nested| path.starts_with(nested) || nested.starts_with(path))
+            || discover::resolvers_of(input.scan, path) != [input.checkout]
+        {
+            incomplete_root(
+                report,
+                Some(path),
+                "the required root does not have exclusive checkout scope",
+            );
+            return None;
+        }
+        if matches!(root.presence, RootPresence::Present { .. })
+            && (!selection.own.contains(path)
+                || !input.scan.targets.iter().any(|row| {
+                    row.path == *path
+                        && row.unreadable.is_none()
+                        && matches!(&row.owner, target::Owner::Owned { checkout } if checkout == input.checkout)
+                }))
+        {
+            incomplete_root(report, Some(path), "the required root was not discovered as a supported owned Cargo root");
+            return None;
+        }
+        if !check_root(input, root, report) {
+            return None;
+        }
+    }
+    roots.sort_by(|a, b| a.path.cmp(&b.path));
+    Some(roots)
+}
+
+fn check_root(input: &CheckoutInput<'_>, root: &RequiredRoot, report: &mut CheckoutReport) -> bool {
+    if matches_presence(input, root) {
+        return true;
+    }
+    incomplete_root(
+        report,
+        Some(&root.path),
+        "the required root identity or initial absence no longer matches",
+    );
+    false
+}
+
+fn matches_presence(input: &CheckoutInput<'_>, root: &RequiredRoot) -> bool {
+    if input.checkout.canonicalize().as_deref().ok() != Some(input.checkout) {
+        return false;
+    }
+    match root.presence {
+        RootPresence::Present { dev, ino } => {
+            root.path.canonicalize().as_ref().ok() == Some(&root.path)
+                && input.fs.entry_stat(&root.path).is_ok_and(|stat| {
+                    stat.kind == EntryKind::Dir && stat.dev == dev && stat.ino == ino
+                })
+        }
+        RootPresence::InitiallyAbsent => {
+            let Ok(relative) = root.path.strip_prefix(input.checkout) else {
+                return false;
+            };
+            if !relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+            {
+                return false;
+            }
+            let mut path = input.checkout.to_path_buf();
+            for component in relative.components() {
+                path.push(component);
+                match input.fs.entry_stat(&path) {
+                    Ok(stat) if stat.kind == EntryKind::Dir => (),
+                    Err(err) if is_not_found(&err) => return true,
+                    _ => return false,
+                }
+            }
+            false
+        }
+    }
+}
+
+fn incomplete_root(report: &mut CheckoutReport, path: Option<&Path>, detail: &str) {
+    report.failed = true;
+    report.findings.push(Finding {
+        kind: "gc.root_incomplete".into(),
+        path: path.map(Path::to_path_buf),
+        detail: detail.into(),
+        measured: BTreeMap::new(),
+    });
+}
+
+fn selection_report(input: &CheckoutInput<'_>, selected: &Selection) -> CheckoutReport {
     let mut report = CheckoutReport {
         per_target: Vec::new(),
         totals: Counts::empty(),
@@ -172,12 +448,11 @@ pub fn run(input: &CheckoutInput, cancel: &dyn Fn() -> bool) -> CheckoutReport {
         cancelled: false,
         failed: false,
     };
-    let selected = select_targets(input.scan, input.checkout, input.nested);
     if !selected.failed.is_empty() {
-        for (dir, err) in selected.failed {
+        for (dir, err) in &selected.failed {
             report.findings.push(Finding {
                 kind: "ownership.unresolved".into(),
-                path: Some(dir),
+                path: Some(dir.clone()),
                 detail: format!(
                     "{err}; clears when that workspace's cargo metadata succeeds, or its worktree is removed"
                 ),
@@ -211,39 +486,22 @@ pub fn run(input: &CheckoutInput, cancel: &dyn Fn() -> bool) -> CheckoutReport {
             measured: BTreeMap::new(),
         });
     }
-    for path in &selected.own {
-        if cancel() {
-            report.cancelled = true;
-            break;
-        }
-        let counts = clean_target(input, path, cancel, &mut report);
-        report.totals.add_target(&counts);
-        report.per_target.push((path.clone(), counts));
-        if report.cancelled {
-            break;
-        }
-    }
     report
 }
 
 fn clean_target(
     input: &CheckoutInput,
     path: &Path,
+    required: Option<&RequiredRoot>,
     cancel: &dyn Fn() -> bool,
     report: &mut CheckoutReport,
-) -> Counts {
+) -> (Counts, bool) {
     let mut counts = Counts::empty();
     let locked = match locks::acquire(input.fs, path, true) {
         Acquired::Locked(locked) => locked,
         Acquired::Skipped(reason) => {
-            *counts.skips.entry(reason.count_name()).or_insert(0) += 1;
-            report.findings.push(Finding {
-                kind: "gc.skipped".into(),
-                path: Some(path.to_path_buf()),
-                detail: reason_text(reason),
-                measured: BTreeMap::new(),
-            });
-            return counts;
+            skip_target(&mut counts, report, path, reason);
+            return (counts, false);
         }
         Acquired::Failed(why) => {
             report.failed = true;
@@ -253,9 +511,19 @@ fn clean_target(
                 detail: why,
                 measured: BTreeMap::new(),
             });
-            return counts;
+            return (counts, false);
         }
     };
+    if let Some(root) = required {
+        if locked.held.is_empty() {
+            skip_target(&mut counts, report, path, Reason::Missing);
+            return (counts, false);
+        }
+        if !check_root(input, root, report) {
+            return (counts, false);
+        }
+    }
+    let mut complete = true;
     let found = match target::identify_bounded(input.fs, path, CRATE_DIR_CAP) {
         Some(Ok(found)) => found,
         Some(Err(why)) => {
@@ -266,18 +534,18 @@ fn clean_target(
                 detail: why,
                 measured: BTreeMap::new(),
             });
-            return counts;
+            return (counts, false);
         }
         None => {
-            skip_profile_set(&mut counts, report, path);
-            return counts;
+            skip_target(&mut counts, report, path, Reason::ProfileSet);
+            return (counts, false);
         }
     };
     let first: BTreeSet<_> = locked.profiles.iter().cloned().collect();
     let again: BTreeSet<_> = found.iter().map(|(p, _)| p.clone()).collect();
     if first != again {
-        skip_profile_set(&mut counts, report, path);
-        return counts;
+        skip_target(&mut counts, report, path, Reason::ProfileSet);
+        return (counts, false);
     }
     let reports: Vec<ProfileReport> = found
         .iter()
@@ -302,6 +570,7 @@ fn clean_target(
     let mut ledger = Ledger::new();
     match liveness(input.fs, &fresh, input.now, input.window) {
         Liveness::Undecided { reasons } => {
+            complete = false;
             for reason in reasons {
                 report.findings.push(Finding {
                     kind: "gc.undecided".into(),
@@ -326,6 +595,7 @@ fn clean_target(
                     match input.fs.entry_stat(entry) {
                         Ok(stat) if stat.kind != EntryKind::Other => stats.push((entry, stat)),
                         Ok(_) | Err(_) => {
+                            complete = false;
                             report.failed = true;
                             report.findings.push(Finding {
                                 kind: "gc.delete_failed".into(),
@@ -349,6 +619,7 @@ fn clean_target(
                             ino: stat.ino,
                         },
                     ) {
+                        complete = false;
                         report.failed = true;
                         report.findings.push(Finding {
                             kind: "gc.delete_failed".into(),
@@ -375,6 +646,7 @@ fn clean_target(
                         }
                         Ok(_) => {}
                         Err(err) => {
+                            complete = false;
                             report.failed = true;
                             report.findings.push(Finding {
                                 kind: "gc.delete_failed".into(),
@@ -393,7 +665,7 @@ fn clean_target(
             }
         }
     }
-    if !report.cancelled {
+    if !report.cancelled && (required.is_none() || complete) {
         for ((profile, _), profile_report) in found.iter().zip(&reports) {
             let outcome = clean_profile_objects(ObjectsClean {
                 fs: input.fs,
@@ -411,6 +683,7 @@ fn clean_target(
             counts.objects_deleted = counts
                 .objects_deleted
                 .saturating_add(outcome.objects_deleted);
+            complete &= outcome.completed;
             for finding in outcome.findings {
                 report.findings.push(finding);
             }
@@ -431,8 +704,12 @@ fn clean_target(
     if input.account_bytes {
         counts.bytes = Some(tally.per_target.get(path).copied().unwrap_or(tally.total));
     }
+    if let Some(root) = required {
+        report.cancelled |= cancel();
+        complete = complete && !report.cancelled && check_root(input, root, report);
+    }
     drop(locked);
-    counts
+    (counts, complete)
 }
 
 struct ObjectsClean<'a> {
@@ -446,6 +723,7 @@ struct ObjectsClean<'a> {
 }
 
 struct ObjectsOutcome {
+    completed: bool,
     binaries_read: u64,
     objects_referenced: u64,
     objects_deleted: u64,
@@ -456,6 +734,7 @@ struct ObjectsOutcome {
 
 fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
     let mut out = ObjectsOutcome {
+        completed: false,
         binaries_read: 0,
         objects_referenced: 0,
         objects_deleted: 0,
@@ -482,6 +761,7 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
         && !dir_present(ctx.fs, &ctx.profile.join("deps"))
         && !listing.saw_unit_dir
     {
+        out.completed = true;
         return out;
     }
     let mut loose = BTreeSet::new();
@@ -566,6 +846,7 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
             }
         }
     }
+    out.completed = true;
     out
 }
 
@@ -586,13 +867,13 @@ fn is_not_found(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::NotFound
 }
 
-fn skip_profile_set(counts: &mut Counts, report: &mut CheckoutReport, path: &Path) {
-    let name = Reason::ProfileSet.count_name();
+fn skip_target(counts: &mut Counts, report: &mut CheckoutReport, path: &Path, reason: Reason) {
+    let name = reason.count_name();
     *counts.skips.entry(name).or_insert(0) += 1;
     report.findings.push(Finding {
         kind: "gc.skipped".into(),
         path: Some(path.to_path_buf()),
-        detail: reason_text(Reason::ProfileSet),
+        detail: reason_text(reason),
         measured: BTreeMap::new(),
     });
 }
