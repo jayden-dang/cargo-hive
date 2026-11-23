@@ -51,11 +51,11 @@ The corpus placeholder denotes each exact registered target's seed file, not per
 **Interfaces:** Consumes existing UnitLoc, UnitHash, Unit and ProfileReport. Produces fuzz-only `fingerprint::fuzzing::{fingerprint,diagnostics}`, `target::fuzzing::target_tag`, `unit_path::fuzzing::artifact_names`, all `fn(&[u8])`, plus private shared decoder/stream helpers used by production and tests. Root lint recognizes cfg(fuzzing).
 **Depends-on:** none
 
-- [ ] Add a failing oversize/stream-budget behavior test at each new hash/tag read bound, retaining empty hashes and valid tags. Cover both identify entry points and multiple short positional reads; an oversize tag returns a named Some(Err) refusal.
-- [ ] Run `cargo test -p cargo-hive-core --lib`; record expected RED, investigate the read path, then implement only bounded reads and minimal pure decoder extraction.
-- [ ] Add independent valid/corrupt/truncated/name/layout cases, including mismatched directory/hash-file identity; wire adapters to those same decoders.
-- [ ] Run core tests and fuzz-config core check; preserve public signatures and record correction reversal checks.
-- [ ] Commit `test(core): exercise and bound compiler file readers` with evidence and touched-file list.
+- [x] Add a failing oversize/stream-budget behavior test at each new hash/tag read bound, retaining empty hashes and valid tags. Cover both identify entry points and multiple short positional reads; an oversize tag returns a named Some(Err) refusal.
+- [x] Run `cargo test -p cargo-hive-core --lib`; record expected RED, investigate the read path, then implement only bounded reads and minimal pure decoder extraction.
+- [x] Add independent valid/corrupt/truncated/name/layout cases, including mismatched directory/hash-file identity; wire adapters to those same decoders.
+- [x] Run core tests and fuzz-config core check; preserve public signatures and record correction reversal checks.
+- [x] Commit `test(core): exercise and bound compiler file readers` with evidence and touched-file list.
 
 _Requirements: FUZZ-1.2, FUZZ-1.3, FUZZ-2.2, FUZZ-2.4, FUZZ-5.2_
 
