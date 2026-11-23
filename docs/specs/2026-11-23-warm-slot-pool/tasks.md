@@ -32,7 +32,7 @@ Design: ./design.md
 |---|---|
 | `crates/state/src/lib.rs` | Extend bounded private state writes and named recovery without changing old readers. |
 | `crates/state/src/slots.rs` | New strict layout 2 record, checked revisions, transition/outcome I/O with fault tests. |
-| `crates/platform/src/flock.rs` | Check inherited writer descriptors and owner-controlled paths for slot state. |
+| `crates/platform/src/flock.rs` | Check inherited writer and credential descriptors and owner-controlled paths for slot state. |
 | `crates/platform/src/lib.rs` | Export slot-only platform support. |
 | `crates/platform/src/slot.rs` | New local process instance, boot session and entropy helpers. |
 | `crates/platform/tests/slot_fence.rs` | New real macOS multi-process fence and child-lifetime proof. |
@@ -135,6 +135,7 @@ _Requirements: SLOTS-1.1, SLOTS-4.6, SLOTS-4.7, SLOTS-4.8, SLOTS-4.9_
 ### Task 3: Reserve one slot through competing or retried requests
 
 **Files:**
+- Modify: `crates/platform/src/flock.rs`
 - Modify: `crates/state/src/slots.rs`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
 - Modify: `crates/cargo-hive/src/slot/result.rs`
@@ -149,12 +150,12 @@ _Requirements: SLOTS-1.1, SLOTS-4.6, SLOTS-4.7, SLOTS-4.8, SLOTS-4.9_
 
 **Depends-on:** Task 2.
 
-- [ ] Test competing subprocesses for the sole available slot, full pool, a reused operation ID with conflicting parameters, and exhaustion at the 32-outcome cap and the 33rd unacknowledged operation.
-- [ ] Add tests for an old reserve against a replacement pool with the same repo, slot number and initial generation, and for no credential disclosure in argv, stdout result, diagnostics, status or audit. Use the private credential descriptor to deliver the key.
-- [ ] Inject state failures before rename, after rename before directory sync, and after durable commit with lost response. In a new process, read the authoritative generation and replay the identical reserve. Assert no second reserve or rollback. Inject an audit append failure after commit and prove it neither releases nor repeats allocation.
-- [ ] Run `cargo test -p cargo-hive --test slots` and `cargo test -p cargo-hive-state`. Observe missing allocation/reconciliation and duplicate protection.
-- [ ] Add current namespace/generation checks, one reservation transaction, replay lookup and ack compaction. Re-persist or sync a matching visible revision before acknowledging it.
-- [ ] Repeat both suites and re-read the authoritative slot record after each failure. Commit as `feat(slot): reserve and replay one scoped lease`.
+- [x] Test competing subprocesses for the sole available slot, full pool, a reused operation ID with conflicting parameters, and exhaustion at the 32-outcome cap and the 33rd unacknowledged operation.
+- [x] Add tests for an old reserve against a replacement pool with the same repo, slot number and initial generation, and for no credential disclosure in argv, stdout result, diagnostics, status or audit. Use the private credential descriptor to deliver the key.
+- [x] Inject state failures before rename, after rename before directory sync, and after durable commit with lost response. In a new process, read the authoritative generation and replay the identical reserve. Assert no second reserve or rollback. Inject an audit append failure after commit and prove it neither releases nor repeats allocation.
+- [x] Run `cargo test -p cargo-hive --test slots` and `cargo test -p cargo-hive-state`. Observe missing allocation/reconciliation and duplicate protection.
+- [x] Add current namespace/generation checks, one reservation transaction, replay lookup and ack compaction. Re-persist or sync a matching visible revision before acknowledging it.
+- [x] Repeat both suites and re-read the authoritative slot record after each failure. Commit as `feat(slot): reserve and replay one scoped lease`.
 
 _Requirements: SLOTS-1.3, SLOTS-1.4, SLOTS-4.2, SLOTS-4.3, SLOTS-4.8, SLOTS-5.3, SLOTS-5.4_
 
