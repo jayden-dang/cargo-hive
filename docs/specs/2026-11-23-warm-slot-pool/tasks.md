@@ -267,10 +267,10 @@ _Requirements: SLOTS-3.6, SLOTS-3.7, SLOTS-3.10_
 - [ ] Test handoff against the independent clean reference. Require the affected consumer to rebuild or rerun and an unrelated workspace unit to stay fresh. Separately change one crate at the next commit and check the stable absolute path and unrelated unit reuse. Treat unsupported or noncausal controls as failures for that profile.
 - [ ] Add the next-commit, lost permit, lost ready reply and post-rename ready fault cases. Include prior HEAD mismatch, wrong runner, concurrent ready, late inventory/GC skips and interrupted effects. Show actual scoped deletion completes before good ready. A zero standalone exit with an advisory skip must still give incomplete slot handoff.
 - [ ] Run `cargo test -p cargo-hive --test slots --test slot_inputs --test skill` under installed `RUSTUP_TOOLCHAIN=1.97.1` (flat) and `RUSTUP_TOOLCHAIN=1.100.0` (unit-dir). Use existing `tests/common` scratch helpers. Capture independent fixture values and build events; do not enable a profile without causal lock and Cargo proofs.
-- [ ] Implement fenced stages, non-forcing Git/mtime, initial seed/empty verification, typed GC and durable ready, including the machine-readable guide-only use policy. Add the precise helper inventory to the existing skill package guard in this same task. Re-run both layouts, the CLI skill test, the clean/stale/restored controls and state re-read in a new process; verify identical ready replay without a second effect.
+- [ ] Implement fenced stages, non-forcing Git/mtime, initial seed/empty verification, typed GC and durable ready, including the machine-readable guide-only use policy. Install the exact bundled version check before the helper first reserves or acts, with a mismatch smoke case at this seam. Add the precise helper inventory to the existing skill package guard in this same task. Re-run both layouts, the CLI skill test, the clean/stale/restored controls and state re-read in a new process; verify identical ready replay without a second effect.
 - [ ] Commit as `feat(slot): deliver verified warm handoffs`.
 
-_Requirements: SLOTS-1.2, SLOTS-1.6, SLOTS-1.7, SLOTS-2.4, SLOTS-3.1, SLOTS-3.4, SLOTS-3.5, SLOTS-3.6, SLOTS-3.7, SLOTS-3.8, SLOTS-3.9, SLOTS-3.11, SLOTS-4.3, SLOTS-5.4_
+_Requirements: SLOTS-1.2, SLOTS-1.6, SLOTS-1.7, SLOTS-1.8, SLOTS-2.4, SLOTS-3.1, SLOTS-3.4, SLOTS-3.5, SLOTS-3.6, SLOTS-3.7, SLOTS-3.8, SLOTS-3.9, SLOTS-3.11, SLOTS-4.3, SLOTS-5.4_
 
 ---
 
@@ -314,13 +314,14 @@ _Requirements: SLOTS-4.1, SLOTS-4.2, SLOTS-4.3, SLOTS-4.4, SLOTS-4.5, SLOTS-4.6,
 
 **Interfaces:**
 - Consumes: Task 7 guide and slot results and Task 8 retry/recovery actions, plus the existing `seed` command.
-- Produces: installed take/use/return guidance, before-use guarded Cargo notice, one independent seeded fallback and guard tests for old and new examples.
+- Produces: installed take/use/return guidance, before-use guarded Cargo notice, exact private-helper version gate, separate seeded fallback and guard tests for old and new examples.
 
 **Depends-on:** Task 8.
 
 - [ ] Assert every actionable take carries the pre-build use policy and warning. Keep private checkpoints out of public operator help/examples. Write the guide/CLI parser checks and run a real full-pool and rejected-profile journey, including an attempted fallback alias of a tainted slot. Prove the actual eligible fallback is a distinct independently seeded secondary with separate roots and only registry units, with no copied workspace-unit output.
+- [ ] Test the installed helper with exact bundled version, same-major/minor but different patch, malformed version and failed probe. For take and resume, a mismatch must leave reservation/lease state, sources, index, mtimes, output and GC unchanged. Guard the shipped non-slot same-major/minor rule.
 - [ ] Run `cargo test -p cargo-hive --test skill --test slots` to observe the absent guide and fallback behavior.
-- [ ] Document setup and the ordinary reserve/ready/return path, handling of lost acknowledgements, held and unsupported results, and human resolution of unfinished work. Keep internal checkpoint flags out of the usual examples. A seed refusal is explicit.
+- [ ] Document setup and the ordinary reserve/ready/return path, handling of lost acknowledgements, held and unsupported results, and human resolution of unfinished work. Keep internal checkpoint flags out of the usual examples. Check the exact bundled `metadata.hive-version` before private work, explain the update remedy and preserve the non-slot version rule. A seed refusal is explicit.
 - [ ] Re-run the tests and walk an actual normal, full and refused journey in scratch using the installed guide. Preserve ordinary seed and checkout GC examples.
 - [ ] Commit as `docs(hive): teach scoped slot use and fallbacks`.
 

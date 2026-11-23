@@ -490,7 +490,18 @@ including the lost-capacity effect of unrecorded work. Keep the checkpoints
 and receipt confirmation private to the guide. Public operator inspection and
 recovery explain when held warm capacity cannot be restored. The operator
 can stop requesting slots and keep the existing checkout flow. No
-auto retirement changes a worktree. Use current skill version checks.
+auto retirement changes a worktree.
+
+**Agent-decided private helper compatibility.** Before any slot-helper
+reservation, retry, recovery or effect, resolve its hive binary and compare
+the full version reported by that same binary with the installed guide's
+`metadata.hive-version`. Use the existing read-only version check. Recheck
+whenever starting or resuming a helper invocation. A missing, unreadable,
+unparseable or nonidentical version, including a patch mismatch, refuses with
+the update action before any slot reservation, phase change, Git step, mtime
+touch or GC. The bail-out preserves any existing hold. Non-slot guide use
+keeps its existing same-major/minor policy. The bundled metadata remains the
+single version source. See `plugin/skills/hive/SKILL.md`, Version first.
 
 Use five valid matched pairs as agent-decided Draft acceptance. Compare
 complete warm reservation/handoff plus first command to fresh worktree
