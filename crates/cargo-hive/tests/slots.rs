@@ -5205,15 +5205,39 @@ fn fixture_resolve_digest(metadata: &Value, checkout: &Path) -> String {
 
 #[test]
 fn the_guarded_producer_binds_extracted_registry_bytes_before_writing() {
-    exercise_materialized_dependency(false);
+    exercise_materialized_dependency(DependencyFixture::Registry);
 }
 
 #[test]
 fn the_guarded_producer_binds_local_git_revision_and_bytes_before_writing() {
-    exercise_materialized_dependency(true);
+    exercise_materialized_dependency(DependencyFixture::Git);
 }
 
-fn exercise_materialized_dependency(git_dependency: bool) {
+#[test]
+fn the_guarded_producer_requires_exact_review_for_an_external_build_script() {
+    exercise_materialized_dependency(DependencyFixture::ReviewedBuild);
+}
+
+#[test]
+fn the_guarded_producer_refuses_an_incomplete_registry_extraction_before_metadata() {
+    exercise_materialized_dependency(DependencyFixture::IncompleteRegistry);
+}
+
+#[derive(Clone, Copy)]
+enum DependencyFixture {
+    Registry,
+    IncompleteRegistry,
+    Git,
+    ReviewedBuild,
+}
+
+fn exercise_materialized_dependency(scenario: DependencyFixture) {
+    let git_dependency = matches!(
+        scenario,
+        DependencyFixture::Git | DependencyFixture::ReviewedBuild
+    );
+    let incomplete = matches!(scenario, DependencyFixture::IncompleteRegistry);
+    let reviewed_build = matches!(scenario, DependencyFixture::ReviewedBuild);
     let fixture = reviewed_pool_fixture(Some(if git_dependency {
         "pub fn answer() -> u32 { git_leaf::value() }\n"
     } else {
@@ -5230,6 +5254,37 @@ fn exercise_materialized_dependency(git_dependency: bool) {
         )
         .unwrap();
         fs::write(donor.join("src/lib.rs"), "pub fn value() -> u32 { 42 }\n").unwrap();
+        if reviewed_build {
+            fs::write(
+                donor.join("build.rs"),
+                "fn main() { println!(\"cargo:rustc-env=ROAD17_REVIEWED_BUILD=ready\"); }\n",
+            )
+            .unwrap();
+            fs::write(
+                donor.join("src/lib.rs"),
+                "const _: &str = env!(\"ROAD17_REVIEWED_BUILD\");\npub fn value() -> u32 { 42 }\n",
+            )
+            .unwrap();
+            git(&donor, &["add", "build.rs"]);
+        }
+        if matches!(scenario, DependencyFixture::Git) {
+            let nested = donor.join("leaf");
+            fs::create_dir(&nested).unwrap();
+            fs::rename(donor.join("Cargo.toml"), nested.join("Cargo.toml")).unwrap();
+            fs::rename(donor.join("src"), nested.join("src")).unwrap();
+            fs::write(
+                donor.join("Cargo.toml"),
+                "[workspace]\nmembers = [\"leaf\"]\nresolver = \"2\"\n",
+            )
+            .unwrap();
+            fs::write(donor.join("shared.txt"), "reviewed checkout-level data").unwrap();
+            fs::write(
+                nested.join("src/lib.rs"),
+                "pub fn value() -> u32 { include_str!(\"../../shared.txt\").len() as u32 }\n",
+            )
+            .unwrap();
+            git(&donor, &["add", "-A"]);
+        }
         git(
             &donor,
             &["commit", "-qam", "Name the compiled Git dependency"],
@@ -5319,6 +5374,10 @@ fn exercise_materialized_dependency(git_dependency: bool) {
     let root = Path::new(package["manifest_path"].as_str().unwrap())
         .parent()
         .unwrap();
+    let marker = root.join(".cargo-ok");
+    if incomplete {
+        fs::remove_file(&marker).unwrap();
+    }
     let pin = root.join("src/lib.rs");
     let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
     for fact in profile["graph_inputs"].as_array_mut().unwrap() {
@@ -5343,7 +5402,8 @@ fn exercise_materialized_dependency(git_dependency: bool) {
     let mut closure: Value = serde_json::from_slice(&fs::read(&seal).unwrap()).unwrap();
     let relative = root.strip_prefix(home).unwrap();
     let origin = if let Some(revision) = &git_revision {
-        json!({"kind":"git", "revision":revision, "checkout":relative})
+        let git_checkout: PathBuf = relative.iter().take(4).collect();
+        json!({"kind":"git", "revision":revision, "checkout":git_checkout, "tree_sha256":fixture_inventory(&home.join(&git_checkout), true)})
     } else {
         let index = relative.parent().unwrap().file_name().unwrap();
         let leaf = format!(
@@ -5357,6 +5417,21 @@ fn exercise_materialized_dependency(git_dependency: bool) {
     closure["materialized"] = json!({"resolve_sha256":fixture_resolve_digest(&metadata, &fixture.repo),
         "packages":[{"id":package["id"],"name":dependency,"version":package["version"], "source":package["source"],
             "root":relative, "inventory_sha256":fixture_inventory(root,git_dependency), "origin":origin}]});
+    let review = reviewed_build.then(|| {
+        let review = fixture._repo_dir.path.join("reviewed-executable.json");
+        let target = json!({"name":"build-script-build", "kind":"custom_build", "source":"build.rs"});
+        let bytes = serde_json::to_vec(&json!({
+            "schema":1,"profile":{"id":"fixture","revision":1},"invocation":"check","recipe":"clippy",
+            "package_id":package["id"],"inventory_sha256":fixture_inventory(root,true),
+            "source_sha256":fixture_sha(&fs::read(root.join("build.rs")).unwrap()),
+            "target":target,"behavior":"metadata_only_build_script"
+        })).unwrap();
+        fs::write(&review, &bytes).unwrap();
+        closure["materialized"]["packages"][0]["executables"] = json!([
+            {"target":target,"review_sha256":fixture_sha(&bytes)}
+        ]);
+        (review, bytes)
+    });
     let bytes = serde_json::to_vec(&closure).unwrap();
     fs::write(&seal, &bytes).unwrap();
     let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
@@ -5366,6 +5441,12 @@ fn exercise_materialized_dependency(git_dependency: bool) {
         .last_mut()
         .unwrap()["expectation"]["identity"]["sha256"] = json!(fixture_sha(&bytes));
     profile["proofs"][0]["evidence"] = json!(format!("closure-v1:sha256={}", fixture_sha(&bytes)));
+    if let Some((path, bytes)) = &review {
+        profile["graph_inputs"].as_array_mut().unwrap().push(json!({
+            "locator":{"kind":"external","path":path},
+            "expectation":{"kind":"present","identity":{"kind":"reviewed_bytes","sha256":fixture_sha(bytes)}}
+        }));
+    }
     fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
     let (out, initialized) = fixture.init();
     assert!(out.status.success(), "{initialized}");
@@ -5379,6 +5460,15 @@ fn exercise_materialized_dependency(git_dependency: bool) {
             .success()
     );
     let out = run_packaged_take(&fixture, pool, &head, &key, "take");
+    if incomplete {
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        assert!(
+            !marker.exists(),
+            "Cargo metadata tried to re-extract a sealed package"
+        );
+        assert!(!checkout.join("target").exists());
+        return;
+    }
     assert!(out.status.success(), "{out:?}");
     let produce = |operation: &str| {
         let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -5399,6 +5489,12 @@ fn exercise_materialized_dependency(git_dependency: bool) {
             .unwrap();
         common::wait_within(child, Duration::from_secs(50))
     };
+    if let Some((path, bytes)) = &review {
+        fs::remove_file(path).unwrap();
+        assert_eq!(produce(&"9".repeat(32)).status.code(), Some(1));
+        assert!(!checkout.join("target").exists());
+        fs::write(path, bytes).unwrap();
+    }
     if let Some(revision) = &git_revision {
         git(
             root,
@@ -5412,6 +5508,24 @@ fn exercise_materialized_dependency(git_dependency: bool) {
         assert_eq!(produce(&"8".repeat(32)).status.code(), Some(1));
         assert!(!checkout.join("target").exists());
         git(root, &["reset", "--soft", revision]);
+    }
+    if matches!(scenario, DependencyFixture::Git) {
+        let shared = root.parent().unwrap().join("shared.txt");
+        let original = fs::read(&shared).unwrap();
+        let mtime = fs::metadata(&shared).unwrap().modified().unwrap();
+        fs::write(&shared, b"unapproved sibling source").unwrap();
+        fs::File::open(&shared)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let out = produce(&"a".repeat(32));
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        assert!(!checkout.join("target").exists());
+        fs::write(&shared, original).unwrap();
+        fs::File::open(&shared)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
     }
     let original = fs::read(&pin).unwrap();
     let modified = fs::metadata(&pin).unwrap().modified().unwrap();
@@ -5450,6 +5564,15 @@ fn exercise_materialized_dependency(git_dependency: bool) {
             .iter()
             .any(|unit| unit.loc.package() == dependency)
     );
+    if reviewed_build {
+        assert!(
+            built
+                .units
+                .iter()
+                .any(|unit| unit.loc.package() == dependency
+                    && unit.kind == cargo_hive_core::fingerprint::UnitKind::RunBuildScript)
+        );
+    }
 }
 
 #[test]

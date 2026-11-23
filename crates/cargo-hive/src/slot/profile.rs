@@ -291,9 +291,9 @@ pub(super) fn check_invocation(
     }
     let material_before = native
         .as_ref()
-        .and_then(NativeBuild::materialized)
-        .map(|material| material.verify_material(&cargo_home, &checkout.path))
-        .transpose()?;
+        .map(|seal| seal.verify_dependency_material(profile, &cargo_home, &checkout.path))
+        .transpose()?
+        .flatten();
     let discovered = discover(&cargo, &cwd, &environment)?;
     if tools_before != tool_identities(&cargo, &rustc)? {
         return Err(refused(
@@ -332,13 +332,13 @@ pub(super) fn check_invocation(
         verify_native_graph(&discovered, &checkout.path, seal.packages(), material)?;
         if let Some(material) = material {
             verify_materialized_graph(&discovered, &checkout.path, &cargo_home, material)?;
-            let after = material.verify_material(&cargo_home, &checkout.path)?;
-            if material_before.as_ref() != Some(&after) {
+            let after = seal.verify_dependency_material(profile, &cargo_home, &checkout.path)?;
+            if material_before != after {
                 return Err(refused(
                     "The reviewed dependency material changed during Cargo discovery.",
                 ));
             }
-            Some(after)
+            after
         } else {
             None
         }
@@ -1083,10 +1083,22 @@ fn verify_materialized_graph(
         let key = if let Some(source) = &pkg.source {
             let expected = packages.get(&pkg.id).ok_or_else(unproved)?;
             let root = home.join(&expected.root);
+            let targets = pkg
+                .targets
+                .iter()
+                .map(|target| {
+                    let source = target
+                        .src_path
+                        .strip_prefix(&root)
+                        .map_err(|_| unproved())?;
+                    Ok((target.name.as_str(), target.kind.as_slice(), source))
+                })
+                .collect::<Result<Vec<_>, Refusal>>()?;
             if expected.name != pkg.name
                 || expected.version != pkg.version
                 || &expected.source != source
                 || pkg.manifest_path != root.join("Cargo.toml")
+                || !expected.matches_executables(targets.into_iter())
                 || root.canonicalize().as_ref().ok() != Some(&root)
                 || pkg.targets.iter().any(|target| {
                     !target.src_path.starts_with(&root)
@@ -1094,7 +1106,14 @@ fn verify_materialized_graph(
                         || target.kind.iter().any(|kind| {
                             !matches!(
                                 kind.as_str(),
-                                "lib" | "rlib" | "bin" | "test" | "example" | "bench"
+                                "lib"
+                                    | "rlib"
+                                    | "bin"
+                                    | "test"
+                                    | "example"
+                                    | "bench"
+                                    | "custom-build"
+                                    | "proc-macro"
                             )
                         })
                 })
