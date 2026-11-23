@@ -332,6 +332,7 @@ _Requirements: SLOTS-1.2, SLOTS-1.6, SLOTS-1.7, SLOTS-1.8, SLOTS-2.4, SLOTS-3.1,
 ### Task 8: Recover an abandoned slot without replaying old authority
 
 **Files:**
+- Create: `crates/cargo-hive/src/slot/recover.rs`
 - Modify: `crates/platform/src/slot.rs`
 - Modify: `crates/cargo-hive/src/cli.rs`
 - Modify: `crates/cargo-hive/tests/cli_tree.rs`
