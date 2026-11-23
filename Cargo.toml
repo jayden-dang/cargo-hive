@@ -23,6 +23,9 @@ cargo-hive-doctor = { path = "crates/doctor", version = "=0.1.2" }
 cargo-hive-seed = { path = "crates/seed", version = "=0.1.2" }
 cargo-hive-gc = { path = "crates/gc", version = "=0.1.2" }
 
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
 [workspace.lints.clippy]
 disallowed_types = "warn"
 disallowed_methods = "warn"

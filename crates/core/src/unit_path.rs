@@ -145,6 +145,50 @@ fn is_hex_component(name: &std::ffi::OsStr) -> bool {
         .is_some_and(|text| fingerprint::UnitHash::parse(text).is_some())
 }
 
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+    pub fn artifact_names(data: &[u8]) {
+        if let Ok(name) = std::str::from_utf8(data) {
+            let _ = fingerprint::unit_hash(name);
+            for hash in crate::liveness::embedded_hashes(name) {
+                assert_eq!(hash.len(), 16);
+                assert!(
+                    hash.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                );
+            }
+            let _ = unit_dir_of(Path::new(name));
+            let _ = is_fingerprint_dir(Path::new(name));
+            let loc = UnitLoc {
+                layout: UnitLayout::UnitDir,
+                name_meta: name.into(),
+            };
+            let _ = (loc.package(), loc.hex());
+        }
+        let n = u64::from(data.first().copied().unwrap_or(0));
+        let hash = format!("{n:016x}");
+        let name = format!("libprobe-{hash}.rlib");
+        assert_eq!(
+            crate::liveness::embedded_hashes(&name).collect::<Vec<_>>(),
+            vec![hash.as_str()]
+        );
+        let loc = UnitLoc {
+            layout: UnitLayout::UnitDir,
+            name_meta: format!("probe-{hash}"),
+        };
+        assert_eq!(loc.package(), "probe");
+        assert_eq!(loc.hex(), hash);
+        assert_eq!(
+            outputs(Path::new("target/debug"), &loc),
+            Path::new("target/debug/build/probe")
+                .join(&hash)
+                .join("out")
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -153,6 +197,17 @@ mod tests {
     };
     use crate::fingerprint::UnitKind;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn generated_names_preserve_hex_and_layout_boundaries() {
+        for data in [
+            &b""[..],
+            &b"\xff"[..],
+            "\u{1f680}-0123456789abcdef.o".as_bytes(),
+        ] {
+            super::fuzzing::artifact_names(data);
+        }
+    }
 
     const NAME_META: &str = "probe-0123456789abcdef";
     const PROFILE: &str = "/t/debug";

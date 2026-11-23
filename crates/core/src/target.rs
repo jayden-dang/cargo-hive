@@ -4,10 +4,12 @@
 use crate::fingerprint::ProfileReport;
 use serde::Serialize;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 pub const TAG_LINE: &str = "# This file is a cache directory tag created by cargo.";
+
+const MAX_TAG_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,14 +105,12 @@ fn profile_dirs_with(
     Ok(out)
 }
 
-/// `Some(Ok(profiles))` for a Cargo target dir; `Some(Err(reason))` for a dir
-/// Cargo tagged whose profiles cannot be read; `None` for anything else.
+/// `Some(Ok(profiles))` for a Cargo target dir. An oversized tag or a Cargo tag
+/// with unreadable profiles yields `Some(Err(reason))`. Other dirs yield `None`.
 pub fn identify(dir: &Path) -> Option<Result<Vec<(PathBuf, Layout)>, String>> {
-    let tag = fs::read(dir.join("CACHEDIR.TAG")).ok()?;
-    if !valid_tag(&tag) {
-        return None;
-    }
-    finish_profiles(profile_dirs(dir))
+    let path = dir.join("CACHEDIR.TAG");
+    let body = fs::File::open(&path).and_then(read_tag);
+    identify_tag(&path, body, || profile_dirs(dir))
 }
 
 /// Same as [`identify`], but every directory listing stops at `cap` entries.
@@ -119,22 +119,57 @@ pub fn identify_bounded(
     dir: &Path,
     cap: usize,
 ) -> Option<Result<Vec<(PathBuf, Layout)>, String>> {
-    let tag = fs.read(&dir.join("CACHEDIR.TAG")).ok()?;
-    if !valid_tag(&tag) {
-        return None;
-    }
-    finish_profiles(profile_dirs_with(
-        dir,
-        cap,
-        &|path, cap| bounded_dirs(fs, path, cap),
-        &|path| is_dir_bounded(fs, path),
-    ))
+    let path = dir.join("CACHEDIR.TAG");
+    let body = read_tag_at(|offset, len| fs.read_at(&path, offset, len));
+    identify_tag(&path, body, || {
+        profile_dirs_with(
+            dir,
+            cap,
+            &|path, cap| bounded_dirs(fs, path, cap),
+            &|path| is_dir_bounded(fs, path),
+        )
+    })
 }
 
-fn valid_tag(tag: &[u8]) -> bool {
-    String::from_utf8_lossy(tag)
+fn read_tag(reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut tag = Vec::new();
+    reader
+        .take((MAX_TAG_BYTES + 1) as u64)
+        .read_to_end(&mut tag)?;
+    Ok(tag)
+}
+
+fn read_tag_at(mut read: impl FnMut(u64, usize) -> io::Result<Vec<u8>>) -> io::Result<Vec<u8>> {
+    let mut tag = Vec::new();
+    while tag.len() <= MAX_TAG_BYTES {
+        let part = read(tag.len() as u64, MAX_TAG_BYTES + 1 - tag.len())?;
+        if part.is_empty() {
+            break;
+        }
+        tag.extend_from_slice(&part);
+    }
+    Ok(tag)
+}
+
+fn identify_tag(
+    path: &Path,
+    body: io::Result<Vec<u8>>,
+    profiles: impl FnOnce() -> Result<Vec<(PathBuf, Layout)>, String>,
+) -> Option<Result<Vec<(PathBuf, Layout)>, String>> {
+    match valid_tag(&body.ok()?) {
+        Ok(true) => finish_profiles(profiles()),
+        Ok(false) => None,
+        Err(reason) => Some(Err(format!("{}: {reason}", path.display()))),
+    }
+}
+
+fn valid_tag(tag: &[u8]) -> Result<bool, &'static str> {
+    if tag.len() > MAX_TAG_BYTES {
+        return Err("larger than 1 MiB");
+    }
+    Ok(String::from_utf8_lossy(tag)
         .lines()
-        .any(|line| line.trim_end() == TAG_LINE)
+        .any(|line| line.trim_end() == TAG_LINE))
 }
 
 fn finish_profiles(
@@ -214,6 +249,28 @@ pub struct TargetDir {
     pub unreadable: Option<String>,
 }
 
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+
+    pub fn target_tag(data: &[u8]) {
+        let _ = valid_tag(data);
+        let mut body = format!("# ignored\n{TAG_LINE}\n").into_bytes();
+        body.extend_from_slice(data);
+        let chunk = usize::from(data.first().copied().unwrap_or(0)) + 1;
+        let read = read_tag_at(|offset, len| {
+            let start = usize::try_from(offset).unwrap();
+            let n = len.min(chunk).min(body.len().saturating_sub(start));
+            Ok(body[start..start + n].to_vec())
+        })
+        .unwrap();
+        assert_eq!(read, body);
+        assert_eq!(valid_tag(&read), Ok(true));
+        assert_eq!(read_tag(body.as_slice()).unwrap(), body);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +307,61 @@ mod tests {
         assert!(err.contains("more than"), "{err}");
         assert!(identify(&root).is_some_and(|found| found.is_ok()));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn both_identifiers_refuse_oversized_tags_even_with_a_valid_prefix() {
+        let root = scratch("tag-cap");
+        mkdir(root.join("debug/.fingerprint"));
+        let platform = cargo_hive_platform::current().unwrap();
+        let tag_path = root.join("CACHEDIR.TAG");
+        let mut body = format!("{TAG_LINE}\n").into_bytes();
+        body.resize(1024 * 1024, b'#');
+        fs::write(&tag_path, &body).unwrap();
+        let exact = [
+            identify(&root),
+            identify_bounded(platform.fs.as_ref(), &root, 10),
+        ];
+        body.push(b'#');
+        fs::write(&tag_path, &body).unwrap();
+        let over = [
+            identify(&root),
+            identify_bounded(platform.fs.as_ref(), &root, 10),
+        ];
+        fs::remove_dir_all(&root).unwrap();
+
+        for found in exact {
+            assert_eq!(
+                found,
+                Some(Ok(vec![(root.join("debug"), Layout::Fingerprint)]))
+            );
+        }
+        assert!(
+            over.iter().all(|found| matches!(found, Some(Err(why)) if why.contains("CACHEDIR.TAG") && why.contains("larger than 1 MiB"))),
+            "{over:?}"
+        );
+    }
+
+    #[test]
+    fn positional_tag_reads_accumulate_short_chunks_and_preserve_io_failure_mapping() {
+        for data in [&b""[..], &b"\xff\nnoise"[..], &b"123456789"[..]] {
+            fuzzing::target_tag(data);
+        }
+        let mut calls = 0;
+        let body = read_tag_at(|_, _| {
+            calls += 1;
+            if calls == 1 {
+                Ok(format!("{TAG_LINE}\n").into_bytes())
+            } else {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            }
+        });
+        assert!(
+            identify_tag(Path::new("CACHEDIR.TAG"), body, || panic!(
+                "cannot inspect profiles after read failure"
+            ))
+            .is_none()
+        );
     }
 
     fn tag(dir: &Path, line: &str) {
