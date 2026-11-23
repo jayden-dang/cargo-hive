@@ -5114,15 +5114,23 @@ fn fixture_sha(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn fixture_inventory(root: &Path) -> String {
-    fn collect(root: &Path, directory: &Path, rows: &mut Vec<(PathBuf, u64, Option<String>)>) {
+fn fixture_inventory(root: &Path, exclude_git: bool) -> String {
+    fn collect(
+        root: &Path,
+        directory: &Path,
+        exclude_git: bool,
+        rows: &mut Vec<(PathBuf, u64, Option<String>)>,
+    ) {
         for item in fs::read_dir(directory).unwrap() {
             let item = item.unwrap();
+            if exclude_git && directory == root && item.file_name() == ".git" {
+                continue;
+            }
             let path = item.path();
             let relative = path.strip_prefix(root).unwrap().to_path_buf();
             if item.file_type().unwrap().is_dir() {
                 rows.push((relative, 0, None));
-                collect(root, &path, rows);
+                collect(root, &path, exclude_git, rows);
             } else {
                 assert!(item.file_type().unwrap().is_file());
                 let bytes = fs::read(path).unwrap();
@@ -5131,7 +5139,7 @@ fn fixture_inventory(root: &Path) -> String {
         }
     }
     let mut rows = Vec::new();
-    collect(root, root, &mut rows);
+    collect(root, root, exclude_git, &mut rows);
     rows.sort();
     fixture_sha(&serde_json::to_vec(&rows).unwrap())
 }
@@ -5197,30 +5205,65 @@ fn fixture_resolve_digest(metadata: &Value, checkout: &Path) -> String {
 
 #[test]
 fn the_guarded_producer_binds_extracted_registry_bytes_before_writing() {
-    let fixture = reviewed_pool_fixture(Some(
-        "use pin_project_lite::pin_project;
-pin_project! { struct Sample { value: u32 } }
-pub fn answer() -> u32 { Sample { value: 42 }.value }
-",
-    ));
+    exercise_materialized_dependency(false);
+}
+
+#[test]
+fn the_guarded_producer_binds_local_git_revision_and_bytes_before_writing() {
+    exercise_materialized_dependency(true);
+}
+
+fn exercise_materialized_dependency(git_dependency: bool) {
+    let fixture = reviewed_pool_fixture(Some(if git_dependency {
+        "pub fn answer() -> u32 { git_leaf::value() }\n"
+    } else {
+        "use pin_project_lite::pin_project;\npin_project! { struct Sample { value: u32 } }\npub fn answer() -> u32 { Sample { value: 42 }.value }\n"
+    }));
     fixture.hive.write_ready_capabilities();
-    let cache = PathBuf::from(std::env::var_os("CARGO_HOME").unwrap());
     let home = &fixture.hive.cargo_home.path;
-    let repository = "index.crates.io-1949cf8c6b5b557f";
-    let archive = format!("registry/cache/{repository}/pin-project-lite-0.2.17.crate");
-    for path in [
-        format!("registry/index/{repository}/config.json"),
-        format!("registry/index/{repository}/.cache/pi/n-/pin-project-lite"),
-        archive.clone(),
-    ] {
-        let output = home.join(&path);
-        fs::create_dir_all(output.parent().unwrap()).unwrap();
-        fs::copy(cache.join(path), output).unwrap();
-    }
+    let (dependency, requirement, git_revision) = if git_dependency {
+        let donor = init_repo(&fixture._repo_dir.path.join("material-donor"), "");
+        let manifest = fs::read_to_string(donor.join("Cargo.toml")).unwrap();
+        fs::write(
+            donor.join("Cargo.toml"),
+            manifest.replace("name = \"fixture\"", "name = \"git-leaf\""),
+        )
+        .unwrap();
+        fs::write(donor.join("src/lib.rs"), "pub fn value() -> u32 { 42 }\n").unwrap();
+        git(
+            &donor,
+            &["commit", "-qam", "Name the compiled Git dependency"],
+        );
+        let revision = git(&donor, &["rev-parse", "HEAD"]);
+        let requirement = format!(
+            "git-leaf = {{ git = \"file://{}\", rev = \"{}\" }}\n",
+            donor.display(),
+            revision
+        );
+        ("git-leaf", requirement, Some(revision))
+    } else {
+        let cache = PathBuf::from(std::env::var_os("CARGO_HOME").unwrap());
+        let repository = "index.crates.io-1949cf8c6b5b557f";
+        let archive = format!("registry/cache/{repository}/pin-project-lite-0.2.17.crate");
+        for path in [
+            format!("registry/index/{repository}/config.json"),
+            format!("registry/index/{repository}/.cache/pi/n-/pin-project-lite"),
+            archive,
+        ] {
+            let output = home.join(&path);
+            fs::create_dir_all(output.parent().unwrap()).unwrap();
+            fs::copy(cache.join(path), output).unwrap();
+        }
+        (
+            "pin-project-lite",
+            "pin-project-lite = \"=0.2.17\"\n".to_owned(),
+            None,
+        )
+    };
     let manifest = fixture.repo.join("Cargo.toml");
     let updated = fs::read_to_string(&manifest).unwrap().replace(
         "[dependencies]\n",
-        "[dependencies]\npin-project-lite = \"=0.2.17\"\n",
+        &format!("[dependencies]\n{requirement}"),
     );
     fs::write(manifest, updated).unwrap();
     let cargo = |args: &[&str]| {
@@ -5233,7 +5276,20 @@ pub fn answer() -> u32 { Sample { value: 42 }.value }
         assert!(out.status.success(), "{out:?}");
         out.stdout
     };
-    cargo(&["generate-lockfile", "--offline"]);
+    if git_dependency {
+        let out = fixture
+            .hive
+            .command_with(Path::new("cargo"), &["generate-lockfile"])
+            .current_dir(&fixture.repo)
+            .env("CARGO_NET_OFFLINE", "false")
+            .env("CARGO_NET_GIT_FETCH_WITH_CLI", "true")
+            .env("GIT_ALLOW_PROTOCOL", "file")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    } else {
+        cargo(&["generate-lockfile", "--offline"]);
+    }
     git(
         &fixture.repo,
         &[
@@ -5258,7 +5314,7 @@ pub fn answer() -> u32 { Sample { value: 42 }.value }
         .as_array()
         .unwrap()
         .iter()
-        .find(|pkg| pkg["name"] == "pin-project-lite")
+        .find(|pkg| pkg["name"] == dependency)
         .unwrap();
     let root = Path::new(package["manifest_path"].as_str().unwrap())
         .parent()
@@ -5285,11 +5341,22 @@ pub fn answer() -> u32 { Sample { value: 42 }.value }
     external_fixture_seal(&fixture, &head, "clippy", &args);
     let seal = fixture._repo_dir.path.join("external-recipe.json");
     let mut closure: Value = serde_json::from_slice(&fs::read(&seal).unwrap()).unwrap();
-    closure["packages"][0]["dependencies"] = json!(["pin-project-lite"]);
+    let relative = root.strip_prefix(home).unwrap();
+    let origin = if let Some(revision) = &git_revision {
+        json!({"kind":"git", "revision":revision, "checkout":relative})
+    } else {
+        let index = relative.parent().unwrap().file_name().unwrap();
+        let leaf = format!(
+            "{dependency}-{}.crate",
+            package["version"].as_str().unwrap()
+        );
+        let archive = home.join("registry/cache").join(index).join(leaf);
+        json!({"kind":"registry", "checksum":fixture_sha(&fs::read(archive).unwrap())})
+    };
+    closure["packages"][0]["dependencies"] = json!([dependency]);
     closure["materialized"] = json!({"resolve_sha256":fixture_resolve_digest(&metadata, &fixture.repo),
-        "packages":[{"id":package["id"],"name":"pin-project-lite","version":"0.2.17", "source":package["source"],
-            "root":root.strip_prefix(home).unwrap(), "inventory_sha256":fixture_inventory(root),
-            "origin":{"kind":"registry","checksum":fixture_sha(&fs::read(home.join(archive)).unwrap())}}]});
+        "packages":[{"id":package["id"],"name":dependency,"version":package["version"], "source":package["source"],
+            "root":relative, "inventory_sha256":fixture_inventory(root,git_dependency), "origin":origin}]});
     let bytes = serde_json::to_vec(&closure).unwrap();
     fs::write(&seal, &bytes).unwrap();
     let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
@@ -5332,6 +5399,20 @@ pub fn answer() -> u32 { Sample { value: 42 }.value }
             .unwrap();
         common::wait_within(child, Duration::from_secs(50))
     };
+    if let Some(revision) = &git_revision {
+        git(
+            root,
+            &[
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Same bytes at an unapproved commit",
+            ],
+        );
+        assert_eq!(produce(&"8".repeat(32)).status.code(), Some(1));
+        assert!(!checkout.join("target").exists());
+        git(root, &["reset", "--soft", revision]);
+    }
     let original = fs::read(&pin).unwrap();
     let modified = fs::metadata(&pin).unwrap().modified().unwrap();
     fs::write(
@@ -5367,7 +5448,7 @@ pub fn answer() -> u32 { Sample { value: 42 }.value }
         built
             .units
             .iter()
-            .any(|unit| unit.loc.package() == "pin-project-lite")
+            .any(|unit| unit.loc.package() == dependency)
     );
 }
 
