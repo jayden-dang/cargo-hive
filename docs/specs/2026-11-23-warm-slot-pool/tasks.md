@@ -32,7 +32,7 @@ Design: ./design.md
 |---|---|
 | `crates/state/src/lib.rs` | Extend bounded private state writes and named recovery without changing old readers. |
 | `crates/state/src/slots.rs` | New strict layout 2 record, checked revisions, transition/outcome I/O with fault tests. |
-| `crates/platform/src/flock.rs` | Checked borrowed descriptor lock without explicit unlock while the guide keeps its reference. |
+| `crates/platform/src/flock.rs` | Check inherited writer descriptors and owner-controlled paths for slot state. |
 | `crates/platform/src/lib.rs` | Export slot-only platform support. |
 | `crates/platform/src/slot.rs` | New local process instance, boot session and entropy helpers. |
 | `crates/platform/tests/slot_fence.rs` | New real macOS multi-process fence and child-lifetime proof. |
@@ -40,6 +40,7 @@ Design: ./design.md
 | `crates/cargo-hive/src/lib.rs` | Declare the new private slot module beside CLI and bench. |
 | `crates/cargo-hive/src/cli.rs` | Add slot dispatch and extract typed GC and seed paths from standalone emission. |
 | `crates/cargo-hive/tests/cli_tree.rs` | Freeze existing command help and allow only the intentional additive slot branch. |
+| `crates/cargo-hive/tests/liveness.rs` | Retain exact checks on shipped command paths and flags outside the separately tested slot subtree. |
 | `crates/cargo-hive/tests/fixtures/current/cli-tree.txt` | Update only the current command tree golden for the new slot branch. |
 | `crates/cargo-hive/src/slot/mod.rs` | New slot dispatch, identity-scoped transition/replay and operator recovery. |
 | `crates/cargo-hive/src/slot/inspect.rs` | New positive slot identity, dirty-return, and candidate root checks. |
@@ -96,11 +97,13 @@ _Requirements: SLOTS-5.4_
 ### Task 2: Establish two private, unoccupied slots
 
 **Files:**
+- Modify: `crates/platform/src/flock.rs`
 - Modify: `crates/state/src/lib.rs`
 - Create: `crates/state/src/slots.rs`
 - Modify: `crates/cargo-hive/src/lib.rs`
 - Modify: `crates/cargo-hive/src/cli.rs`
 - Modify: `crates/cargo-hive/tests/cli_tree.rs`
+- Modify: `crates/cargo-hive/tests/liveness.rs`
 - Modify: `crates/cargo-hive/tests/fixtures/current/cli-tree.txt`
 - Modify: `crates/cargo-hive/tests/skill.rs`
 - Create: `crates/cargo-hive/src/slot/mod.rs`
@@ -118,12 +121,12 @@ _Requirements: SLOTS-5.4_
 
 **Depends-on:** Task 1.
 
-- [ ] Write CLI and state fixtures for exactly two stable unused paths after restart, private metadata and temporary-file modes, symlinks and unsafe pre-existing state, malformed/newer layouts, duplicate/reused identities, wrong schema and the exact file cap plus one byte.
-- [ ] Add cases for an absent fresh record versus old lock/path evidence with a missing record, and for old state files and old-format audit lines remaining readable.
-- [ ] Run `cargo test -p cargo-hive --test slots --test upgrade --test cli_tree --test skill` and `cargo test -p cargo-hive-state`. Observe missing behavior and keep prior compatibility tests present.
-- [ ] Add strict bounded layout parsing, owner-only no-follow writes, initialization and named fail-closed recovery. Keep orphans held. Parse the added Slot case in the skill harness and scope the historical CLI comparison to the additive slot branch. Regenerate only the current fixture via the existing `HIVE_WRITE_CLI_TREE` seam. Preserve the archived fixture and old-state readers.
-- [ ] Repeat the tests. Inspect private file modes, both allocated names and the persisted result after a separate process opens state.
-- [ ] Commit as `feat(slot): initialize bounded private pool state`.
+- [x] Write CLI and state fixtures for exactly two stable unused paths after restart, private metadata and temporary-file modes, symlinks and unsafe pre-existing state, malformed/newer layouts, duplicate/reused identities, wrong schema and the exact file cap plus one byte.
+- [x] Add cases for an absent fresh record versus old lock/path evidence with a missing record, and for old state files and old-format audit lines remaining readable.
+- [x] Run `cargo test -p cargo-hive --test slots --test upgrade --test cli_tree --test skill` and `cargo test -p cargo-hive-state`. Observe missing behavior and keep prior compatibility tests present.
+- [x] Add strict bounded layout parsing, owner-only no-follow writes, initialization and named fail-closed recovery. Keep orphans held. Parse the added Slot case in the skill harness and scope the historical CLI comparison to the additive slot branch. Regenerate only the current fixture via the existing `HIVE_WRITE_CLI_TREE` seam. Preserve the archived fixture and old-state readers.
+- [x] Repeat the tests. Inspect private file modes, both allocated names and the persisted result after a separate process opens state.
+- [x] Commit as `feat(slot): initialize bounded private pool state`.
 
 _Requirements: SLOTS-1.1, SLOTS-4.6, SLOTS-4.7, SLOTS-4.8, SLOTS-4.9_
 
