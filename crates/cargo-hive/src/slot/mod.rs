@@ -1,30 +1,43 @@
 //! The slot CLI scopes operations to a registered main and its private pool namespace.
 
 mod inspect;
+mod profile;
 mod result;
 
-use crate::cli::{SlotCommand, SlotReplay, SlotScopeArgs};
+use crate::cli::{SlotCommand, SlotLockedOperation, SlotOperation, SlotReplay, SlotScopeArgs};
 use cargo_hive_cargo::{
     git::{Git, SlotGitError, WorktreeRecord},
     registry::{self, Registry},
 };
-use cargo_hive_platform::flock::{duplicate_inherited_fd, private_file_metadata, try_exclusive};
+use cargo_hive_platform::flock::{
+    InheritedLock, LockFileIdentity, duplicate_inherited_fd, private_file_metadata, try_exclusive,
+    try_lock_inherited,
+};
 use cargo_hive_platform::proc::read_stdin_complete;
 use cargo_hive_platform::signals::{self, cancelled};
+use cargo_hive_platform::slot::{
+    ForegroundExec, ForegroundWatch, ProcessInstance, parent_instance,
+};
 use cargo_hive_state::slots::{
-    self, CHECKOUT_NAMESPACE, FileIdentity, GitIdentity, LOCK_NAMESPACE, Lease, MAX_OUTCOMES,
-    MAX_POOLS, OperationKind, Outcome, OutcomeRequest, Phase, Pool, PoolProfile, Slot,
-    SlotRequestKey, SlotsFile, TransitionResult,
+    self, BypassReport, CHECKOUT_NAMESPACE, CompletedInvocation, EligibleProducer, FileIdentity,
+    ForegroundInstance, GitIdentity, LOCK_NAMESPACE, Lease, MAX_OUTCOMES, MAX_POOLS, OperationKind,
+    Outcome, OutcomeRequest, OutputEpoch, OutputRoots, PendingProducer, Phase, Pool, PoolProfile,
+    Producer, ProvenanceLoss, RootExpectation, Runner, Slot, SlotRequestKey, SlotsFile,
+    TransitionResult,
 };
 use cargo_hive_state::{State, StateError, Tx};
+pub(crate) use inspect::CheckoutProof;
 use inspect::{
-    CheckoutInventory, ExpectedCheckout, SlotScope, directory_stamp, inspect_checkout,
-    owned_identity,
+    CheckoutInventory, ExpectedCheckout, ProducerInventory, SlotScope, directory_stamp,
+    inspect_checkout, inspect_producer_checkout, owned_identity,
 };
+use profile::InvocationInput;
 use result::{FRESH_FALLBACK, SlotResult, SlotStatus, SlotTransition};
+use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Seek, Write};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -38,6 +51,15 @@ const MAX_ROOT_ENTRIES: usize = 4096;
 const MAX_ROOT_DEPTH: usize = 32;
 const KEY_HEX_LEN: usize = 64;
 const CREDENTIAL_DEADLINE: Duration = Duration::from_secs(2);
+const PRODUCER_GATE_PROGRAM: &str = "/bin/bash";
+const PRODUCER_ENV_PROGRAM: &str = "/usr/bin/env";
+const PRODUCER_GATE_ARGS: [&str; 5] = [
+    "--noprofile",
+    "--norc",
+    "-c",
+    "builtin kill -STOP \"$$\"; builtin exec -c /usr/bin/env -i \"$@\"",
+    "producer-gate",
+];
 
 pub(super) fn dispatch(command: SlotCommand) -> i32 {
     let (name, repo, json, init) = match command {
@@ -74,10 +96,11 @@ pub(super) fn dispatch(command: SlotCommand) -> i32 {
             return unavailable("slot step-check", Some(scope.repo), out.json);
         }
         SlotCommand::Producer(op) => {
-            return unavailable(
+            return run_scoped(
                 "slot producer",
-                Some(op.operation.scope.repo),
+                &op.operation.scope.repo,
                 op.operation.out.json,
+                |state| producer(state, &op),
             );
         }
         SlotCommand::Ready { request, .. } => {
@@ -207,6 +230,7 @@ enum Refusal {
     ReturnWork(&'static str),
     ReturnUncertain(&'static str),
     OutcomeLimit,
+    ProducerHistoryLimit,
 }
 
 impl From<StateError> for Refusal {
@@ -240,6 +264,12 @@ fn refusal(command: &'static str, repo: &Path, err: Refusal) -> SlotResult {
                 "The slot already has {MAX_OUTCOMES} unacknowledged outcomes. {OUTCOME_LIMIT_ACTION}"
             ),
             FRESH_FALLBACK,
+        ),
+        Refusal::ProducerHistoryLimit => (
+            "unavailable",
+            1,
+            "The current lease has reached the limit for completed Cargo invocations.".into(),
+            "Resolve unfinished work, then return the slot or use a separate fresh seeded checkout.",
         ),
         Refusal::Orphan(record, evidence) => (
             "held",
@@ -430,6 +460,655 @@ struct ReturnScope {
     pool: Pool,
     registry: Registry,
     secondary_roots: Vec<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProducerInput {
+    action: ProducerAction,
+    credential: String,
+    nonce: String,
+    shape: InvocationInput,
+    child_pid: Option<u32>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProducerAction {
+    Start,
+    Watch,
+    ReportBypass,
+}
+
+fn producer(state: &State, request: &SlotLockedOperation) -> Result<SlotResult, Refusal> {
+    let op = &request.operation;
+    let key = request_key(
+        &op.scope,
+        op.generation,
+        OperationKind::ProducerStart,
+        &op.op,
+        None,
+    )?;
+    let input = read_stdin_complete(64 * 1024, CREDENTIAL_DEADLINE, cancelled).map_err(|err| {
+        if err.kind() == io::ErrorKind::Interrupted {
+            StateError::Cancelled.into()
+        } else {
+            credential_refusal()
+        }
+    })?;
+    let input: ProducerInput = serde_json::from_slice(&input).map_err(|_| credential_refusal())?;
+    if !slots::hex(&input.credential, KEY_HEX_LEN) || !slots::hex(&input.nonce, KEY_HEX_LEN) {
+        return Err(credential_refusal());
+    }
+    let runner = producer_runner(&input.nonce)?;
+    let registered = verify_operation_repo(state, &op.scope.repo)?;
+    let lock_path = state
+        .root()
+        .join(LOCK_NAMESPACE)
+        .join(key.pool_id)
+        .join(Slot::lock_name_for(key.slot));
+    let lock_id = slots::checked_slot_lock(&lock_path).map_err(|_| producer_fence_refusal())?;
+    let fd = i32::try_from(request.lock_fd)
+        .ok()
+        .filter(|fd| *fd > 2)
+        .ok_or_else(producer_fence_refusal)?;
+    let inherited = duplicate_inherited_fd(fd).map_err(|_| producer_fence_refusal())?;
+    let (independent, _) =
+        slots::open_slot_lock(&lock_path).map_err(|_| producer_fence_refusal())?;
+    if try_exclusive(&independent)
+        .map_err(|_| producer_fence_refusal())?
+        .is_some()
+    {
+        return Err(producer_fence_refusal());
+    }
+    let lock = LockFileIdentity {
+        dev: lock_id.dev,
+        ino: lock_id.ino,
+    };
+    let InheritedLock::Acquired(_guard) =
+        try_lock_inherited(inherited.as_fd(), lock).map_err(|_| producer_fence_refusal())?
+    else {
+        return Err(producer_fence_refusal());
+    };
+    let command = ProducerCommand {
+        state,
+        op,
+        key,
+        registered,
+        runner,
+        lock_id,
+    };
+    let snapshot = command.snapshot(&input.credential)?;
+    match (input.action, input.child_pid) {
+        (ProducerAction::Start, None) => command.start(&snapshot, input),
+        (ProducerAction::Watch, Some(pid)) => {
+            command.watch(snapshot, input, pid, fd, inherited.as_fd())
+        }
+        (ProducerAction::ReportBypass, None) => command.report_bypass(&snapshot, &input),
+        _ => Err(producer_fence_refusal()),
+    }
+}
+
+struct ProducerCommand<'a> {
+    state: &'a State,
+    op: &'a SlotOperation,
+    key: SlotRequestKey<'a>,
+    registered: VerifiedRepo,
+    runner: Runner,
+    lock_id: FileIdentity,
+}
+
+impl ProducerCommand<'_> {
+    fn slot_index(&self) -> usize {
+        usize::from(self.key.slot - 1)
+    }
+
+    fn snapshot(&self, credential: &str) -> Result<ReturnScope, Refusal> {
+        with_slot_state(self.state, |tx| {
+            let (mut saved, index) =
+                checked_pool(tx, self.state, &self.op.scope, &self.registered)?;
+            let pool = &saved.pools[index];
+            let slot = &pool.slots[self.slot_index()];
+            producer_lease(slot, &self.key, credential)?;
+            if slot.lock_id != self.lock_id || !slot_identity_present(self.state.root(), pool, slot)
+            {
+                return Err(producer_fence_refusal());
+            }
+            Ok(ReturnScope {
+                pool: saved.pools.swap_remove(index),
+                registry: tx.read_slot_registry()?,
+                secondary_roots: self.state.slot_config()?.secondary_roots,
+            })
+        })
+    }
+
+    fn publish(
+        &self,
+        snapshot: &ReturnScope,
+        write: impl FnOnce(&mut Slot) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        with_slot_state(self.state, |tx| {
+            let (mut saved, index) =
+                checked_pool(tx, self.state, &self.op.scope, &self.registered)?;
+            let current = &saved.pools[index];
+            let slot_index = self.slot_index();
+            if current.slots[slot_index] != snapshot.pool.slots[slot_index]
+                || current.profile != snapshot.pool.profile
+                || tx.read_slot_registry::<Registry>()? != snapshot.registry
+                || self.state.slot_config()?.secondary_roots != snapshot.secondary_roots
+                || producer_runner(&self.runner.nonce)? != self.runner
+                || !slot_identity_present(self.state.root(), current, &current.slots[slot_index])
+            {
+                return Err(producer_fence_refusal());
+            }
+            write(&mut saved.pools[index].slots[slot_index])?;
+            commit_slot_update(tx, &mut saved)
+        })
+    }
+
+    fn start(&self, snapshot: &ReturnScope, input: ProducerInput) -> Result<SlotResult, Refusal> {
+        let pool = &snapshot.pool;
+        let slot = &pool.slots[self.slot_index()];
+        let (checkout, _) = producer_lease(slot, &self.key, &input.credential)?;
+        if slot
+            .outcomes
+            .iter()
+            .any(|outcome| self.key.matches_identity(outcome))
+        {
+            return Err(Refusal::ReturnUncertain(
+                "This producer operation already has a recorded start. Wait for its original foreground operation.",
+            ));
+        }
+        let prior = profile::eligible_producer(&slot.producer, slot.generation)?;
+        if slot.outcomes.len() == MAX_OUTCOMES {
+            return Err(Refusal::OutcomeLimit);
+        }
+        if prior.completed_in_generation(slot.generation).len() >= MAX_OUTCOMES {
+            return Err(Refusal::ProducerHistoryLimit);
+        }
+        if prior
+            .completed_in_generation(slot.generation)
+            .iter()
+            .any(|record| record.operation == self.key.operation)
+        {
+            return Err(Refusal::ReturnUncertain(
+                "This invocation operation is already recorded as complete.",
+            ));
+        }
+        let roots = prior.roots();
+        let mut proof = self.inspect(snapshot, &input, &roots, empty_proof(&prior))?;
+        let checked = profile::check_invocation(&pool.profile, &input.shape, &proof, &roots)?;
+        let pending = PendingProducer {
+            epoch: OutputEpoch {
+                pool_id: pool.pool_id.clone(),
+                slot: slot.number,
+                checkout: checkout.clone(),
+            },
+            generation: slot.generation,
+            profile: input.shape.profile,
+            invocation: checked.evidence.clone(),
+            roots,
+            operation: self.key.operation.to_owned(),
+            prior,
+            runner: self.runner.clone(),
+            foreground: None,
+        };
+        let outcome = Outcome {
+            pool_id: pool.pool_id.clone(),
+            slot: slot.number,
+            generation: slot.generation,
+            operation: self.key.operation.to_owned(),
+            attempt_id: None,
+            kind: OperationKind::ProducerStart,
+            request: OutcomeRequest::Producer {
+                runner: self.runner.clone(),
+                invocation: checked.evidence,
+            },
+            credential: input.credential,
+            result: TransitionResult::ProducerPending,
+        };
+        self.publish(snapshot, |slot| {
+            slot.producer = Producer::Pending(Box::new(pending));
+            slot.outcomes.push(outcome);
+            Ok(())
+        })?;
+        proof.release_output_locks();
+        Ok(producer_result(pool, slot, &proof, "producer_started"))
+    }
+
+    fn report_bypass(
+        &self,
+        snapshot: &ReturnScope,
+        input: &ProducerInput,
+    ) -> Result<SlotResult, Refusal> {
+        let pool = &snapshot.pool;
+        let slot = &pool.slots[self.slot_index()];
+        let (checkout, ready_commit) = producer_lease(slot, &self.key, &input.credential)?;
+        if input.shape.profile.id != pool.profile.id
+            || input.shape.profile.revision != pool.profile.revision
+        {
+            return Err(Refusal::ReturnUncertain(
+                "The producer report does not name the current reviewed profile.",
+            ));
+        }
+        let report = BypassReport {
+            operation: self.key.operation.to_owned(),
+            runner: self.runner.clone(),
+        };
+        let mut result = SlotResult::new(
+            "slot producer",
+            "producer_tainted",
+            Some(pool.main.clone()),
+            0,
+        );
+        result.pool_id = Some(pool.pool_id.clone());
+        result.transition = Some(SlotTransition {
+            slot: slot.number,
+            generation: slot.generation,
+            phase: "held",
+            commit: ready_commit.to_owned(),
+            current: false,
+        });
+        result.next_action = Some(LOST_PROVENANCE);
+        if let Producer::Tainted {
+            generation,
+            report: Some(previous),
+            ..
+        } = &slot.producer
+            && generation == &slot.generation
+            && previous == &report
+        {
+            return Ok(result);
+        }
+        if slot.producer.lost()
+            || slot
+                .outcomes
+                .iter()
+                .any(|outcome| self.key.matches_identity(outcome))
+        {
+            return Err(watch_refusal());
+        }
+        let previous_roots = if let Producer::Pending(pending) = &slot.producer {
+            if pending.runner != self.runner || pending.operation == self.key.operation {
+                return Err(producer_fence_refusal());
+            }
+            Some(pending.roots.clone())
+        } else if let Some(prior) = slot.producer.eligible(slot.generation) {
+            let completed = prior.completed_in_generation(slot.generation);
+            if completed
+                .last()
+                .is_some_and(|record| record.runner != self.runner)
+                || completed
+                    .iter()
+                    .any(|record| record.operation == self.key.operation)
+            {
+                return Err(producer_fence_refusal());
+            }
+            Some(prior.roots())
+        } else {
+            None
+        };
+        let observed = |root: RootExpectation| match root {
+            RootExpectation::Present { root }
+                if owned_identity(&root.path) == Some(root.identity) =>
+            {
+                Some(root)
+            }
+            _ => None,
+        };
+        let roots = previous_roots.map_or(
+            OutputRoots {
+                target: None,
+                build: None,
+            },
+            |roots| OutputRoots {
+                target: observed(roots.target),
+                build: observed(roots.build),
+            },
+        );
+        self.publish(snapshot, |slot| {
+            slot.producer = Producer::Tainted {
+                epoch: OutputEpoch {
+                    pool_id: pool.pool_id.clone(),
+                    slot: slot.number,
+                    checkout: checkout.clone(),
+                },
+                generation: slot.generation,
+                roots,
+                reason: ProvenanceLoss::OffProfile,
+                report: Some(report),
+            };
+            Ok(())
+        })?;
+        Ok(result)
+    }
+
+    fn inspect(
+        &self,
+        snapshot: &ReturnScope,
+        input: &ProducerInput,
+        roots: &OutputRoots<RootExpectation>,
+        initial_empty: Option<&slots::EmptyEpoch>,
+    ) -> Result<CheckoutProof, Refusal> {
+        let pool = &snapshot.pool;
+        let slot = &pool.slots[self.slot_index()];
+        let (checkout, ready_commit) = producer_lease(slot, &self.key, &input.credential)?;
+        let invocation = profile::reviewed_shape(&pool.profile, &input.shape)?;
+        let mutable =
+            profile::mutable_checkout_paths(&pool.profile, invocation, &pool.checkout_path(slot));
+        let proof = inspect_producer_checkout(
+            &SlotScope {
+                pool,
+                slot,
+                registry: &snapshot.registry,
+                secondary_roots: &snapshot.secondary_roots,
+            },
+            &ExpectedCheckout {
+                identity: checkout,
+                head: Some(ready_commit),
+            },
+            &ProducerInventory {
+                roots,
+                initial_empty,
+                mutable: &mutable,
+            },
+        )?;
+        check_producer_inventory(&proof)?;
+        Ok(proof)
+    }
+
+    fn watch(
+        &self,
+        mut snapshot: ReturnScope,
+        input: ProducerInput,
+        pid: u32,
+        fd: i32,
+        inherited: BorrowedFd<'_>,
+    ) -> Result<SlotResult, Refusal> {
+        let slot = &snapshot.pool.slots[self.slot_index()];
+        let Producer::Pending(pending) = &slot.producer else {
+            return Err(watch_refusal());
+        };
+        if pending.operation != self.key.operation
+            || pending.runner != self.runner
+            || pending.foreground.is_some()
+            || pending.profile != input.shape.profile
+        {
+            return Err(watch_refusal());
+        }
+        let mut pending = pending.clone();
+        let mut proof = self.inspect(
+            &snapshot,
+            &input,
+            &pending.roots,
+            empty_proof(&pending.prior),
+        )?;
+        let checked = profile::check_invocation(
+            &snapshot.pool.profile,
+            &input.shape,
+            &proof,
+            &pending.roots,
+        )?;
+        if checked.evidence != pending.invocation {
+            return Err(watch_refusal());
+        }
+        let watcher = ForegroundWatch::start(
+            runner_instance(&self.runner),
+            pid,
+            fd,
+            LockFileIdentity {
+                dev: self.lock_id.dev,
+                ino: self.lock_id.ino,
+            },
+            inherited,
+        )
+        .map_err(foreground_refusal)?;
+        let profile = &snapshot.pool.profile;
+        let invocation = profile::reviewed_shape(profile, &input.shape)?;
+        let gate = watcher.stopped_image().map_err(foreground_refusal)?;
+        let environment_args: Vec<_> = checked
+            .environment
+            .iter()
+            .map(|(name, value)| {
+                let mut assignment = name.clone();
+                assignment.push("=");
+                assignment.push(value);
+                assignment
+            })
+            .collect();
+        let cargo_args = || {
+            std::iter::once(checked.cargo.as_os_str())
+                .chain(invocation.argv.iter().map(std::ffi::OsStr::new))
+        };
+        let environment_and_cargo = || {
+            environment_args
+                .iter()
+                .map(std::ffi::OsString::as_os_str)
+                .chain(cargo_args())
+        };
+        let expected_gate = std::iter::once(std::ffi::OsStr::new(PRODUCER_GATE_PROGRAM))
+            .chain(PRODUCER_GATE_ARGS.iter().map(std::ffi::OsStr::new))
+            .chain(environment_and_cargo());
+        if gate.program != Path::new(PRODUCER_GATE_PROGRAM)
+            || !gate.argv.iter().eq(expected_gate)
+            || gate.cwd != checked.cwd
+        {
+            return Err(Refusal::ReturnUncertain(
+                "The stopped guide child's executable, arguments or environment allowlist differs from the reviewed Cargo launch.",
+            ));
+        }
+        let child = watcher.child();
+        let child = ForegroundInstance {
+            pid: child.pid,
+            start_secs: child.start_secs,
+            start_micros: child.start_micros,
+        };
+        pending.foreground = Some(child.clone());
+        self.publish(&snapshot, |slot| {
+            slot.producer = Producer::Pending(pending.clone());
+            Ok(())
+        })?;
+        snapshot.pool.slots[self.slot_index()].producer = Producer::Pending(pending.clone());
+        proof.release_output_locks();
+
+        let exited = watcher
+            .wait(
+                Duration::from_secs(60 * 60),
+                &checked.cargo,
+                checked.environment.len(),
+                |image| {
+                    if image.cwd != checked.cwd {
+                        return None;
+                    }
+                    if image.program == checked.cargo
+                        && image.argv.iter().eq(cargo_args())
+                        && image.environment == checked.environment
+                    {
+                        Some(ForegroundExec::Writer)
+                    } else if image.program == Path::new(PRODUCER_ENV_PROGRAM)
+                        && image.argv.iter().eq([PRODUCER_ENV_PROGRAM, "-i"]
+                            .into_iter()
+                            .map(std::ffi::OsStr::new)
+                            .chain(environment_and_cargo()))
+                    {
+                        Some(ForegroundExec::Handoff)
+                    } else {
+                        None
+                    }
+                },
+                cancelled,
+            )
+            .map_err(foreground_refusal)?;
+        if exited.pid != child.pid
+            || exited.start_secs != child.start_secs
+            || exited.start_micros != child.start_micros
+        {
+            return Err(watch_refusal());
+        }
+        let finished = self.snapshot(&input.credential)?;
+        if finished.pool.slots[self.slot_index()] != snapshot.pool.slots[self.slot_index()] {
+            return Err(watch_refusal());
+        }
+        self.finish(&finished, &input, &pending, child)
+    }
+
+    fn finish(
+        &self,
+        snapshot: &ReturnScope,
+        input: &ProducerInput,
+        pending: &PendingProducer,
+        child: ForegroundInstance,
+    ) -> Result<SlotResult, Refusal> {
+        let roots = profile::completed_roots(&pending.roots)?;
+        let roots_for_check = OutputRoots {
+            target: RootExpectation::Present {
+                root: roots.target.clone(),
+            },
+            build: RootExpectation::Present {
+                root: roots.build.clone(),
+            },
+        };
+        let proof = self.inspect(snapshot, input, &roots_for_check, None)?;
+        let pool = &snapshot.pool;
+        let checked =
+            profile::check_invocation(&pool.profile, &input.shape, &proof, &roots_for_check)?;
+        if checked.evidence != pending.invocation {
+            return Err(watch_refusal());
+        }
+        profile::verify_output_layout(
+            profile::reviewed_shape(&pool.profile, &input.shape)?,
+            &roots.build.path,
+        )?;
+        let mut invocations = pending
+            .prior
+            .completed_in_generation(pending.generation)
+            .to_vec();
+        invocations.push(CompletedInvocation {
+            evidence: pending.invocation.clone(),
+            operation: pending.operation.clone(),
+            runner: pending.runner.clone(),
+            foreground: Some(child),
+        });
+        self.publish(snapshot, |slot| {
+            let outcome = slot
+                .outcomes
+                .iter_mut()
+                .find(|outcome| {
+                    self.key.matches_identity(outcome)
+                        && outcome.kind == OperationKind::ProducerStart
+                        && outcome.credential == input.credential
+                })
+                .ok_or_else(watch_refusal)?;
+            outcome.kind = OperationKind::ProducerComplete;
+            outcome.result = TransitionResult::ProducerComplete;
+            slot.producer = Producer::Complete {
+                epoch: pending.epoch.clone(),
+                generation: pending.generation,
+                profile: pending.profile.clone(),
+                roots,
+                invocations,
+            };
+            Ok(())
+        })?;
+        Ok(producer_result(
+            pool,
+            &pool.slots[self.slot_index()],
+            &proof,
+            "producer_complete",
+        ))
+    }
+}
+
+fn empty_proof(prior: &EligibleProducer) -> Option<&slots::EmptyEpoch> {
+    match prior {
+        EligibleProducer::NeverBuilt { evidence } => Some(evidence),
+        _ => None,
+    }
+}
+
+fn runner_instance(runner: &Runner) -> ProcessInstance {
+    ProcessInstance {
+        boot_session: runner.boot_session.clone(),
+        pid: runner.pid,
+        start_secs: runner.start_secs,
+        start_micros: runner.start_micros,
+    }
+}
+
+fn watch_refusal() -> Refusal {
+    Refusal::ReturnUncertain(
+        "The exact pending invocation or its foreground completion could not be verified.",
+    )
+}
+
+fn foreground_refusal(err: io::Error) -> Refusal {
+    if err.kind() == io::ErrorKind::Interrupted && cancelled() {
+        return StateError::Cancelled.into();
+    }
+    Refusal::Scope(format!(
+        "Foreground custody or completion could not be established ({err}). Preserve the pending invocation and slot files."
+    ))
+}
+
+fn producer_result(
+    pool: &Pool,
+    slot: &Slot,
+    proof: &CheckoutProof,
+    kind: &'static str,
+) -> SlotResult {
+    let mut result = SlotResult::new("slot producer", kind, Some(pool.main.clone()), 0);
+    result.pool_id = Some(pool.pool_id.clone());
+    result.transition = Some(SlotTransition {
+        slot: slot.number,
+        generation: slot.generation,
+        phase: "leased",
+        commit: proof.head.clone(),
+        current: true,
+    });
+    result
+}
+
+fn producer_lease<'a>(
+    slot: &'a Slot,
+    key: &SlotRequestKey<'_>,
+    credential: &str,
+) -> Result<(&'a slots::CheckoutIdentity, &'a str), Refusal> {
+    if let Phase::Leased {
+        lease,
+        ready_commit,
+    } = &slot.phase
+        && slot.generation == key.generation
+        && lease.credential == credential
+        && let Some(checkout) = &slot.checkout_id
+    {
+        return Ok((checkout, ready_commit));
+    }
+    Err(Refusal::Scope(
+        "A producer requires the original credential and current ready lease generation.".into(),
+    ))
+}
+
+fn producer_fence_refusal() -> Refusal {
+    Refusal::ReturnUncertain("Could not verify the guide runner and inherited slot operation lock.")
+}
+
+fn producer_runner(nonce: &str) -> Result<Runner, Refusal> {
+    let observed = parent_instance().map_err(|_| producer_fence_refusal())?;
+    Ok(Runner {
+        boot_session: observed.boot_session,
+        pid: observed.pid,
+        start_secs: observed.start_secs,
+        start_micros: observed.start_micros,
+        nonce: nonce.to_owned(),
+    })
+}
+
+fn check_producer_inventory(proof: &CheckoutProof) -> Result<(), Refusal> {
+    match proof.inventory {
+        CheckoutInventory::Clean => Ok(()),
+        CheckoutInventory::Dirty(detail) => Err(Refusal::ReturnWork(detail)),
+        CheckoutInventory::Uncertain(detail) => Err(Refusal::ReturnUncertain(detail)),
+    }
 }
 
 enum ReturnPlan {
@@ -1341,7 +2020,10 @@ fn project_pool(
             let held = !scope_verified || !slot_identity_present(state, pool, slot);
             let (phase, action) = if slot.producer.lost() {
                 ("held", Some(LOST_PROVENANCE))
-            } else if held || matches!(slot.phase, Phase::Held { .. }) {
+            } else if held
+                || matches!(slot.phase, Phase::Held { .. })
+                || matches!(slot.producer, Producer::Pending(_))
+            {
                 ("held", Some(HELD_ACTION))
             } else if matches!(slot.phase, Phase::Vacant) && slot.outcomes.len() >= MAX_OUTCOMES {
                 ("held", Some(OUTCOME_LIMIT_ACTION))
