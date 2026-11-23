@@ -466,6 +466,29 @@ _Requirements: SCORECARD-8.7, SCORECARD-8.9, SCORECARD-8.10_
 
 ---
 
+### Task 12: Warn when a rerun uses a debug build of hive (added 2026-11-23 after O4)
+
+**Files:**
+- Modify: `docs/scorecard.md` (`preflight` and the prose under it)
+
+**Reuse:** rung 2 — the profile detection already in `preflight` (Task 3)
+
+**Interfaces:**
+- Consumes: `prof` in `preflight`, `$RUN/hive.txt`
+- Produces: a one-line stderr warning for `debug`, a different note for `unknown`, the same line recorded in `$RUN/hive.txt`
+
+**Depends-on:** Task 11
+
+`preflight` already wrote `build profile:` to `$RUN/hive.txt`. It now also warns on a debug build and notes an unknown one, and it never stops the run (the operator chose record-and-warn on 2026-11-23, closing requirements O4).
+
+- [x] **Step 1: Warning.** When `prof` is `debug`, `preflight` prints one line to stderr and appends the same line to `$RUN/hive.txt`; an `unknown` profile gets a different one-line note, printed and recorded the same way; `release` prints nothing. The doc's prose says the cold arm is unaffected.
+- [x] **Step 2: Check, as an isolated snippet.** The profile-detection and warning lines were extracted from the Rerun blocks into a scratch script and run in pure zsh under `zsh -e` with `hbin` set to a path containing `/target/debug/`, `/target/release/` and one containing neither. Debug: the warning on stderr and in the scratch `hive.txt`, exit 0. Release: nothing printed or recorded, exit 0. Unknown: the note on stderr and in `hive.txt`, exit 0. `zsh -n` on the whole extracted Rerun script passed. The full `preflight` chain was not rerun for this change: no dev build of hive exists in this worktree, so only the snippet was checked.
+- [x] **Step 3: Commit.** `docs(scorecard): warn when a rerun uses a debug build of hive`.
+
+_Requirements: SCORECARD-8.11_
+
+---
+
 ## Realigned 2026-11-23
 
 The plan text above is left as approved; what was built differs in these recorded ways:
@@ -476,3 +499,4 @@ The plan text above is left as approved; what was built differs in these recorde
 - The `.env` probe edit inserts `x` before a closing quote (design Decision 5); an untracked probe file is restored by copying from the main.
 - The Values column is `Cost`, not `Metric`; "measured workspace" became "measured repo"; the hive used in the first run was a debug build (requirements O4).
 - Task 11 and requirements 8.9 and 8.10 were added for the validation and load work.
+- Task 12 and requirement 8.11 were added after the realign, when O4 was closed with record-and-warn.

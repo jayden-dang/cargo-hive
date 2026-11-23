@@ -175,7 +175,7 @@ SCORECARD-10.1 is met by the env-file split in Decision 2. The doc's text never 
 
 ### Rerun preflight
 
-Satisfies: SCORECARD-8.1, SCORECARD-8.2, SCORECARD-8.3, SCORECARD-8.9
+Satisfies: SCORECARD-8.1, SCORECARD-8.2, SCORECARD-8.3, SCORECARD-8.9, SCORECARD-8.11
 Reuse: rung 2 — the shipped CLI (`cargo hive doctor`, `cargo hive repo add`, `cargo hive bench --help`; crates/cargo-hive/src/cli.rs:75-90)
 Interface: one block. It sources `.skills/verify/scorecard.env`, then checks `cargo hive doctor --json` passed and that `$MAIN` is registered. It then greps `cargo hive bench --help` for each quoted flag (`--cold`, `--seeded`, `--build-cmd`, `--json`) and stops on the first missing one, naming the step to fix in the same commit
 Depth: callers keep knowing only "source the env file, then run preflight"; the flag list is the one thing to update when bench changes
@@ -185,6 +185,10 @@ The block also:
 - resolves `TC` in `$MAIN` and runs `RUSTUP_TOOLCHAIN=$TC cargo hive doctor --json`. Doctor resolves its toolchain from the state root with any directory toolchain dropped (cli.rs:440; cargo/src/toolchain.rs:73-80), so without the variable it records the rustup default, not the workspace's;
 - records `command -v cargo-hive`, `cargo hive --version` and, as its third line, `build profile:`
   (`debug` when the binary lies under `target/debug/`) in `$RUN/hive.txt`;
+- when the profile is `debug`, prints one warning line to stderr and appends the same line to
+  `$RUN/hive.txt` (SCORECARD-8.11); an `unknown` profile (neither `target/debug/` nor
+  `target/release/`) gets a different one-line note, printed and recorded the same way. It never
+  stops the run: the operator chose record-and-warn on 2026-11-23 (closing requirements O4). The cold arm is unaffected, since hive does no work in its timed window;
 - runs `check_inputs`, shared with `bench_row` and `pipeline` (SCORECARD-8.9): `P` is non-empty,
   alphanumeric first, letters, digits, `_` and `-` only; `FILE` is non-empty; `rel_ok` holds for
   `FILE`, `PROBE` and each `UNTRACKED_COPY` entry (relative, no `..` segment);
@@ -418,7 +422,7 @@ runs and records in evidence.
 
 Every ID in requirements.md appears in exactly one Satisfies line:
 - Values and Provenance tables: 1.1–1.9, 10.1
-- Rerun preflight: 8.1–8.3, 8.9
+- Rerun preflight: 8.1–8.3, 8.9, 8.11
 - Bench rows: 2.1–2.4
 - By-hand pipeline: 3.1–3.5, 4.1–4.4, 5.1–5.3, 6.1–6.4
 - Recording a run: 8.4–8.8, 8.10, 9.1, 9.3

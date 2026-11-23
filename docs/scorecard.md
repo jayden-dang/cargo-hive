@@ -100,6 +100,8 @@ SCORECARD_NUMBERS_PUBLIC=
 
 `preflight` rejects an empty `P` or `FILE`, a `P` that is not letters, digits, `_` and `-` or that starts with `-`, and a `FILE`, `PROBE` or `UNTRACKED_COPY` entry that is absolute or has a `..` segment. A failed preflight must be fixed and rerun before anything else: it sets `PREFLIGHT_OK` only when every check passed, and `bench_row` and `pipeline` refuse to run without it and re-check these inputs themselves.
 
+When hive's binary lies under `target/debug/`, `preflight` prints one warning line to stderr (hive is a debug build: seed times in the seeded arm run slower than a release build; use `target/release` for a baseline) and records the same line in `$RUN/hive.txt`; it never stops the run. A path under neither `target/debug/` nor `target/release/` gets a different one-line note, printed and recorded the same way. The cold arm is unaffected, since hive does no work in its timed window.
+
 The evidence directory is named for the date preflight runs on. A run that crosses midnight would start a second directory in a new shell. To keep one directory, finish before midnight, or set `RUN` to the earlier directory (`RUN=.skills/verify/<date>-scorecard`) before `preflight`: preflight keeps a `RUN` already set in the shell, including a leftover one from an earlier run in the same shell, so `unset RUN` before a new run. Ctrl-C stops the run after cleaning up: the interrupt trap removes the worktrees and sets `SCORECARD_INTERRUPTED`, and `bench_row` and `pipeline` return 130 and refuse to start while it is set. The interrupt trap's `return` ends only the function that was running and loses its status, so `bench_row` and `pipeline` are thin wrappers that turn the flag into 130. A rerunner clears the flag by rerunning `preflight`, and in a loop must test `intr` after each call, because a trailing `|| true` hides the 130. A second preflight overwrites `load-start.txt`, and `summarize` writes the date it runs on. When resuming, run only the pipelines still missing: the pipelines block moves an existing `pipe.jsonl` aside.
 
 ```zsh
@@ -160,6 +162,12 @@ preflight() {
   [[ $hbin == */target/debug/* ]] && prof=debug
   [[ $hbin == */target/release/* ]] && prof=release
   { print -r -- $hbin; cargo hive --version && print "build profile: $prof (from the binary's path)"; } > $RUN/hive.txt || { print "preflight stopped: cargo hive --version failed" | tee $RUN/preflight-fail.txt >&2; return 1 }
+  case $prof in
+    debug) msg='hive is a debug build: seed times in the seeded arm run slower than a release build; use target/release for a baseline' ;;
+    unknown) msg="hive's build profile is unknown: its path has neither target/debug nor target/release, so seed times may not match a release build" ;;
+    *) msg= ;;
+  esac
+  [[ -z $msg ]] || { print -u2 -r -- $msg; print -r -- $msg >> $RUN/hive.txt }
 
   local doctor_rc=0
   if [[ -n $TC ]]; then

@@ -271,6 +271,12 @@ feature ships, so that the new numbers replace the old ones in the same rows.
   `load-end.txt`, and print a warning to stderr, not a failure, when the start load in
   `load-start.txt` is above half the logical core count or the file is missing. Added at realign
   2026-11-23; built in 97181bd.
+- **SCORECARD-8.11** WHEN `preflight` finds hive's binary under a debug build directory
+  (`target/debug/`) THE SYSTEM SHALL print one warning line to stderr and record the same line in
+  `$RUN/hive.txt`, and SHALL continue; WHEN the path matches neither `target/debug/` nor
+  `target/release/` it SHALL print and record a different one-line note, and continue. It SHALL
+  also record the build profile (`debug`, `release` or `unknown`) in `$RUN/hive.txt`. Added
+  2026-11-23 after O4; the cold arm is unaffected, since hive does no work in its timed window.
 
 ## 9. The first run replaces today's headline
 
@@ -361,7 +367,7 @@ The guards:
   `bench_row` and `pipeline` calls still refuse, so no wrong number can be measured, but the
   exit status is misleading, because `preflight` has no wrapper like the other two. `summarize`
   and `record` are not interrupt-aware either. Owner: operator (fix, or accept).
-- O4 Decision for the owner: the first run used a debug build of hive, so the seeded values of R1
-  to R5 and R7 carry a debug-built seed. The scorecard says so in its Latest run paragraph and
-  `hive.txt` records the build profile, but no requirement forces a rerun to state it. Add one,
-  or leave it to the Latest run paragraph?
+- O4 Closed 2026-11-23: the first run used a debug build of hive, so the seeded values of R1 to
+  R5 and R7 carried a debug-built seed. The operator chose to record and warn, not stop:
+  `preflight` prints and records a one-line warning for a debug build and continues
+  (SCORECARD-8.11). The Latest run paragraph still names the build the numbers came from.
