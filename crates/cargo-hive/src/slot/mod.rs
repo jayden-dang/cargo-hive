@@ -1,14 +1,14 @@
 //! The slot CLI scopes operations to a registered main and its private pool namespace.
 
+mod inspect;
 mod result;
 
 use crate::cli::{SlotCommand, SlotReplay, SlotScopeArgs};
 use cargo_hive_cargo::{
-    env,
+    git::{Git, SlotGitError, WorktreeRecord},
     registry::{self, Registry},
 };
-use cargo_hive_platform::flock::{duplicate_inherited_fd, private_file_metadata};
-use cargo_hive_platform::proc::{self, Capture, Spec};
+use cargo_hive_platform::flock::{duplicate_inherited_fd, private_file_metadata, try_exclusive};
 use cargo_hive_platform::signals::{self, cancelled};
 use cargo_hive_state::slots::{
     self, CHECKOUT_NAMESPACE, FileIdentity, GitIdentity, LOCK_NAMESPACE, Lease, MAX_OUTCOMES,
@@ -16,13 +16,13 @@ use cargo_hive_state::slots::{
     SlotRequestKey, SlotsFile, TransitionResult,
 };
 use cargo_hive_state::{State, StateError, Tx};
+use inspect::{CheckoutInventory, ExpectedCheckout, SlotScope, inspect_checkout};
 use result::{FRESH_FALLBACK, SlotResult, SlotStatus, SlotTransition};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 const HELD_ACTION: &str = "Preserve the slot files and ask the repository operator to inspect identity, quiescence and unfinished work. Create a separate fresh secondary checkout and run `cargo hive seed <checkout>` there.";
 const LOST_PROVENANCE: &str = "This slot does not regain warm capacity for these retained outputs in this version. Create a separate fresh secondary checkout and run `cargo hive seed <checkout>` there.";
@@ -82,7 +82,9 @@ pub(super) fn dispatch(command: SlotCommand) -> i32 {
             );
         }
         SlotCommand::Return(op) => {
-            return unavailable("slot return", Some(op.scope.repo), op.out.json);
+            return run_scoped("slot return", &op.scope.repo, op.out.json, |state| {
+                return_slot(state, &op.scope, op.generation, &op.op)
+            });
         }
         SlotCommand::Outcome(op) => return dispatch_replay(&op, ReplayAction::Outcome),
         SlotCommand::Ack(op) => return dispatch_replay(&op, ReplayAction::Acknowledge),
@@ -196,6 +198,8 @@ enum Refusal {
     Scope(String),
     Orphan(PathBuf, PathBuf),
     Capacity(&'static str),
+    ReturnWork(&'static str),
+    ReturnUncertain(&'static str),
     OutcomeLimit,
 }
 
@@ -216,6 +220,13 @@ fn refusal(command: &'static str, repo: &Path, err: Refusal) -> SlotResult {
         Refusal::State(err) => ("refused", 1, err.to_string(), FRESH_FALLBACK),
         Refusal::Scope(detail) => ("refused", 1, detail, FRESH_FALLBACK),
         Refusal::Capacity(detail) => ("unavailable", 1, detail.into(), FRESH_FALLBACK),
+        Refusal::ReturnWork(detail) => (
+            "refused",
+            1,
+            detail.into(),
+            "Resolve the unfinished work deliberately, then retry the original return.",
+        ),
+        Refusal::ReturnUncertain(detail) => ("refused", 1, detail.into(), HELD_ACTION),
         Refusal::OutcomeLimit => (
             "unavailable",
             1,
@@ -416,6 +427,163 @@ fn commit_refusal() -> Refusal {
     )
 }
 
+struct ReturnScope {
+    pool: Pool,
+    registry: Registry,
+    secondary_roots: Vec<PathBuf>,
+}
+
+enum ReturnPlan {
+    Inspect(Box<ReturnScope>),
+    Replay(SlotResult),
+}
+
+fn return_slot(
+    state: &State,
+    scope: &SlotScopeArgs,
+    generation: u64,
+    operation: &str,
+) -> Result<SlotResult, Refusal> {
+    const COMMAND: &str = "slot return";
+    let key = request_key(scope, generation, OperationKind::Return, operation, None)?;
+    let input = SlotOperationInput::read()?;
+    let lock_dir = state.root().join(LOCK_NAMESPACE).join(key.pool_id);
+    check_private_dir(&lock_dir).map_err(|err| path_refusal(&lock_dir, err))?;
+    let lock_path = lock_dir.join(format!("slot-{}.lock", key.slot));
+    let (file, lock_id) =
+        slots::open_slot_lock(&lock_path).map_err(|err| path_refusal(&lock_path, err))?;
+    let _guard = try_exclusive(&file)
+        .map_err(|err| path_refusal(&lock_path, err))?
+        .ok_or(Refusal::ReturnUncertain(
+            "A writer may still hold the slot operation lock.",
+        ))?;
+    let registered = verify_operation_repo(state, &scope.repo)?;
+    let slot_index = usize::from(key.slot - 1);
+    let plan = with_slot_state(state, |tx| {
+        let (saved, index) = checked_pool(tx, state, scope, &registered)?;
+        let pool = &saved.pools[index];
+        let slot = &pool.slots[slot_index];
+        if slot.lock_id != lock_id || slots::checked_slot_lock(&lock_path).ok() != Some(lock_id) {
+            return Err(Refusal::ReturnUncertain(
+                "The persisted slot lock identity could not be verified.",
+            ));
+        }
+        if let Some(outcome) = slot
+            .outcomes
+            .iter()
+            .find(|outcome| key.matches_identity(outcome))
+        {
+            if outcome.kind != key.kind || outcome.credential != input.credential {
+                return Err(Refusal::Scope("The operation ID is already bound to a different request. Use the guide's exact original request.".into()));
+            }
+            let result = return_result(COMMAND, "returned", pool, outcome)?;
+            tx.sync_slots(&saved)?;
+            return Ok(ReturnPlan::Replay(result));
+        }
+        if slot.generation != key.generation
+            || !matches!(&slot.phase, Phase::Leased { lease, .. }
+            if lease.credential == input.credential)
+        {
+            return Err(Refusal::Scope(
+                "Return requires the original credential and the current ready lease generation."
+                    .into(),
+            ));
+        }
+        if slot.outcomes.len() >= MAX_OUTCOMES {
+            return Err(Refusal::OutcomeLimit);
+        }
+        Ok(ReturnPlan::Inspect(Box::new(ReturnScope {
+            pool: pool.clone(),
+            registry: tx.read_slot_registry()?,
+            secondary_roots: state.slot_config()?.secondary_roots,
+        })))
+    })?;
+    let snapshot = match plan {
+        ReturnPlan::Replay(result) => return Ok(result),
+        ReturnPlan::Inspect(snapshot) => snapshot,
+    };
+    let pool = &snapshot.pool;
+    let slot = &pool.slots[slot_index];
+    let checkout = slot.checkout_id.as_ref().ok_or(Refusal::ReturnUncertain(
+        "The ready lease does not have a verified checkout identity.",
+    ))?;
+    let proof = inspect_checkout(
+        &SlotScope {
+            pool,
+            slot,
+            registry: &snapshot.registry,
+            secondary_roots: &snapshot.secondary_roots,
+        },
+        &ExpectedCheckout {
+            identity: checkout,
+            head: None,
+        },
+    )?;
+    match proof.inventory {
+        CheckoutInventory::Clean => (),
+        CheckoutInventory::Dirty(detail) => return Err(Refusal::ReturnWork(detail)),
+        CheckoutInventory::Uncertain(detail) => return Err(Refusal::ReturnUncertain(detail)),
+    }
+    let outcome = Outcome {
+        pool_id: key.pool_id.into(),
+        slot: key.slot,
+        generation: key.generation,
+        operation: key.operation.into(),
+        kind: key.kind,
+        attempt_id: key.attempt_id,
+        request: OutcomeRequest::Return,
+        credential: input.credential,
+        result: TransitionResult::Returned {
+            commit: proof.head.clone(),
+        },
+    };
+    let result = return_result(COMMAND, "returned", pool, &outcome)?;
+    with_slot_state(state, |tx| {
+        let (mut saved, index) = checked_pool(tx, state, scope, &registered)?;
+        let current = &saved.pools[index];
+        if current != pool
+            || tx.read_slot_registry::<Registry>()? != snapshot.registry
+            || state.slot_config()?.secondary_roots != snapshot.secondary_roots
+            || current.checkout_path(&current.slots[slot_index]) != proof.path
+            || !slot_identity_present(state.root(), current, &current.slots[slot_index])
+        {
+            return Err(Refusal::ReturnUncertain(
+                "The slot or owner scope changed during return inspection. Recheck the current lease.",
+            ));
+        }
+        check_cancelled()?;
+        let slot = &mut saved.pools[index].slots[slot_index];
+        slot.phase = Phase::Vacant;
+        slot.last_head = Some(proof.head);
+        slot.outcomes.push(outcome);
+        commit_slot_update(tx, &mut saved)?;
+        Ok(result)
+    })
+}
+
+fn return_result(
+    command: &'static str,
+    kind: &'static str,
+    pool: &Pool,
+    outcome: &Outcome,
+) -> Result<SlotResult, Refusal> {
+    let TransitionResult::Returned { commit } = &outcome.result else {
+        return Err(Refusal::Scope(
+            "The recorded operation is not a return.".into(),
+        ));
+    };
+    let mut result = SlotResult::new(command, kind, Some(pool.main.clone()), 0);
+    result.pool_id = Some(pool.pool_id.clone());
+    result.transition = Some(SlotTransition {
+        slot: outcome.slot,
+        generation: outcome.generation,
+        phase: "vacant",
+        commit: commit.clone(),
+        current: false,
+    });
+    Ok(result)
+}
+
 enum ReplayAction {
     Outcome,
     Acknowledge,
@@ -428,11 +596,11 @@ fn dispatch_replay(replay: &SlotReplay, action: ReplayAction) -> i32 {
     };
     let request = &replay.operation;
     run_scoped(command, &request.scope.repo, request.out.json, |state| {
-        replay_reservation(state, command, replay, action)
+        replay_outcome(state, command, replay, action)
     })
 }
 
-fn replay_reservation(
+fn replay_outcome(
     state: &State,
     command: &'static str,
     replay: &SlotReplay,
@@ -448,7 +616,7 @@ fn replay_reservation(
         replay.attempt,
     )?;
     let missing = || {
-        Refusal::Scope("No matching unresolved reservation was found. Use the guide's original request or ask the repository operator to inspect the current slot.".into())
+        Refusal::Scope("No matching unresolved slot operation was found. Use the guide's original request or ask the repository operator to inspect the current slot.".into())
     };
     if key.attempt_id.is_some() {
         return Err(missing());
@@ -466,15 +634,29 @@ fn replay_reservation(
             .enumerate()
             .find(|(_, outcome)| {
                 key.matches_identity(outcome)
-                    && outcome.kind == key.kind
+                    && matches!(outcome.kind, OperationKind::Reserve | OperationKind::Return)
                     && outcome.credential == input.credential
             })
             .ok_or_else(missing)?;
-        let kind = match action {
-            ReplayAction::Outcome => "reserved",
-            ReplayAction::Acknowledge => "acknowledged",
+        let acknowledgement = matches!(action, ReplayAction::Acknowledge).then_some("acknowledged");
+        let result = match outcome.kind {
+            OperationKind::Reserve => reservation_result(
+                command,
+                acknowledgement.unwrap_or("reserved"),
+                pool,
+                slot,
+                outcome,
+                state.root(),
+            ),
+            OperationKind::Return => return_result(
+                command,
+                acknowledgement.unwrap_or("returned"),
+                pool,
+                outcome,
+            ),
+            _ => return Err(missing()),
         };
-        let result = reservation_result(command, kind, pool, slot, outcome, state.root())?;
+        let result = result?;
         tx.sync_slots(&saved)?;
         if matches!(action, ReplayAction::Acknowledge) {
             check_cancelled()?;
@@ -716,8 +898,9 @@ fn current_git_identity(repo: &registry::Repo) -> Result<GitIdentity, Refusal> {
             "--show-superproject-working-tree",
         ],
     )?;
-    let decoded = std::str::from_utf8(&output).map_err(|_| git_scope_refusal(main))?;
-    let fields: Vec<_> = decoded.lines().collect();
+    let fields: Vec<_> = complete_git_lines(&output)
+        .ok_or_else(|| git_scope_refusal(main))?
+        .collect();
     let [top, admin, common] = fields.as_slice() else {
         return Err(git_scope_refusal(main));
     };
@@ -727,10 +910,11 @@ fn current_git_identity(repo: &registry::Repo) -> Result<GitIdentity, Refusal> {
     let common = PathBuf::from(common);
     let metadata = slots::owner_directory(&common).map_err(|err| path_refusal(&common, err))?;
     let roots = git_scope(main, &["rev-list", "--max-parents=0", "HEAD"])?;
-    let roots = std::str::from_utf8(&roots).map_err(|_| git_scope_refusal(main))?;
-    let roots: BTreeSet<_> = roots.lines().collect();
-    if roots.is_empty()
-        || !roots
+    let mut lines = complete_git_lines(&roots).ok_or_else(|| git_scope_refusal(main))?;
+    let mut observed = BTreeSet::new();
+    if !lines.all(|line| observed.insert(line))
+        || observed.is_empty()
+        || !observed
             .into_iter()
             .eq(repo.root_commits.iter().map(String::as_str))
     {
@@ -739,51 +923,25 @@ fn current_git_identity(repo: &registry::Repo) -> Result<GitIdentity, Refusal> {
     Ok(GitIdentity::of(common, &metadata))
 }
 
+fn complete_git_lines(bytes: &[u8]) -> Option<impl Iterator<Item = &str>> {
+    Some(
+        std::str::from_utf8(bytes)
+            .ok()?
+            .strip_suffix('\n')?
+            .split('\n'),
+    )
+}
+
 fn git_scope(main: &Path, args: &[&str]) -> Result<Vec<u8>, Refusal> {
-    let mut spec = Spec::new("git");
-    spec.args.extend([
-        "--no-optional-locks".into(),
-        "--no-replace-objects".into(),
-        "-c".into(),
-        "core.fsmonitor=false".into(),
-        "-C".into(),
-    ]);
-    spec.args.push(main.as_os_str().to_os_string());
-    spec.args.extend(args.iter().map(|arg| (*arg).into()));
-    let parent: Vec<_> = std::env::vars_os().collect();
-    env::git(&mut spec, &parent);
-    // Git versions without the lazy-fetch switch still honor the transport allowlist.
-    let controlled = [("GIT_NO_LAZY_FETCH", "1"), ("GIT_ALLOW_PROTOCOL", "")];
-    spec.env_remove
-        .retain(|key| !controlled.iter().any(|(name, _)| key == *name));
-    spec.env_remove.extend(
-        [
-            "CARGO_TARGET_DIR",
-            "CARGO_BUILD_TARGET_DIR",
-            "CARGO_BUILD_BUILD_DIR",
-        ]
-        .map(Into::into),
-    );
-    spec.env_set
-        .extend(controlled.map(|(key, value)| (key.into(), value.into())));
-    match proc::run_bounded(
-        &spec,
-        Duration::from_secs(10),
-        Capture {
-            stdout_cap: GIT_OUTPUT_LIMIT + 1,
-            stderr_cap: 1,
-        },
-        cancelled,
-    ) {
-        Ok(ran)
-            if ran.status.success()
-                && ran.stderr_tail.is_empty()
-                && ran.stdout.len() <= GIT_OUTPUT_LIMIT =>
-        {
-            Ok(ran.stdout)
-        }
-        Err(proc::ChildOutputError::Cancelled) => Err(StateError::Cancelled.into()),
-        _ => Err(git_scope_refusal(main)),
+    Git::at(main)
+        .slot_read_only(args, GIT_OUTPUT_LIMIT)
+        .map_err(|err| git_error(main, err))
+}
+
+fn git_error(main: &Path, error: SlotGitError) -> Refusal {
+    match error {
+        SlotGitError::Cancelled => StateError::Cancelled.into(),
+        SlotGitError::Incomplete => git_scope_refusal(main),
     }
 }
 
@@ -816,6 +974,14 @@ fn verify_root(
             root.display()
         )));
     }
+    verify_no_checkout_ancestor(root)?;
+    let mut remaining = MAX_ROOT_ENTRIES;
+    check_nested_checkouts(root, 0, &mut remaining, &[])?;
+    owner_worktree_inventory(root, registry, None)?;
+    Ok(())
+}
+
+fn verify_no_checkout_ancestor(root: &Path) -> Result<(), Refusal> {
     for ancestor in root.ancestors() {
         if exists(&ancestor.join(".git")).map_err(|err| path_refusal(ancestor, err))? {
             return Err(Refusal::Scope(format!(
@@ -824,26 +990,92 @@ fn verify_root(
             )));
         }
     }
-    let mut remaining = MAX_ROOT_ENTRIES;
-    check_nested_checkouts(root, 0, &mut remaining)?;
+    Ok(())
+}
+
+fn owner_worktree_inventory(
+    root: &Path,
+    registry: &Registry,
+    pool: Option<&Pool>,
+) -> Result<Vec<WorktreeRecord>, Refusal> {
     if registry.repos.len() > MAX_POOLS {
         return Err(Refusal::Scope(
             "Too many registered repositories to check the complete owner scope.".into(),
         ));
     }
+    let mut linked_slots = Vec::new();
     for repo in &registry.repos {
+        check_cancelled()?;
         let common = current_git_identity(repo)?;
         if overlaps(root, &repo.main) || overlaps(root, &common.path) {
             return Err(overlap_refusal(root));
         }
-        let inventory = git_scope(&repo.main, &["worktree", "list", "--porcelain", "-z"])?;
+        let own_pool = pool.filter(|pool| pool.main == repo.main);
+        if own_pool.is_some_and(|pool| pool.common_git_id != common) {
+            return Err(git_scope_refusal(&repo.main));
+        }
+        let entries = Git::at(&repo.main)
+            .worktrees_complete(GIT_OUTPUT_LIMIT)
+            .map_err(|err| git_error(&repo.main, err))?;
         let oid_len = repo.root_commits.first().map_or(0, String::len);
-        verify_worktree_inventory(root, &repo.main, oid_len, &inventory)?;
+        let valid_main = entries.first().is_some_and(|record| {
+            record.path.as_os_str() == repo.main.as_os_str()
+                && record.head.as_ref().is_some_and(|head| {
+                    head.len() == oid_len && head.bytes().any(|byte| byte != b'0')
+                })
+        });
+        if !valid_main || entries.len() > MAX_WORKTREES {
+            return Err(git_scope_refusal(&repo.main));
+        }
+        for record in entries {
+            let canonical =
+                canonical_worktree_path(&record.path).map_err(|_| git_scope_refusal(&repo.main))?;
+            if !overlaps(root, &record.path) && !overlaps(root, &canonical) {
+                continue;
+            }
+            if let Some(pool) = own_pool
+                && record.path.as_os_str() == canonical.as_os_str()
+                && pool.slots.iter().any(|slot| {
+                    slot.checkout_id.is_some() && pool.checkout_path(slot) == record.path
+                })
+                && !record.prunable
+            {
+                linked_slots.push(record);
+            } else {
+                return Err(overlap_refusal(root));
+            }
+        }
     }
-    Ok(())
+    Ok(linked_slots)
 }
 
-fn check_nested_checkouts(path: &Path, depth: usize, remaining: &mut usize) -> Result<(), Refusal> {
+fn canonical_worktree_path(path: &Path) -> io::Result<PathBuf> {
+    let mut missing = Vec::new();
+    for ancestor in path.ancestors() {
+        match ancestor.canonicalize() {
+            Ok(mut canonical) => {
+                canonical.extend(missing.into_iter().rev());
+                return Ok(canonical);
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                if exists(ancestor)? {
+                    return Err(err);
+                }
+                missing.push(ancestor.file_name().ok_or(err)?);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(io::Error::from(io::ErrorKind::NotFound))
+}
+
+fn check_nested_checkouts(
+    path: &Path,
+    depth: usize,
+    remaining: &mut usize,
+    skip: &[PathBuf],
+) -> Result<(), Refusal> {
+    check_cancelled()?;
     if depth > MAX_ROOT_DEPTH {
         return Err(Refusal::Scope(
             "Could not check the complete secondary root within the directory depth limit.".into(),
@@ -857,7 +1089,11 @@ fn check_nested_checkouts(path: &Path, depth: usize, remaining: &mut usize) -> R
                     .into(),
             )
         })?;
-        if entry.file_name() == ".git" {
+        if entry
+            .file_name()
+            .as_encoded_bytes()
+            .eq_ignore_ascii_case(b".git")
+        {
             return Err(Refusal::Scope(format!(
                 "{} contains an existing Git checkout.",
                 path.display()
@@ -866,8 +1102,8 @@ fn check_nested_checkouts(path: &Path, depth: usize, remaining: &mut usize) -> R
         let kind = entry
             .file_type()
             .map_err(|err| path_refusal(&entry.path(), err))?;
-        if kind.is_dir() {
-            check_nested_checkouts(&entry.path(), depth + 1, remaining)?;
+        if kind.is_dir() && !skip.contains(&entry.path()) {
+            check_nested_checkouts(&entry.path(), depth + 1, remaining, skip)?;
         }
     }
     Ok(())
@@ -878,102 +1114,6 @@ fn overlap_refusal(root: &Path) -> Refusal {
         "{} overlaps a registered main or owner worktree.",
         root.display()
     ))
-}
-
-fn verify_worktree_inventory(
-    root: &Path,
-    main: &Path,
-    oid_len: usize,
-    inventory: &[u8],
-) -> Result<(), Refusal> {
-    if !matches!(oid_len, 40 | 64) || inventory.len() > GIT_OUTPUT_LIMIT {
-        return Err(git_scope_refusal(main));
-    }
-    let decoded = std::str::from_utf8(inventory).map_err(|_| git_scope_refusal(main))?;
-    let records = decoded
-        .strip_suffix("\0\0")
-        .ok_or_else(|| git_scope_refusal(main))?;
-    let mut paths = BTreeSet::new();
-    for (index, record) in records.split("\0\0").enumerate() {
-        if index >= MAX_WORKTREES {
-            return Err(git_scope_refusal(main));
-        }
-        let mut fields = record.split('\0');
-        let path = fields
-            .next()
-            .and_then(|first| first.strip_prefix("worktree "))
-            .map(Path::new)
-            .filter(|path| path.is_absolute())
-            .ok_or_else(|| git_scope_refusal(main))?;
-        let head = fields.next().ok_or_else(|| git_scope_refusal(main))?;
-        // The registered main was already verified as non-bare.
-        if (index == 0) != (path == main)
-            || !valid_worktree_fields(head, fields, oid_len, index == 0)
-            || !paths.insert(path)
-        {
-            return Err(git_scope_refusal(main));
-        }
-        if overlaps(root, path) {
-            return Err(overlap_refusal(root));
-        }
-        match path.canonicalize() {
-            Ok(canonical) if overlaps(root, &canonical) => return Err(overlap_refusal(root)),
-            Ok(_) => (),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => (),
-            Err(_) => return Err(git_scope_refusal(main)),
-        }
-    }
-    Ok(())
-}
-
-fn valid_worktree_fields<'a>(
-    head: &str,
-    mut fields: impl Iterator<Item = &'a str>,
-    oid_len: usize,
-    is_main: bool,
-) -> bool {
-    let Some(oid) = head.strip_prefix("HEAD ") else {
-        return false;
-    };
-    if oid.len() != oid_len
-        || !oid
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        || (is_main && oid.bytes().all(|byte| byte == b'0'))
-    {
-        return false;
-    }
-    let Some(kind) = fields.next() else {
-        return false;
-    };
-    if kind != "detached" && !kind.strip_prefix("branch ").is_some_and(valid_git_ref) {
-        return false;
-    }
-    let mut locked = false;
-    let mut prunable = false;
-    fields.all(|field| {
-        let (name, reason) = field.split_once(' ').unwrap_or((field, ""));
-        let seen = match name {
-            "locked" => &mut locked,
-            "prunable" => &mut prunable,
-            _ => return false,
-        };
-        (!reason.is_empty() || name == field) && !std::mem::replace(seen, true)
-    })
-}
-
-fn valid_git_ref(name: &str) -> bool {
-    name.contains('/')
-        && !name.ends_with('.')
-        && !name.contains("..")
-        && !name.contains("@{")
-        && !name.bytes().any(|byte| {
-            byte.is_ascii_control()
-                || matches!(byte, b' ' | b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
-        })
-        && name
-            .split('/')
-            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
 }
 
 fn path_refusal(path: &Path, err: io::Error) -> Refusal {
@@ -1239,55 +1379,4 @@ fn project_pool(
         result.next_action = Some(FRESH_FALLBACK);
     }
     result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn worktree_inventory_requires_complete_exclusive_fields() {
-        let root = Path::new("/unused-slot-root");
-        let main = Path::new("/registered-main");
-        let head = "a".repeat(40);
-        let valid_main =
-            format!("worktree /registered-main\0HEAD {head}\0branch refs/heads/main\0\0");
-        let linked = format!(
-            "worktree /linked\0HEAD {head}\0detached\0locked because\nof this\0prunable reason\0\0"
-        );
-        assert!(
-            verify_worktree_inventory(root, main, 40, format!("{valid_main}{linked}").as_bytes())
-                .is_ok()
-        );
-        assert!(
-            verify_worktree_inventory(root, main, 40, format!("{linked}{valid_main}").as_bytes())
-                .is_err()
-        );
-        assert!(
-            verify_worktree_inventory(root, main, 40, b"worktree /registered-main\0bare\0\0")
-                .is_err()
-        );
-
-        for fields in [
-            "branch refs/heads/main".to_owned(),
-            "HEAD short\0detached".to_owned(),
-            format!("HEAD {}\0detached", "a".repeat(64)),
-            format!("HEAD {}\0detached", "z".repeat(40)),
-            format!("HEAD {head}"),
-            format!("HEAD {head}\0HEAD {head}\0detached"),
-            format!("HEAD {head}\0detached extra"),
-            format!("HEAD {head}\0branch refs/heads/m..ain"),
-            format!("HEAD {head}\0branch refs/heads/main\0detached"),
-            "bare".to_owned(),
-            format!("HEAD {head}\0bare"),
-            format!("HEAD {head}\0detached\0locked\0locked again"),
-            format!("HEAD {head}\0detached\0prunable one\0prunable two"),
-        ] {
-            let malformed = format!("{valid_main}worktree /linked\0{fields}\0\0");
-            assert!(
-                verify_worktree_inventory(root, main, 40, malformed.as_bytes()).is_err(),
-                "accepted {fields:?}"
-            );
-        }
-    }
 }

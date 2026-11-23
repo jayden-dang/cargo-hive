@@ -176,9 +176,20 @@ impl PoolFixture {
 }
 
 fn start_private(hive: &Hive, args: Vec<String>, input: &str) -> Child {
+    start_private_with(hive, args, input, |_| ())
+}
+
+#[allow(clippy::disallowed_types)]
+fn start_private_with(
+    hive: &Hive,
+    args: Vec<String>,
+    input: &str,
+    configure: impl FnOnce(&mut std::process::Command),
+) -> Child {
     assert!(args.iter().all(|arg| arg != input.trim_end()));
-    let mut child = hive
-        .command(&[])
+    let mut command = hive.command(&[]);
+    configure(&mut command);
+    let mut child = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -198,6 +209,614 @@ fn finish_private(child: Child) -> (Output, Value) {
     let out = common::wait_within(child, Duration::from_secs(15));
     let result = serde_json::from_slice(&out.stdout).unwrap_or_else(|err| panic!("{err}: {out:?}"));
     (out, result)
+}
+
+struct LeasedSlot {
+    fixture: PoolFixture,
+    pool: String,
+    path: PathBuf,
+    admin: PathBuf,
+    head: String,
+    credential: String,
+    operation: String,
+}
+
+impl LeasedSlot {
+    fn new() -> Self {
+        let fixture = PoolFixture::new();
+        let (out, initialized) = fixture.init();
+        assert!(out.status.success(), "{initialized}");
+        let pool = initialized["pool_id"].as_str().unwrap().to_owned();
+        let path = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                path.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let head = git(&path, &["rev-parse", "HEAD"]);
+        let admin = PathBuf::from(git(&path, &["rev-parse", "--absolute-git-dir"]));
+        let directory = fs::metadata(&path).unwrap();
+        let admin_metadata = fs::metadata(&admin).unwrap();
+        let checkout = json!({
+            "directory": {"dev": directory.dev(), "ino": directory.ino()},
+            "admin": {"path": admin, "dev": admin_metadata.dev(), "ino": admin_metadata.ino()}
+        });
+        let credential = "d".repeat(64);
+        let mut record = fixture.record();
+        let slot = &mut record["pools"][0]["slots"][0];
+        slot["generation"] = json!(1);
+        slot["checkout_id"] = checkout.clone();
+        slot["last_head"] = json!(head);
+        slot["phase"] = json!({
+            "kind": "leased", "ready_commit": head, "lease": {
+                "requested_commit": head, "credential": credential, "reservation_op": "2".repeat(32)
+            }
+        });
+        slot["producer"] = json!({
+            "kind": "never_built", "evidence": {
+                "epoch": {"pool_id": pool, "slot": 1, "checkout": checkout},
+                "roots": {
+                    "target": {"kind": "absent", "path": path.join("target")},
+                    "build": {"kind": "absent", "path": path.join("target")}
+                }
+            }
+        });
+        fs::write(fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+        Self {
+            fixture,
+            pool,
+            path,
+            admin,
+            head,
+            credential,
+            operation: "6".repeat(32),
+        }
+    }
+
+    fn start(&self, command: &str) -> Child {
+        self.start_with(command, |_| ())
+    }
+
+    #[allow(clippy::disallowed_types)]
+    fn start_with(
+        &self,
+        command: &str,
+        configure: impl FnOnce(&mut std::process::Command),
+    ) -> Child {
+        start_private_with(
+            &self.fixture.hive,
+            self.fixture
+                .replay(command, &self.pool, 1, 1, &self.operation),
+            &self.credential,
+            configure,
+        )
+    }
+
+    fn assert_refused(&self, check: &str) {
+        self.assert_refused_with(check, |_| ());
+    }
+
+    #[allow(clippy::disallowed_types)]
+    fn assert_refused_with(&self, check: &str, configure: impl FnOnce(&mut std::process::Command)) {
+        let checkout = [&*self.path, &*self.fixture.repo, &*self.fixture.file()];
+        let before = snapshot_paths(&checkout);
+        let (out, result) = finish_private(self.start_with("return", configure));
+        assert_eq!(out.status.code(), Some(1), "{result}");
+        let detail = result["detail"].as_str().unwrap();
+        assert!(detail.contains(check), "{result}");
+        assert_no_credential(&out, &self.credential);
+        assert_eq!(snapshot_paths(&checkout), before);
+    }
+
+    fn retain(&self, path: &Path) {
+        let mut record = self.fixture.record();
+        let slot = &mut record["pools"][0]["slots"][0];
+        let root_meta = fs::symlink_metadata(path).unwrap();
+        let proof = json!({
+            "path": path, "identity": {"dev": root_meta.dev(), "ino": root_meta.ino()}
+        });
+        slot["producer"] = json!({
+            "kind": "complete",
+            "epoch": slot["producer"]["evidence"]["epoch"].clone(),
+            "generation": 1, "profile": {"id": "fixture", "revision": 1},
+            "roots": {"target": proof, "build": proof},
+            "invocations": [{
+                "evidence": {
+                    "invocation": "check", "graph_digest": "a".repeat(64),
+                    "environment_digest": "b".repeat(64)
+                },
+                "operation": "1".repeat(32),
+                "runner": {
+                    "boot_session": "boot", "pid": 1, "start_secs": 1,
+                    "start_micros": 0, "nonce": "c".repeat(64)
+                }
+            }]
+        });
+        fs::write(self.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+    }
+}
+
+type PathSnapshot = (PathBuf, u64, u64, i64, i64, Option<Vec<u8>>);
+
+fn snapshot_paths(paths: &[&Path]) -> Vec<PathSnapshot> {
+    fn record(path: &Path, inventory: &mut Vec<PathSnapshot>) {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        let bytes = if metadata.is_file() {
+            Some(fs::read(path).unwrap())
+        } else if metadata.is_symlink() {
+            Some(fs::read_link(path).unwrap().as_os_str().as_bytes().to_vec())
+        } else {
+            None
+        };
+        inventory.push((
+            path.to_owned(),
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            bytes,
+        ));
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                record(&entry.unwrap().path(), inventory);
+            }
+        }
+    }
+    let mut inventory = Vec::new();
+    for path in paths {
+        record(path, &mut inventory);
+    }
+    inventory.sort();
+    inventory
+}
+
+#[test]
+fn tracked_edits_leave_the_checkout_index_and_lease_untouched_until_resolved() {
+    let slot = LeasedSlot::new();
+    fs::write(
+        slot.path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 43 }\n",
+    )
+    .unwrap();
+    slot.assert_refused("tracked or index changes");
+    git(&slot.path, &["add", "src/lib.rs"]);
+    slot.assert_refused("tracked or index changes");
+    git(&slot.path, &["commit", "-qm", "resolve the holder's edit"]);
+    let resolved = git(&slot.path, &["rev-parse", "HEAD"]);
+    assert_ne!(resolved, slot.head);
+    let before = snapshot_paths(&[&slot.path, &slot.admin]);
+    let (out, returned) = finish_private(slot.start("return"));
+    assert!(out.status.success(), "{returned}");
+    assert_eq!(returned["kind"], "returned");
+    assert_eq!(returned["phase"], "vacant");
+    assert_eq!(returned["commit"], resolved);
+    assert_eq!(returned["current"], false);
+    assert_eq!(
+        slot.fixture.record()["pools"][0]["slots"][0]["last_head"],
+        resolved
+    );
+    assert_eq!(snapshot_paths(&[&slot.path, &slot.admin]), before);
+}
+
+#[test]
+fn an_unmerged_index_and_an_unfinished_git_operation_preserve_every_path() {
+    let slot = LeasedSlot::new();
+    git(&slot.path, &["switch", "-qc", "conflicting-lane"]);
+    fs::write(
+        slot.path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 2 }\n",
+    )
+    .unwrap();
+    git(&slot.path, &["commit", "-qam", "lane change"]);
+    git(&slot.path, &["switch", "--detach", &slot.head]);
+    fs::write(
+        slot.path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 3 }\n",
+    )
+    .unwrap();
+    git(&slot.path, &["commit", "-qam", "conflicting change"]);
+    let attempted = slot
+        .fixture
+        .hive
+        .command_with(
+            Path::new("/usr/bin/git"),
+            &[
+                "-c",
+                "core.fsmonitor=false",
+                "-C",
+                slot.path.to_str().unwrap(),
+                "merge",
+                "--no-edit",
+                "conflicting-lane",
+            ],
+        )
+        .output()
+        .unwrap();
+    assert!(!attempted.status.success(), "{attempted:?}");
+    assert!(git(&slot.path, &["ls-files", "--unmerged"]).contains("src/lib.rs"));
+    slot.assert_refused("unfinished Git operation");
+    fs::remove_file(slot.admin.join("MERGE_HEAD")).unwrap();
+    let _ = fs::remove_file(slot.admin.join("AUTO_MERGE"));
+    slot.assert_refused("tracked or index changes");
+}
+
+#[test]
+fn ignored_dotenv_untracked_sqlx_and_unproved_targets_are_left_in_place() {
+    let slot = LeasedSlot::new();
+    fs::write(slot.fixture.repo.join(".git/info/exclude"), ".env\n").unwrap();
+    fs::write(slot.path.join(".env"), b"LOCAL_SECRET=fixture-only\n").unwrap();
+    assert_eq!(git(&slot.path, &["check-ignore", ".env"]), ".env");
+    slot.assert_refused("untracked or ignored material");
+    fs::remove_file(slot.path.join(".env")).unwrap();
+    fs::create_dir(slot.path.join(".sqlx")).unwrap();
+    fs::write(slot.path.join(".sqlx/query.json"), b"fixture query").unwrap();
+    slot.assert_refused("untracked or ignored material");
+    fs::remove_dir_all(slot.path.join(".sqlx")).unwrap();
+    fs::create_dir(slot.path.join("target")).unwrap();
+    fs::write(slot.path.join("target/borrowed"), b"not proved generated").unwrap();
+    slot.assert_refused("retained output root identity");
+}
+
+#[test]
+fn retained_output_identity_excludes_input_probes_symlinks_and_nested_checkouts() {
+    let slot = LeasedSlot::new();
+    let target = slot.path.join("target");
+    fs::create_dir_all(target.join("debug")).unwrap();
+    fs::write(target.join("debug/fixture.rmeta"), b"retained metadata").unwrap();
+    slot.retain(&target);
+    fs::write(target.join("debug/.ENV"), b"disguised ignored input").unwrap();
+    slot.assert_refused("possible input");
+    fs::remove_file(target.join("debug/.ENV")).unwrap();
+    symlink(slot.path.join("Cargo.toml"), target.join("debug/alias")).unwrap();
+    slot.assert_refused("symlink");
+    fs::remove_file(target.join("debug/alias")).unwrap();
+    fs::hard_link(
+        slot.path.join("Cargo.toml"),
+        target.join("debug/linked-input"),
+    )
+    .unwrap();
+    slot.assert_refused("exclusive generated use");
+    fs::remove_file(target.join("debug/linked-input")).unwrap();
+    git(&target.join("debug"), &["init", "-q"]);
+    slot.assert_refused("nested checkout");
+    fs::remove_dir_all(target.join("debug/.git")).unwrap();
+
+    let file = slot.fixture.file();
+    let previous = fs::read(&file).unwrap();
+    let mut record = slot.fixture.record();
+    record["pools"][0]["profile"]["graph_inputs"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "locator": {"kind": "checkout", "path": "target/debug/negative-input"},
+            "expectation": {"kind": "absent"}
+        }));
+    fs::write(&file, serde_json::to_vec(&record).unwrap()).unwrap();
+    assert!(!target.join("debug/negative-input").exists());
+    slot.assert_refused("possible input");
+    fs::write(&file, &previous).unwrap();
+
+    let mut overlapping = slot.fixture.record();
+    let debug = target.join("debug");
+    let metadata = fs::metadata(&debug).unwrap();
+    overlapping["pools"][0]["profile"]["invocations"][0]["build_root"] = json!("target/debug");
+    overlapping["pools"][0]["slots"][0]["producer"]["roots"]["build"] = json!({
+        "path": debug, "identity": {"dev": metadata.dev(), "ino": metadata.ino()}
+    });
+    fs::write(&file, serde_json::to_vec(&overlapping).unwrap()).unwrap();
+    slot.assert_refused("exclusive generated use");
+    fs::write(&file, &previous).unwrap();
+
+    git(&slot.path, &["add", "-f", "target/debug/fixture.rmeta"]);
+    git(&slot.path, &["commit", "-qm", "disguised tracked input"]);
+    slot.assert_refused("possible input");
+    git(
+        &slot.path,
+        &["rm", "--cached", "target/debug/fixture.rmeta"],
+    );
+    git(&slot.path, &["commit", "-qm", "restore generated output"]);
+
+    let moved = target.with_file_name("old-target");
+    fs::rename(&target, &moved).unwrap();
+    fs::create_dir(&target).unwrap();
+    slot.assert_refused("retained output root identity");
+    fs::remove_dir(&target).unwrap();
+    fs::rename(moved, &target).unwrap();
+    git(&slot.path, &["switch", "-qc", "kept-holder-branch"]);
+    let main_branch = git(&slot.fixture.repo, &["symbolic-ref", "--short", "HEAD"]);
+    git(&slot.path, &["branch", "--set-upstream-to", &main_branch]);
+
+    let expected = snapshot_paths(&[&slot.path, &slot.fixture.repo]);
+    let (out, returned) = finish_private(slot.start("return"));
+    assert!(out.status.success(), "{returned}");
+    assert_eq!(returned["kind"], "returned");
+    assert_eq!(snapshot_paths(&[&slot.path, &slot.fixture.repo]), expected);
+    assert_eq!(
+        git(&slot.path, &["symbolic-ref", "--short", "HEAD"]),
+        "kept-holder-branch"
+    );
+}
+
+#[test]
+fn a_live_writer_and_lost_writer_custody_each_preserve_the_lease() {
+    let slot = LeasedSlot::new();
+    let lock_path = slot
+        .fixture
+        .hive
+        .home
+        .path
+        .join("slot-locks")
+        .join(&slot.pool)
+        .join("slot-1.lock");
+    let mut locking_writer =
+        common::KillOnDrop(slot.fixture.hive.hold_lock_child("flock", &lock_path));
+    slot.assert_refused("writer may still hold the slot operation lock");
+    locking_writer.0.kill().unwrap();
+    locking_writer.0.wait().unwrap();
+    let mut record = slot.fixture.record();
+    let lease = &mut record["pools"][0]["slots"][0];
+    let initial = &lease["producer"]["evidence"];
+    let epoch = initial["epoch"].clone();
+    lease["producer"] = json!({
+        "kind": "pending", "epoch": epoch, "generation": 1,
+        "profile": {"id": "fixture", "revision": 1},
+        "invocation": {
+            "invocation": "check", "graph_digest": "a".repeat(64),
+            "environment_digest": "b".repeat(64)
+        },
+        "roots": initial["roots"].clone(),
+        "operation": "1".repeat(32), "runner": {
+            "boot_session": "boot", "pid": 1, "start_secs": 1,
+            "start_micros": 0, "nonce": "c".repeat(64)
+        },
+        "prior": {"kind": "never_built", "evidence": initial}
+    });
+    fs::write(slot.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+    slot.assert_refused("prior writer may still change");
+
+    record["pools"][0]["slots"][0]["producer"] = json!({
+        "kind": "unknown", "epoch": epoch, "generation": 1,
+        "roots": {"target": null, "build": null}, "reason": "lost_writer"
+    });
+    fs::write(slot.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+    slot.assert_refused("provenance is unproved");
+}
+
+#[test]
+fn return_refuses_an_active_cargo_lock_in_a_verified_retained_root() {
+    let slot = LeasedSlot::new();
+    let root = slot.path.join("target");
+    fs::create_dir_all(root.join("debug")).unwrap();
+    let lock = root.join("debug/.cargo-lock");
+    fs::write(&lock, b"").unwrap();
+    slot.retain(&root);
+    let mut writer = common::KillOnDrop(slot.fixture.hive.hold_lock_child("flock", &lock));
+    slot.assert_refused("Cargo lock");
+    writer.0.kill().unwrap();
+    writer.0.wait().unwrap();
+    let (out, returned) = finish_private(slot.start("return"));
+    assert!(out.status.success(), "{returned}");
+}
+
+#[test]
+fn return_refuses_checkout_substitution_symlink_and_overlapping_owner_paths() {
+    let slot = LeasedSlot::new();
+    let owner = slot.fixture._repo_dir.path.join("owner");
+    git(
+        &slot.fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            owner.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let moved = slot.path.with_file_name("saved-slot");
+    fs::rename(&slot.path, &moved).unwrap();
+    fs::create_dir(&slot.path).unwrap();
+    fs::copy(moved.join(".git"), slot.path.join(".git")).unwrap();
+    slot.assert_refused("exact slot checkout");
+    fs::remove_dir_all(&slot.path).unwrap();
+    for alias in [&slot.fixture.repo, &owner, &moved] {
+        symlink(alias, &slot.path).unwrap();
+        slot.assert_refused("exact slot checkout");
+        fs::remove_file(&slot.path).unwrap();
+    }
+    fs::rename(&moved, &slot.path).unwrap();
+    let checkout = slot.path.join("owner-worktree");
+    git(
+        &slot.fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            checkout.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    slot.assert_refused("overlaps a registered main or owner worktree");
+}
+
+#[test]
+fn a_lost_return_reply_can_be_replayed_after_the_next_reservation() {
+    let slot = LeasedSlot::new();
+    let mut child = slot.start("return");
+    drop(child.stdout.take().unwrap());
+    let lost = common::wait_within(child, Duration::from_secs(15));
+    assert_eq!(lost.status.code(), Some(1), "{lost:?}");
+    assert!(String::from_utf8_lossy(&lost.stderr).contains("could not deliver the slot result"));
+    let saved = slot.fixture.record();
+    assert_eq!(saved["pools"][0]["slots"][0]["phase"]["kind"], "vacant");
+    let (out, replay) = finish_private(slot.start("return"));
+    assert!(out.status.success(), "{replay}");
+    assert_eq!(replay["kind"], "returned");
+    assert_eq!(replay["current"], false);
+    assert_eq!(replay["commit"], slot.head);
+    assert_eq!(slot.fixture.record(), saved);
+    let (out, next) = finish_private(start_private(
+        &slot.fixture.hive,
+        slot.fixture
+            .reservation(&slot.pool, 1, 1, &slot.head, &"7".repeat(32)),
+        &"3".repeat(64),
+    ));
+    assert!(out.status.success(), "{next}");
+    assert_eq!(next["generation"], 2);
+    let next_state = slot.fixture.record();
+    for command in ["return", "outcome"] {
+        let (out, previous) = finish_private(slot.start(command));
+        assert!(out.status.success(), "{previous}");
+        assert_eq!(previous, replay);
+        assert_no_credential(&out, &slot.credential);
+        assert_eq!(slot.fixture.record(), next_state);
+    }
+    let (out, acknowledged) = finish_private(slot.start("ack"));
+    assert!(out.status.success(), "{acknowledged}");
+    assert_eq!(acknowledged["kind"], "acknowledged");
+    let (out, stale) = finish_private(slot.start("return"));
+    assert_eq!(out.status.code(), Some(1), "{stale}");
+}
+
+#[test]
+#[allow(clippy::disallowed_types)]
+fn scoped_output_requires_complete_git_inventory_and_preserves_shipped_discovery() {
+    const GIT_CAP: usize = 64 * 1024;
+    let slot = LeasedSlot::new();
+    let fixture = &slot.fixture;
+    let linked = fixture.repo.join(".worktrees/lane");
+    let owner = fixture._repo_dir.path.join("owner");
+    for path in [&linked, &owner] {
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                path.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+    }
+    let sandbox = &fixture._repo_dir.path;
+    let real_git = fixture
+        .hive
+        .command_with(Path::new("/bin/sh"), &["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let real_git = std::str::from_utf8(&real_git.stdout).unwrap().trim();
+    let path = common::counting_git(&sandbox.join("bin"), &sandbox.join("git.log"));
+    fs::write(
+        sandbox.join("bin/git"),
+        r#"#!/bin/sh
+if [ "$1" = --no-optional-locks ] && [ "${T4_REQUIRE_SCRUB:-}" = 1 ]; then
+    [ "${GIT_NO_LAZY_FETCH:-}" = 1 ] && [ "${GIT_ALLOW_PROTOCOL-unset}" = "" ] &&
+    [ "${CARGO_TARGET_DIR-unset}" = unset ] && [ "${CARGO_BUILD_TARGET_DIR-unset}" = unset ] &&
+    [ "${CARGO_BUILD_BUILD_DIR-unset}" = unset ] || exit 101
+fi
+scope=missing
+subcommand=missing
+for arg do
+    [ "$arg" != "$T4_LIST_SCOPE" ] || scope=matched
+    [ "$arg" != worktree ] || subcommand=matched
+done
+if [ "$scope:$subcommand" = matched:matched ]; then
+    exec /bin/cat "$T4_LIST"
+fi
+exec "$T4_REAL_GIT" "$@"
+"#,
+    )
+    .unwrap();
+    let list = sandbox.join("inventory");
+    let actual = |repo: &Path| {
+        let out = fixture
+            .hive
+            .command_with(
+                Path::new(real_git),
+                &[
+                    "-C",
+                    repo.to_str().unwrap(),
+                    "worktree",
+                    "list",
+                    "--porcelain",
+                    "-z",
+                ],
+            )
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        out.stdout
+    };
+    let scoped = |repo: &Path| {
+        let scope = repo.to_owned();
+        let path = &path;
+        let list = &list;
+        move |command: &mut std::process::Command| {
+            command
+                .env("PATH", path)
+                .env("T4_REAL_GIT", real_git)
+                .env("T4_LIST_SCOPE", scope)
+                .env("T4_LIST", list)
+                .env("T4_REQUIRE_SCRUB", "1")
+                .env("GIT_NO_LAZY_FETCH", "0")
+                .env("GIT_ALLOW_PROTOCOL", "file")
+                .env("CARGO_TARGET_DIR", "unwanted-target")
+                .env("CARGO_BUILD_TARGET_DIR", "unwanted-target")
+                .env("CARGO_BUILD_BUILD_DIR", "unwanted-build");
+        }
+    };
+    let mut valid = actual(&fixture.repo);
+    assert!(valid.ends_with(b"\0\0"));
+    assert_eq!(valid.pop(), Some(0));
+    fs::write(&list, &valid).unwrap();
+    slot.assert_refused_with("complete registered Git scope", scoped(&fixture.repo));
+
+    fixture.hive.write_ready_capabilities();
+    let (out, receipt) = fixture.hive.json_env(
+        &["status", fixture.repo.to_str().unwrap()],
+        &[
+            ("PATH", &path),
+            ("T4_REAL_GIT", real_git),
+            ("T4_LIST_SCOPE", fixture.repo.to_str().unwrap()),
+            ("T4_LIST", list.to_str().unwrap()),
+        ],
+    );
+    assert!(out.status.success(), "{receipt}: {out:?}");
+    for (checkout, class) in [
+        (&fixture.repo, "checkout.protected"),
+        (&linked, "checkout.secondary"),
+        (&owner, "checkout.protected"),
+        (&slot.path, "checkout.secondary"),
+    ] {
+        assert!(
+            receipt["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| { finding["path"] == json!(checkout) && finding["kind"] == class }),
+            "{receipt}"
+        );
+    }
+
+    let another = init_repo(&sandbox.join("other-registered"), "");
+    register(&fixture.hive, &another);
+    let incomplete = actual(&another);
+    fs::write(&list, &incomplete[..incomplete.len() - 1]).unwrap();
+    slot.assert_refused_with("complete registered Git scope", scoped(&another));
+
+    valid.extend_from_slice(b"locked ");
+    valid.resize(GIT_CAP - 2, b'x');
+    valid.extend_from_slice(b"\0\0");
+    assert_eq!(valid.len(), GIT_CAP);
+    fs::write(&list, [&valid[..], b"w"].concat()).unwrap();
+    slot.assert_refused_with("complete registered Git scope", scoped(&fixture.repo));
+    fs::write(&list, valid).unwrap();
+    let (out, returned) = finish_private(slot.start_with("return", scoped(&fixture.repo)));
+    assert!(out.status.success(), "{returned}");
 }
 
 #[test]

@@ -945,7 +945,7 @@ pub enum TransitionResult {
     Reserved,
     PermitIssued,
     Ready { commit: String },
-    Returned,
+    Returned { commit: String },
     ProducerPending,
     ProducerComplete,
     Recovered,
@@ -1015,8 +1015,15 @@ impl Outcome {
                 }
                 Ok(())
             }
-            (OperationKind::Return, OutcomeRequest::Return, TransitionResult::Returned)
-            | (OperationKind::Recover, OutcomeRequest::Recover, TransitionResult::Recovered) => {
+            (
+                OperationKind::Return,
+                OutcomeRequest::Return,
+                TransitionResult::Returned { commit },
+            ) => require(
+                self.attempt_id.is_none() && object_id(commit),
+                "invalid return outcome",
+            ),
+            (OperationKind::Recover, OutcomeRequest::Recover, TransitionResult::Recovered) => {
                 require(self.attempt_id.is_none(), "unexpected attempt on outcome")
             }
             (
@@ -1552,14 +1559,19 @@ pub fn new_slot_lock(path: &Path) -> io::Result<FileIdentity> {
 }
 
 pub fn checked_slot_lock(path: &Path) -> io::Result<FileIdentity> {
+    open_slot_lock(path).map(|(_, identity)| identity)
+}
+
+pub fn open_slot_lock(path: &Path) -> io::Result<(File, FileIdentity)> {
     let file = open_exact_private(path)?;
-    if file.metadata()?.len() != 0 {
+    let metadata = file.metadata()?;
+    if metadata.len() != 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "private slot lock must be empty",
         ));
     }
-    Ok(FileIdentity::of(&file.metadata()?))
+    Ok((file, FileIdentity::of(&metadata)))
 }
 
 pub fn random_pool_id() -> io::Result<String> {
