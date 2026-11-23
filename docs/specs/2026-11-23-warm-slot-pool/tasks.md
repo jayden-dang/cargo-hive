@@ -290,6 +290,7 @@ _Requirements: SLOTS-3.6, SLOTS-3.7, SLOTS-3.10_
 - Modify: `crates/cargo-hive/tests/skill.rs`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
 - Modify: `crates/cargo-hive/src/slot/inspect.rs`
+- Create: `crates/cargo-hive/src/slot/prepare.rs`
 - Modify: `crates/cargo-hive/src/slot/profile.rs`
 - Modify: `crates/state/src/slots.rs`
 - Create: `plugin/skills/hive/scripts/slot-handoff.sh`

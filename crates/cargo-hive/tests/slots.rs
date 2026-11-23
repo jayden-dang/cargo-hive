@@ -1174,11 +1174,19 @@ fn producer_gate_args(slot: &LeasedSlot) -> Vec<String> {
 }
 
 fn stopped_stock_cargo(slot: &LeasedSlot, lock: Option<&fs::File>, bad_env: bool) -> Child {
-    let mut command = slot.fixture.hive.command_with(Path::new("/bin/bash"), &[]);
     let mut args = producer_gate_args(slot);
     if bad_env {
         args.insert(1, "CARGO_TARGET_DIR=outside".into());
     }
+    stopped_stock_cargo_with_args(slot, lock, args)
+}
+
+fn stopped_stock_cargo_with_args(
+    slot: &LeasedSlot,
+    lock: Option<&fs::File>,
+    args: Vec<String>,
+) -> Child {
+    let mut command = slot.fixture.hive.command_with(Path::new("/bin/bash"), &[]);
     command
         .args([
             "--noprofile",
@@ -4064,6 +4072,17 @@ fn start_packaged_take(
     key_path: &Path,
     mode: &str,
 ) -> Child {
+    start_packaged_take_at(fixture, pool, head, key_path, mode, "0")
+}
+
+fn start_packaged_take_at(
+    fixture: &PoolFixture,
+    pool: &str,
+    head: &str,
+    key_path: &Path,
+    mode: &str,
+    expect: &str,
+) -> Child {
     let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
     let mut command = fixture
@@ -4077,7 +4096,7 @@ fn start_packaged_take(
         .args([
             pool,
             "1",
-            "0",
+            expect,
             head,
             &"1".repeat(32),
             &"2".repeat(32),
@@ -4089,6 +4108,271 @@ fn start_packaged_take(
         .stderr(Stdio::piped())
         .spawn()
         .unwrap()
+}
+
+fn guarded_workspace_check(slot: &LeasedSlot, generation: u64) {
+    let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+    let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+        .unwrap()
+        .unwrap();
+    let mut request = producer_input(slot);
+    request["shape"]["argv"] = json!(["check", "--locked", "--workspace"]);
+    let (out, started) = finish_private(start_producer(
+        slot,
+        generation,
+        &slot.operation,
+        &request,
+        Some(&lock),
+        |_| (),
+    ));
+    assert!(out.status.success(), "{started}");
+    let mut args = producer_gate_args(slot);
+    args.push("--workspace".into());
+    let mut cargo = stopped_stock_cargo_with_args(slot, Some(&lock), args);
+    request["action"] = json!("watch");
+    request["child_pid"] = json!(cargo.id());
+    let mut watcher = start_producer(
+        slot,
+        generation,
+        &slot.operation,
+        &request,
+        Some(&lock),
+        |_| (),
+    );
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = cargo.try_wait().unwrap() {
+            assert!(status.success(), "{status}");
+            break;
+        }
+        if Instant::now() >= until || watcher.try_wait().unwrap().is_some() {
+            cargo.kill().unwrap();
+            cargo.wait().unwrap();
+            let (_, result) = finish_private(watcher);
+            panic!("watch did not permit Cargo: {result}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (out, completed) = finish_private(watcher);
+    assert!(out.status.success(), "{completed}");
+    assert_eq!(completed["kind"], "producer_complete");
+}
+
+fn workspace_unit_stamp(path: &Path, package: &str) -> std::time::SystemTime {
+    use cargo_hive_core::{fingerprint, unit_path};
+    let profile = path.join("target/debug");
+    let report = fingerprint::read_profile(&profile);
+    let graph = report.graph.unwrap();
+    let mut units = graph
+        .units
+        .iter()
+        .filter(|unit| unit.loc.package() == package);
+    let unit = units.next().unwrap();
+    assert!(units.next().is_none());
+    fs::metadata(unit_path::stamp(&profile, &unit.loc, unit.kind))
+        .unwrap()
+        .modified()
+        .unwrap()
+}
+
+const RETAINED_EDIT: &str = "pub fn answer() -> u32 { 43 }\n";
+
+fn first_completed_workspace() -> (LeasedSlot, PathBuf, String) {
+    let fixture = reviewed_pool_fixture(None);
+    fixture.hive.write_ready_capabilities();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    fs::write(fixture.repo.join("src/lib.rs"), RETAINED_EDIT).unwrap();
+    git(
+        &fixture.repo,
+        &[
+            "commit",
+            "-qm",
+            "Edit only the fixture crate",
+            "--",
+            "src/lib.rs",
+        ],
+    );
+    let next = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+    profile["consumers"][0]["requested_object"] =
+        json!(git(&fixture.repo, &["rev-parse", "HEAD:src/lib.rs"]));
+    profile["invocations"][0]["argv"] = json!(["check", "--locked", "--workspace"]);
+    fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap().to_owned();
+    let path = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let key = fixture._repo_dir.path.join("retained-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let credential = fs::read_to_string(&key).unwrap();
+    let out = run_packaged_take(&fixture, &pool, &head, &key, "take");
+    let first: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(out.status.success(), "{first}");
+    assert_eq!(first["path"], json!(path));
+    let admin = PathBuf::from(git(&path, &["rev-parse", "--absolute-git-dir"]));
+    let slot = LeasedSlot {
+        fixture,
+        pool,
+        path,
+        admin,
+        head,
+        credential: credential.trim_end().to_owned(),
+        operation: "5".repeat(32),
+    };
+    guarded_workspace_check(&slot, 1);
+    (slot, key, next)
+}
+
+fn return_workspace(slot: &LeasedSlot, generation: u64) {
+    let returned = slot
+        .fixture
+        .replay("return", &slot.pool, 1, generation, &"4".repeat(32));
+    let (out, returned) = finish_private(start_private(
+        &slot.fixture.hive,
+        returned,
+        &slot.credential,
+    ));
+    assert!(out.status.success(), "{returned}");
+}
+
+fn take_workspace(
+    slot: &LeasedSlot,
+    key: &Path,
+    commit: &str,
+    generation: &str,
+) -> (Output, Value) {
+    let child = start_packaged_take_at(&slot.fixture, &slot.pool, commit, key, "take", generation);
+    let out = common::wait_within(child, Duration::from_secs(30));
+    let result = serde_json::from_slice(&out.stdout).unwrap();
+    (out, result)
+}
+
+#[test]
+fn a_returned_slot_switches_to_the_next_commit_and_reuses_an_unrelated_unit() {
+    let (slot, key, next) = first_completed_workspace();
+    let before = fs::metadata(slot.path.join("target")).unwrap();
+    let before_consumer = workspace_unit_stamp(&slot.path, "fixture");
+    let before_independent = workspace_unit_stamp(&slot.path, "independent");
+    return_workspace(&slot, 1);
+    let (out, ready) = take_workspace(&slot, &key, &next, "1");
+    assert!(out.status.success(), "{ready}");
+    assert_eq!(ready["path"], json!(slot.path));
+    assert_eq!(ready["generation"], 2);
+    assert_eq!(ready["commit"], next);
+    assert_eq!(
+        fs::read_to_string(slot.path.join("src/lib.rs")).unwrap(),
+        RETAINED_EDIT
+    );
+    let after = fs::metadata(slot.path.join("target")).unwrap();
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+    assert!(
+        fs::metadata(slot.path.join("src/lib.rs"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            > before_consumer
+    );
+    guarded_workspace_check(&slot, 2);
+    assert!(workspace_unit_stamp(&slot.path, "fixture") > before_consumer);
+    assert_eq!(
+        workspace_unit_stamp(&slot.path, "independent"),
+        before_independent
+    );
+}
+
+#[test]
+fn a_same_commit_handoff_invalidates_only_the_reviewed_consumer() {
+    let (slot, key, _) = first_completed_workspace();
+    let before = workspace_unit_stamp(&slot.path, "fixture");
+    let independent = workspace_unit_stamp(&slot.path, "independent");
+    let anchor = slot.path.join("src/lib.rs");
+    let initial_anchor = fs::metadata(&anchor).unwrap();
+    let content = fs::read(&anchor).unwrap();
+    return_workspace(&slot, 1);
+    let (out, ready) = take_workspace(&slot, &key, &slot.head, "1");
+    assert!(out.status.success(), "{ready}");
+    let touched = fs::metadata(&anchor).unwrap();
+    assert_eq!(
+        (touched.dev(), touched.ino()),
+        (initial_anchor.dev(), initial_anchor.ino())
+    );
+    assert!(touched.modified().unwrap() > before);
+    assert_eq!(fs::read(&anchor).unwrap(), content);
+    guarded_workspace_check(&slot, 2);
+    assert!(workspace_unit_stamp(&slot.path, "fixture") > before);
+    assert_eq!(workspace_unit_stamp(&slot.path, "independent"), independent);
+}
+
+#[test]
+fn retained_preparation_refuses_a_different_prior_head_or_unreviewed_commit() {
+    for wrong_head in [true, false] {
+        let (slot, key, next) = first_completed_workspace();
+        return_workspace(&slot, 1);
+        let commit = if wrong_head {
+            git(&slot.path, &["switch", "--detach", &next]);
+            slot.head.clone()
+        } else {
+            fs::write(
+                slot.fixture.repo.join("independent/src/lib.rs"),
+                "pub fn changed() {}\n",
+            )
+            .unwrap();
+            git(
+                &slot.fixture.repo,
+                &[
+                    "commit",
+                    "-qm",
+                    "outside the reviewed envelope",
+                    "--",
+                    "independent/src/lib.rs",
+                ],
+            );
+            git(&slot.fixture.repo, &["rev-parse", "HEAD"])
+        };
+        let existing = git(&slot.path, &["rev-parse", "HEAD"]);
+        let stamp = workspace_unit_stamp(&slot.path, "fixture");
+        let (out, refused) = take_workspace(&slot, &key, &commit, "1");
+        assert_eq!(out.status.code(), Some(1), "{refused}");
+        assert!(refused.get("path").is_none());
+        assert_eq!(git(&slot.path, &["rev-parse", "HEAD"]), existing);
+        assert_eq!(workspace_unit_stamp(&slot.path, "fixture"), stamp);
+        let saved = slot.fixture.record();
+        assert_eq!(saved["pools"][0]["slots"][0]["last_head"], slot.head);
+        assert_eq!(saved["pools"][0]["slots"][0]["phase"]["kind"], "reserved");
+    }
+}
+
+#[test]
+fn a_retained_cleanup_skip_never_publishes_ready() {
+    let (slot, key, next) = first_completed_workspace();
+    return_workspace(&slot, 1);
+    let mut removed = 0;
+    for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
+        match fs::remove_file(slot.path.join("target/debug").join(name)) {
+            Ok(()) => removed += 1,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
+            Err(err) => panic!("could not remove fixture lock: {err}"),
+        }
+    }
+    assert!(removed > 0);
+    let (out, refused) = take_workspace(&slot, &key, &next, "1");
+    assert_eq!(out.status.code(), Some(1), "{refused}");
+    assert!(refused.get("path").is_none());
+    assert!(
+        refused["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("Scoped cleanup")),
+        "{refused}"
+    );
+    let saved = slot.fixture.record();
+    let record = &saved["pools"][0]["slots"][0];
+    assert_eq!(record["phase"]["attempt"]["stage"], "gc_in_progress");
+    assert_eq!(record["producer"]["kind"], "complete");
 }
 
 #[test]

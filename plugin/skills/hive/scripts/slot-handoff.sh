@@ -28,6 +28,12 @@ check_slot_version() {
     [[ $actual == "cargo-hive $version"$'\n.' ]]
 }
 
+git_for_slot() {
+    /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= \
+        /usr/bin/git --no-replace-objects -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+        -c submodule.recurse=false -c maintenance.auto=false -c gc.auto=0 "$@"
+}
+
 # Keep this Bash process as the parent of every lock-bearing checkpoint.
 take_slot() {
     local binary=$1 repo=$2 pool=$3 slot=$4 expect=$5 commit=$6
@@ -37,7 +43,8 @@ take_slot() {
     local hive_root=${HIVE_HOME:-$HOME/.hive} credential nonce extra request step_request
     local lock generation permit attempt checkout witnessed_commit prefix suffix digit
     local scratch
-    local -a scope
+    local prior anchor
+    local -a scope anchors
 
     check_slot_version "$binary" || return 1
     [[ $repo == /* && ( $slot == 1 || $slot == 2 ) && $expect =~ $count_pattern && ${#expect} -le 20 &&
@@ -78,9 +85,13 @@ take_slot() {
         --control-fd 8 --json <<< "$request" 8<> "$scratch/permit" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
     {
         IFS= read -r -d '' permit && IFS= read -r -d '' attempt && IFS= read -r -d '' checkout &&
-            IFS= read -r -d '' witnessed_commit || return 1
-        extra=
-        if IFS= read -r -d '' extra || [[ -n $extra ]]; then return 1; fi
+            IFS= read -r -d '' witnessed_commit && IFS= read -r -d '' prior || return 1
+        anchors=()
+        while IFS= read -r -d '' anchor; do
+            [[ -n $anchor && $anchor != /* && ${#anchors[@]} -lt 256 ]] || return 1
+            anchors[${#anchors[@]}]=$anchor
+        done
+        [[ -z $anchor ]] || return 1
     } < "$scratch/permit"
     [[ $permit == permit_issued && $attempt =~ $count_pattern && $attempt != 0 &&
         $checkout == /* && $witnessed_commit == "$commit" ]] || return 1
@@ -88,13 +99,25 @@ take_slot() {
     printf -v step_request '{"auth":%s,"step":"checkout"}' "$request"
     "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \
         --lock-fd 9 --json <<< "$step_request" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
-    /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= \
-        /usr/bin/git --no-replace-objects -c core.fsmonitor=false -c core.hooksPath=/dev/null \
-        -c submodule.recurse=false -C "$repo" worktree add --detach -- "$checkout" "$commit" \
-        > /dev/null || return 1
+    if [[ -z $prior ]]; then
+        git_for_slot -C "$repo" worktree add --detach -- "$checkout" "$commit" > /dev/null || return 1
+    elif [[ $prior != "$commit" ]]; then
+        git_for_slot -C "$checkout" switch --detach -- "$commit" > /dev/null || return 1
+    fi
     printf -v step_request '{"auth":%s,"step":"checkout_done"}' "$request"
     "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \
         --lock-fd 9 --json <<< "$step_request" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+    if [[ ${#anchors[@]} -gt 0 ]]; then
+        printf -v step_request '{"auth":%s,"step":"anchors"}' "$request"
+        "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \
+            --lock-fd 9 --json <<< "$step_request" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+        for anchor in "${anchors[@]}"; do
+            /usr/bin/touch -m -c -h -- "$checkout/$anchor" || return 1
+        done
+        printf -v step_request '{"auth":%s,"step":"anchors_done"}' "$request"
+        "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \
+            --lock-fd 9 --json <<< "$step_request" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+    fi
     if [[ $mode == take-seeded ]]; then
         printf -v step_request '{"auth":%s,"step":"seed"}' "$request"
         "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \

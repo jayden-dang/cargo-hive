@@ -1,6 +1,7 @@
 //! The slot CLI scopes operations to a registered main and its private pool namespace.
 
 mod inspect;
+mod prepare;
 mod profile;
 mod result;
 
@@ -1346,22 +1347,24 @@ fn begin(
             "The preparation path is outside the private protocol bound.",
         ));
     }
+    let anchors = prepare::consumers(&pool.profile, &slot.producer);
+    let private_len = path.as_os_str().as_encoded_bytes().len()
+        + anchors
+            .keys()
+            .map(|path| path.as_os_str().as_encoded_bytes().len() + 1)
+            .sum::<usize>();
+    if private_len > 7680 {
+        return Err(Refusal::ReturnUncertain(
+            "The preparation permit exceeds its private protocol bound.",
+        ));
+    }
     let lock_offset = check_runner(None)?;
-    let inspection = if let Some(checkout) = &slot.checkout_id {
-        let proof = inspect_checkout(
-            &SlotScope {
-                pool,
-                slot,
-                registry: &snapshot.registry,
-                secondary_roots: &snapshot.secondary_roots,
-            },
-            &ExpectedCheckout {
-                identity: checkout,
-                head: slot.last_head.as_deref(),
-            },
-        )?;
-        check_producer_inventory(&proof)?;
-        Some(proof)
+    let inspection = if let Some(prior) = slot.last_head.as_deref() {
+        verify_requested_tree(&pool.main, &lease.requested_commit)?;
+        prepare::verify_changes(&pool.main, prior, &lease.requested_commit, &pool.profile)?;
+        Some(inspect_prepared_checkout(
+            pool, &snapshot, slot_index, prior,
+        )?)
     } else {
         verify_no_checkout_ancestor(&pool.root)?;
         let records = owner_worktree_inventory(&pool.root, &snapshot.registry, Some(pool))?;
@@ -1412,6 +1415,8 @@ fn begin(
                 runner: runner.clone(),
                 stage: AttemptStage::PermitIssued,
                 lock_offset: Some(lock_offset),
+                prior_head: slot.last_head.clone(),
+                anchors: Vec::new(),
             },
         };
         next.outcomes.push(outcome);
@@ -1425,6 +1430,13 @@ fn begin(
     payload.extend(b"\0");
     payload.extend(lease.requested_commit.as_bytes());
     payload.extend(b"\0");
+    payload.extend(slot.last_head.as_deref().unwrap_or("").as_bytes());
+    payload.extend(b"\0");
+    for anchor in anchors.keys() {
+        payload.extend(anchor.as_os_str().as_encoded_bytes());
+        payload.extend(b"\0");
+    }
+
     if payload.len() > 8192 || control.write_all(&payload).is_err() {
         return Err(Refusal::ReturnUncertain(
             "The first preparation permit could not be delivered.",
@@ -1461,6 +1473,8 @@ struct StepRequest {
 enum PreparationStep {
     Checkout,
     CheckoutDone,
+    Anchors,
+    AnchorsDone,
     Seed,
 }
 
@@ -1635,70 +1649,153 @@ fn step_check(
     let kind = match input.step {
         PreparationStep::Checkout => {
             let snapshot = fence.snapshot(AttemptStage::PermitIssued)?;
-            let slot = &snapshot.pool.slots[fence.index()];
-            let (lease, _) = fence.check(slot)?;
-            if slot.checkout_id.is_some()
+            let index = fence.index();
+            let slot = &snapshot.pool.slots[index];
+            let (lease, attempt) = fence.check(slot)?;
+            if slot.last_head != attempt.prior_head
                 || !slot_identity_present(state.root(), &snapshot.pool, slot)
             {
-                return Err(Refusal::ReturnUncertain(
-                    "First checkout requires the exact unused slot path.",
-                ));
+                return Err(producer_fence_refusal());
             }
-            verify_no_checkout_ancestor(&snapshot.pool.root)?;
-            owner_worktree_inventory(
-                &snapshot.pool.root,
-                &snapshot.registry,
-                Some(&snapshot.pool),
-            )?;
-            inspect::reject_checkout_filters(&snapshot.pool.main)?;
             verify_requested_tree(&snapshot.pool.main, &lease.requested_commit)?;
+            let inspection = if let Some(prior_head) = &attempt.prior_head {
+                let proof =
+                    inspect_prepared_checkout(&snapshot.pool, &snapshot, index, prior_head)?;
+                inspect::reject_checkout_filters(&proof.path)?;
+                prepare::verify_changes(
+                    &snapshot.pool.main,
+                    prior_head,
+                    &lease.requested_commit,
+                    &snapshot.pool.profile,
+                )?;
+                Some(proof)
+            } else {
+                verify_no_checkout_ancestor(&snapshot.pool.root)?;
+                owner_worktree_inventory(
+                    &snapshot.pool.root,
+                    &snapshot.registry,
+                    Some(&snapshot.pool),
+                )?;
+                inspect::reject_checkout_filters(&snapshot.pool.main)?;
+                None
+            };
             fence.update(&snapshot, |slot| {
                 if !slot_identity_present(state.root(), &snapshot.pool, slot) {
                     return Err(producer_fence_refusal());
                 }
                 prepare_stage(slot, AttemptStage::CheckoutInProgress)
             })?;
+            drop(inspection);
             "checkout_permitted"
         }
         PreparationStep::CheckoutDone => {
             let snapshot = fence.snapshot(AttemptStage::CheckoutInProgress)?;
             let slot = &snapshot.pool.slots[fence.index()];
-            let (lease, _) = fence.check(slot)?;
+            let (lease, attempt) = fence.check(slot)?;
             let commit = &lease.requested_commit;
-            let mut candidate = snapshot.pool.clone();
-            let path = candidate.checkout_path(slot);
-            let checkout = new_checkout_identity(&path, &candidate.common_git_id.path)?;
-            let epoch = OutputEpoch {
-                pool_id: candidate.pool_id.clone(),
-                slot: slot.number,
-                checkout: checkout.clone(),
-            };
-            let evidence = first_root_evidence(&candidate.profile, &path, epoch)?;
-            let slot = &mut candidate.slots[fence.index()];
-            if slot.checkout_id.is_some() {
-                return Err(producer_fence_refusal());
-            }
-            slot.checkout_id = Some(checkout.clone());
-            slot.last_head = Some(commit.clone());
-            slot.producer = Producer::NeverBuilt {
-                evidence: Some(evidence.clone()),
-            };
-            inspect_prepared_checkout(&candidate, &snapshot, fence.index(), commit)?;
-            fence.update(&snapshot, |slot| {
-                slot.checkout_id = Some(checkout);
+            if attempt.prior_head.is_some() {
+                let _proof =
+                    inspect_prepared_checkout(&snapshot.pool, &snapshot, fence.index(), commit)?;
+                let stage = if prepare::consumers(&snapshot.pool.profile, &slot.producer).is_empty()
+                {
+                    AttemptStage::CheckoutVerified
+                } else {
+                    AttemptStage::AwaitingAnchors
+                };
+                fence.update(&snapshot, |slot| prepare_stage(slot, stage))?;
+            } else {
+                let mut candidate = snapshot.pool.clone();
+                let path = candidate.checkout_path(slot);
+                let checkout = new_checkout_identity(&path, &candidate.common_git_id.path)?;
+                let epoch = OutputEpoch {
+                    pool_id: candidate.pool_id.clone(),
+                    slot: slot.number,
+                    checkout: checkout.clone(),
+                };
+                let evidence = first_root_evidence(&candidate.profile, &path, epoch)?;
+                let slot = &mut candidate.slots[fence.index()];
+                if slot.checkout_id.is_some() {
+                    return Err(producer_fence_refusal());
+                }
+                slot.checkout_id = Some(checkout.clone());
                 slot.last_head = Some(commit.clone());
                 slot.producer = Producer::NeverBuilt {
-                    evidence: Some(evidence),
+                    evidence: Some(evidence.clone()),
                 };
-                prepare_stage(slot, AttemptStage::CheckoutVerified)
-            })?;
+                inspect_prepared_checkout(&candidate, &snapshot, fence.index(), commit)?;
+                fence.update(&snapshot, |slot| {
+                    slot.checkout_id = Some(checkout);
+                    slot.last_head = Some(commit.clone());
+                    slot.producer = Producer::NeverBuilt {
+                        evidence: Some(evidence),
+                    };
+                    prepare_stage(slot, AttemptStage::CheckoutVerified)
+                })?;
+            }
             "checkout_verified"
+        }
+        PreparationStep::Anchors => {
+            let snapshot = fence.snapshot(AttemptStage::AwaitingAnchors)?;
+            let index = fence.index();
+            let slot = &snapshot.pool.slots[index];
+            let (lease, _) = fence.check(slot)?;
+            let proof = inspect_prepared_checkout(
+                &snapshot.pool,
+                &snapshot,
+                index,
+                &lease.requested_commit,
+            )?;
+            let witnesses = prepare::witness(&proof, &snapshot.pool.profile, &slot.producer)?;
+            if witnesses.is_empty() {
+                return Err(producer_fence_refusal());
+            }
+            fence.update(&snapshot, |slot| {
+                let Phase::Preparing { attempt, .. } = &mut slot.phase else {
+                    return Err(producer_fence_refusal());
+                };
+                attempt.anchors = witnesses;
+                attempt.stage = AttemptStage::AnchorsInProgress;
+                Ok(())
+            })?;
+            "anchor_touch_permitted"
+        }
+        PreparationStep::AnchorsDone => {
+            let snapshot = fence.snapshot(AttemptStage::AnchorsInProgress)?;
+            let index = fence.index();
+            let slot = &snapshot.pool.slots[index];
+            let (lease, attempt) = fence.check(slot)?;
+            let proof = inspect_prepared_checkout(
+                &snapshot.pool,
+                &snapshot,
+                index,
+                &lease.requested_commit,
+            )?;
+            let witnesses = prepare::observe_touch(
+                &proof,
+                &snapshot.pool.profile,
+                &slot.producer,
+                &attempt.anchors,
+            )?;
+            fence.update(&snapshot, |slot| {
+                let Phase::Preparing { attempt, .. } = &mut slot.phase else {
+                    return Err(producer_fence_refusal());
+                };
+                attempt.anchors = witnesses;
+                attempt.stage = AttemptStage::CheckoutVerified;
+                Ok(())
+            })?;
+            "anchor_touch_verified"
         }
         PreparationStep::Seed => {
             let mut snapshot = fence.snapshot(AttemptStage::CheckoutVerified)?;
             let index = fence.index();
             let slot = &snapshot.pool.slots[index];
-            let (lease, _) = fence.check(slot)?;
+            let (lease, attempt) = fence.check(slot)?;
+            if attempt.prior_head.is_some() {
+                return Err(Refusal::ReturnUncertain(
+                    "Initial seed requires a newly provisioned checkout.",
+                ));
+            }
             let commit = lease.requested_commit.clone();
             let Producer::NeverBuilt {
                 evidence: Some(evidence),
@@ -1931,7 +2028,7 @@ fn empty_gc_roots(evidence: &slots::EmptyEpoch) -> [cargo_hive_gc::checkout::Req
     ]
 }
 
-fn seeded_gc_roots(
+fn present_gc_roots(
     roots: &OutputRoots<RootExpectation>,
 ) -> Result<[cargo_hive_gc::checkout::RequiredRoot; 2], Refusal> {
     use cargo_hive_gc::checkout::{RequiredRoot, RootPresence, RootRole};
@@ -1991,17 +2088,22 @@ fn ready(
     let mut snapshot = fence.snapshot(AttemptStage::CheckoutVerified)?;
     let index = fence.index();
     let slot = &snapshot.pool.slots[index];
-    let (lease, _) = fence.check(slot)?;
+    let (lease, attempt) = fence.check(slot)?;
+    let anchors = attempt.anchors.clone();
     let lease = lease.clone();
     let expected = match &slot.producer {
         Producer::NeverBuilt {
             evidence: Some(evidence),
         } => empty_gc_roots(evidence),
-        Producer::SeedOnly { final_roots, .. } => seeded_gc_roots(final_roots)?,
+        Producer::SeedOnly { final_roots, .. } => present_gc_roots(final_roots)?,
+        Producer::Complete { .. } => {
+            present_gc_roots(&profile::eligible_producer(&slot.producer, slot.generation)?.roots())?
+        }
         _ => return Err(producer_fence_refusal()),
     };
     let mut proof =
         inspect_prepared_checkout(&snapshot.pool, &snapshot, index, &lease.requested_commit)?;
+    prepare::verify_touch(&proof, &snapshot.pool.profile, &slot.producer, &anchors)?;
     fence.update(&snapshot, |slot| {
         if slot.outcomes.len() >= MAX_OUTCOMES {
             return Err(Refusal::OutcomeLimit);
@@ -2038,6 +2140,12 @@ fn ready(
     }
     let final_proof =
         inspect_prepared_checkout(&snapshot.pool, &snapshot, index, &lease.requested_commit)?;
+    prepare::verify_touch(
+        &final_proof,
+        &snapshot.pool.profile,
+        &snapshot.pool.slots[index].producer,
+        &anchors,
+    )?;
     let outcome = Outcome {
         pool_id: key.pool_id.into(),
         slot: key.slot,
@@ -2064,6 +2172,7 @@ fn ready(
             ready_commit: lease.requested_commit.clone(),
             lease,
         };
+        slot.last_head = Some(final_proof.head);
         slot.outcomes.push(outcome);
         Ok(())
     })?;

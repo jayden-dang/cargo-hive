@@ -440,7 +440,7 @@ fn fixed_inputs(
         .collect()
 }
 
-fn read_input(path: &Path) -> Result<Option<Vec<u8>>, Refusal> {
+pub(super) fn read_input(path: &Path) -> Result<Option<Vec<u8>>, Refusal> {
     let unproved =
         || refused("Could not establish a canonical regular reviewed input or prove its absence.");
     let canonical = canonical_worktree_path(path).map_err(|_| unproved())?;
@@ -474,7 +474,7 @@ fn read_input(path: &Path) -> Result<Option<Vec<u8>>, Refusal> {
     Ok(Some(bytes))
 }
 
-fn tracked_object(checkout: &CheckoutProof, path: &Path) -> Result<String, Refusal> {
+pub(super) fn tracked_object(checkout: &CheckoutProof, path: &Path) -> Result<String, Refusal> {
     let unproved = || {
         refused("A reviewed consumer or Cargo graph input lacks its tracked regular Git anchor.")
     };
@@ -499,7 +499,7 @@ fn tracked_object(checkout: &CheckoutProof, path: &Path) -> Result<String, Refus
     }
 }
 
-fn blob(checkout: &CheckoutProof, oid: &str) -> Result<Vec<u8>, Refusal> {
+pub(super) fn blob(checkout: &CheckoutProof, oid: &str) -> Result<Vec<u8>, Refusal> {
     use cargo_hive_cargo::git::Git;
     Git::at(&checkout.path)
         .slot_read_only(&["cat-file", "blob", oid], INPUT_LIMIT)

@@ -486,6 +486,10 @@ pub struct Attempt {
     pub stage: AttemptStage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock_offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchors: Vec<AnchorWitness>,
 }
 
 impl Attempt {
@@ -496,6 +500,13 @@ impl Attempt {
                 && self.lock_offset.is_none_or(|offset| offset >= (1 << 32)),
             "invalid attempt identity",
         )?;
+        require(
+            self.prior_head.as_ref().is_none_or(|head| object_id(head))
+                && self.anchors.len() <= MAX_PROFILE_ENTRIES
+                && unique(self.anchors.iter().map(|anchor| &anchor.path))
+                && self.anchors.iter().all(AnchorWitness::valid),
+            "invalid preparation input witness",
+        )?;
         self.runner.validate()
     }
 }
@@ -505,9 +516,40 @@ impl Attempt {
 pub enum AttemptStage {
     PermitIssued,
     CheckoutInProgress,
+    AwaitingAnchors,
+    AnchorsInProgress,
     CheckoutVerified,
     SeedInProgress,
     GcInProgress,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnchorWitness {
+    pub path: PathBuf,
+    pub identity: FileIdentity,
+    pub object: String,
+    pub mode: u32,
+    pub prior_unit: (i64, i64),
+    pub floor: (i64, i64),
+    pub touched: Option<(i64, i64)>,
+}
+
+impl AnchorWitness {
+    fn valid(&self) -> bool {
+        let valid_stamp =
+            |&(seconds, nanos): &(i64, i64)| seconds > 0 && (0..1_000_000_000).contains(&nanos);
+        relative(&self.path)
+            && self.identity.valid()
+            && object_id(&self.object)
+            && valid_stamp(&self.prior_unit)
+            && valid_stamp(&self.floor)
+            && self.floor >= self.prior_unit
+            && self
+                .touched
+                .as_ref()
+                .is_none_or(|stamp| valid_stamp(stamp) && *stamp > self.floor)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
