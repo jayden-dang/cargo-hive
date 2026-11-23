@@ -376,7 +376,7 @@ fn read_hash(reader: &mut impl Read, stem: &str) -> Result<Option<UnitHash>, Str
         .map_err(|e| format!("hash file `{stem}`: {e}"))?;
     if bytes.len() > UnitHash::HEX_LEN {
         return Err(format!(
-            "hash file `{stem}` is larger than {} bytes",
+            "hash file `{stem}` is larger than {} bytes; rebuild the unit and try again",
             UnitHash::HEX_LEN
         ));
     }
@@ -1027,6 +1027,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hash_prefixes_distinguish_rebuilding_from_incomplete_hashes() {
+        let bytes = b"0123456789abcdef";
+        for end in 0..=bytes.len() {
+            let parsed = read_hash(&mut &bytes[..end], "lib-probe");
+            match end {
+                0 => assert_eq!(parsed.unwrap(), None),
+                16 => assert_eq!(parsed.unwrap().unwrap().to_string(), "0123456789abcdef"),
+                _ => assert!(parsed.unwrap_err().contains("16 lowercase hex")),
+            }
+        }
+    }
+
     fn unit_json(deps: &[u64]) -> String {
         let deps: Vec<String> = deps
             .iter()
@@ -1448,7 +1461,7 @@ mod tests {
         assert_eq!(empty.format, Format::Supported);
         assert_eq!(empty.not_current, 1);
         assert!(
-            matches!(&over.format, Format::Unsupported(why) if why.contains(stem) && why.contains("larger than 16 bytes")),
+            matches!(&over.format, Format::Unsupported(why) if why.contains(stem) && why.contains("larger than 16 bytes") && why.contains("rebuild")),
             "{:?}",
             over.format
         );

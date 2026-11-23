@@ -982,6 +982,66 @@ pub mod fuzzing {
 mod tests {
     use super::*;
 
+    struct Chunked<'a> {
+        bytes: &'a [u8],
+        interrupted: bool,
+        fail_at_end: bool,
+    }
+
+    impl Read for Chunked<'_> {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            if self.interrupted {
+                self.interrupted = false;
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            if self.bytes.is_empty() && self.fail_at_end {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            let n = out.len().min(2).min(self.bytes.len());
+            out[..n].copy_from_slice(&self.bytes[..n]);
+            self.bytes = &self.bytes[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn dep_info_prefixes_preserve_the_first_prerequisite_rule() {
+        let prefix = "object: cargo-home/registry/src/";
+        let text = format!("{prefix}package/lib.rs other.rs\nignored: line\n");
+        let home = Path::new("cargo-home");
+        for end in 0..=text.len() {
+            let line = read_dep_info_line(&text.as_bytes()[..end], Path::new("probe.d")).unwrap();
+            assert_eq!(
+                is_registry_dep_info(&line, home),
+                end >= prefix.len(),
+                "cut {end}"
+            );
+        }
+    }
+
+    #[test]
+    fn dep_info_streams_retry_interruptions_and_refuse_errors_after_valid_prefixes() {
+        let text = b"object: cargo-home/registry/src/package/lib.rs\n";
+        for fail_at_end in [false, true] {
+            let stream = Chunked {
+                bytes: text,
+                interrupted: true,
+                fail_at_end,
+            };
+            let result = read_dep_info_line(stream, Path::new("probe.d"));
+            if fail_at_end {
+                assert!(
+                    matches!(result, Err(Skip::Bound(why)) if why.contains("probe.d") && why.contains("permission denied"))
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap(),
+                    "object: cargo-home/registry/src/package/lib.rs"
+                );
+            }
+        }
+    }
+
     #[test]
     fn dependency_reader_models_keep_prefix_rules_and_workspace_veto() {
         for input in [&b""[..], &b"\xff\n"[..], &b"2"[..], &b"target: x\n"[..]] {

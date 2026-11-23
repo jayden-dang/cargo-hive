@@ -896,6 +896,25 @@ pub mod fuzzing {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn diagnostic_stream_cuts_keep_complete_records_and_flag_partial_records() {
+        let first = r#"{"level":"error","code":{"code":"E0123"},"message":"first"}"#;
+        let second = r#"{"level":"error","code":null,"message":"aborting due to previous error"}"#;
+        let text = format!("{first}\n{second}\n");
+        let second_start = first.len() + 1;
+        let second_end = second_start + second.len();
+        for end in 0..=text.len() {
+            let result = super::read_output_texts(&[text[..end].to_string()]);
+            assert_eq!(result.codes, if end >= first.len() { "E0123" } else { "" });
+            assert_eq!(result.failed, end >= second_end);
+            assert_eq!(
+                result.unparsable,
+                (0 < end && end < first.len()) || (second_start < end && end < second_end),
+                "cut {end}"
+            );
+        }
+    }
+
+    #[test]
     fn diagnostic_and_artifact_models_keep_order_and_modes() {
         for bytes in [&b""[..], &b"\xff"[..], &b"artifact-name.rmeta"[..]] {
             super::fuzzing::diagnostics(bytes);

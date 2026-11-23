@@ -165,7 +165,7 @@ fn identify_tag(
 
 fn valid_tag(tag: &[u8]) -> Result<bool, &'static str> {
     if tag.len() > MAX_TAG_BYTES {
-        return Err("larger than 1 MiB");
+        return Err("larger than 1 MiB; remove this invalid tag and build the target again");
     }
     Ok(String::from_utf8_lossy(tag)
         .lines()
@@ -337,7 +337,7 @@ mod tests {
             );
         }
         assert!(
-            over.iter().all(|found| matches!(found, Some(Err(why)) if why.contains("CACHEDIR.TAG") && why.contains("larger than 1 MiB"))),
+            over.iter().all(|found| matches!(found, Some(Err(why)) if why.contains("CACHEDIR.TAG") && why.contains("larger than 1 MiB") && why.contains("build the target again"))),
             "{over:?}"
         );
     }
@@ -362,6 +362,18 @@ mod tests {
             ))
             .is_none()
         );
+    }
+
+    #[test]
+    fn tag_prefixes_become_recognized_only_at_the_complete_identifying_line() {
+        let body = format!("# comment\n{TAG_LINE}\n# trailing comment\n");
+        let identifying_end = "# comment\n".len() + TAG_LINE.len();
+        for end in 0..=body.len() {
+            assert_eq!(
+                valid_tag(&body.as_bytes()[..end]),
+                Ok(end >= identifying_end)
+            );
+        }
     }
 
     fn tag(dir: &Path, line: &str) {

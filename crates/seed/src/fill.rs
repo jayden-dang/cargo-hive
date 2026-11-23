@@ -1066,6 +1066,65 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    struct Chunked<'a> {
+        bytes: &'a [u8],
+        interrupted: bool,
+        fail_at_end: bool,
+    }
+
+    impl std::io::Read for Chunked<'_> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.interrupted {
+                self.interrupted = false;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            if self.bytes.is_empty() && self.fail_at_end {
+                return Err(std::io::ErrorKind::PermissionDenied.into());
+            }
+            let n = out.len().min(2).min(self.bytes.len());
+            out[..n].copy_from_slice(&self.bytes[..n]);
+            self.bytes = &self.bytes[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn rustc_info_json_cuts_refuse_missing_required_structure() {
+        let text = info(&[("version", "release: probe\n")]);
+        for end in 0..text.len() {
+            assert!(rustc_info_version(&text[..end]).is_err(), "cut {end}");
+        }
+        assert_eq!(rustc_info_version(&text).unwrap(), "release: probe\n");
+    }
+
+    #[test]
+    fn toolchain_streams_retry_interruptions_and_retain_late_errors() {
+        let text = info(&[("version", "release: probe\n")]);
+        for fail_at_end in [false, true] {
+            let stream = Chunked {
+                bytes: text.as_bytes(),
+                interrupted: true,
+                fail_at_end,
+            };
+            let result = super::read_capped_stream(stream, Path::new("probe-info.json"), 1024);
+            let stream = Chunked {
+                bytes: b"0123456789abcdef",
+                interrupted: true,
+                fail_at_end,
+            };
+            let hash = super::hash_matches(stream, Path::new("probe-hash"), "0123456789abcdef");
+            if fail_at_end {
+                let why = result.unwrap_err();
+                assert!(why.contains("probe-info.json") && why.contains("permission denied"));
+                let why = hash.unwrap_err();
+                assert!(why.contains("probe-hash") && why.contains("permission denied"));
+            } else {
+                assert_eq!(result.unwrap(), text);
+                assert!(hash.unwrap());
+            }
+        }
+    }
+
     #[test]
     fn toolchain_and_staging_hash_models_cover_raw_and_bounded_inputs() {
         use std::io::Read;

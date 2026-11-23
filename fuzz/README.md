@@ -67,6 +67,14 @@ matters because libFuzzer can truncate an oversized replay file to its input cap
 The checked-in corpus is read-only during a run; discoveries go into a scratch
 copy. The runner verifies that the manifest and registry contain the same targets.
 
+A whole-run watchdog also covers tool preflight, Cargo compilation and replay.
+Its wall-clock allowance is 600 seconds for setup plus each selected target's
+requested mutation time and 40 seconds for replay/teardown. `FUZZ_RUN_TIMEOUT`
+can select a different explicit deadline (1 to 1,000,000 seconds). Timeout exits
+124 and interruption exits 130. Both stop the owned process group, including
+compiler/fuzzer descendants, and retain an incomplete-phase record. A process
+killed before producing an input is reported as an incomplete reproduction.
+
 Each phase uses a 5-second input timeout, 2,048 MiB RSS guard, 65,536-byte raw-input
 cap, a recorded engine seed (default 20261123), final engine statistics and a
 target-specific artifact directory. Replay passes individual files, which runs
