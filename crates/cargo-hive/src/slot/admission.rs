@@ -69,6 +69,7 @@ struct Tools {
     target_sysroot: Vec<Material>,
     clang: Material,
     ld: Material,
+    otool: Material,
     sdk: PathBuf,
     sdk_settings: Material,
     system_library: Material,
@@ -318,9 +319,11 @@ impl NativeBuild {
             .ok_or_else(unproved)?;
         let clang = xcode_path(cwd, cargo_home, &["--find", "clang"])?;
         let ld = xcode_path(cwd, cargo_home, &["--find", "ld"])?;
+        let otool = xcode_path(cwd, cargo_home, &["--find", "otool"])?;
         let sdk = xcode_path(cwd, cargo_home, &["--show-sdk-path"])?;
         if clang != tools.clang.path
             || ld != tools.ld.path
+            || otool != tools.otool.path
             || sdk != tools.sdk
             || tools.sdk_settings.path != sdk.join("SDKSettings.json")
             || sdk
@@ -340,6 +343,7 @@ impl NativeBuild {
             &tools.rustc,
             &tools.clang,
             &tools.ld,
+            &tools.otool,
             &tools.sdk_settings,
             &tools.system_library,
         ] {
@@ -361,7 +365,7 @@ impl NativeBuild {
             &mut remaining,
             &mut stamps,
         )?;
-        verify_rust_loader(cwd, cargo_home, rustc, &tools.rust_runtime)?;
+        verify_rust_loader(&otool, cwd, cargo_home, rustc, &tools.rust_runtime)?;
         let linker = format!(
             "CARGO_TARGET_{}_LINKER",
             self.seal
@@ -483,6 +487,7 @@ fn verify_inventory(
 }
 
 fn verify_rust_loader(
+    otool: &Path,
     cwd: &Path,
     home: &OsStr,
     rustc: &Path,
@@ -490,10 +495,9 @@ fn verify_rust_loader(
 ) -> Result<(), Refusal> {
     let unproved =
         || refused("The installed Rust compiler loader differs from the sealed compiler material.");
-    let otool = xcode_path(cwd, home, &["--find", "otool"])?;
     let image = |flag| {
         native_output(
-            &otool,
+            otool,
             [OsStr::new(flag), rustc.as_os_str()],
             cwd,
             home,

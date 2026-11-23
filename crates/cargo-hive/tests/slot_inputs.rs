@@ -543,7 +543,14 @@ fn observe_writer_lock(
     false
 }
 
-fn fixture_seal(fixture: &Fixture, head: &str, false_driver: bool) -> PathBuf {
+#[derive(Clone, Copy)]
+enum SealFault {
+    None,
+    RustDriver,
+    Otool,
+}
+
+fn fixture_seal(fixture: &Fixture, head: &str, fault: SealFault) -> PathBuf {
     use serde_json::json;
     let seal = fixture._scratch.path.join("reviewed-closure.json");
     let profile_path = fixture._scratch.path.join("reviewed-profile.json");
@@ -561,8 +568,13 @@ fn fixture_seal(fixture: &Fixture, head: &str, false_driver: bool) -> PathBuf {
         .join("bin");
     let clang = pinned_tool(fixture, &["--no-cache", "--find", "clang"]);
     let ld = pinned_tool(fixture, &["--no-cache", "--find", "ld"]);
+    let otool = pinned_tool(fixture, &["--no-cache", "--find", "otool"]);
     let sdk = pinned_tool(fixture, &["--no-cache", "--show-sdk-path"]);
     let tool = |path: &Path| json!({"path": path, "sha256": digest_file(path)});
+    let mut loader_inspector = tool(&otool);
+    if matches!(fault, SealFault::Otool) {
+        loader_inspector["sha256"] = json!("0".repeat(64));
+    }
     let lib = bin.parent().unwrap().join("lib");
     let inventory = |dir: &Path, skip_rustlib: bool| {
         let mut files: Vec<_> = fs::read_dir(dir)
@@ -576,7 +588,7 @@ fn fixture_seal(fixture: &Fixture, head: &str, false_driver: bool) -> PathBuf {
             .into_iter()
             .map(|path| {
                 let mut material = tool(&path);
-                if false_driver
+                if matches!(fault, SealFault::RustDriver)
                     && path
                         .file_name()
                         .unwrap()
@@ -604,7 +616,7 @@ fn fixture_seal(fixture: &Fixture, head: &str, false_driver: bool) -> PathBuf {
             "cargo":tool(&bin.join("cargo")), "rustc":tool(&bin.join("rustc")),
             "rust_runtime":inventory(&lib, true),
             "target_sysroot":inventory(&lib.join("rustlib").join(&native).join("lib"), false),
-            "clang":tool(&clang), "ld":tool(&ld), "sdk":sdk,
+            "clang":tool(&clang), "ld":tool(&ld), "otool":loader_inspector, "sdk":sdk,
             "sdk_settings":tool(&sdk.join("SDKSettings.json")),
             "system_library":tool(&sdk.join("usr/lib/libSystem.tbd").canonicalize().unwrap())
         },
@@ -662,7 +674,7 @@ fn fixture_seal(fixture: &Fixture, head: &str, false_driver: bool) -> PathBuf {
 fn packaged_guide_admits_only_the_sealed_native_producer() {
     let fixture = Fixture::new("guided-native-seal");
     let head = git(&fixture.main, &["rev-parse", "HEAD"]);
-    let profile = fixture_seal(&fixture, &head, false);
+    let profile = fixture_seal(&fixture, &head, SealFault::None);
     fixture.hive.config(
         &serde_json::json!({"secondary_roots":[fixture.hive.secondary_root.path]}).to_string(),
     );
@@ -886,7 +898,7 @@ fn initialize_sealed_slot(fixture: &Fixture, profile: &Path) -> (String, PathBuf
 fn a_late_foreign_resolver_prevents_the_guided_writer() {
     let fixture = Fixture::new("guided-native-foreign-root");
     let head = git(&fixture.main, &["rev-parse", "HEAD"]);
-    let profile = fixture_seal(&fixture, &head, false);
+    let profile = fixture_seal(&fixture, &head, SealFault::None);
     let (pool, checkout) = initialize_sealed_slot(&fixture, &profile);
     let key = "f".repeat(64);
     let out = packaged(
@@ -959,11 +971,25 @@ fn a_late_foreign_resolver_prevents_the_guided_writer() {
 #[test]
 fn a_matching_seal_cannot_substitute_unproved_compiler_material() {
     let fixture = Fixture::new("guided-native-invalid-driver");
-    let head = git(&fixture.main, &["rev-parse", "HEAD"]);
-    let profile = fixture_seal(&fixture, &head, true);
-    let (pool, checkout) = initialize_sealed_slot(&fixture, &profile);
-    let out = packaged(
+    assert_unproved_tool_is_refused(&fixture, SealFault::RustDriver, "compiler material");
+}
+
+#[test]
+fn a_matching_seal_cannot_use_a_mismatched_loader_inspector() {
+    let fixture = Fixture::new("guided-native-invalid-otool");
+    assert_unproved_tool_is_refused(
         &fixture,
+        SealFault::Otool,
+        "native tool or SDK file changed",
+    );
+}
+
+fn assert_unproved_tool_is_refused(fixture: &Fixture, fault: SealFault, detail: &str) {
+    let head = git(&fixture.main, &["rev-parse", "HEAD"]);
+    let profile = fixture_seal(fixture, &head, fault);
+    let (pool, checkout) = initialize_sealed_slot(fixture, &profile);
+    let out = packaged(
+        fixture,
         &[
             "take",
             fixture.main.to_str().unwrap(),
@@ -980,10 +1006,7 @@ fn a_matching_seal_cannot_substitute_unproved_compiler_material() {
     assert!(!out.status.success(), "{out:?}");
     let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(
-        reply["detail"]
-            .as_str()
-            .unwrap()
-            .contains("compiler material"),
+        reply["detail"].as_str().unwrap().contains(detail),
         "{reply}"
     );
     assert!(!checkout.join("target").exists());
