@@ -859,8 +859,50 @@ fn measured_count(finding: &Finding, key: &str) -> u64 {
     }
 }
 
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+    pub fn diagnostics(data: &[u8]) {
+        if let Ok(text) = std::str::from_utf8(data) {
+            let _ = read_output_texts(&[text.into()]);
+        }
+        let coded = r#"{"level":"error","code":{"code":"E0123"},"message":"probe"}"#;
+        let summary = r#"{"level":"error","code":null,"message":"aborting due to errors"}"#;
+        let parsed = read_output_texts(&[format!("{coded}\n{coded}\n{summary}\nnot-json")]);
+        assert!(parsed.failed);
+        assert!(parsed.unparsable);
+        assert_eq!(parsed.codes, "E0123");
+    }
+    pub fn artifact_names(data: &[u8]) {
+        if let Ok(name) = std::str::from_utf8(data) {
+            let index = mode_index(&[name.into()]);
+            let hash = UnitHash::parse("0123456789abcdef").unwrap();
+            let _ = unit_mode(name, &hash, &index);
+            let _ = directory_crate(name, &hash);
+            let _ = crate_and_kind(name);
+        }
+        let hash = UnitHash::parse("0123456789abcdef").unwrap();
+        let mut names = vec!["libprobe-0123456789abcdef.rmeta".into()];
+        assert!(unit_mode("probe-0123456789abcdef", &hash, &mode_index(&names)) == Mode::Check);
+        names.push("libprobe-0123456789abcdef.rlib".into());
+        assert!(unit_mode("probe-0123456789abcdef", &hash, &mode_index(&names)) == Mode::Build);
+        assert!(unit_mode("probe-0123456789abcdef", &hash, &ModeIndex::new()) == Mode::Unknown);
+        assert_eq!(directory_crate("probe-0123456789abcdef", &hash), "probe");
+        assert_eq!(crate_and_kind("lib-probe"), ("probe".into(), "lib".into()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diagnostic_and_artifact_models_keep_order_and_modes() {
+        for bytes in [&b""[..], &b"\xff"[..], &b"artifact-name.rmeta"[..]] {
+            super::fuzzing::diagnostics(bytes);
+            super::fuzzing::artifact_names(bytes);
+        }
+    }
+
     use super::{DIVERGENCE_DETAIL, FailedUnits, Limits, NotCurrentInput, ProfileInput, analyse};
     use cargo_hive_core::fingerprint::{Coverage, NotCurrentUnit, UnitHash, UnitKind};
     use cargo_hive_core::receipt::{Finding, Measured};

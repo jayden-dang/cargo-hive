@@ -94,7 +94,7 @@ pub fn read(fs: &dyn Fs, path: &Path) -> Result<Option<DebugMap>, MapError> {
     let magic_be = u32::from_be_bytes(raw);
 
     match magic_le {
-        MH_MAGIC_64 => parse_thin(fs, path, 0),
+        MH_MAGIC_64 => parse_thin(fs, path, 0, None),
         MH_MAGIC | MH_CIGAM | MH_CIGAM_64 => {
             Err(MapError::Unsupported("32-bit or big-endian thin header"))
         }
@@ -146,7 +146,10 @@ fn parse_fat(fs: &dyn Fs, path: &Path, is_64: bool) -> Result<Option<DebugMap>, 
         if slice_size < 4 {
             return Err(MapError::UnknownSlice(cputype));
         }
-        let slice_magic = read_at(fs, path, slice_off, 4)?;
+        let slice_end = slice_off
+            .checked_add(slice_size)
+            .ok_or(MapError::Truncated("fat slice range"))?;
+        let slice_magic = read_range(fs, path, slice_off, 0, 4, Some(slice_end))?;
         if slice_magic.len() < 4 {
             return Err(MapError::UnknownSlice(cputype));
         }
@@ -154,7 +157,7 @@ fn parse_fat(fs: &dyn Fs, path: &Path, is_64: bool) -> Result<Option<DebugMap>, 
         if slice_le != MH_MAGIC_64 {
             return Err(MapError::UnknownSlice(cputype));
         }
-        match parse_thin(fs, path, slice_off)? {
+        match parse_thin(fs, path, slice_off, Some(slice_end))? {
             None => {}
             Some(map) => {
                 any_linked = true;
@@ -170,8 +173,33 @@ fn parse_fat(fs: &dyn Fs, path: &Path, is_64: bool) -> Result<Option<DebugMap>, 
     }
 }
 
-fn parse_thin(fs: &dyn Fs, path: &Path, base: u64) -> Result<Option<DebugMap>, MapError> {
-    let header = read_at(fs, path, base, HEADER64 as usize)?;
+fn read_range(
+    fs: &dyn Fs,
+    path: &Path,
+    base: u64,
+    relative: u64,
+    len: usize,
+    end: Option<u64>,
+) -> Result<Vec<u8>, MapError> {
+    let offset = base
+        .checked_add(relative)
+        .ok_or(MapError::Truncated("offset"))?;
+    let finish = offset
+        .checked_add(len as u64)
+        .ok_or(MapError::Truncated("range"))?;
+    if end.is_some_and(|end| finish > end) {
+        return Err(MapError::Truncated("fat slice range"));
+    }
+    read_at(fs, path, offset, len)
+}
+
+fn parse_thin(
+    fs: &dyn Fs,
+    path: &Path,
+    base: u64,
+    end: Option<u64>,
+) -> Result<Option<DebugMap>, MapError> {
+    let header = read_range(fs, path, base, 0, HEADER64 as usize, end)?;
     if header.len() < HEADER64 as usize {
         return Err(MapError::Truncated("header"));
     }
@@ -192,7 +220,7 @@ fn parse_thin(fs: &dyn Fs, path: &Path, base: u64) -> Result<Option<DebugMap>, M
     let cmds = if sizeofcmds == 0 {
         Vec::new()
     } else {
-        let cmds = read_at(fs, path, base + HEADER64, sizeofcmds as usize)?;
+        let cmds = read_range(fs, path, base, HEADER64, sizeofcmds as usize, end)?;
         if cmds.len() as u64 != sizeofcmds {
             return Err(MapError::Truncated("load commands"));
         }
@@ -244,7 +272,7 @@ fn parse_thin(fs: &dyn Fs, path: &Path, base: u64) -> Result<Option<DebugMap>, M
     let symtab_data = if sym_bytes == 0 {
         Vec::new()
     } else {
-        let data = read_at(fs, path, base + u64::from(symoff), sym_bytes as usize)?;
+        let data = read_range(fs, path, base, u64::from(symoff), sym_bytes as usize, end)?;
         if data.len() as u64 != sym_bytes {
             return Err(MapError::Truncated("symbol table"));
         }
@@ -253,7 +281,7 @@ fn parse_thin(fs: &dyn Fs, path: &Path, base: u64) -> Result<Option<DebugMap>, M
     let strtab = if str_bytes == 0 {
         Vec::new()
     } else {
-        let data = read_at(fs, path, base + u64::from(stroff), str_bytes as usize)?;
+        let data = read_range(fs, path, base, u64::from(stroff), str_bytes as usize, end)?;
         if data.len() as u64 != str_bytes {
             return Err(MapError::Truncated("string table"));
         }
@@ -294,6 +322,82 @@ fn parse_thin(fs: &dyn Fs, path: &Path, base: u64) -> Result<Option<DebugMap>, M
         loose,
         archive_entries,
     }))
+}
+
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+    use crate::reader_testing::ReaderFs;
+
+    fn thin(name: &str) -> Vec<u8> {
+        let mut bytes = vec![0u8; 73];
+        for (at, n) in [
+            (0, MH_MAGIC_64),
+            (12, 2),
+            (16, 1),
+            (20, 24),
+            (32, LC_SYMTAB),
+            (36, 24),
+            (40, 56),
+            (44, 1),
+            (48, 72),
+            (52, (name.len() + 2) as u32),
+            (56, 1),
+        ] {
+            bytes[at..at + 4].copy_from_slice(&n.to_le_bytes());
+        }
+        bytes[60] = N_OSO;
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0);
+        bytes
+    }
+
+    pub fn debug_map(data: &[u8]) {
+        let path = Path::new("binary");
+        let _ = read(&ReaderFs::new(data.to_vec()), path);
+        let name = format!("object-{}.rcgu.o", data.first().copied().unwrap_or(0));
+        let bytes = thin(&name);
+        let map = read(&ReaderFs::new(bytes.clone()), path).unwrap().unwrap();
+        assert_eq!(map.loose, BTreeSet::from([name]));
+        assert_eq!(map.archive_entries, 0);
+        let archive = thin("libprobe.rlib(member.o)");
+        let map = read(&ReaderFs::new(archive), path).unwrap().unwrap();
+        assert!(map.loose.is_empty());
+        assert_eq!(map.archive_entries, 1);
+        let second = thin("libprobe.rlib(member.o)");
+        let mut fat = vec![0u8; 48];
+        fat[..4].copy_from_slice(&FAT_MAGIC_BE.to_be_bytes());
+        fat[4..8].copy_from_slice(&2u32.to_be_bytes());
+        for (at, offset, size) in [
+            (8usize, 48u32, bytes.len() as u32),
+            (28, 48 + bytes.len() as u32, second.len() as u32),
+        ] {
+            fat[at..at + 4].copy_from_slice(&0x0100_000cu32.to_be_bytes());
+            fat[at + 8..at + 12].copy_from_slice(&offset.to_be_bytes());
+            fat[at + 12..at + 16].copy_from_slice(&size.to_be_bytes());
+        }
+        fat.extend_from_slice(&bytes);
+        fat.extend_from_slice(&second);
+        let merged = read(&ReaderFs::new(fat), path).unwrap().unwrap();
+        assert_eq!(
+            merged.loose,
+            BTreeSet::from([format!(
+                "object-{}.rcgu.o",
+                data.first().copied().unwrap_or(0)
+            )])
+        );
+        assert_eq!(merged.archive_entries, 1);
+        let mut fs = ReaderFs::new(bytes);
+        fs.chunk = 3;
+        assert!(read(&fs, path).unwrap().is_none());
+        fs.reads.set(0);
+        fs.chunk = 8;
+        assert!(read(&fs, path).is_err());
+        fs.reads.set(0);
+        fs.read_error = Some(io::ErrorKind::PermissionDenied);
+        assert!(read(&fs, path).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -534,6 +638,56 @@ mod tests {
             buf.extend_from_slice(data);
         }
         buf
+    }
+
+    #[test]
+    fn generated_debug_maps_and_truncations_keep_exact_objects() {
+        for data in [&b""[..], &b"\xff"[..], &b"probe"[..]] {
+            super::fuzzing::debug_map(data);
+        }
+        let bytes = thin_with_oso(&["kept.rcgu.o"]);
+        let path = Path::new("binary");
+        for end in 4..bytes.len() {
+            assert!(
+                read(&MemFs::with(path, bytes[..end].to_vec()), path).is_err(),
+                "cut {end}"
+            );
+        }
+        let fs = crate::reader_testing::ReaderFs::new(vec![]);
+        assert!(super::read_range(&fs, path, u64::MAX, 1, 1, None).is_err());
+        assert_eq!(fs.reads.get(), 0);
+    }
+
+    #[test]
+    fn a_fat_slice_cannot_borrow_tables_from_bytes_after_its_declared_end() {
+        let thin = thin_with_oso(&["/synthetic/kept.rcgu.o"]);
+        for fat64 in [false, true] {
+            for size in [32usize, 56, 72, thin.len() - 1] {
+                let mut bytes = wrap_fat(&[(0x0100_000c, thin.clone())], fat64);
+                if fat64 {
+                    bytes[24..32].copy_from_slice(&(size as u64).to_be_bytes());
+                } else {
+                    bytes[20..24].copy_from_slice(&(size as u32).to_be_bytes());
+                }
+                let path = Path::new("binary");
+                assert!(
+                    read(&MemFs::with(path, bytes), path).is_err(),
+                    "tables must belong to their declared slice, fat64={fat64}, size={size}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_fat_slice_with_an_overflowing_end_is_a_range_refusal() {
+        let mut bytes = wrap_fat(&[(0x0100_000c, thin_with_oso(&["kept.rcgu.o"]))], true);
+        bytes[16..24].copy_from_slice(&(u64::MAX - 31).to_be_bytes());
+        bytes[24..32].copy_from_slice(&64u64.to_be_bytes());
+        let path = Path::new("binary");
+        assert!(matches!(
+            read(&MemFs::with(path, bytes), path),
+            Err(MapError::Truncated("fat slice range"))
+        ));
     }
 
     #[test]
