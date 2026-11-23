@@ -60,6 +60,7 @@ Design: ./design.md
 | `crates/gc/src/debug_map.rs` | Read strict checkout GC candidates through a checked regular descriptor. |
 | `crates/seed/src/lib.rs` | Share typed registry seed execution with a positively scoped initial placement. |
 | `crates/seed/src/place.rs` | Verify the exact expected initial root before scoped placement. |
+| `crates/seed/src/store.rs` | Read scoped seed records through bounded regular descriptors. |
 | `crates/cargo-hive/tests/slots.rs` | New real CLI slot, persistence, scope, recovery and fault interleavings. |
 | `crates/cargo-hive/tests/slot_inputs.rs` | New generated throwaway fixtures for causal Cargo and build reuse proofs. |
 | `crates/cargo-hive/tests/checkout_gc.rs` | Guard existing scoped GC output and add the stricter slot-run root evidence cases. |
@@ -288,6 +289,7 @@ _Requirements: SLOTS-3.6, SLOTS-3.7, SLOTS-3.10_
 - Create: `crates/cargo-hive/src/slot/admission.rs`
 - Modify: `crates/seed/src/lib.rs`
 - Modify: `crates/seed/src/place.rs`
+- Modify: `crates/seed/src/store.rs`
 - Modify: `crates/platform/src/slot.rs`
 - Modify: `crates/gc/src/checkout.rs`
 - Modify: `crates/cargo-hive/tests/fixtures/current/cli-tree.txt`
