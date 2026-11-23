@@ -13,9 +13,9 @@ What an agent worktree costs, cold and seeded, on the measured repo. A cold chec
 | R5 | First-command time for `check -p <package> --lib` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 37232 | 4 | 29608 | open — operator | open — operator |  |
 | R6 | Next build after a one-file edit in a workspace crate (ms) | by hand (outside bench) | 4 | 6625 | 4 | 6702 | open — operator | open — operator |  |
 | R7 | Private bytes each new worktree adds (bytes) | by hand (outside bench): free space | 4 | 5197094912 | 4 | 3262543872 | open — operator | open — operator |  |
-| R8 | Units rebuilt because of a hive deletion | by hand (outside bench): cargo -v after gc --checkout | 4 | 0 rebuilt over 4 non-vacuous samples; 0 vacuous | 4 | 0 rebuilt over 4 non-vacuous samples; 0 vacuous | open — operator | open — operator |  |
-| R9 | Stale results on a probe that changes a file a proc macro reads without declaring it | by hand (outside bench): cargo -v after probe | 4 | 4 stale of 4 | 4 | 4 stale of 4 | open — operator | open — operator |  |
-| R10 | Setup footprint | listed | — | nothing | — | `cargo install cargo-hive`, `cargo hive doctor`, `cargo hive repo add <main>`; Cargo config files 0, environment variables 0, rustc wrappers 0, cargo shims 0; files outside the state root: 0, beyond clones into target dirs | open — operator | open — operator |  |
+| R8 | Units rebuilt because of a hive deletion | by hand (outside bench): cargo -v after gc --checkout | 4 | 0 rebuilt over 4 non-vacuous samples; 0 vacuous | 4 | 0 rebuilt over 4 non-vacuous samples; 0 vacuous | 0 rebuilt | 0 rebuilt | 2026-11-23 |
+| R9 | Stale results on a probe that changes a file a proc macro reads without declaring it | by hand (outside bench): cargo -v after probe | 4 | 4 stale of 4 | 4 | 4 stale of 4 | open — operator | no more stale than cold | 2026-11-23 |
+| R10 | Setup footprint | listed | — | nothing | — | `cargo install cargo-hive`, `cargo hive doctor`, `cargo hive repo add <main>`; Cargo config files 0, environment variables 0, rustc wrappers 0, cargo shims 0; files outside the state root: 0, beyond clones into target dirs | open — operator | nothing installed or changed | 2026-11-23 |
 
 R8 cells read `R rebuilt over k non-vacuous samples; m vacuous`, or `all vacuous`. R9 cells read `s stale of n`.
 
@@ -45,6 +45,8 @@ Medians are only as quiet as the machine they were measured on. Preflight record
 ## Targets
 
 The operator sets a target by editing that row's Target cell and its Target set date in a plain commit. A rerun never touches either.
+
+Only targets that the operator's agreed goals back are set: R8 (no unit rebuilds because of a deletion), R9 (the seeded arm is no more stale than the cold arm, which is the control) and R10 (the seeded arm installs and changes nothing). The time rows R1 to R6 and R7 stay open, because a run-to-run spread of up to about 17 percent in the cold arm (the cold medians of R2 moved by 17.4 percent between two runs) means a target closer to the baseline than that cannot be judged by one rerun, and a seeded time target below the share of each first build spent compiling workspace crates (about 25 to 71 s here) needs a warm worktree that the current two arms do not have; the owner sets them when that exists.
 
 ## Notes per row
 
