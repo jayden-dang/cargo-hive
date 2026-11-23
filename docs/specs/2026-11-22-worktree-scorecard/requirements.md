@@ -3,7 +3,7 @@
 Feature code: SCORECARD
 Status: Implemented
 Approved: 2026-11-22 12:46 by the operator (Jayden), "approve" on the spec sheet for #16 at feat/worktree-scorecard 226a925, relayed by the conductor (/Users/jayden/Developer/experiments/cargo-zip/.skills/_pending-worktree-scorecard/auto/operator-reply.md). The reply approves the sheet as a whole; the Open Questions O1 and O2 stay open as listed, and Task 9 still waits for the operator's own go-ahead.
-Re-approved: 2026-11-23 by the operator (Jayden), "đồng ý" on the realign changes listed in the PR #38 description, with the 8.7 and Task 11 fixes of this change.
+Re-approved: 2026-11-23 by the operator (Jayden), with one bare "đồng ý" to a four-item plan: the realign changes listed in the PR #38 description; the 8.7 and Task 11 fixes; the new requirement 8.11 and Task 12 with the closure of O4; and the goal-backed targets in docs/scorecard.md. The same plan included the ARCH-10 and vision clarification (commit 706e2c0). It was one reply to that plan, on 2026-11-23.
 Date: 2026-11-22
 Realigned: 2026-11-23, to what was built (docs/scorecard.md at 99186de). O1 and O2 are answered on ticket #16 (2026-11-22); see Open Questions.
 
@@ -355,7 +355,12 @@ The guards:
   operator. Date: 2026-11-22. Forbid-guess: no session or agent writes a target value.
   **Answered 2026-11-22 on ticket #16, in part:** targets stay `open — operator` until the first
   measured run is recorded; after that the owner sets them, and a rerun never changes them. The
-  first run was recorded 2026-11-23, so the owner's targets are still to come. No target is written.
+  first run was recorded 2026-11-23, so the owner's targets were still to come then.
+  **Answered 2026-11-23 on a plan the operator agreed to:** only goal-backed targets are set now.
+  R8 takes `0 rebuilt` in both slots, R9 seeded `no more stale than cold`, and R10 seeded
+  `nothing installed or changed`, each dated 2026-11-23; R9 cold and R10 cold stay open. The time
+  rows R1 to R6 and R7 stay open, for the reasons now in docs/scorecard.md `## Targets`. Their
+  owner sets them later, and a rerun never changes any target.
 - O2 Whether the scorecard may name the measured workspace and hold its numbers and paths in
   this public repo. Owner: operator. Date: 2026-11-22. Forbid-guess: until it is
   answered, SCORECARD-9.3 holds. **Answered 2026-11-22 on ticket #16:** the scorecard may hold
