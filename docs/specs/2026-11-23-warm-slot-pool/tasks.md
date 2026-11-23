@@ -31,13 +31,15 @@ Design: ./design.md
 
 | File | Responsibility |
 |---|---|
+| `crates/core/src/locks.rs` | Add separately verified current Cargo lock and profile namespace evidence. |
+| `crates/core/src/target.rs` | Add bounded strict target identification while retaining the standalone path. |
 | `crates/cargo/src/discover.rs` | Add strict bounded checkout and workspace discovery without changing standalone readers. |
 | `crates/core/src/ledger/account.rs` | Add final checked removal after accounting for strict callers. |
 | `crates/core/src/ledger/mod.rs` | Export the generic checked removal seam. |
 | `crates/state/src/lib.rs` | Extend bounded private state writes and named recovery without changing old readers. |
 | `crates/state/src/slots.rs` | New strict layout 2 record, checked revisions, transition/outcome I/O with fault tests. |
 | `crates/platform/src/flock.rs` | Check inherited writer and credential descriptors and owner-controlled paths for slot state. |
-| `crates/platform/src/lib.rs` | Export slot-only platform support. |
+| `crates/platform/src/lib.rs` | Export slot support and bounded regular-file input for strict callers. |
 | `crates/platform/src/proc.rs` | Confirm complete slot Git pipe capture and bound private CLI input. |
 | `crates/platform/src/testing.rs` | Inspect pipe readiness and inherited flags for the native CLI cancellation fixture. |
 | `crates/platform/src/slot.rs` | New local process instance, boot session and entropy helpers. |
@@ -232,6 +234,10 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 ### Task 6: Prove exactly which roots checkout GC completed
 
 **Files:**
+- Modify: `crates/core/src/locks.rs`
+- Modify: `crates/core/src/target.rs`
+- Modify: `crates/platform/src/lib.rs`
+- Modify: `crates/cargo/src/git.rs`
 - Modify: `crates/cargo/src/discover.rs`
 - Modify: `crates/core/src/ledger/account.rs`
 - Modify: `crates/core/src/ledger/mod.rs`
@@ -248,6 +254,9 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 
 - Consumes (proposed): `discover::checkouts_complete` and `discover::targets_for_checkout_gc` for bounded complete inventory and all admitted manifest candidates, preserving the existing standalone discovery modes.
 - Produces (proposed): `ledger::remove_counted_guarded` with a final validation callback after accounting and immediately before removal; the existing `remove_counted` contract remains unchanged.
+
+- Consumes (proposed): `locks::acquire_verified`, `target::identify_strict`, and `Fs::read_regular_bounded` for current Cargo lock namespace proof and bounded strict input reads; legacy defaults remain unchanged.
+- Consumes (proposed): cancellation-aware `Git::slot_read_only_until` and `Git::worktrees_complete_until` through the existing strict reader defaults.
 
 **Depends-on:** Task 4.
 
