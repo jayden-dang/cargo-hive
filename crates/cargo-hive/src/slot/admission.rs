@@ -198,12 +198,14 @@ enum Origin {
 #[serde(rename_all = "snake_case")]
 enum ExecutableKind {
     CustomBuild,
+    ProcMacro,
 }
 
 impl ExecutableKind {
     fn cargo_kind(&self) -> &'static str {
         match self {
             Self::CustomBuild => "custom-build",
+            Self::ProcMacro => "proc-macro",
         }
     }
 }
@@ -227,6 +229,7 @@ struct ExecutableApproval {
 #[serde(rename_all = "snake_case")]
 enum ReviewedBehavior {
     MetadataOnlyBuildScript,
+    SealedInputsTokenTransform,
 }
 
 #[derive(Deserialize)]
@@ -461,6 +464,9 @@ impl MaterializedPackage {
                     (
                         ExecutableKind::CustomBuild,
                         ReviewedBehavior::MetadataOnlyBuildScript
+                    ) | (
+                        ExecutableKind::ProcMacro,
+                        ReviewedBehavior::SealedInputsTokenTransform
                     )
                 )
             {

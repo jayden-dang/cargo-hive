@@ -5228,6 +5228,11 @@ fn an_executable_review_of_the_old_git_tree_cannot_admit_a_changed_sibling() {
     exercise_materialized_dependency(DependencyFixture::StaleBuildReview);
 }
 
+#[test]
+fn the_guarded_producer_requires_exact_review_for_an_external_proc_macro() {
+    exercise_materialized_dependency(DependencyFixture::ReviewedMacro);
+}
+
 #[derive(Clone, Copy)]
 enum DependencyFixture {
     Registry,
@@ -5235,6 +5240,7 @@ enum DependencyFixture {
     Git,
     ReviewedBuild,
     StaleBuildReview,
+    ReviewedMacro,
 }
 
 fn exercise_materialized_dependency(scenario: DependencyFixture) {
@@ -5243,6 +5249,7 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
         DependencyFixture::Git
             | DependencyFixture::ReviewedBuild
             | DependencyFixture::StaleBuildReview
+            | DependencyFixture::ReviewedMacro
     );
     let incomplete = matches!(scenario, DependencyFixture::IncompleteRegistry);
     let reviewed_build = matches!(
@@ -5250,7 +5257,10 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
         DependencyFixture::ReviewedBuild | DependencyFixture::StaleBuildReview
     );
     let stale_review = matches!(scenario, DependencyFixture::StaleBuildReview);
-    let fixture = reviewed_pool_fixture(Some(if git_dependency {
+    let reviewed_macro = matches!(scenario, DependencyFixture::ReviewedMacro);
+    let fixture = reviewed_pool_fixture(Some(if reviewed_macro {
+        "pub fn answer() -> u32 { git_leaf::identity!(42) }\n"
+    } else if git_dependency {
         "pub fn answer() -> u32 { git_leaf::value() }\n"
     } else {
         "use pin_project_lite::pin_project;\npin_project! { struct Sample { value: u32 } }\npub fn answer() -> u32 { Sample { value: 42 }.value }\n"
@@ -5266,6 +5276,15 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
         )
         .unwrap();
         fs::write(donor.join("src/lib.rs"), "pub fn value() -> u32 { 42 }\n").unwrap();
+        if reviewed_macro {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(donor.join("Cargo.toml"))
+                .unwrap()
+                .write_all(b"\n[lib]\nproc-macro = true\n")
+                .unwrap();
+            fs::write(donor.join("src/lib.rs"), "use proc_macro::TokenStream;\n#[proc_macro]\npub fn identity(input: TokenStream) -> TokenStream { input }\n").unwrap();
+        }
         if reviewed_build {
             fs::write(
                 donor.join("build.rs"),
@@ -5292,7 +5311,7 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
             fs::write(donor.join("shared.txt"), "reviewed checkout-level data").unwrap();
             if reviewed_build {
                 fs::rename(donor.join("build.rs"), nested.join("build.rs")).unwrap();
-            } else {
+            } else if !reviewed_macro {
                 fs::write(
                     nested.join("src/lib.rs"),
                     "pub fn value() -> u32 { include_str!(\"../../shared.txt\").len() as u32 }\n",
@@ -5449,15 +5468,18 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
     closure["materialized"] = json!({"resolve_sha256":fixture_resolve_digest(&metadata, &fixture.repo),
         "packages":[{"id":package["id"],"name":dependency,"version":package["version"], "source":package["source"],
             "root":relative, "inventory_sha256":fixture_inventory(root,git_dependency), "origin":origin}]});
-    let review = reviewed_build.then(|| {
+    let review = (reviewed_build || reviewed_macro).then(|| {
         let review = fixture._repo_dir.path.join("reviewed-executable.json");
-        let target = json!({"name":"build-script-build", "kind":"custom_build", "source":"build.rs"});
+        let (name, kind, source, behavior) = if reviewed_macro {
+            ("git_leaf", "proc_macro", "src/lib.rs", "sealed_inputs_token_transform")
+        } else { ("build-script-build", "custom_build", "build.rs", "metadata_only_build_script") };
+        let target = json!({"name":name, "kind":kind, "source":source});
         let bytes = serde_json::to_vec(&json!({
             "schema":1,"profile":{"id":"fixture","revision":1},"invocation":"check","recipe":"clippy",
             "package_id":package["id"],"inventory_sha256":fixture_inventory(root,true),
             "git_checkout_sha256":reviewed_git_tree,
-            "source_sha256":fixture_sha(&fs::read(root.join("build.rs")).unwrap()),
-            "target":target,"behavior":"metadata_only_build_script"
+            "source_sha256":fixture_sha(&fs::read(root.join(source)).unwrap()),
+            "target":target,"behavior":behavior
         })).unwrap();
         fs::write(&review, &bytes).unwrap();
         closure["materialized"]["packages"][0]["executables"] = json!([
@@ -5538,6 +5560,9 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
         fs::remove_file(path).unwrap();
         assert_eq!(produce(&"9".repeat(32)).status.code(), Some(1));
         assert!(!checkout.join("target").exists());
+        fs::write(path, b"{}").unwrap();
+        assert_eq!(produce(&"b".repeat(32)).status.code(), Some(1));
+        assert!(!checkout.join("target").exists());
         fs::write(path, bytes).unwrap();
     }
     if let Some(revision) = &git_revision {
@@ -5617,6 +5642,22 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
                 .any(|unit| unit.loc.package() == dependency
                     && unit.kind == cargo_hive_core::fingerprint::UnitKind::RunBuildScript)
         );
+    }
+    if reviewed_macro {
+        let unit = built
+            .units
+            .iter()
+            .find(|unit| unit.loc.package() == dependency)
+            .unwrap();
+        let outputs =
+            cargo_hive_core::unit_path::outputs(&checkout.join("target/debug"), &unit.loc);
+        assert!(fs::read_dir(outputs).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "dylib")
+        }));
     }
 }
 
