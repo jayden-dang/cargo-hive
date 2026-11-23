@@ -1,0 +1,9 @@
+fingerprint
+diagnostics
+dep_info
+rustc_info
+debug_map
+target_tag
+incremental_names
+artifact_names
+timestamp_metadata

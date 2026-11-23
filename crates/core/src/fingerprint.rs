@@ -291,7 +291,11 @@ pub fn unit_hash(dir_name: &str) -> Option<UnitHash> {
 pub fn dep_name(fingerprint_dir: &Path, stem: &str, dep: u64) -> Option<String> {
     let mut file = fs::File::open(fingerprint_dir.join(format!("{stem}.json"))).ok()?;
     let bytes = read_capped(&mut file).ok()?;
-    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    dependency_name(&bytes, dep)
+}
+
+fn dependency_name(bytes: &[u8], dep: u64) -> Option<String> {
+    let value: Value = serde_json::from_slice(bytes).ok()?;
     value["deps"]
         .as_array()?
         .iter()
@@ -364,6 +368,28 @@ enum ParsedUnit {
     },
 }
 
+fn read_hash(reader: &mut impl Read, stem: &str) -> Result<Option<UnitHash>, String> {
+    let mut bytes = Vec::with_capacity(UnitHash::HEX_LEN + 1);
+    reader
+        .take((UnitHash::HEX_LEN + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("hash file `{stem}`: {e}"))?;
+    if bytes.len() > UnitHash::HEX_LEN {
+        return Err(format!(
+            "hash file `{stem}` is larger than {} bytes; rebuild the unit and try again",
+            UnitHash::HEX_LEN
+        ));
+    }
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(UnitHash::parse)
+        .map(Some)
+        .ok_or_else(|| format!("hash file `{stem}` is not 16 lowercase hex characters"))
+}
+
 /// An emptied hash is a unit Cargo is rebuilding. The JSON beside it is stale, so the unit is
 /// not current; its stem and features are still the ones the last successful build wrote.
 fn read_unit(
@@ -373,12 +399,9 @@ fn read_unit(
     shared_features: &mut HashMap<String, Arc<str>>,
 ) -> Result<ParsedUnit, String> {
     let stem = json_name.trim_end_matches(".json");
-    let hash = fs::read(dir.join(stem)).map_err(|e| format!("hash file `{stem}`: {e}"))?;
-    if !hash.is_empty() && !is_hash(&hash) {
-        return Err(format!(
-            "hash file `{stem}` is not 16 lowercase hex characters"
-        ));
-    }
+    let mut hash_file =
+        fs::File::open(dir.join(stem)).map_err(|e| format!("hash file `{stem}`: {e}"))?;
+    let hash = read_hash(&mut hash_file, stem)?;
     let json_path = dir.join(json_name);
     let len = fs::metadata(&json_path)
         .map_err(|e| format!("{json_name}: {e}"))?
@@ -388,10 +411,20 @@ fn read_unit(
     }
     let mut file = fs::File::open(&json_path).map_err(|e| format!("{json_name}: {e}"))?;
     let bytes = read_capped(&mut file).map_err(|e| format!("{json_name}: {e}"))?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|e| format!("{json_name}: {e}"))?;
+    decode_unit(&bytes, hash, stem, loc, shared_features)
+}
+
+fn decode_unit(
+    bytes: &[u8],
+    hash: Option<UnitHash>,
+    stem: &str,
+    loc: UnitLoc,
+    shared_features: &mut HashMap<String, Arc<str>>,
+) -> Result<ParsedUnit, String> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|e| format!("{stem}.json: {e}"))?;
     let obj = value
         .as_object()
-        .ok_or_else(|| format!("{json_name} is not a JSON object"))?;
+        .ok_or_else(|| format!("{stem}.json is not a JSON object"))?;
     let deps = check_types(obj)?;
     let features_raw = obj["features"]
         .as_str()
@@ -401,24 +434,22 @@ fn read_unit(
         .ok_or("`declared_features` is not a string")?;
     let features = intern(shared_features, features_raw);
     let stem = stem.to_string();
-    if hash.is_empty() {
+    let Some(hash) = hash else {
         return Ok(ParsedUnit::NotCurrent {
             stem,
             features,
             deps,
         });
-    }
-    let hash_text = String::from_utf8(hash).expect("checked ASCII hex");
+    };
     // Both layouts key a unit by its hash file: a dep edge carries that value. A unit dir's own
     // name is a different hex in Cargo 1.100, so it only has to be well-formed.
     if loc.layout == UnitLayout::UnitDir && UnitHash::parse(loc.hex()).is_none() {
         return Err("unit dir name is not 16 lowercase hex".to_string());
     }
-    let unit_hash = UnitHash::parse(&hash_text).expect("checked hex");
     Ok(ParsedUnit::Current(Unit {
         loc,
         kind: UnitKind::of(&stem),
-        hash: unit_hash,
+        hash,
         deps,
         stem,
         features,
@@ -856,6 +887,93 @@ fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
     }
 }
 
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+
+    pub fn fingerprint(data: &[u8]) {
+        let loc = UnitLoc {
+            layout: UnitLayout::UnitDir,
+            name_meta: "probe-ffffffffffffffff".into(),
+        };
+        let mut shared = HashMap::new();
+        let _ = read_hash(&mut &data[..], "lib-probe");
+        let _ = read_capped(&mut &data[..]);
+        let _ = decode_unit(
+            data,
+            Some(UnitHash(1)),
+            "lib-probe",
+            loc.clone(),
+            &mut shared,
+        );
+        let _ = dependency_name(data, 1);
+        if let Ok(text) = std::str::from_utf8(data) {
+            let _ = coverage_of(text, text);
+        }
+        let n = data.first().copied().unwrap_or(0) as u64;
+        let value = serde_json::json!({"rustc":n,"features":"[\"a\"]","declared_features":"[\"a\"]","target":2,"profile":3,"path":4,"deps":[[5,"neighbor",false,n]],"local":[],"rustflags":[],"config":6,"compile_kind":0});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let hash_text = format!("{n:016x}");
+        let hash = read_hash(&mut hash_text.as_bytes(), "lib-probe").unwrap();
+        for layout in [UnitLayout::Flat, UnitLayout::UnitDir] {
+            let loc = UnitLoc {
+                layout,
+                ..loc.clone()
+            };
+            let ParsedUnit::Current(unit) =
+                decode_unit(&bytes, hash, "lib-probe", loc.clone(), &mut shared).unwrap()
+            else {
+                panic!("valid current unit")
+            };
+            assert_eq!(unit.hash.to_string(), hash_text);
+            assert_eq!(
+                unit.deps,
+                vec![DepEdge {
+                    package: 5,
+                    fingerprint: n
+                }]
+            );
+            assert_eq!(unit.coverage, Coverage::AllDeclared);
+            assert_eq!(unit.toolchain_value, n);
+            assert!(matches!(
+                decode_unit(&bytes, None, "lib-probe", loc, &mut shared),
+                Ok(ParsedUnit::NotCurrent { .. })
+            ));
+        }
+        assert_eq!(dependency_name(&bytes, n).as_deref(), Some("neighbor"));
+        let mut invalid = value;
+        invalid["deps"] = serde_json::json!([[5, "neighbor", 0, n]]);
+        assert!(
+            decode_unit(
+                &serde_json::to_vec(&invalid).unwrap(),
+                hash,
+                "lib-probe",
+                loc,
+                &mut shared
+            )
+            .is_err()
+        );
+    }
+
+    pub fn diagnostics(data: &[u8]) {
+        if let Ok(text) = std::str::from_utf8(data) {
+            for line in text.lines() {
+                let _ = is_summary_line(line);
+                let _ = error_code(line);
+            }
+        }
+        let message = String::from_utf8_lossy(data);
+        let line = serde_json::json!({"level":"error","code":{"code":"E0123"},"message":message})
+            .to_string();
+        assert_eq!(is_summary_line(&line), Some(false));
+        assert_eq!(error_code(&line).as_deref(), Some("E0123"));
+        let summary = serde_json::json!({"level":"error","code":null,"message":"aborting due to previous error"}).to_string();
+        assert_eq!(is_summary_line(&summary), Some(true));
+        assert!(error_code(&summary).is_none());
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
@@ -876,6 +994,49 @@ mod tests {
         let p = std::env::temp_dir().join(format!("hive-fp-{}-{k}-{n}", std::process::id()));
         fs::create_dir_all(p.join(".fingerprint")).unwrap();
         p
+    }
+
+    #[test]
+    fn reader_models_cover_valid_and_invalid_compiler_data() {
+        for data in [
+            &b""[..],
+            &b"\xff\x00garbled"[..],
+            &b"[]"[..],
+            &b"abcdef"[..],
+        ] {
+            fuzzing::fingerprint(data);
+            fuzzing::diagnostics(data);
+        }
+        let bytes = unit_json(&[7]).into_bytes();
+        let loc = UnitLoc {
+            layout: UnitLayout::Flat,
+            name_meta: "q-0000000000000001".into(),
+        };
+        for end in 0..bytes.len() {
+            assert!(
+                decode_unit(
+                    &bytes[..end],
+                    Some(UnitHash(1)),
+                    "lib-q",
+                    loc.clone(),
+                    &mut HashMap::new()
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn hash_prefixes_distinguish_rebuilding_from_incomplete_hashes() {
+        let bytes = b"0123456789abcdef";
+        for end in 0..=bytes.len() {
+            let parsed = read_hash(&mut &bytes[..end], "lib-probe");
+            match end {
+                0 => assert_eq!(parsed.unwrap(), None),
+                16 => assert_eq!(parsed.unwrap().unwrap().to_string(), "0123456789abcdef"),
+                _ => assert!(parsed.unwrap_err().contains("16 lowercase hex")),
+            }
+        }
     }
 
     fn unit_json(deps: &[u64]) -> String {
@@ -1263,6 +1424,45 @@ mod tests {
             source.pulled <= MAX_JSON_BYTES + 1,
             "pulled {} bytes past the cap",
             source.pulled
+        );
+    }
+
+    #[test]
+    fn a_hash_stream_stops_after_the_one_overflow_sentinel() {
+        let mut source = CountingReader {
+            remaining: 1024 * 1024,
+            pulled: 0,
+        };
+        assert!(
+            read_hash(&mut source, "lib-probe")
+                .unwrap_err()
+                .contains("larger than 16 bytes")
+        );
+        assert_eq!(source.pulled, 17);
+    }
+
+    #[test]
+    fn a_hash_file_at_the_limit_is_current_and_one_byte_past_is_a_size_refusal() {
+        let profile = scratch();
+        let name = "probe-0000000000000001";
+        let stem = "lib-probe";
+        write_unit(&profile, name, stem, 1, &[]);
+        let hash_path = profile.join(".fingerprint").join(name).join(stem);
+        let exact = read_profile(&profile);
+        fs::write(&hash_path, format!("{}0", le_hex(1))).unwrap();
+        let over = read_profile(&profile);
+        fs::write(&hash_path, b"").unwrap();
+        let empty = read_profile(&profile);
+        fs::remove_dir_all(profile).unwrap();
+
+        assert_eq!(exact.format, Format::Supported);
+        assert_eq!(exact.units, 1);
+        assert_eq!(empty.format, Format::Supported);
+        assert_eq!(empty.not_current, 1);
+        assert!(
+            matches!(&over.format, Format::Unsupported(why) if why.contains(stem) && why.contains("larger than 16 bytes") && why.contains("rebuild")),
+            "{:?}",
+            over.format
         );
     }
 

@@ -1170,8 +1170,10 @@ fn every_lock_is_taken_before_the_first_read_of_the_target() {
         .iter()
         .rposition(|line| line.starts_with("lock "))
         .expect("lock lines");
+    let tag_probe = format!("read_at {} ", target.join("CACHEDIR.TAG").display());
     let first_deps_or_read_at = log.iter().position(|line| {
-        line.starts_with("read_at ") || (line.starts_with("read ") && line.contains("/deps"))
+        (line.starts_with("read_at ") && !line.starts_with(&tag_probe))
+            || (line.starts_with("read ") && line.contains("/deps"))
     });
     let Some(first) = first_deps_or_read_at else {
         panic!("expected a deps listing or read_at in the log: {log:?}");
@@ -1180,7 +1182,6 @@ fn every_lock_is_taken_before_the_first_read_of_the_target() {
         last_lock < first,
         "a deps/read_at happened before the last lock: last_lock={last_lock} first={first} log={log:?}"
     );
-    let _ = target;
 }
 
 #[test]

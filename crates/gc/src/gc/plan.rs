@@ -190,9 +190,54 @@ pub fn is_temp_entry(name: &str, kind: EntryKind) -> bool {
         })
 }
 
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+    pub fn incremental_names(data: &[u8]) {
+        if let Ok(name) = std::str::from_utf8(data) {
+            let _ = parse_session(name);
+            let _ = parse_lock(name);
+            for kind in [
+                EntryKind::File,
+                EntryKind::Dir,
+                EntryKind::Symlink,
+                EntryKind::Other,
+            ] {
+                let _ = is_temp_entry(name, kind);
+            }
+            let _ = crate_dir(&[(name.into(), EntryKind::Dir)], UNIX_EPOCH);
+        }
+        let n = usize::from(data.first().copied().unwrap_or(0)) % 36;
+        let digit = b"0123456789abcdefghijklmnopqrstuvwxyz"[n] as char;
+        assert_eq!(timestamp(&digit.to_string()), Some(n as u64));
+        let dir = format!("s-{digit}-r-working");
+        let lock = format!("s-{digit}-r.lock");
+        let entries = [
+            (dir.clone(), EntryKind::Dir),
+            (lock.clone(), EntryKind::File),
+        ];
+        let actions = crate_dir(&entries, UNIX_EPOCH + MIN_AGE + Duration::from_secs(1));
+        assert!(
+            matches!(actions.as_slice(), [Action::DeleteLocked(pair)] if pair.dir()==dir && pair.lock()==lock)
+        );
+        assert!(crate_dir(&entries, UNIX_EPOCH).is_empty());
+        assert!(is_temp_entry("rustcA1", EntryKind::Dir));
+        assert!(!is_temp_entry("rustc-A1", EntryKind::Dir));
+        assert!(!is_temp_entry("rustcA1", EntryKind::File));
+        assert!(timestamp("zzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_none());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generated_incremental_names_preserve_pairing_and_age() {
+        for bytes in [&b""[..], &b"\xff"[..], &b"s-1-r-working"[..]] {
+            super::fuzzing::incremental_names(bytes);
+        }
+    }
 
     /// Base-36 lowercase, as rustc writes name timestamps.
     fn b36(mut n: u64) -> String {

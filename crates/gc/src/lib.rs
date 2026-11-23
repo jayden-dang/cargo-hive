@@ -8,3 +8,6 @@ pub mod explain;
 pub mod gc;
 pub mod liveness;
 pub mod plan_tier;
+
+#[cfg(any(test, fuzzing))]
+mod reader_testing;

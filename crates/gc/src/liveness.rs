@@ -574,9 +574,76 @@ fn make_unit_ref(profile: &Path, loc: &UnitLoc) -> UnitRef {
     }
 }
 
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+    use crate::reader_testing::ReaderFs;
+    use std::time::UNIX_EPOCH;
+    pub fn timestamp_metadata(data: &[u8]) {
+        let now = UNIX_EPOCH + Duration::from_secs(1000);
+        let window = Duration::from_secs(100);
+        for (seconds, expected) in [(899, false), (900, true), (1000, true), (1001, true)] {
+            assert_eq!(
+                in_window(UNIX_EPOCH + Duration::from_secs(seconds), now, window),
+                expected
+            );
+        }
+        assert!(in_window(UNIX_EPOCH, now, Duration::MAX));
+        let mut fs = ReaderFs::new(vec![]);
+        let path = Path::new("timestamp");
+        let mode = data.first().copied().unwrap_or(0) % 3;
+        let value = match mode {
+            0 => Ok(now),
+            1 => Err(io::ErrorKind::NotFound),
+            _ => Err(io::ErrorKind::PermissionDenied),
+        };
+        fs.times.insert(path.into(), value);
+        match mode {
+            0 => assert!(invoked_in_window(&fs, path, now, window).unwrap()),
+            1 => assert!(!invoked_in_window(&fs, path, now, window).unwrap()),
+            _ => assert!(invoked_in_window(&fs, path, now, window).is_err()),
+        }
+        let loc = UnitLoc {
+            layout: UnitLayout::Flat,
+            name_meta: "probe-0123456789abcdef".into(),
+        };
+        let profile = Path::new("target/debug");
+        let node = NotCurrentNode {
+            profile,
+            loc: &loc,
+            stem: "lib-probe",
+            deps: &[],
+        };
+        let stamp = unit_timestamp(profile, &loc, UnitKind::Lib);
+        let hash = unit_path::hash_file(profile, &loc, "lib-probe");
+        fs.times.insert(stamp.clone(), Ok(now));
+        fs.times.insert(hash, Ok(now + Duration::from_secs(1)));
+        let mut reasons = vec![];
+        assert_eq!(
+            node.last_wanted(&fs, &mut reasons),
+            Some(now + Duration::from_secs(1))
+        );
+        assert!(reasons.is_empty());
+        fs.times.insert(stamp, Err(io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            node.last_wanted(&fs, &mut reasons),
+            Some(now + Duration::from_secs(1))
+        );
+        assert_eq!(reasons.len(), 1);
+    }
+}
+
 #[cfg(test)]
 #[cfg(target_os = "macos")]
 mod tests {
+    #[test]
+    fn metadata_models_distinguish_missing_unreadable_current_and_not_current() {
+        for bytes in [&b""[..], &b"1"[..], &b"2"[..]] {
+            super::fuzzing::timestamp_metadata(bytes);
+        }
+    }
+
     use super::*;
     use cargo_hive_core::fingerprint::{UnitId, le_hex, read_profile};
     use cargo_hive_core::liveness::DEFAULT_WINDOW;

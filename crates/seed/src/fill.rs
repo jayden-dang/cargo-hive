@@ -717,8 +717,13 @@ fn profile_listings(
 
 fn hash_unchanged(path: &Path, expected: &str) -> Result<bool, String> {
     let mut file = File::open(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    hash_matches(&mut file, path, expected)
+}
+
+fn hash_matches(mut reader: impl Read, path: &Path, expected: &str) -> Result<bool, String> {
     let mut buf = Vec::new();
-    file.by_ref()
+    reader
+        .by_ref()
         .take(HASH_CAP + 1)
         .read_to_end(&mut buf)
         .map_err(|err| format!("{}: {err}", path.display()))?;
@@ -982,8 +987,13 @@ fn read_capped(path: &Path, cap: u64) -> Result<String, String> {
             ));
         }
     };
+    read_capped_stream(&mut file, path, cap)
+}
+
+fn read_capped_stream(mut reader: impl Read, path: &Path, cap: u64) -> Result<String, String> {
     let mut buf = Vec::new();
-    file.by_ref()
+    reader
+        .by_ref()
         .take(cap + 1)
         .read_to_end(&mut buf)
         .map_err(|err| {
@@ -1012,6 +1022,36 @@ fn epoch_secs(now: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+    pub fn rustc_info(data: &[u8]) {
+        if let Ok(text) = read_capped_stream(data, Path::new("rustc-info.json"), RUSTC_INFO_CAP) {
+            let _ = rustc_info_version(&text);
+        }
+        let _ = hash_matches(data, Path::new("hash"), "0123456789abcdef");
+        let stdout = format!(
+            "rustc probe\nrelease: {}\nrelease: repeated within one entry\n",
+            data.first().copied().unwrap_or(0)
+        );
+        let mut value = serde_json::json!({"outputs":{"probe":{"stdout":"libprobe.rlib"},"version":{"stdout":stdout}}});
+        let text = value.to_string();
+        assert_eq!(rustc_info_version(&text).unwrap(), stdout);
+        value["outputs"]["other"] = serde_json::json!({"stdout":"release: other"});
+        assert!(rustc_info_version(&value.to_string()).is_err());
+        assert!(
+            hash_matches(
+                &b"0123456789abcdef"[..],
+                Path::new("hash"),
+                "0123456789abcdef"
+            )
+            .unwrap()
+        );
+        assert!(!hash_matches(&b"other"[..], Path::new("hash"), "0123456789abcdef").unwrap());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::rustc_info_version;
@@ -1025,6 +1065,84 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct Chunked<'a> {
+        bytes: &'a [u8],
+        interrupted: bool,
+        fail_at_end: bool,
+    }
+
+    impl std::io::Read for Chunked<'_> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.interrupted {
+                self.interrupted = false;
+                return Err(std::io::ErrorKind::Interrupted.into());
+            }
+            if self.bytes.is_empty() && self.fail_at_end {
+                return Err(std::io::ErrorKind::PermissionDenied.into());
+            }
+            let n = out.len().min(2).min(self.bytes.len());
+            out[..n].copy_from_slice(&self.bytes[..n]);
+            self.bytes = &self.bytes[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn rustc_info_json_cuts_refuse_missing_required_structure() {
+        let text = info(&[("version", "release: probe\n")]);
+        for end in 0..text.len() {
+            assert!(rustc_info_version(&text[..end]).is_err(), "cut {end}");
+        }
+        assert_eq!(rustc_info_version(&text).unwrap(), "release: probe\n");
+    }
+
+    #[test]
+    fn toolchain_streams_retry_interruptions_and_retain_late_errors() {
+        let text = info(&[("version", "release: probe\n")]);
+        for fail_at_end in [false, true] {
+            let stream = Chunked {
+                bytes: text.as_bytes(),
+                interrupted: true,
+                fail_at_end,
+            };
+            let result = super::read_capped_stream(stream, Path::new("probe-info.json"), 1024);
+            let stream = Chunked {
+                bytes: b"0123456789abcdef",
+                interrupted: true,
+                fail_at_end,
+            };
+            let hash = super::hash_matches(stream, Path::new("probe-hash"), "0123456789abcdef");
+            if fail_at_end {
+                let why = result.unwrap_err();
+                assert!(why.contains("probe-info.json") && why.contains("permission denied"));
+                let why = hash.unwrap_err();
+                assert!(why.contains("probe-hash") && why.contains("permission denied"));
+            } else {
+                assert_eq!(result.unwrap(), text);
+                assert!(hash.unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn toolchain_and_staging_hash_models_cover_raw_and_bounded_inputs() {
+        use std::io::Read;
+        for input in [&b""[..], &b"\xff"[..], &b"{}"[..], &b"a"[..]] {
+            super::fuzzing::rustc_info(input);
+        }
+        let path = Path::new("probe");
+        assert!(super::hash_matches(std::io::repeat(b'a').take(65), path, "a").is_err());
+        assert!(
+            super::read_capped_stream(
+                std::io::repeat(b'a').take(1024 * 1024 + 1),
+                path,
+                1024 * 1024
+            )
+            .is_err()
+        );
+        assert!(super::read_capped_stream(&b"\xff"[..], path, 1024).is_err());
+    }
 
     fn info(entries: &[(&str, &str)]) -> String {
         let mut outputs = serde_json::Map::new();
