@@ -54,9 +54,12 @@ Design: ./design.md
 | `crates/cargo-hive/src/slot/mod.rs` | New slot dispatch, identity-scoped transition/replay and operator recovery. |
 | `crates/cargo-hive/src/slot/inspect.rs` | New positive slot identity, dirty-return, and candidate root checks. |
 | `crates/cargo-hive/src/slot/profile.rs` | New effective producer, certified graph/consumer and mtime evidence checks. |
+| `crates/cargo-hive/src/slot/admission.rs` | Validate bounded sealed profile closure evidence and approved data variants. |
 | `crates/cargo-hive/src/slot/result.rs` | New sanitized JSON projection and existing Receipt audit projection. |
 | `crates/gc/src/checkout.rs` | Expose positive root-lock/completion evidence beside the existing report. |
 | `crates/gc/src/debug_map.rs` | Read strict checkout GC candidates through a checked regular descriptor. |
+| `crates/seed/src/lib.rs` | Share typed registry seed execution with a positively scoped initial placement. |
+| `crates/seed/src/place.rs` | Verify the exact expected initial root before scoped placement. |
 | `crates/cargo-hive/tests/slots.rs` | New real CLI slot, persistence, scope, recovery and fault interleavings. |
 | `crates/cargo-hive/tests/slot_inputs.rs` | New generated throwaway fixtures for causal Cargo and build reuse proofs. |
 | `crates/cargo-hive/tests/checkout_gc.rs` | Guard existing scoped GC output and add the stricter slot-run root evidence cases. |
@@ -282,6 +285,9 @@ _Requirements: SLOTS-3.6, SLOTS-3.7, SLOTS-3.10_
 ### Task 7: Deliver a ready slot at the requested commit
 
 **Files:**
+- Create: `crates/cargo-hive/src/slot/admission.rs`
+- Modify: `crates/seed/src/lib.rs`
+- Modify: `crates/seed/src/place.rs`
 - Modify: `crates/platform/src/slot.rs`
 - Modify: `crates/gc/src/checkout.rs`
 - Modify: `crates/cargo-hive/tests/fixtures/current/cli-tree.txt`
