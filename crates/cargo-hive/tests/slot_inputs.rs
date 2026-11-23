@@ -155,9 +155,14 @@ impl Fixture {
             .unwrap();
         let output = wait_within(child, Duration::from_secs(60));
         assert!(output.status.success(), "{output:?}");
+        let messages = String::from_utf8(output.stdout).unwrap();
+        self.observe_build(&self.checkout, target, &messages)
+    }
+
+    fn observe_build(&self, checkout: &Path, target: &Path, messages: &str) -> Build {
         let mut fresh = BTreeMap::new();
         let mut executable = None;
-        for line in String::from_utf8(output.stdout).unwrap().lines() {
+        for line in messages.lines().filter(|line| line.starts_with('{')) {
             let row: Value = serde_json::from_str(line).unwrap();
             if row["reason"] != "compiler-artifact" {
                 continue;
@@ -171,7 +176,7 @@ impl Fixture {
             };
             assert_eq!(
                 Path::new(row["target"]["src_path"].as_str().unwrap()),
-                self.checkout.join(source)
+                checkout.join(source)
             );
             assert!(
                 fresh
@@ -205,17 +210,14 @@ impl Fixture {
         }
     }
 
-    fn touch_consumer(&self) {
+    fn touch_consumer(checkout: &Path, target: &Path) {
         assert_eq!(
-            git(
-                &self.checkout,
-                &["ls-files", "--error-unmatch", "--", ANCHOR]
-            ),
+            git(checkout, &["ls-files", "--error-unmatch", "--", ANCHOR]),
             ANCHOR
         );
-        let anchor = self.checkout.join(ANCHOR);
+        let anchor = checkout.join(ANCHOR);
         let old_mtime = fs::metadata(&anchor).unwrap().modified().unwrap();
-        let profile = self.retained.join("debug");
+        let profile = target.join("debug");
         let report = fingerprint::read_profile(&profile);
         let units = report.graph.unwrap().units;
         let mut consumers = units.iter().filter(|unit| unit.loc.package() == "consumer");
@@ -292,7 +294,7 @@ fn causal_control(input: ChangedInput) {
         ChangedInput::Sqlx => fs::write(&query, CHANGED_QUERY).unwrap(),
         ChangedInput::Dotenv => fs::write(&dotenv, "FIXTURE_VALUE=present\n").unwrap(),
     }
-    fixture.touch_consumer();
+    Fixture::touch_consumer(&fixture.checkout, &fixture.retained);
     fixture
         .build(&fixture.retained)
         .check("holder's changed input", changed, false, true);
@@ -327,7 +329,7 @@ fn causal_control(input: ChangedInput) {
     assert_ne!(stale.value, reference.value);
 
     // This deliberately supplies the anchor touch without calling the slot guide.
-    fixture.touch_consumer();
+    Fixture::touch_consumer(&fixture.checkout, &fixture.retained);
     fixture
         .build(&fixture.retained)
         .check("manual anchor control", &reference.value, false, true);
@@ -616,12 +618,124 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
     assert!(!refused.status.success(), "{refused:?}");
     assert!(!checkout.join("target").exists());
     fs::remove_file(rejected).unwrap();
-    let out = produce(&"f".repeat(32));
-    assert!(
-        out.status.success(),
-        "sealed producer did not complete: {out:?}"
+    let retained = checkout.join("target");
+    let run = |op: char| {
+        let operation = op.to_string().repeat(32);
+        let out = produce(&operation);
+        assert!(
+            out.status.success(),
+            "sealed producer did not complete: {out:?}"
+        );
+        let receipt: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(receipt["kind"], "producer_complete");
+        let record: Value =
+            serde_json::from_slice(&fs::read(fixture.hive.home.path.join("slots.json")).unwrap())
+                .unwrap();
+        let producer = &record["pools"][0]["slots"][0]["producer"];
+        assert_eq!(producer["kind"], "complete");
+        let invocations = producer["invocations"].as_array().unwrap();
+        let latest = invocations.last().unwrap();
+        assert_eq!(latest["operation"], operation);
+        assert!(
+            latest["foreground"]["pid"]
+                .as_u64()
+                .is_some_and(|pid| pid > 1)
+        );
+        let evidence = &latest["evidence"];
+        assert!(
+            evidence["stable_digest"]
+                .as_str()
+                .is_some_and(|digest| digest.len() == 64)
+        );
+        let messages = String::from_utf8(out.stderr).unwrap();
+        (
+            fixture.observe_build(&checkout, &retained, &messages),
+            evidence.clone(),
+        )
+    };
+    let (baseline, original) = run('f');
+    baseline.check("guided baseline", ORIGINAL, false, false);
+    let query = checkout.join(QUERY);
+    let original_mtime = fs::metadata(&query).unwrap().modified().unwrap();
+    let dotenv = checkout.join(".env");
+    assert!(!dotenv.exists());
+    let reference = fixture.build(&fixture.clean);
+    reference.check(
+        "independent clean for guided controls",
+        ORIGINAL,
+        false,
+        false,
     );
-    let receipt: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(receipt["kind"], "producer_complete");
-    assert!(checkout.join("target/debug/consumer").is_file());
+
+    for (input, changed, op) in [
+        (ChangedInput::Sqlx, "modified:absent", ['1', '2', '3']),
+        (ChangedInput::Dotenv, "original:present", ['4', '5', '6']),
+    ] {
+        match input {
+            ChangedInput::Sqlx => fs::write(&query, CHANGED_QUERY).unwrap(),
+            ChangedInput::Dotenv => fs::write(&dotenv, "FIXTURE_VALUE=present\n").unwrap(),
+        }
+        Fixture::touch_consumer(&checkout, &retained);
+        let (build, changed_evidence) = run(op[0]);
+        build.check("guided changed input", changed, false, true);
+        assert_ne!(changed_evidence["graph_digest"], original["graph_digest"]);
+        assert_eq!(changed_evidence["stable_digest"], original["stable_digest"]);
+        match input {
+            ChangedInput::Sqlx => {
+                fs::write(&query, ORIGINAL_QUERY).unwrap();
+                set_mtime(&query, original_mtime);
+            }
+            ChangedInput::Dotenv => fs::remove_file(&dotenv).unwrap(),
+        }
+        assert_eq!(
+            fs::metadata(&query).unwrap().modified().unwrap(),
+            original_mtime
+        );
+        assert!(!dotenv.exists());
+        let (stale, restored_evidence) = run(op[1]);
+        stale.check("guided unprotected restored input", changed, true, true);
+        assert_eq!(restored_evidence, original);
+        // The later retained-take test replaces this manual causal control with guide invalidation.
+        Fixture::touch_consumer(&checkout, &retained);
+        let (protected, final_evidence) = run(op[2]);
+        protected.check(
+            "guided build after manual anchor control",
+            &reference.value,
+            false,
+            true,
+        );
+        assert_eq!(final_evidence, original);
+    }
+    assert!(git(&checkout, &["status", "--porcelain"]).is_empty());
+    let op = "9".repeat(32);
+    let mut child = fixture
+        .hive
+        .command(&[
+            "slot",
+            "return",
+            "--repo",
+            fixture.main.to_str().unwrap(),
+            "--pool",
+            pool,
+            "--slot",
+            "1",
+            "--generation",
+            "1",
+            "--op",
+            &op,
+            "--json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write as _;
+        writeln!(child.stdin.take().unwrap(), "{key}").unwrap();
+    }
+    let out = wait_within(child, Duration::from_secs(30));
+    assert!(out.status.success(), "{out:?}");
+    let returned: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(returned["kind"], "returned");
 }
