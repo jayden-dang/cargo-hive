@@ -56,6 +56,7 @@ Design: ./design.md
 | `crates/cargo-hive/src/slot/profile.rs` | New effective producer, certified graph/consumer and mtime evidence checks. |
 | `crates/cargo-hive/src/slot/result.rs` | New sanitized JSON projection and existing Receipt audit projection. |
 | `crates/gc/src/checkout.rs` | Expose positive root-lock/completion evidence beside the existing report. |
+| `crates/gc/src/debug_map.rs` | Read strict checkout GC candidates through a checked regular descriptor. |
 | `crates/cargo-hive/tests/slots.rs` | New real CLI slot, persistence, scope, recovery and fault interleavings. |
 | `crates/cargo-hive/tests/slot_inputs.rs` | New generated throwaway fixtures for causal Cargo and build reuse proofs. |
 | `crates/cargo-hive/tests/checkout_gc.rs` | Guard existing scoped GC output and add the stricter slot-run root evidence cases. |
@@ -246,6 +247,7 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 - Modify: `crates/core/src/ledger/mod.rs`
 - Modify: `crates/cargo-hive/src/cli.rs`
 - Modify: `crates/gc/src/checkout.rs`
+- Modify: `crates/gc/src/debug_map.rs`
 - Modify: `crates/cargo-hive/tests/checkout_gc.rs`
 
 **Reuse:** rung 2 — reuse `metadata::resolve`, target ownership, and `gc::checkout::run` through the existing checkout-GC driver after extracting its typed operation result from emission. Continue to use shipped `seed`.
@@ -280,6 +282,9 @@ _Requirements: SLOTS-3.6, SLOTS-3.7, SLOTS-3.10_
 ### Task 7: Deliver a ready slot at the requested commit
 
 **Files:**
+- Modify: `crates/platform/src/slot.rs`
+- Modify: `crates/gc/src/checkout.rs`
+- Modify: `crates/cargo-hive/tests/fixtures/current/cli-tree.txt`
 - Modify: `crates/cargo-hive/src/slot/result.rs`
 - Modify: `crates/cargo-hive/src/cli.rs`
 - Modify: `crates/cargo-hive/tests/skill.rs`
