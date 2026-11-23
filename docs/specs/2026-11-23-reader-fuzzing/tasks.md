@@ -31,6 +31,7 @@ Baseline Rustup default differs from the 1.97.1 compiler; use a scratch RUSTUP_H
 | `crates/seed/src/source.rs`, `crates/seed/src/fill.rs` | Seed shared decoding, adapters and ordinary regressions |
 | `crates/gc/src/debug_map.rs`, `crates/gc/src/gc/plan.rs`, `crates/gc/src/gc.rs`, `crates/gc/src/liveness.rs`, `crates/gc/src/explain.rs`, `crates/gc/src/lib.rs` | GC slice bounds, adapters and ordinary regressions |
 | `crates/gc/src/reader_testing.rs` | Optional cfg(test/fuzzing) read-only sparse/metadata fixture shared by GC reader tests |
+| `crates/cargo-hive/tests/checkout_gc.rs` | Preserve the artifact-lock ordering guard while distinguishing bounded preflight Cargo-tag probes |
 | `fuzz/Cargo.toml`, `fuzz/Cargo.lock`, `fuzz/rust-toolchain.toml`, `fuzz/.gitignore`, `fuzz/targets.txt`, `fuzz/README.md` | Independent fuzz workspace, pins, target registry, limits and instructions |
 | `fuzz/fuzz_targets/fingerprint.rs`, `diagnostics.rs`, `dep_info.rs`, `rustc_info.rs`, `debug_map.rs`, `target_tag.rs`, `incremental_names.rs`, `artifact_names.rs`, `timestamp_metadata.rs` | Nine thin executables under fuzz/fuzz_targets/ |
 | `fuzz/corpus/<target>/seed` | One or more small synthetic seed inputs per registered target |
@@ -145,6 +146,7 @@ _Requirements: FUZZ-3.1, FUZZ-3.4, FUZZ-4.1, FUZZ-4.2, FUZZ-4.3, FUZZ-4.4, FUZZ-
 ### Task 5: Verify acceptance and close the branch
 
 **Files:**
+- Modify: `crates/cargo-hive/tests/checkout_gc.rs`
 - Modify: `fuzz/README.md`
 - Modify: `docs/specs/2026-11-23-reader-fuzzing/tasks.md`
 - Modify: `docs/specs/2026-11-23-reader-fuzzing/requirements.md`
