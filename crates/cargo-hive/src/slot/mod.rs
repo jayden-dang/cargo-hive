@@ -107,7 +107,7 @@ fn run(
     json: bool,
     init: Option<(PathBuf, PathBuf)>,
 ) -> i32 {
-    let result = match state.locked_or_cancelled(cancelled, |tx| {
+    let result = match state.slot_locked_or_cancelled(cancelled, |tx| {
         Ok(inspect_or_init(tx, state, name, &repo, init))
     }) {
         Ok(Ok(result)) => result,
@@ -116,9 +116,9 @@ fn run(
     };
     match serde_json::to_string(&result.audit_receipt()) {
         Ok(line) => {
-            if let Err(err) = state
-                .locked_or_cancelled(cancelled, |tx| tx.append_slot_audit_line(&line).map(|_| ()))
-            {
+            if let Err(err) = state.slot_locked_or_cancelled(cancelled, |tx| {
+                tx.append_slot_audit_line(&line).map(|_| ())
+            }) {
                 eprintln!("cargo-hive: could not log the slot receipt: {err}");
             }
         }
@@ -197,7 +197,7 @@ fn inspect_or_init(
             ));
         }
         registered_main(main, &registry)?;
-        check_namespaces(state.root(), &config.secondary_roots, pools)?;
+        check_namespaces(state.root(), &config.secondary_roots, None, pools)?;
         let mut result = SlotResult::new(command, "unconfigured", Some(main.to_path_buf()), 0);
         result.next_action = Some(
             "Use `cargo hive slot init` with a durable secondary root and a reviewed profile.",
@@ -222,11 +222,7 @@ fn inspect_or_init(
         ));
     }
     slots::owner_directory(&root).map_err(|err| path_refusal(&root, err))?;
-    let mut known_roots = config.secondary_roots.clone();
-    if !known_roots.contains(&root) {
-        known_roots.push(root.clone());
-    }
-    check_namespaces(state.root(), &known_roots, pools)?;
+    check_namespaces(state.root(), &config.secondary_roots, Some(&root), pools)?;
     verify_root(&root, state.root(), &config.secondary_roots, &registry)?;
     let profile = PoolProfile::read(&profile).map_err(|err| match err {
         StateError::Malformed { detail, .. } => Refusal::Scope(format!(
@@ -396,7 +392,8 @@ fn verify_root(
             return Err(overlap_refusal(root));
         }
         let inventory = git_scope(&repo.main, &["worktree", "list", "--porcelain", "-z"])?;
-        verify_worktree_inventory(root, &repo.main, &inventory)?;
+        let oid_len = repo.root_commits.first().map_or(0, String::len);
+        verify_worktree_inventory(root, &repo.main, oid_len, &inventory)?;
     }
     Ok(())
 }
@@ -438,12 +435,20 @@ fn overlap_refusal(root: &Path) -> Refusal {
     ))
 }
 
-fn verify_worktree_inventory(root: &Path, main: &Path, inventory: &[u8]) -> Result<(), Refusal> {
+fn verify_worktree_inventory(
+    root: &Path,
+    main: &Path,
+    oid_len: usize,
+    inventory: &[u8],
+) -> Result<(), Refusal> {
+    if !matches!(oid_len, 40 | 64) || inventory.len() > GIT_OUTPUT_LIMIT {
+        return Err(git_scope_refusal(main));
+    }
     let decoded = std::str::from_utf8(inventory).map_err(|_| git_scope_refusal(main))?;
     let records = decoded
         .strip_suffix("\0\0")
         .ok_or_else(|| git_scope_refusal(main))?;
-    let mut found_main = false;
+    let mut paths = BTreeSet::new();
     for (index, record) in records.split("\0\0").enumerate() {
         if index >= MAX_WORKTREES {
             return Err(git_scope_refusal(main));
@@ -455,16 +460,14 @@ fn verify_worktree_inventory(root: &Path, main: &Path, inventory: &[u8]) -> Resu
             .map(Path::new)
             .filter(|path| path.is_absolute())
             .ok_or_else(|| git_scope_refusal(main))?;
-        if fields.any(|field| {
-            let name = field.split_once(' ').map_or(field, |(name, _)| name);
-            !matches!(
-                name,
-                "HEAD" | "branch" | "bare" | "detached" | "locked" | "prunable"
-            )
-        }) {
+        let head = fields.next().ok_or_else(|| git_scope_refusal(main))?;
+        // The registered main was already verified as non-bare.
+        if (index == 0) != (path == main)
+            || !valid_worktree_fields(head, fields, oid_len, index == 0)
+            || !paths.insert(path)
+        {
             return Err(git_scope_refusal(main));
         }
-        found_main |= path == main;
         if overlaps(root, path) {
             return Err(overlap_refusal(root));
         }
@@ -475,10 +478,57 @@ fn verify_worktree_inventory(root: &Path, main: &Path, inventory: &[u8]) -> Resu
             Err(_) => return Err(git_scope_refusal(main)),
         }
     }
-    if !found_main {
-        return Err(git_scope_refusal(main));
-    }
     Ok(())
+}
+
+fn valid_worktree_fields<'a>(
+    head: &str,
+    mut fields: impl Iterator<Item = &'a str>,
+    oid_len: usize,
+    is_main: bool,
+) -> bool {
+    let Some(oid) = head.strip_prefix("HEAD ") else {
+        return false;
+    };
+    if oid.len() != oid_len
+        || !oid
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        || (is_main && oid.bytes().all(|byte| byte == b'0'))
+    {
+        return false;
+    }
+    let Some(kind) = fields.next() else {
+        return false;
+    };
+    if kind != "detached" && !kind.strip_prefix("branch ").is_some_and(valid_git_ref) {
+        return false;
+    }
+    let mut locked = false;
+    let mut prunable = false;
+    fields.all(|field| {
+        let (name, reason) = field.split_once(' ').unwrap_or((field, ""));
+        let seen = match name {
+            "locked" => &mut locked,
+            "prunable" => &mut prunable,
+            _ => return false,
+        };
+        (!reason.is_empty() || name == field) && !std::mem::replace(seen, true)
+    })
+}
+
+fn valid_git_ref(name: &str) -> bool {
+    name.contains('/')
+        && !name.ends_with('.')
+        && !name.contains("..")
+        && !name.contains("@{")
+        && !name.bytes().any(|byte| {
+            byte.is_ascii_control()
+                || matches!(byte, b' ' | b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+        })
+        && name
+            .split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
 }
 
 fn path_refusal(path: &Path, err: io::Error) -> Refusal {
@@ -493,7 +543,12 @@ fn exists(path: &Path) -> io::Result<bool> {
     }
 }
 
-fn check_namespaces(state: &Path, roots: &[PathBuf], pools: &[Pool]) -> Result<(), Refusal> {
+fn check_namespaces(
+    state: &Path,
+    roots: &[PathBuf],
+    selected: Option<&Path>,
+    pools: &[Pool],
+) -> Result<(), Refusal> {
     let orphan = |path: &Path| Refusal::Orphan(state.join(slots::FILE), path.to_path_buf());
     let checked_namespace = |path: &Path, root: Option<&Path>| {
         if !exists(path).map_err(|_| orphan(path))? {
@@ -521,18 +576,87 @@ fn check_namespaces(state: &Path, roots: &[PathBuf], pools: &[Pool]) -> Result<(
         Ok(())
     };
     checked_namespace(&state.join(LOCK_NAMESPACE), None)?;
+    let check_checkout_root =
+        |root: &Path| checked_namespace(&root.join(CHECKOUT_NAMESPACE), Some(root));
     if roots.len() > MAX_POOLS {
         return Err(Refusal::Scope(
             "Too many configured secondary roots to check for orphaned pool paths.".into(),
         ));
     }
+    let mut remaining = MAX_ROOT_ENTRIES;
     for root in roots {
         if !root.is_absolute() {
             return Err(orphan(root));
         }
-        checked_namespace(&root.join(CHECKOUT_NAMESPACE), Some(root))?;
+        if selected.is_some() {
+            check_checkout_root(root)?;
+        } else if exists(root).map_err(|_| inventory_refusal(root))? {
+            scan_checkout_roots(root, 0, &mut remaining, &check_checkout_root)?;
+        }
+    }
+    if let Some(selected) = selected {
+        for ancestor in selected.ancestors().skip(1) {
+            if !accepted_root(ancestor, roots) {
+                break;
+            }
+            check_checkout_root(ancestor)?;
+        }
+        scan_checkout_roots(selected, 0, &mut remaining, &check_checkout_root)?;
     }
     Ok(())
+}
+
+fn scan_checkout_roots(
+    path: &Path,
+    depth: usize,
+    remaining: &mut usize,
+    check_root: &impl Fn(&Path) -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
+    if cancelled() {
+        return Err(StateError::Cancelled.into());
+    }
+    let incomplete = |_| inventory_refusal(path);
+    if depth > MAX_ROOT_DEPTH {
+        return Err(inventory_refusal(path));
+    }
+    let before = fs::symlink_metadata(path).map_err(incomplete)?;
+    if !before.is_dir() {
+        return Err(inventory_refusal(path));
+    }
+    check_root(path)?;
+    for entry in fs::read_dir(path).map_err(incomplete)? {
+        *remaining = remaining
+            .checked_sub(1)
+            .ok_or_else(|| inventory_refusal(path))?;
+        let entry = entry.map_err(incomplete)?;
+        if entry.file_type().map_err(incomplete)?.is_dir() {
+            scan_checkout_roots(&entry.path(), depth + 1, remaining, check_root)?;
+        }
+    }
+    let after = fs::symlink_metadata(path).map_err(incomplete)?;
+    if FileIdentity::of(&before) != FileIdentity::of(&after)
+        || (
+            before.mtime(),
+            before.mtime_nsec(),
+            before.ctime(),
+            before.ctime_nsec(),
+        ) != (
+            after.mtime(),
+            after.mtime_nsec(),
+            after.ctime(),
+            after.ctime_nsec(),
+        )
+    {
+        return Err(inventory_refusal(path));
+    }
+    Ok(())
+}
+
+fn inventory_refusal(path: &Path) -> Refusal {
+    Refusal::Scope(format!(
+        "Could not establish a complete bounded slot namespace inventory at {}. Preserve the existing files.",
+        path.display()
+    ))
 }
 
 fn check_private_dir(path: &Path) -> io::Result<()> {
@@ -666,4 +790,55 @@ fn project_pool(
         result.next_action = Some(FRESH_FALLBACK);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worktree_inventory_requires_complete_exclusive_fields() {
+        let root = Path::new("/unused-slot-root");
+        let main = Path::new("/registered-main");
+        let head = "a".repeat(40);
+        let valid_main =
+            format!("worktree /registered-main\0HEAD {head}\0branch refs/heads/main\0\0");
+        let linked = format!(
+            "worktree /linked\0HEAD {head}\0detached\0locked because\nof this\0prunable reason\0\0"
+        );
+        assert!(
+            verify_worktree_inventory(root, main, 40, format!("{valid_main}{linked}").as_bytes())
+                .is_ok()
+        );
+        assert!(
+            verify_worktree_inventory(root, main, 40, format!("{linked}{valid_main}").as_bytes())
+                .is_err()
+        );
+        assert!(
+            verify_worktree_inventory(root, main, 40, b"worktree /registered-main\0bare\0\0")
+                .is_err()
+        );
+
+        for fields in [
+            "branch refs/heads/main".to_owned(),
+            "HEAD short\0detached".to_owned(),
+            format!("HEAD {}\0detached", "a".repeat(64)),
+            format!("HEAD {}\0detached", "z".repeat(40)),
+            format!("HEAD {head}"),
+            format!("HEAD {head}\0HEAD {head}\0detached"),
+            format!("HEAD {head}\0detached extra"),
+            format!("HEAD {head}\0branch refs/heads/m..ain"),
+            format!("HEAD {head}\0branch refs/heads/main\0detached"),
+            "bare".to_owned(),
+            format!("HEAD {head}\0bare"),
+            format!("HEAD {head}\0detached\0locked\0locked again"),
+            format!("HEAD {head}\0detached\0prunable one\0prunable two"),
+        ] {
+            let malformed = format!("{valid_main}worktree /linked\0{fields}\0\0");
+            assert!(
+                verify_worktree_inventory(root, main, 40, malformed.as_bytes()).is_err(),
+                "accepted {fields:?}"
+            );
+        }
+    }
 }

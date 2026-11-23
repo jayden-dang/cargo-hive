@@ -47,7 +47,7 @@ impl SlotResult {
             schema: 1,
             command,
             kind,
-            repo,
+            repo: repo.filter(|path| path.to_str().is_some()),
             pool_id: None,
             slots: Vec::new(),
             detail: None,

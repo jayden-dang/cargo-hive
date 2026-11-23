@@ -1,7 +1,10 @@
 //! Strict, bounded private storage for worktree pools and their transition history.
 
 use crate::{StateError, Tx, check_layout, encode, io_err};
-use cargo_hive_platform::flock::{LockFileIdentity, open_private_file};
+use cargo_hive_platform::flock::{
+    LockFileIdentity, checked_owner_directory, open_owner_state_file, open_owner_state_lock,
+    open_private_file,
+};
 use cargo_hive_platform::slot::{effective_uid, random_slot_bytes};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
@@ -778,6 +781,17 @@ impl Producer {
                 final_roots.validate(|root| root.validate(&slot_path))
             }
             Self::Pending(pending) => {
+                require(
+                    matches!(
+                        slot.phase,
+                        Phase::Leased { .. }
+                            | Phase::Held {
+                                prior: PriorPhase::Leased { .. },
+                                ..
+                            }
+                    ),
+                    "pending producer requires a ready lease",
+                )?;
                 let PendingProducer {
                     epoch,
                     generation,
@@ -1479,19 +1493,13 @@ fn valid_components(path: &Path) -> bool {
 }
 
 pub fn owner_directory(path: &Path) -> io::Result<fs::Metadata> {
-    let metadata = fs::symlink_metadata(path)?;
-    if !absolute(path)
-        || !metadata.is_dir()
-        || metadata.uid() != effective_uid()
-        || metadata.mode() & 0o7022 != 0
-        || path.canonicalize()?.as_os_str() != path.as_os_str()
-    {
+    if !absolute(path) || path.canonicalize()?.as_os_str() != path.as_os_str() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "expected a canonical owner-controlled directory",
         ));
     }
-    Ok(metadata)
+    checked_owner_directory(path)
 }
 
 pub fn make_private_directory(path: &Path) -> io::Result<()> {
@@ -1749,16 +1757,57 @@ impl crate::State {
         let root = Self::configured_root()?;
         let path = root.join(FILE);
         owner_directory(&root).map_err(|err| format_error(&path, err.to_string()))?;
-        check_optional_state_file(&root.join(".lock"))
-            .map_err(|err| format_error(&path, err.to_string()))?;
         Ok(Self { root })
+    }
+
+    /// Uses the ordinary state lock through checked independent opens.
+    pub fn slot_locked_or_cancelled<T>(
+        &self,
+        cancel: impl FnMut() -> bool,
+        body: impl FnOnce(&Tx<'_>) -> Result<T, StateError>,
+    ) -> Result<T, StateError> {
+        let path = self.root.join(".lock");
+        let root = owner_directory(&self.root).map_err(|err| io_err(&self.root, err))?;
+        let file = match open_owner_state_lock(&path) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(_) => open_owner_state_lock(&path),
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                    open_owner_state_lock(&path)
+                }
+                Err(err) => Err(err),
+            },
+            result => result,
+        }
+        .map_err(|err| io_err(&path, err))?;
+        let identity = file.metadata().map_err(|err| io_err(&path, err))?;
+        self.with_state_lock(&path, &file, cancel, |tx| {
+            let current_root =
+                owner_directory(&self.root).map_err(|err| io_err(&self.root, err))?;
+            let current = open_owner_state_lock(&path)
+                .and_then(|file| file.metadata())
+                .map_err(|err| io_err(&path, err))?;
+            if FileIdentity::of(&root) != FileIdentity::of(&current_root)
+                || FileIdentity::of(&identity) != FileIdentity::of(&current)
+            {
+                return Err(format_error(
+                    &path,
+                    "state lock scope changed while acquiring it",
+                ));
+            }
+            body(tx)
+        })
     }
 
     /// Reads the shipped configuration within the slot state read bound.
     pub fn slot_config(&self) -> Result<crate::Config, StateError> {
         let path = self.root.join(crate::CONFIG_FILE);
-        check_optional_state_file(&path).map_err(|err| io_err(&path, err))?;
-        let file = match File::open(&path) {
+        let file = match open_owner_state_file(&path) {
             Ok(file) => file,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 return Ok(crate::resolve_config(crate::ConfigFile::default()));
@@ -1774,8 +1823,14 @@ impl Tx<'_> {
     /// Reads the existing registry for slot operations without accepting an unsafe inode.
     pub fn read_slot_registry<T: DeserializeOwned + Default>(&self) -> Result<T, StateError> {
         let path = self.root.join("registry.json");
-        check_optional_state_file(&path).map_err(|err| io_err(&path, err))?;
-        self.read_bounded("registry.json", MAX_BYTES)
+        let file = match open_owner_state_file(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
+            Err(err) => return Err(io_err(&path, err)),
+        };
+        let bytes = read_bounded(&path, file)?;
+        check_layout(&path, &bytes)?;
+        crate::parse_json(&path, &bytes)
     }
 
     /// Appends an ordinary receipt after verifying the existing write scope.
@@ -1783,11 +1838,15 @@ impl Tx<'_> {
         let dir = self.root.join("receipts");
         owner_directory(&dir).map_err(|err| io_err(&dir, err))?;
         let path = self.receipt_path();
-        check_optional_state_file(&path).map_err(|err| io_err(&path, err))?;
+        let bytes = match open_owner_state_file(&path) {
+            Ok(file) => read_bounded(&path, file)?,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(err) => return Err(io_err(&path, err)),
+        };
         let temp = crate::atomic_temp_path(&path);
         match fs::symlink_metadata(&temp) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
-                self.append_receipt_line_at(&path, line)
+                crate::append_receipt_bytes(&path, bytes, line)
             }
             Err(err) => Err(io_err(&temp, err)),
             Ok(_) => Err(io_err(
@@ -1798,25 +1857,6 @@ impl Tx<'_> {
                 ),
             )),
         }
-    }
-}
-
-fn check_optional_state_file(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err),
-        Ok(meta)
-            if meta.is_file()
-                && meta.uid() == effective_uid()
-                && meta.nlink() == 1
-                && meta.mode() & 0o7022 == 0 =>
-        {
-            Ok(())
-        }
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "unsafe hive state inode",
-        )),
     }
 }
 
@@ -1840,6 +1880,70 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn slot_transactions_contend_with_the_legacy_state_lock() {
+        let scratch = Scratch::new();
+        let state = State::open_at(scratch.0.clone()).unwrap();
+        state
+            .locked(|_| {
+                let err = state
+                    .slot_locked_or_cancelled::<()>(
+                        || true,
+                        |_| panic!("legacy lock is still held"),
+                    )
+                    .unwrap_err();
+                assert!(matches!(err, StateError::Cancelled));
+                Ok(())
+            })
+            .unwrap();
+        state
+            .slot_locked_or_cancelled(
+                || true,
+                |tx| {
+                    assert!(tx.read_slots()?.is_none());
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_slot_waiter_refuses_a_legacy_lock_replaced_while_waiting() {
+        let scratch = Scratch::new();
+        let state = State::open_at(scratch.0.clone()).unwrap();
+        let (waiting, observed) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let waiter = state
+                .locked(|_| {
+                    let waiter = scope.spawn(|| {
+                        let mut first_poll = true;
+                        state.slot_locked_or_cancelled::<()>(
+                            || {
+                                if std::mem::take(&mut first_poll) {
+                                    waiting.send(()).unwrap();
+                                }
+                                false
+                            },
+                            |_| panic!("a transaction cannot use a replaced state lock"),
+                        )
+                    });
+                    observed
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                    let lock = state.root().join(".lock");
+                    fs::rename(&lock, state.root().join("previous-lock")).unwrap();
+                    fs::write(&lock, []).unwrap();
+                    Ok(waiter)
+                })
+                .unwrap();
+            let error = waiter.join().unwrap().unwrap_err();
+            assert!(
+                error.to_string().contains("state lock scope changed"),
+                "{error}"
+            );
+        });
     }
 
     #[test]

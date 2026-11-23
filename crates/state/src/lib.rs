@@ -249,9 +249,19 @@ impl State {
             .truncate(false)
             .open(&path)
             .map_err(|e| io_err(&path, e))?;
-        let _guard = flock::exclusive_or_cancelled(&file, cancel).map_err(|e| match e {
+        self.with_state_lock(&path, &file, cancel, body)
+    }
+
+    fn with_state_lock<T>(
+        &self,
+        path: &Path,
+        file: &fs::File,
+        cancel: impl FnMut() -> bool,
+        body: impl FnOnce(&Tx<'_>) -> Result<T, StateError>,
+    ) -> Result<T, StateError> {
+        let _guard = flock::exclusive_or_cancelled(file, cancel).map_err(|e| match e {
             FlockError::Cancelled => StateError::Cancelled,
-            FlockError::Io(err) => io_err(&path, err),
+            FlockError::Io(err) => io_err(path, err),
         })?;
         body(&Tx { root: &self.root })
     }
@@ -443,16 +453,24 @@ impl Tx<'_> {
     }
 
     fn append_receipt_line_at(&self, path: &Path, line: &str) -> Result<PathBuf, StateError> {
-        let mut bytes = match fs::read(path) {
+        let bytes = match fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(io_err(path, e)),
         };
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
-        atomic_write(path, &bytes)?;
-        Ok(path.to_path_buf())
+        append_receipt_bytes(path, bytes, line)
     }
+}
+
+fn append_receipt_bytes(
+    path: &Path,
+    mut bytes: Vec<u8>,
+    line: &str,
+) -> Result<PathBuf, StateError> {
+    bytes.extend_from_slice(line.as_bytes());
+    bytes.push(b'\n');
+    atomic_write(path, &bytes)?;
+    Ok(path.to_path_buf())
 }
 
 fn encode<T: Serialize>(path: &Path, value: &T) -> Result<Vec<u8>, StateError> {

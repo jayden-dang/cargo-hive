@@ -140,6 +140,74 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Checks the owner, mode and ACL on a descriptor for the named directory.
+pub fn checked_owner_directory(path: &Path) -> io::Result<Metadata> {
+    let expected = symlink_metadata(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let actual = check_owned_inode(&file, &expected, Metadata::is_dir)?;
+    Ok(actual)
+}
+
+/// Opens an independent descriptor for the legacy state lock, keeping its existing mode.
+pub fn open_owner_state_lock(path: &Path) -> io::Result<File> {
+    open_owner_state_file_with(path, true)
+}
+
+/// Reads a legacy state file from a checked descriptor without changing its mode.
+pub fn open_owner_state_file(path: &Path) -> io::Result<File> {
+    open_owner_state_file_with(path, false)
+}
+
+fn open_owner_state_file_with(path: &Path, write: bool) -> io::Result<File> {
+    let expected = symlink_metadata(path)?;
+    if !expected.is_file() {
+        return Err(unsafe_owner_inode());
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(write)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|err| {
+            if err.kind() == io::ErrorKind::NotFound {
+                unsafe_owner_inode()
+            } else {
+                err
+            }
+        })?;
+    check_owned_inode(&file, &expected, |meta| meta.is_file() && meta.nlink() == 1)?;
+    Ok(file)
+}
+
+fn check_owned_inode(
+    file: &File,
+    expected: &Metadata,
+    valid: impl Fn(&Metadata) -> bool,
+) -> io::Result<Metadata> {
+    let actual = file.metadata()?;
+    if [expected, &actual]
+        .iter()
+        .any(|meta| !valid(meta) || meta.uid() != effective_uid() || meta.mode() & 0o7022 != 0)
+        || actual.dev() != expected.dev()
+        || actual.ino() != expected.ino()
+    {
+        return Err(unsafe_owner_inode());
+    }
+    #[cfg(target_os = "macos")]
+    refuse_extended_acl(file)?;
+    Ok(actual)
+}
+
+fn unsafe_owner_inode() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "unsafe owner-controlled inode",
+    )
+}
+
 /// Copies an inherited descriptor into an owned, close-on-exec reference.
 pub fn duplicate_inherited_fd(fd: RawFd) -> io::Result<OwnedFd> {
     // SAFETY: fcntl validates the raw descriptor and attests ownership of any returned duplicate.
@@ -221,7 +289,7 @@ fn refuse_extended_acl(file: &File) -> io::Result<()> {
     unsafe { acl_free(acl) };
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
-        "private file must not have an extended ACL",
+        "owner-controlled inode must not have an extended ACL",
     ))
 }
 
