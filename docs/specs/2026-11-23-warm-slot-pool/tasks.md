@@ -235,6 +235,7 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 ### Task 6: Prove exactly which roots checkout GC completed
 
 **Files:**
+- Modify: `crates/state/src/lib.rs`
 - Modify: `crates/core/src/fingerprint.rs`
 - Modify: `crates/core/src/locks.rs`
 - Modify: `crates/core/src/target.rs`
@@ -261,6 +262,8 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 - Consumes (proposed): cancellation-aware `Git::slot_read_only_until` and `Git::worktrees_complete_until` through the existing strict reader defaults.
 
 - Consumes (proposed): a strict `fingerprint` reader using bounded regular no-follow reads and known flat/unit-dir decoding under the verified Cargo guard; the existing reader remains unchanged.
+
+- Consumes (proposed): a regular bounded state artifact reader preserving the existing layout/codec rules, plus `State::slot_config`, for strict setup; standalone state readers retain their behavior.
 
 **Depends-on:** Task 4.
 
