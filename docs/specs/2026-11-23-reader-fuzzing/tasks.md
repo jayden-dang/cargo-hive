@@ -34,7 +34,7 @@ Baseline Rustup default differs from the 1.97.1 compiler; use a scratch RUSTUP_H
 | `fuzz/Cargo.toml`, `fuzz/Cargo.lock`, `fuzz/rust-toolchain.toml`, `fuzz/.gitignore`, `fuzz/targets.txt`, `fuzz/README.md` | Independent fuzz workspace, pins, target registry, limits and instructions |
 | `fuzz/fuzz_targets/fingerprint.rs`, `diagnostics.rs`, `dep_info.rs`, `rustc_info.rs`, `debug_map.rs`, `target_tag.rs`, `incremental_names.rs`, `artifact_names.rs`, `timestamp_metadata.rs` | Nine thin executables under fuzz/fuzz_targets/ |
 | `fuzz/corpus/<target>/seed` | One or more small synthetic seed inputs per registered target |
-| `scripts/fuzz-readers.sh`, `.github/workflows/fuzz.yml` | Shared bounded runner and isolated macOS CI |
+| `scripts/fuzz-readers.sh`, `scripts/test-fuzz-readers.sh`, `.github/workflows/fuzz.yml` | Shared bounded runner and isolated macOS CI |
 | `docs/specs/catalog/hive.md`, this feature's requirements/design/tasks | Feature registration, traceability and progress |
 
 The corpus placeholder denotes each exact registered target's seed file, not permission to edit arbitrary project files. Candidate paths are reader-local; ROAD-17 consumes them without owning these edits. Validate any newly necessary path before adding it to this map.
@@ -127,17 +127,18 @@ _Requirements: FUZZ-1.4, FUZZ-2.3, FUZZ-2.5_
 - Create: `fuzz/corpus/artifact_names/seed`
 - Create: `fuzz/corpus/timestamp_metadata/seed`
 - Create: `scripts/fuzz-readers.sh`
+- Create: `scripts/test-fuzz-readers.sh`
 - Create: `.github/workflows/fuzz.yml`
 
 **Reuse:** rung 3 — ordinary Rust assertions, byte slices and the production adapter functions; libfuzzer-sys drives input generation.
 **Interfaces:** Consumes all nine target groups' adapters. Produces `scripts/fuzz-readers.sh <seconds> [target]`, complete target registry, pinned cargo-fuzz/nightly policy, per-target logs and replay artifacts. FUZZ_REPORT_DIR selects scratch output; CARGO_FUZZ selects an isolated cargo-fuzz executable.
 **Depends-on:** Task 1, Task 2, Task 3
 
-- [ ] Wire all real adapters, generated synthetic seeds and a registry covering every inventory entry; pin nightly-2026-11-17 / rustc commit 5df8c02af and cargo-fuzz 0.13.2 and commit the separate lockfile.
-- [ ] Prove the runner refuses invalid durations/unknown targets and reports a deliberately failing process without swallowing its status or artifact.
-- [ ] Build every executable and replay seeds, then run 30-second smoke campaigns with all resource flags; retain any discovered input before minimization.
-- [ ] Add separate macOS PR/schedule/manual workflow using the same runner and unconditional artifact upload; document failures, limits, replay and regression promotion.
-- [ ] Run normal workspace/package compile controls without nightly/fuzz dependencies and commit `test(fuzz): run compiler reader campaigns in isolation`.
+- [x] Wire all real adapters, generated synthetic seeds and a registry covering every inventory entry; pin nightly-2026-11-17 / rustc commit 5df8c02af and cargo-fuzz 0.13.2 and commit the separate lockfile.
+- [x] Prove the runner refuses invalid durations/unknown targets and reports a deliberately failing process without swallowing its status or artifact.
+- [x] Build every executable and replay seeds, then run 30-second smoke campaigns with all resource flags; retain any discovered input before minimization.
+- [x] Add separate macOS PR/schedule/manual workflow using the same runner and unconditional artifact upload; document failures, limits, replay and regression promotion.
+- [x] Run normal workspace/package compile controls without nightly/fuzz dependencies and commit `test(fuzz): run compiler reader campaigns in isolation`.
 
 _Requirements: FUZZ-3.1, FUZZ-3.4, FUZZ-4.1, FUZZ-4.2, FUZZ-4.3, FUZZ-4.4, FUZZ-5.1, FUZZ-5.4, FUZZ-6.1, FUZZ-6.2, FUZZ-6.3_
 

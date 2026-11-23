@@ -1,0 +1,81 @@
+[package]
+name = "cargo-hive-reader-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+resolver = "3"
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+cargo-hive-core = { path = "../crates/core" }
+cargo-hive-gc = { path = "../crates/gc" }
+cargo-hive-seed = { path = "../crates/seed" }
+
+[[bin]]
+name = "fingerprint"
+path = "fuzz_targets/fingerprint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diagnostics"
+path = "fuzz_targets/diagnostics.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dep_info"
+path = "fuzz_targets/dep_info.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rustc_info"
+path = "fuzz_targets/rustc_info.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "debug_map"
+path = "fuzz_targets/debug_map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "target_tag"
+path = "fuzz_targets/target_tag.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "incremental_names"
+path = "fuzz_targets/incremental_names.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "artifact_names"
+path = "fuzz_targets/artifact_names.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "timestamp_metadata"
+path = "fuzz_targets/timestamp_metadata.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,61 @@
+name: reader fuzzing
+
+on:
+  pull_request:
+    paths:
+      - 'crates/core/**'
+      - 'crates/seed/**'
+      - 'crates/gc/**'
+      - 'crates/platform/**'
+      - 'fuzz/**'
+      - 'scripts/*fuzz-readers.sh'
+      - '.github/workflows/fuzz.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  readers:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-11-17
+      FUZZ_REPORT_DIR: ${{ github.workspace }}/fuzz/reports/ci
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned fuzz toolchain
+        run: rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: reader-fuzz-nightly-2026-11-17
+      - name: Install pinned cargo-fuzz outside normal installation
+        run: |
+          RUSTUP_TOOLCHAIN="$FUZZ_TOOLCHAIN" cargo install cargo-fuzz --version 0.13.2 --locked --root "$RUNNER_TEMP/reader-fuzz-tools"
+          echo "CARGO_FUZZ=$RUNNER_TEMP/reader-fuzz-tools/bin/cargo-fuzz" >> "$GITHUB_ENV"
+      - name: Verify runner refusal and failure controls
+        run: scripts/test-fuzz-readers.sh
+      - name: Replay seeds and run bounded campaigns
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          seconds=300
+          if [[ "$EVENT_NAME" == pull_request ]]; then seconds=30; fi
+          scripts/fuzz-readers.sh "$seconds"
+      - name: Retain reports, corpus and failure inputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reader-fuzz-${{ github.run_id }}-${{ github.run_attempt }}
+          path: fuzz/reports/
+          if-no-files-found: warn
+          retention-days: 14
