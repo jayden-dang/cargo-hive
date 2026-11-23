@@ -3,9 +3,10 @@
 use super::profile::{digest, read_input_bounded, refused};
 use super::{CheckoutProof, Refusal, directory_stamp, git_scope};
 use cargo_hive_platform::{
-    host_fs,
+    EntryKind, host_fs,
     proc::{self, Capture, Spec},
     signals::cancelled,
+    slot::sha256_reader,
 };
 use cargo_hive_state::slots::{
     self, CargoLayout, Coverage, EnvironmentExpectation, GraphExpectation, InputIdentity,
@@ -13,8 +14,7 @@ use cargo_hive_state::slots::{
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
-use std::io::Read as _;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -28,6 +28,7 @@ const NATIVE_ARGV: [&str; 5] = [
     "--message-format=json",
 ];
 const FILE_LIMIT: u64 = 256 * 1024 * 1024;
+const TOTAL_MATERIAL_LIMIT: u64 = 1024 * 1024 * 1024;
 const ENTRY_LIMIT: usize = 256;
 
 #[derive(Deserialize)]
@@ -64,6 +65,8 @@ struct Endpoint {
 struct Tools {
     cargo: Material,
     rustc: Material,
+    rust_runtime: Vec<Material>,
+    target_sysroot: Vec<Material>,
     clang: Material,
     ld: Material,
     sdk: PathBuf,
@@ -184,6 +187,8 @@ impl NativeBuild {
                 bounded_unique(item.sha256.iter().map(String::as_str))
                     && item.sha256.iter().all(|hash| slots::hex(hash, 64))
             })
+            || !valid_inventory(&seal.tools.rust_runtime)
+            || !valid_inventory(&seal.tools.target_sysroot)
             || !native_environment(&invocation.environment)
         {
             return Err(malformed());
@@ -328,6 +333,7 @@ impl NativeBuild {
         {
             return Err(unproved());
         }
+        let mut remaining = TOTAL_MATERIAL_LIMIT;
         let mut stamps = Vec::new();
         for material in [
             &tools.cargo,
@@ -337,8 +343,25 @@ impl NativeBuild {
             &tools.sdk_settings,
             &tools.system_library,
         ] {
-            stamps.push(material.verify()?);
+            stamps.push(material.verify(&mut remaining)?);
         }
+        let compiler_unproved =
+            || refused("The reviewed native Rust compiler material could not be verified.");
+        let lib = rustc
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(compiler_unproved)?
+            .join("lib");
+        let target_libdir = self.target_libdir().ok_or_else(compiler_unproved)?;
+        verify_inventory(&lib, &tools.rust_runtime, true, &mut remaining, &mut stamps)?;
+        verify_inventory(
+            &target_libdir,
+            &tools.target_sysroot,
+            false,
+            &mut remaining,
+            &mut stamps,
+        )?;
+        verify_rust_loader(cwd, cargo_home, rustc, &tools.rust_runtime)?;
         let linker = format!(
             "CARGO_TARGET_{}_LINKER",
             self.seal
@@ -354,10 +377,23 @@ impl NativeBuild {
         environment.insert("CARGO_ENCODED_RUSTFLAGS".into(), linker_flags);
         digest(&serde_json::to_vec(&stamps).map_err(|_| unproved())?)
     }
+    pub fn target_libdir(&self) -> Option<PathBuf> {
+        Some(
+            self.seal
+                .tools
+                .rustc
+                .path
+                .parent()?
+                .parent()?
+                .join("lib/rustlib")
+                .join(&self.seal.native_target)
+                .join("lib"),
+        )
+    }
 }
 
 impl Material {
-    fn verify(&self) -> Result<String, Refusal> {
+    fn verify(&self, remaining: &mut u64) -> Result<String, Refusal> {
         let unproved =
             || refused("A sealed native tool or SDK file changed or is outside its byte bound.");
         let path = &self.path;
@@ -365,21 +401,25 @@ impl Material {
             return Err(unproved());
         }
         let fs = host_fs();
-        let file = fs.open_regular(path).map_err(|_| unproved())?;
+        let mut file = fs.open_regular(path).map_err(|_| unproved())?;
         let before = file.metadata().map_err(|_| unproved())?;
         if before.mode() & 0o7022 != 0 || before.len() > FILE_LIMIT {
             return Err(unproved());
         }
-        let mut bytes = Vec::new();
-        file.take(FILE_LIMIT + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| unproved())?;
+        *remaining = remaining.checked_sub(before.len()).ok_or_else(unproved)?;
+        let hash = sha256_reader(&mut file, before.len(), cancelled).map_err(|err| {
+            if err.kind() == std::io::ErrorKind::Interrupted && cancelled() {
+                cargo_hive_state::StateError::Cancelled.into()
+            } else {
+                unproved()
+            }
+        })?;
+        let actual: String = hash.iter().map(|byte| format!("{byte:02x}")).collect();
         let after = std::fs::symlink_metadata(path).map_err(|_| unproved())?;
-        if bytes.len() as u64 != before.len()
-            || after.len() != before.len()
+        if after.len() != before.len()
             || directory_stamp(&after) != directory_stamp(&before)
             || !after.is_file()
-            || digest(&bytes)? != self.sha256
+            || actual != self.sha256
         {
             return Err(unproved());
         }
@@ -390,32 +430,152 @@ impl Material {
     }
 }
 
-fn xcode_path(cwd: &Path, home: &OsString, args: &[&str]) -> Result<PathBuf, Refusal> {
+fn valid_inventory(materials: &[Material]) -> bool {
+    (1..=ENTRY_LIMIT).contains(&materials.len())
+        && materials.windows(2).all(|pair| pair[0].path < pair[1].path)
+        && materials
+            .iter()
+            .all(|material| material.path.is_absolute() && slots::hex(&material.sha256, 64))
+}
+
+fn verify_inventory(
+    directory: &Path,
+    materials: &[Material],
+    skip_rustlib: bool,
+    remaining: &mut u64,
+    stamps: &mut Vec<String>,
+) -> Result<(), Refusal> {
+    let unproved = || refused("The reviewed native Rust compiler material could not be verified.");
+    if directory.canonicalize().ok().as_deref() != Some(directory) {
+        return Err(unproved());
+    }
+    let fs = host_fs();
+    let mut paths = Vec::new();
+    for (name, kind) in fs
+        .read_dir_bounded(directory, ENTRY_LIMIT + usize::from(skip_rustlib))
+        .map_err(|_| unproved())?
+    {
+        if skip_rustlib && name == "rustlib" && kind == EntryKind::Dir {
+            continue;
+        }
+        if kind != EntryKind::File {
+            return Err(unproved());
+        }
+        paths.push(directory.join(name));
+    }
+    paths.sort();
+    if paths
+        .iter()
+        .ne(materials.iter().map(|material| &material.path))
+    {
+        return Err(unproved());
+    }
+    for material in materials {
+        match material.verify(remaining) {
+            Ok(stamp) => stamps.push(stamp),
+            Err(error @ Refusal::State(cargo_hive_state::StateError::Cancelled)) => {
+                return Err(error);
+            }
+            Err(_) => return Err(unproved()),
+        }
+    }
+    Ok(())
+}
+
+fn verify_rust_loader(
+    cwd: &Path,
+    home: &OsStr,
+    rustc: &Path,
+    runtime: &[Material],
+) -> Result<(), Refusal> {
+    let unproved =
+        || refused("The installed Rust compiler loader differs from the sealed compiler material.");
+    let otool = xcode_path(cwd, home, &["--find", "otool"])?;
+    let image = |flag| {
+        native_output(
+            &otool,
+            [OsStr::new(flag), rustc.as_os_str()],
+            cwd,
+            home,
+            128 * 1024,
+        )
+    };
+    let commands = image("-l")?;
+    let commands = std::str::from_utf8(&commands).map_err(|_| unproved())?;
+    let lines: Vec<_> = commands.lines().map(str::trim).collect();
+    let mut rpaths = lines.windows(3).filter(|row| row[0] == "cmd LC_RPATH");
+    let expected = "path @loader_path/../lib (offset 12)";
+    if !rpaths.next().is_some_and(|row| row[2] == expected) || rpaths.next().is_some() {
+        return Err(unproved());
+    }
+    let dependencies = image("-L")?;
+    let dependencies = std::str::from_utf8(&dependencies).map_err(|_| unproved())?;
+    let mut drivers = 0;
+    for line in dependencies.lines().skip(1) {
+        let (name, _) = line
+            .trim()
+            .split_once(" (compatibility version ")
+            .ok_or_else(unproved)?;
+        if let Some(name) = name.strip_prefix("@rpath/") {
+            if !runtime
+                .iter()
+                .any(|material| material.path.file_name() == Some(OsStr::new(name)))
+            {
+                return Err(unproved());
+            }
+            drivers +=
+                usize::from(name.starts_with("librustc_driver-") && name.ends_with(".dylib"));
+        } else if !name.starts_with("/usr/lib/") && !name.starts_with("/System/Library/") {
+            return Err(unproved());
+        }
+    }
+    if drivers != 1 {
+        return Err(unproved());
+    }
+    Ok(())
+}
+
+fn native_output<'a>(
+    program: &Path,
+    args: impl IntoIterator<Item = &'a OsStr>,
+    cwd: &Path,
+    home: &OsStr,
+    cap: usize,
+) -> Result<Vec<u8>, Refusal> {
     let unproved = || refused("Could not resolve the reviewed installed native toolchain.");
-    let mut spec = Spec::new("/usr/bin/xcrun");
-    spec.args.push("--no-cache".into());
-    spec.args.extend(args.iter().map(|arg| (*arg).into()));
+    let mut spec = Spec::new(program);
+    spec.args.extend(args.into_iter().map(OsStr::to_owned));
     spec.cwd = Some(cwd.to_path_buf());
     spec.env_clear = true;
     spec.env_set = vec![
-        ("HOME".into(), home.clone()),
-        ("TMPDIR".into(), home.clone()),
+        ("HOME".into(), home.to_owned()),
+        ("TMPDIR".into(), home.to_owned()),
         ("PATH".into(), "/usr/bin:/bin".into()),
     ];
     let ran = proc::run_bounded_complete(
         &spec,
         Duration::from_secs(10),
         Capture {
-            stdout_cap: 4097,
+            stdout_cap: cap + 1,
             stderr_cap: 1024,
         },
         cancelled,
     )
-    .map_err(|_| unproved())?;
-    if !ran.status.success() || ran.stdout.len() > 4096 {
+    .map_err(|err| match err {
+        proc::ChildOutputError::Cancelled => cargo_hive_state::StateError::Cancelled.into(),
+        _ => unproved(),
+    })?;
+    if !ran.status.success() || ran.stdout.len() > cap {
         return Err(unproved());
     }
-    let raw = std::str::from_utf8(&ran.stdout).map_err(|_| unproved())?;
+    Ok(ran.stdout)
+}
+
+fn xcode_path(cwd: &Path, home: &OsStr, args: &[&str]) -> Result<PathBuf, Refusal> {
+    let unproved = || refused("Could not resolve the reviewed installed native toolchain.");
+    let argv = std::iter::once(OsStr::new("--no-cache")).chain(args.iter().map(OsStr::new));
+    let stdout = native_output(Path::new("/usr/bin/xcrun"), argv, cwd, home, 4096)?;
+    let raw = std::str::from_utf8(&stdout).map_err(|_| unproved())?;
     let path = Path::new(raw.strip_suffix('\n').ok_or_else(unproved)?);
     if !path.is_absolute() {
         return Err(unproved());

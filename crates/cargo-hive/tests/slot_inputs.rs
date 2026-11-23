@@ -387,7 +387,9 @@ fn a_tracked_next_commit_reuses_an_independent_unit_at_the_same_checkout_path() 
 }
 
 fn digest_file(path: &Path) -> String {
-    cargo_hive_platform::slot::sha256(&fs::read(path).unwrap())
+    let mut file = fs::File::open(path).unwrap();
+    let size = file.metadata().unwrap().len();
+    cargo_hive_platform::slot::sha256_reader(&mut file, size, || false)
         .unwrap()
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -410,7 +412,7 @@ fn pinned_tool(fixture: &Fixture, args: &[&str]) -> PathBuf {
         .unwrap()
 }
 
-fn packaged(fixture: &Fixture, args: &[&str], input: &str) -> std::process::Output {
+fn start_packaged(fixture: &Fixture, args: &[&str], input: &str) -> std::process::Child {
     use std::io::Write as _;
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
@@ -450,6 +452,10 @@ fn packaged(fixture: &Fixture, args: &[&str], input: &str) -> std::process::Outp
     }
     let mut child = command.spawn().unwrap();
     writeln!(child.stdin.take().unwrap(), "{input}").unwrap();
+    child
+}
+
+fn finish_packaged(child: std::process::Child, input: &str) -> std::process::Output {
     let out = wait_within(child, Duration::from_secs(60));
     for stream in [&out.stdout, &out.stderr] {
         assert!(
@@ -460,7 +466,84 @@ fn packaged(fixture: &Fixture, args: &[&str], input: &str) -> std::process::Outp
     out
 }
 
-fn fixture_seal(fixture: &Fixture, head: &str) -> PathBuf {
+fn packaged(fixture: &Fixture, args: &[&str], input: &str) -> std::process::Output {
+    finish_packaged(start_packaged(fixture, args, input), input)
+}
+
+fn live_writer(process: &Value) -> bool {
+    let (Some(pid), Some(seconds), Some(micros)) = (
+        process["pid"].as_u64(),
+        process["start_secs"].as_u64(),
+        process["start_micros"].as_u64(),
+    ) else {
+        return false;
+    };
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: PROC_PIDTBSDINFO writes a proc_bsdinfo into the sized buffer.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if read != size {
+        return false;
+    }
+    // SAFETY: the return count confirms the complete initialized structure.
+    let info = unsafe { info.assume_init() };
+    info.pbi_pid == pid as u32
+        && info.pbi_pgid == pid as u32
+        && (info.pbi_start_tvsec, info.pbi_start_tvusec) == (seconds, micros)
+        && !matches!(info.pbi_status, libc::SSTOP | libc::SZOMB)
+}
+
+fn observe_writer_lock(
+    fixture: &Fixture,
+    pool: &str,
+    target: &Path,
+    child: &mut std::process::Child,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let slots = fixture.hive.home.path.join("slots.json");
+    let lock = fixture
+        .hive
+        .home
+        .path
+        .join("slot-locks")
+        .join(pool)
+        .join("slot-1.lock");
+    let fs = cargo_hive_platform::host_fs();
+    while Instant::now() < deadline {
+        if target.join("debug").is_dir() {
+            let record: Value = serde_json::from_slice(&fs::read(&slots).unwrap()).unwrap();
+            let producer = &record["pools"][0]["slots"][0]["producer"];
+            let process = &producer["foreground"];
+            if producer["kind"] == "pending" && live_writer(process) {
+                let held = matches!(
+                    fs.try_lock_exclusive(&lock),
+                    cargo_hive_platform::TryLock::Held
+                );
+                if live_writer(process) {
+                    return held;
+                }
+            }
+        }
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    false
+}
+
+fn fixture_seal(fixture: &Fixture, head: &str, false_driver: bool) -> PathBuf {
     use serde_json::json;
     let seal = fixture._scratch.path.join("reviewed-closure.json");
     let profile_path = fixture._scratch.path.join("reviewed-profile.json");
@@ -480,6 +563,32 @@ fn fixture_seal(fixture: &Fixture, head: &str) -> PathBuf {
     let ld = pinned_tool(fixture, &["--no-cache", "--find", "ld"]);
     let sdk = pinned_tool(fixture, &["--no-cache", "--show-sdk-path"]);
     let tool = |path: &Path| json!({"path": path, "sha256": digest_file(path)});
+    let lib = bin.parent().unwrap().join("lib");
+    let inventory = |dir: &Path, skip_rustlib: bool| {
+        let mut files: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| !(skip_rustlib && entry.file_name() == "rustlib"))
+            .map(|entry| entry.path())
+            .collect();
+        files.sort();
+        files
+            .into_iter()
+            .map(|path| {
+                let mut material = tool(&path);
+                if false_driver
+                    && path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("librustc_driver-")
+                {
+                    material["sha256"] = json!("0".repeat(64));
+                }
+                material
+            })
+            .collect::<Vec<_>>()
+    };
     let data_digest = |bytes: &str| {
         cargo_hive_platform::slot::sha256(bytes.as_bytes())
             .unwrap()
@@ -493,6 +602,8 @@ fn fixture_seal(fixture: &Fixture, head: &str) -> PathBuf {
         "endpoints":[{"commit":head,"tree":git(&fixture.main,&["rev-parse","HEAD^{tree}"])}],
         "tools":{
             "cargo":tool(&bin.join("cargo")), "rustc":tool(&bin.join("rustc")),
+            "rust_runtime":inventory(&lib, true),
+            "target_sysroot":inventory(&lib.join("rustlib").join(&native).join("lib"), false),
             "clang":tool(&clang), "ld":tool(&ld), "sdk":sdk,
             "sdk_settings":tool(&sdk.join("SDKSettings.json")),
             "system_library":tool(&sdk.join("usr/lib/libSystem.tbd").canonicalize().unwrap())
@@ -551,7 +662,7 @@ fn fixture_seal(fixture: &Fixture, head: &str) -> PathBuf {
 fn packaged_guide_admits_only_the_sealed_native_producer() {
     let fixture = Fixture::new("guided-native-seal");
     let head = git(&fixture.main, &["rev-parse", "HEAD"]);
-    let profile = fixture_seal(&fixture, &head);
+    let profile = fixture_seal(&fixture, &head, false);
     fixture.hive.config(
         &serde_json::json!({"secondary_roots":[fixture.hive.secondary_root.path]}).to_string(),
     );
@@ -588,8 +699,8 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
         &key,
     );
     assert!(first.status.success(), "{first:?}");
-    let produce = |op: &str| {
-        packaged(
+    let spawn_producer = |op: &str| {
+        start_packaged(
             &fixture,
             &[
                 "produce",
@@ -603,6 +714,7 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
             &key,
         )
     };
+    let produce = |op: &str| finish_packaged(spawn_producer(op), &key);
     let seal = fixture._scratch.path.join("reviewed-closure.json");
     let original = fs::read(&seal).unwrap();
     let mut tampered = original.clone();
@@ -621,10 +733,17 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
     let retained = checkout.join("target");
     let run = |op: char| {
         let operation = op.to_string().repeat(32);
-        let out = produce(&operation);
+        let mut child = spawn_producer(&operation);
+        let owns_lock =
+            (op == 'f').then(|| observe_writer_lock(&fixture, pool, &retained, &mut child));
+        let out = finish_packaged(child, &key);
         assert!(
             out.status.success(),
             "sealed producer did not complete: {out:?}"
+        );
+        assert!(
+            owns_lock != Some(false),
+            "the live Cargo writer did not retain its slot lock"
         );
         let receipt: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(receipt["kind"], "producer_complete");
@@ -738,4 +857,55 @@ fn packaged_guide_admits_only_the_sealed_native_producer() {
     assert!(out.status.success(), "{out:?}");
     let returned: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(returned["kind"], "returned");
+}
+
+#[test]
+fn a_matching_seal_cannot_substitute_unproved_compiler_material() {
+    let fixture = Fixture::new("guided-native-invalid-driver");
+    let head = git(&fixture.main, &["rev-parse", "HEAD"]);
+    let profile = fixture_seal(&fixture, &head, true);
+    fixture.hive.config(
+        &serde_json::json!({"secondary_roots":[fixture.hive.secondary_root.path]}).to_string(),
+    );
+    fixture.hive.write_ready_capabilities();
+    fs::create_dir(fixture.hive.home.path.join("no-cache")).unwrap();
+    common::register(&fixture.hive, &fixture.main);
+    let (created, initialized) = fixture.hive.json(&[
+        "slot",
+        "init",
+        "--repo",
+        fixture.main.to_str().unwrap(),
+        "--root",
+        fixture.hive.secondary_root.path.to_str().unwrap(),
+        "--profile",
+        profile.to_str().unwrap(),
+    ]);
+    assert!(created.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let out = packaged(
+        &fixture,
+        &[
+            "take",
+            fixture.main.to_str().unwrap(),
+            pool,
+            "1",
+            "0",
+            &head,
+            &"a".repeat(32),
+            &"b".repeat(32),
+            &"c".repeat(32),
+        ],
+        &"f".repeat(64),
+    );
+    assert!(!out.status.success(), "{out:?}");
+    let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        reply["detail"]
+            .as_str()
+            .unwrap()
+            .contains("compiler material"),
+        "{reply}"
+    );
+    assert!(!checkout.join("target").exists());
 }

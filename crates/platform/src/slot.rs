@@ -54,6 +54,74 @@ pub fn sha256(_bytes: &[u8]) -> io::Result<[u8; 32]> {
     ))
 }
 
+/// Hashes a bounded stream without retaining materialized tool or sysroot bytes.
+#[cfg(target_os = "macos")]
+pub fn sha256_reader(
+    reader: &mut dyn std::io::Read,
+    limit: u64,
+    mut cancel: impl FnMut() -> bool,
+) -> io::Result<[u8; 32]> {
+    #[repr(C)]
+    struct Context {
+        count: [u32; 2],
+        hash: [u32; 8],
+        wbuf: [u32; 16],
+    }
+
+    unsafe extern "C" {
+        fn CC_SHA256_Init(context: *mut Context) -> i32;
+        fn CC_SHA256_Update(context: *mut Context, data: *const u8, len: u32) -> i32;
+        fn CC_SHA256_Final(digest: *mut u8, context: *mut Context) -> i32;
+    }
+
+    let mut context = std::mem::MaybeUninit::<Context>::uninit();
+    let context = context.as_mut_ptr();
+    // SAFETY: context has the size and alignment of CommonCrypto CC_SHA256_CTX.
+    if unsafe { CC_SHA256_Init(context) } != 1 {
+        return Err(io::Error::other("could not initialize the material digest"));
+    }
+    let mut remaining = limit;
+    let mut chunk = [0; 64 * 1024];
+    loop {
+        if cancel() {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let read_limit = remaining.saturating_add(1).min(chunk.len() as u64) as usize;
+        let n = reader.read(&mut chunk[..read_limit])?;
+        if n == 0 {
+            break;
+        }
+        remaining = remaining.checked_sub(n as u64).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "material exceeds its byte bound",
+            )
+        })?;
+        // SAFETY: CommonCrypto initialized context and chunk is readable for n bytes.
+        if unsafe { CC_SHA256_Update(context, chunk.as_ptr(), n as u32) } != 1 {
+            return Err(io::Error::other("could not update the material digest"));
+        }
+    }
+    let mut digest = [0; 32];
+    // SAFETY: CommonCrypto initialized context and digest is writable for 32 bytes.
+    if unsafe { CC_SHA256_Final(digest.as_mut_ptr(), context) } != 1 {
+        return Err(io::Error::other("could not finalize the material digest"));
+    }
+    Ok(digest)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn sha256_reader(
+    _reader: &mut dyn std::io::Read,
+    _limit: u64,
+    _cancel: impl FnMut() -> bool,
+) -> io::Result<[u8; 32]> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        MACOS_ONLY_MESSAGE,
+    ))
+}
+
 /// Local boot session UUID. Failure leaves the boot identity unknown.
 #[cfg(target_os = "macos")]
 pub fn boot_session() -> io::Result<String> {
@@ -908,6 +976,24 @@ mod foreground {
     #[cfg(test)]
     mod tests {
         use super::parse_environment;
+
+        #[test]
+        fn streaming_material_hash_checks_exact_bytes_limits_and_cancellation() {
+            use super::super::{sha256, sha256_reader};
+            use std::io::ErrorKind;
+
+            let material: Vec<u8> = (0..131_072).map(|index| (index % 251) as u8).collect();
+            let size = material.len() as u64;
+            let expected = sha256(&material).unwrap();
+            assert_eq!(
+                sha256_reader(&mut material.as_slice(), size, || false).unwrap(),
+                expected
+            );
+            let error = sha256_reader(&mut material.as_slice(), size - 1, || false).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            let error = sha256_reader(&mut material.as_slice(), size, || true).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Interrupted);
+        }
 
         #[test]
         fn a_detached_child_with_a_renumbered_close_on_exec_guard_is_still_a_holder() {

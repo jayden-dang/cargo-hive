@@ -158,7 +158,7 @@ produce_slot() {
     set -m
     /usr/bin/env -i /bin/bash --noprofile --norc -c         'builtin kill -STOP "$$"; builtin exec -c /usr/bin/env -i "$@"'         producer-gate "${assignments[@]}" "${argv[@]}" </dev/null >&2 &
     writer=$!
-    printf -v stop_cleanup 'builtin kill -KILL %q 2>/dev/null; wait %q 2>/dev/null; %s' "$writer" "$writer" "$cleanup"
+    printf -v stop_cleanup 'builtin kill -KILL %%+ 2>/dev/null; wait %%+ 2>/dev/null; %s' "$cleanup"
     trap "$stop_cleanup" EXIT
     for (( i=0; i<250; i++ )); do
         stopped=$(/bin/ps -p "$writer" -o state= 9<&-) || return 1
@@ -171,8 +171,8 @@ produce_slot() {
         /bin/cat "$scratch/result"
         return 1
     }
-    wait "$writer" || return 1
     trap "$cleanup" EXIT
+    wait "$writer" || return 1
     /bin/cat "$scratch/result"
 }
 

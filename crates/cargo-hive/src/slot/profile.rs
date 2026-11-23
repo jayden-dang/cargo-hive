@@ -271,6 +271,23 @@ pub(super) fn check_invocation(
     )?;
     let tools_before = tool_identities(&cargo, &rustc)?;
     verify_tools(invocation, &cwd, &cargo, &rustc, &environment)?;
+    if let Some(seal) = &native {
+        let expected = seal
+            .target_libdir()
+            .ok_or_else(|| refused("The reviewed Rust target sysroot is unavailable."))?;
+        let actual = cargo_output(
+            &rustc,
+            &cwd,
+            &["--print", "target-libdir"],
+            4096,
+            &environment,
+        )?;
+        if actual.strip_suffix(b"\n") != Some(expected.as_os_str().as_encoded_bytes()) {
+            return Err(refused(
+                "The active Rust target sysroot differs from the reviewed compiler material.",
+            ));
+        }
+    }
     let discovered = discover(&cargo, &cwd, &environment)?;
     if tools_before != tool_identities(&cargo, &rustc)? {
         return Err(refused(
