@@ -10,8 +10,10 @@ use serde_json::{Value, json};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -224,7 +226,10 @@ struct LeasedSlot {
 
 impl LeasedSlot {
     fn new() -> Self {
-        let fixture = PoolFixture::new();
+        Self::from_fixture(PoolFixture::new())
+    }
+
+    fn from_fixture(fixture: PoolFixture) -> Self {
         let (out, initialized) = fixture.init();
         assert!(out.status.success(), "{initialized}");
         let pool = initialized["pool_id"].as_str().unwrap().to_owned();
@@ -345,11 +350,1394 @@ impl LeasedSlot {
                 "runner": {
                     "boot_session": "boot", "pid": 1, "start_secs": 1,
                     "start_micros": 0, "nonce": "c".repeat(64)
-                }
+                },
+                "foreground": {"pid": 2, "start_secs": 1, "start_micros": 0}
             }]
         });
         fs::write(self.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
     }
+}
+
+fn producer_slot() -> LeasedSlot {
+    producer_slot_with_source(None)
+}
+
+fn producer_slot_with_source(source: Option<&str>) -> LeasedSlot {
+    let fixture = PoolFixture::new();
+    if let Some(source) = source {
+        fs::write(fixture.repo.join("src/lib.rs"), source).unwrap();
+    }
+    fs::write(
+        fixture.repo.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"fixture\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"independent\"\nversion = \"0.1.0\"\n",
+    ).unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.repo.join("Cargo.toml"))
+        .unwrap()
+        .write_all(b"\n[workspace]\nmembers = [\"independent\"]\n")
+        .unwrap();
+    fs::create_dir_all(fixture.repo.join("independent/src")).unwrap();
+    fs::write(
+        fixture.repo.join("independent/Cargo.toml"),
+        "[package]\nname = \"independent\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.repo.join("independent/src/lib.rs"),
+        "pub fn independent() {}\n",
+    )
+    .unwrap();
+    git(&fixture.repo, &["add", "-A"]);
+    git(&fixture.repo, &["commit", "-qm", "Lock fixture graph"]);
+    let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+    let toolchain = std::env::var("RUSTUP_TOOLCHAIN").unwrap();
+    let release = toolchain
+        .split_once("-aarch64")
+        .map_or(toolchain.as_str(), |pair| pair.0);
+    profile["invocations"][0]["cargo"] = json!(format!("cargo {release}"));
+    profile["invocations"][0]["rustc"] = json!(format!("rustc {release}"));
+    profile["invocations"][0]["layout"] = json!(if release == "1.97.1" {
+        "flat"
+    } else {
+        "unit_dir"
+    });
+    profile["invocations"][0]["environment"] = json!([
+        {"name": "CARGO_HOME", "expectation": {"kind": "present", "value": fixture.hive.cargo_home.path}},
+        {"name": "CARGO_NET_OFFLINE", "expectation": {"kind": "present", "value": "true"}}
+    ]);
+    profile["proofs"][0]["layout"] = profile["invocations"][0]["layout"].clone();
+    profile["graph_inputs"] = json!(["Cargo.toml", "Cargo.lock", "independent/Cargo.toml"]
+        .map(|path| json!({
+            "locator": {"kind": "checkout", "path": path},
+            "expectation": {"kind": "present", "identity": {
+                "kind": "git_object", "oid": git(&fixture.repo, &["rev-parse", &format!("HEAD:{path}")])
+            }}
+        })));
+    let source = git(&fixture.repo, &["rev-parse", "HEAD:src/lib.rs"]);
+    profile["consumers"][0]["prior_object"] = json!(source);
+    profile["consumers"][0]["requested_object"] = json!(source);
+    fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+    LeasedSlot::from_fixture(fixture)
+}
+
+fn producer_input(slot: &LeasedSlot) -> Value {
+    json!({
+        "action": "start",
+        "credential": slot.credential,
+        "nonce": "9".repeat(64),
+        "shape": {
+            "profile": {"id": "fixture", "revision": 1},
+            "invocation": "check",
+            "argv": ["check", "--locked"],
+            "cwd": "."
+        }
+    })
+}
+
+const PRODUCER_SLOT_FD: libc::c_int = 198;
+
+#[allow(clippy::disallowed_types)]
+fn pass_producer_lock(command: &mut std::process::Command, lock: &fs::File) {
+    let fd = lock.as_raw_fd();
+    // SAFETY: dup2 is async-signal-safe, and lock lives through spawn.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(fd, PRODUCER_SLOT_FD) != PRODUCER_SLOT_FD {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[allow(clippy::disallowed_types)]
+fn start_producer(
+    slot: &LeasedSlot,
+    generation: u64,
+    operation: &str,
+    input: &Value,
+    lock: Option<&fs::File>,
+    configure: impl FnOnce(&mut std::process::Command),
+) -> Child {
+    let mut args = slot
+        .fixture
+        .replay("producer", &slot.pool, 1, generation, operation);
+    args.extend(["--lock-fd".into(), PRODUCER_SLOT_FD.to_string()]);
+    start_private_with(&slot.fixture.hive, args, &input.to_string(), |command| {
+        producer_environment(command);
+        configure(command);
+        if let Some(lock) = lock {
+            pass_producer_lock(command, lock);
+        }
+    })
+}
+
+#[allow(clippy::disallowed_types)]
+fn producer_environment(command: &mut std::process::Command) {
+    command.env("CARGO_NET_OFFLINE", "true");
+    for (key, _) in std::env::vars_os() {
+        let name = key.to_string_lossy();
+        if name.starts_with("DYLD_")
+            || ((name.starts_with("CARGO_") || name.starts_with("RUST"))
+                && !matches!(
+                    name.as_ref(),
+                    "CARGO_HOME"
+                        | "CARGO_NET_OFFLINE"
+                        | "RUSTUP_HOME"
+                        | "RUSTUP_TOOLCHAIN"
+                        | "RUSTUP_AUTO_INSTALL"
+                ))
+        {
+            command.env_remove(key);
+        }
+    }
+}
+
+#[test]
+fn a_guarded_producer_persists_pending_before_the_guide_can_launch_cargo() {
+    let slot = producer_slot();
+    let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+    let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+        .unwrap()
+        .unwrap();
+    let child = start_producer(
+        &slot,
+        1,
+        &slot.operation,
+        &producer_input(&slot),
+        Some(&lock),
+        |_| {},
+    );
+    let (out, result) = finish_private(child);
+    assert!(out.status.success(), "{result} {out:?}");
+    assert_eq!(result["kind"], "producer_started");
+    assert_no_credential(&out, &slot.credential);
+    let record = slot.fixture.record();
+    let producer = &record["pools"][0]["slots"][0]["producer"];
+    assert_eq!(producer["kind"], "pending");
+    assert_eq!(producer["generation"], 1);
+    assert_eq!(producer["profile"], json!({"id": "fixture", "revision": 1}));
+    assert_eq!(producer["operation"], slot.operation);
+    assert!(
+        producer["invocation"]["graph_digest"]
+            .as_str()
+            .unwrap()
+            .len()
+            == 64
+    );
+    assert_eq!(
+        producer["roots"]["target"],
+        json!({
+            "kind": "absent", "path": slot.path.join("target")
+        })
+    );
+    assert_eq!(producer["roots"]["build"], producer["roots"]["target"]);
+    assert!(!slot.path.join("target").exists());
+}
+
+fn producer_result_request(slot: &LeasedSlot, command: &str, generation: u64) -> (Output, Value) {
+    finish_private(start_private(
+        &slot.fixture.hive,
+        slot.fixture
+            .replay(command, &slot.pool, 1, generation, &slot.operation),
+        &slot.credential,
+    ))
+}
+
+#[test]
+fn pending_producer_result_is_queryable_without_allowing_ack_or_a_writer() {
+    let slot = producer_slot();
+    let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+    let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+        .unwrap()
+        .unwrap();
+    let (started, result) = finish_private(start_producer(
+        &slot,
+        1,
+        &slot.operation,
+        &producer_input(&slot),
+        Some(&lock),
+        |_| (),
+    ));
+    assert!(started.status.success(), "{result}");
+    let before = slot.fixture.record();
+    let (read, result) = producer_result_request(&slot, "outcome", 1);
+    assert!(read.status.success(), "{result}");
+    assert_eq!(result["kind"], "producer_pending");
+    assert_eq!(result["current"], false);
+    let (ack, _) = producer_result_request(&slot, "ack", 1);
+    assert_eq!(ack.status.code(), Some(1));
+    assert_eq!(slot.fixture.record(), before);
+    assert!(!slot.path.join("target").exists());
+}
+
+#[test]
+fn mutable_rust_and_consumer_anchors_require_reviewed_compiler_inputs() {
+    for case in ["unreviewed source edit", "unrelated tracked anchor"] {
+        let slot = producer_slot();
+        let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+        let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+            .unwrap()
+            .unwrap();
+        let mut saved = slot.fixture.record();
+        if case == "unreviewed source edit" {
+            fs::write(
+                slot.path.join("src/lib.rs"),
+                r#"pub const NEW: &str = include_str!("../Cargo.toml");"#,
+            )
+            .unwrap();
+        } else {
+            let consumer = &mut saved["pools"][0]["profile"]["consumers"][0];
+            let path = "independent/src/lib.rs";
+            let oid = git(&slot.path, &["rev-parse", &format!("HEAD:{path}")]);
+            consumer["anchor"] = json!(path);
+            consumer["prior_object"] = json!(oid);
+            consumer["requested_object"] = json!(oid);
+            saved["pools"][0]["profile"]["mutable_inputs"][0]["locator"]["path"] = json!(path);
+            fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+        }
+        let (out, result) = finish_private(start_producer(
+            &slot,
+            1,
+            &slot.operation,
+            &producer_input(&slot),
+            Some(&lock),
+            |_| (),
+        ));
+        assert_eq!(out.status.code(), Some(1), "{case}: {result}");
+        assert!(
+            result["detail"]
+                .as_str()
+                .unwrap()
+                .contains("consumer anchor"),
+            "{case}: {result}"
+        );
+        assert_eq!(slot.fixture.record(), saved);
+        assert!(!slot.path.join("target").exists());
+    }
+}
+
+#[test]
+fn an_unchanged_rust_entry_cannot_admit_arbitrary_included_source() {
+    for case in ["file", "environment"] {
+        let source = if case == "file" {
+            r#"include!("body.inc");"#
+        } else {
+            r#"include!(env!("HIVE_FIXTURE_RUST_BODY"));"#
+        };
+        let slot = producer_slot_with_source(Some(source));
+        let external = slot.fixture._repo_dir.path.join("unreviewed-probe");
+        fs::write(&external, "unreviewed content").unwrap();
+        let include = format!(
+            "pub const UNREVIEWED: &str = include_str!({:?});\n",
+            external
+        );
+        let body = slot.path.join("src/body.inc");
+        fs::write(&body, include.as_bytes()).unwrap();
+        let mut saved = slot.fixture.record();
+        let profile = &mut saved["pools"][0]["profile"];
+        profile["mutable_inputs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "body-file", "locator": {"kind": "checkout", "path": "src/body.inc"},
+                "presence": "present", "invocations": ["check"],
+                "coverage": {"kind": "consumers", "ids": ["fixture-library"]}
+            }));
+        if case == "environment" {
+            profile["invocations"][0]["environment"].as_array_mut().unwrap().push(json!({
+                "name": "HIVE_FIXTURE_RUST_BODY", "expectation": {"kind": "mutable", "input": "body-env"}
+            }));
+            profile["mutable_inputs"].as_array_mut().unwrap().push(json!({
+                "id": "body-env", "locator": {"kind":"environment","name":"HIVE_FIXTURE_RUST_BODY"},
+                "presence": "present", "invocations": ["check"],
+                "coverage": {"kind": "consumers", "ids": ["fixture-library"]}
+            }));
+        }
+        fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+        let index = slot.admin.join("index");
+        let state_file = slot.fixture.file();
+        let files = [&*slot.path, &*index, &*state_file];
+        let before = snapshot_paths(&files);
+        let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+        let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+            .unwrap()
+            .unwrap();
+        let (out, result) = finish_private(start_producer(
+            &slot,
+            1,
+            &slot.operation,
+            &producer_input(&slot),
+            Some(&lock),
+            |command| {
+                if case == "environment" {
+                    command.env("HIVE_FIXTURE_RUST_BODY", &body);
+                }
+            },
+        ));
+        assert_eq!(out.status.code(), Some(1), "{case}: {result}");
+        assert_eq!(snapshot_paths(&files), before, "{case}");
+        assert!(!slot.path.join("target").exists());
+    }
+}
+
+#[test]
+fn only_the_native_builtin_target_is_admitted_without_a_target_spec_probe() {
+    for case in ["native target", "unknown target", "target search path"] {
+        let slot = producer_slot();
+        let native = format!("{}-apple-darwin", std::env::consts::ARCH);
+        let argv = json!([
+            "check",
+            "--locked",
+            "--target",
+            if case == "unknown target" {
+                "review-fixture".to_owned()
+            } else {
+                native
+            },
+        ]);
+        let mut saved = slot.fixture.record();
+        let profile = &mut saved["pools"][0]["profile"]["invocations"][0];
+        profile["argv"] = argv.clone();
+        let search = slot.fixture._repo_dir.path.join("custom-targets");
+        fs::create_dir(&search).unwrap();
+        fs::write(search.join("review-fixture.json"), "{}").unwrap();
+        if case == "target search path" {
+            profile["environment"].as_array_mut().unwrap().push(json!({
+                "name": "RUST_TARGET_PATH", "expectation": {"kind": "present", "value": search}
+            }));
+        }
+        fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+        let mut input = producer_input(&slot);
+        input["shape"]["argv"] = argv;
+        let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+        let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+            .unwrap()
+            .unwrap();
+        let (out, result) = finish_private(start_producer(
+            &slot,
+            1,
+            &slot.operation,
+            &input,
+            Some(&lock),
+            |command| {
+                if case == "target search path" {
+                    command.env("RUST_TARGET_PATH", &search);
+                }
+            },
+        ));
+        if case == "native target" {
+            assert!(out.status.success(), "{result}");
+        } else {
+            assert_eq!(out.status.code(), Some(1), "{case}: {result}");
+            assert_eq!(slot.fixture.record(), saved);
+        }
+        assert!(!slot.path.join("target").exists());
+    }
+}
+
+#[test]
+fn an_unverified_native_linker_cannot_get_a_build_permit() {
+    let slot = producer_slot();
+    let shim_dir = slot.fixture._repo_dir.path.join("compiler-shims");
+    fs::create_dir(&shim_dir).unwrap();
+    let marker = shim_dir.join("ran");
+    let shim = shim_dir.join("cc");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nprintf invoked > '{}'\nexit 1\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+    let argv = json!(["build", "--locked"]);
+    let mut saved = slot.fixture.record();
+    saved["pools"][0]["profile"]["invocations"][0]["argv"] = argv.clone();
+    fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    let mut input = producer_input(&slot);
+    input["shape"]["argv"] = argv;
+    let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+    let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+        .unwrap()
+        .unwrap();
+    let (out, result) = finish_private(start_producer(
+        &slot,
+        1,
+        &slot.operation,
+        &input,
+        Some(&lock),
+        |command| {
+            command.env(
+                "PATH",
+                format!("{}:{}", shim_dir.display(), std::env::var("PATH").unwrap()),
+            );
+        },
+    ));
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert!(!marker.exists());
+    assert!(!slot.path.join("target").exists());
+    assert_eq!(slot.fixture.record(), saved);
+}
+
+#[test]
+fn a_return_without_a_writer_cannot_pass_old_output_to_a_second_reservation() {
+    let slot = producer_slot();
+    let output = slot.path.join("target");
+    fs::create_dir(&output).unwrap();
+    slot.retain(&output);
+    let (returned, result) = finish_private(slot.start("return"));
+    assert!(returned.status.success(), "{result}");
+    let reserve = |expected, op: &str| {
+        finish_private(start_private(
+            &slot.fixture.hive,
+            slot.fixture
+                .reservation(&slot.pool, 1, expected, &slot.head, op),
+            &slot.credential,
+        ))
+    };
+    let (reserved, result) = reserve(1, &"a".repeat(32));
+    assert!(reserved.status.success(), "{result}");
+    assert_eq!(result["current"], true);
+    let mut ready = slot.fixture.record();
+    let state = &mut ready["pools"][0]["slots"][0];
+    state["phase"]["kind"] = json!("leased");
+    state["phase"]["ready_commit"] = json!(slot.head);
+    fs::write(slot.fixture.file(), serde_json::to_vec(&ready).unwrap()).unwrap();
+    let (returned, result) = finish_private(start_private(
+        &slot.fixture.hive,
+        slot.fixture
+            .replay("return", &slot.pool, 1, 2, &"b".repeat(32)),
+        &slot.credential,
+    ));
+    assert!(returned.status.success(), "{result}");
+    let before = slot.fixture.record();
+    let (reserve_again, result) = reserve(2, &"e".repeat(32));
+    assert_eq!(reserve_again.status.code(), Some(1), "{result}");
+    assert_eq!(slot.fixture.record(), before);
+    let (out, status) = slot.fixture.status();
+    assert!(out.status.success(), "{status}");
+    assert_eq!(status["slots"][0]["phase"], "held");
+}
+
+#[test]
+fn an_exact_reviewed_rust_variant_can_record_a_guarded_start() {
+    let slot = producer_slot();
+    let source = "pub fn answer() -> u32 { 43 }\n";
+    fs::write(slot.path.join("src/lib.rs"), source).unwrap();
+    let oid = git(
+        &slot.path,
+        &["hash-object", "-w", "--no-filters", "--", "src/lib.rs"],
+    );
+    let mut saved = slot.fixture.record();
+    saved["pools"][0]["profile"]["consumers"][0]["requested_object"] = json!(oid);
+    fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+    let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+        .unwrap()
+        .unwrap();
+    let (out, result) = finish_private(start_producer(
+        &slot,
+        1,
+        &slot.operation,
+        &producer_input(&slot),
+        Some(&lock),
+        |_| (),
+    ));
+    assert!(out.status.success(), "{result}");
+    assert_eq!(result["kind"], "producer_started");
+    assert!(!slot.path.join("target").exists());
+}
+
+#[test]
+fn an_executable_dependency_without_foreground_proof_is_refused_before_start() {
+    let slot = producer_slot();
+    let relative = "independent/Cargo.toml";
+    fs::OpenOptions::new()
+        .append(true)
+        .open(slot.path.join(relative))
+        .unwrap()
+        .write_all(b"\n[lib]\nproc-macro = true\n")
+        .unwrap();
+    git(&slot.path, &["add", relative]);
+    git(
+        &slot.path,
+        &[
+            "commit",
+            "-qm",
+            "Fixture dependency can execute during compilation",
+        ],
+    );
+    let head = git(&slot.path, &["rev-parse", "HEAD"]);
+    let oid = git(&slot.path, &["rev-parse", &format!("HEAD:{relative}")]);
+    let mut saved = slot.fixture.record();
+    let pool = &mut saved["pools"][0];
+    pool["profile"]["graph_inputs"][2]["expectation"]["identity"]["oid"] = json!(oid);
+    let state = &mut pool["slots"][0];
+    state["last_head"] = json!(head);
+    state["phase"]["ready_commit"] = json!(head);
+    state["phase"]["lease"]["requested_commit"] = json!(head);
+    fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+    let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+        .unwrap()
+        .unwrap();
+    let (out, result) = finish_private(start_producer(
+        &slot,
+        1,
+        &slot.operation,
+        &producer_input(&slot),
+        Some(&lock),
+        |_| (),
+    ));
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert!(
+        result["detail"]
+            .as_str()
+            .unwrap()
+            .contains("executable build target"),
+        "{result}"
+    );
+    assert_eq!(slot.fixture.record(), saved);
+    assert!(!slot.path.join("target").exists());
+}
+
+#[test]
+fn a_reviewed_config_and_environment_must_exclude_compiler_overrides() {
+    for case in [
+        "benign config",
+        "reviewed wrapper",
+        "rustc path",
+        "reviewed git env",
+        "reviewed compiler env",
+        "unreviewed toolchain",
+    ] {
+        let slot = producer_slot();
+        let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+        let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+            .unwrap()
+            .unwrap();
+        let mut saved = slot.fixture.record();
+        let profile = &mut saved["pools"][0]["profile"];
+        let config = slot.fixture.hive.cargo_home.path.join("config.toml");
+        let bin = slot.fixture._repo_dir.path.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let shim = bin.join("rustc");
+        let marker = slot.fixture._repo_dir.path.join("unexpected-compiler");
+        fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nprintf controlled > '{}'\nexit 1\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+        if matches!(case, "reviewed wrapper" | "benign config") {
+            let body = if case == "reviewed wrapper" {
+                format!("[build]\nrustc-wrapper = '{}'\n", shim.display())
+            } else {
+                "[net]\noffline = true\n".to_owned()
+            };
+            fs::write(&config, &body).unwrap();
+            let digest = cargo_hive_platform::slot::sha256(body.as_bytes())
+                .unwrap()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            profile["graph_inputs"].as_array_mut().unwrap().push(json!({
+                "locator": {"kind": "external", "path": config},
+                "expectation": {"kind": "present", "identity": {"kind": "reviewed_bytes", "sha256": digest}}
+            }));
+        }
+        if matches!(case, "reviewed git env" | "reviewed compiler env") {
+            let name = if case == "reviewed git env" {
+                "GIT_CONFIG_GLOBAL"
+            } else {
+                "CARGO_BUILD_RUSTC"
+            };
+            profile["invocations"][0]["environment"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({
+                    "name": name, "expectation": {"kind": "present", "value": shim}
+                }));
+        }
+        fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+        let (out, result) = finish_private(start_producer(
+            &slot,
+            1,
+            &slot.operation,
+            &producer_input(&slot),
+            Some(&lock),
+            |command| match case {
+                "rustc path" => {
+                    command.env(
+                        "PATH",
+                        format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+                    );
+                }
+                "reviewed git env" => {
+                    command.env("GIT_CONFIG_GLOBAL", &shim);
+                }
+                "reviewed compiler env" => {
+                    command.env("CARGO_BUILD_RUSTC", &shim);
+                }
+                "unreviewed toolchain" => {
+                    command.env("RUSTUP_TOOLCHAIN", "unreviewed-fixture-toolchain");
+                }
+                _ => (),
+            },
+        ));
+        if case == "benign config" {
+            assert!(out.status.success(), "{case}: {result}");
+        } else {
+            assert_eq!(out.status.code(), Some(1), "{case}: {result}");
+            assert_eq!(slot.fixture.record(), saved, "{case}");
+        }
+        assert!(!marker.exists(), "{case}: {result}");
+        assert!(!slot.path.join("target").exists(), "{case}: {result}");
+    }
+}
+
+#[test]
+fn a_legacy_completion_without_its_foreground_witness_is_held() {
+    let slot = producer_slot();
+    let target = slot.path.join("target");
+    fs::create_dir(&target).unwrap();
+    slot.retain(&target);
+    let mut saved = slot.fixture.record();
+    saved["pools"][0]["slots"][0]["producer"]["invocations"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("foreground");
+    fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    let (out, status) = slot.fixture.status();
+    assert!(out.status.success(), "{status}");
+    assert_eq!(status["slots"][0]["phase"], "held");
+    let (out, result) = finish_private(slot.start("return"));
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert_eq!(slot.fixture.record(), saved);
+    saved["pools"][0]["slots"][0]["phase"] = json!({"kind": "vacant"});
+    fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    let (out, status) = slot.fixture.status();
+    assert!(out.status.success(), "{status}");
+    assert_eq!(status["slots"][0]["phase"], "held");
+    let (out, result) = finish_private(start_private(
+        &slot.fixture.hive,
+        slot.fixture
+            .reservation(&slot.pool, 1, 1, &slot.head, &"e".repeat(32)),
+        &slot.credential,
+    ));
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert_eq!(slot.fixture.record(), saved);
+}
+
+#[test]
+fn acknowledging_completed_producers_releases_capacity_for_the_next_lease() {
+    let slot = producer_slot();
+    let target = slot.path.join("target");
+    fs::create_dir(&target).unwrap();
+    slot.retain(&target);
+    let mut saved = slot.fixture.record();
+    let state = &mut saved["pools"][0]["slots"][0];
+    let template = state["producer"]["invocations"][0].clone();
+    let operations: Vec<_> = (1..=cargo_hive_state::slots::MAX_OUTCOMES)
+        .map(|n| format!("{n:032x}"))
+        .collect();
+    state["producer"]["invocations"] = json!(
+        operations
+            .iter()
+            .map(|op| {
+                let mut item = template.clone();
+                item["operation"] = json!(op);
+                item
+            })
+            .collect::<Vec<_>>()
+    );
+    state["outcomes"] = json!(operations.iter().map(|op| json!({
+        "pool_id": slot.pool, "slot": 1, "generation": 1, "operation": op,
+        "kind": "producer_complete", "attempt_id": null,
+        "request": { "kind": "producer", "runner": template["runner"], "invocation": template["evidence"],
+            "ready_commit": slot.head },
+        "credential": slot.credential, "result": {"kind": "producer_complete"}
+    })).collect::<Vec<_>>());
+    fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+
+    let (blocked, result) = finish_private(slot.start("return"));
+    assert_eq!(blocked.status.code(), Some(1), "{result}");
+    assert!(
+        result["detail"]
+            .as_str()
+            .unwrap()
+            .contains("unacknowledged")
+    );
+    let result_for = |command: &str, operation: &str, generation: u64, credential: &str| {
+        finish_private(start_private(
+            &slot.fixture.hive,
+            slot.fixture
+                .replay(command, &slot.pool, 1, generation, operation),
+            credential,
+        ))
+    };
+    assert_eq!(
+        result_for("ack", &operations[0], 1, &"f".repeat(64))
+            .0
+            .status
+            .code(),
+        Some(1)
+    );
+    for operation in &operations {
+        let (out, result) = result_for("ack", operation, 1, &slot.credential);
+        assert!(out.status.success(), "{result}");
+        assert_eq!(result["kind"], "acknowledged");
+        assert_eq!(result["current"], false);
+    }
+    assert_eq!(
+        slot.fixture.record()["pools"][0]["slots"][0]["outcomes"],
+        json!([])
+    );
+    assert_eq!(
+        result_for("outcome", &operations[0], 1, &slot.credential)
+            .0
+            .status
+            .code(),
+        Some(1)
+    );
+
+    let (returned, result) = finish_private(slot.start("return"));
+    assert!(returned.status.success(), "{result}");
+    let (reserved, result) = finish_private(start_private(
+        &slot.fixture.hive,
+        slot.fixture
+            .reservation(&slot.pool, 1, 1, &slot.head, &"e".repeat(32)),
+        &"f".repeat(64),
+    ));
+    assert!(reserved.status.success(), "{result}");
+    assert_eq!(result["generation"], 2);
+    assert_eq!(
+        result_for("outcome", &operations[0], 1, &slot.credential)
+            .0
+            .status
+            .code(),
+        Some(1)
+    );
+}
+
+fn producer_gate_args(slot: &LeasedSlot) -> Vec<String> {
+    let resolved = slot
+        .fixture
+        .hive
+        .command_with(Path::new("rustup"), &["which", "cargo"])
+        .output()
+        .unwrap();
+    assert!(resolved.status.success(), "{resolved:?}");
+    let cargo = String::from_utf8(resolved.stdout).unwrap();
+    let resolved = slot
+        .fixture
+        .hive
+        .command_with(Path::new("rustup"), &["which", "rustc"])
+        .output()
+        .unwrap();
+    assert!(resolved.status.success(), "{resolved:?}");
+    let rustc = String::from_utf8(resolved.stdout).unwrap();
+    let mut args = vec![
+        format!("CARGO_HOME={}", slot.fixture.hive.cargo_home.path.display()),
+        "CARGO_NET_OFFLINE=true".into(),
+    ];
+    args.extend(
+        ["HOME", "PATH", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"]
+            .into_iter()
+            .filter_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|value| format!("{name}={value}"))
+            }),
+    );
+    args.extend([
+        format!("RUSTC={}", rustc.trim()),
+        "RUSTUP_AUTO_INSTALL=0".into(),
+    ]);
+    args.sort();
+    args.extend([
+        cargo.trim().to_owned(),
+        "check".to_owned(),
+        "--locked".to_owned(),
+    ]);
+    args
+}
+
+fn stopped_stock_cargo(slot: &LeasedSlot, lock: Option<&fs::File>, bad_env: bool) -> Child {
+    let mut command = slot.fixture.hive.command_with(Path::new("/bin/bash"), &[]);
+    let mut args = producer_gate_args(slot);
+    if bad_env {
+        args.insert(1, "CARGO_TARGET_DIR=outside".into());
+    }
+    command
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "builtin kill -STOP \"$$\"; builtin exec -c /usr/bin/env -i \"$@\"",
+            "producer-gate",
+        ])
+        .args(args)
+        .current_dir(&slot.path)
+        .process_group(0)
+        .env("CARGO_HOME", &slot.fixture.hive.cargo_home.path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    producer_environment(&mut command);
+    if let Some(lock) = lock {
+        pass_producer_lock(&mut command, lock);
+    }
+    let child = command.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let mut status = 0;
+        // SAFETY: this test owns the child and passes a writable wait status.
+        let observed = unsafe {
+            libc::waitpid(
+                child.id() as libc::pid_t,
+                &mut status,
+                libc::WNOHANG | libc::WUNTRACED,
+            )
+        };
+        if observed != 0 {
+            assert_eq!(observed as u32, child.id());
+            assert!(libc::WIFSTOPPED(status));
+            break;
+        }
+        assert!(Instant::now() < deadline, "guide child did not stop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child
+}
+
+#[test]
+fn observed_stock_cargo_completion_and_a_reported_bypass_bind_the_same_epoch() {
+    for (pass_writer_lock, bad_env) in [(true, false), (false, false), (true, true)] {
+        let slot = producer_slot();
+        let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+        let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+            .unwrap()
+            .unwrap();
+        let mut request = producer_input(&slot);
+        let (started, result) = finish_private(start_producer(
+            &slot,
+            1,
+            &slot.operation,
+            &request,
+            Some(&lock),
+            |_| (),
+        ));
+        assert!(started.status.success(), "{result} {started:?}");
+        let mut cargo = stopped_stock_cargo(&slot, pass_writer_lock.then_some(&lock), bad_env);
+        request["action"] = json!("watch");
+        request["child_pid"] = json!(cargo.id());
+        let mut watcher = start_producer(&slot, 1, &slot.operation, &request, Some(&lock), |_| ());
+        if pass_writer_lock && !bad_env {
+            let until = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(status) = cargo.try_wait().unwrap() {
+                    assert!(status.success(), "{status}");
+                    break;
+                }
+                if Instant::now() >= until || watcher.try_wait().unwrap().is_some() {
+                    cargo.kill().unwrap();
+                    cargo.wait().unwrap();
+                    let (out, result) = finish_private(watcher);
+                    panic!("watch did not permit stock Cargo: {result} {out:?}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let (out, result) = finish_private(watcher);
+            assert!(out.status.success(), "{result} {out:?}");
+            assert_eq!(result["kind"], "producer_complete");
+            let record = slot.fixture.record();
+            let producer = &record["pools"][0]["slots"][0]["producer"];
+            let target = slot.path.join("target");
+            let actual = fs::metadata(&target).unwrap();
+            assert_eq!(
+                producer["roots"]["target"],
+                json!({
+                    "path": target, "identity": {"dev": actual.dev(), "ino": actual.ino()}
+                })
+            );
+            assert_eq!(producer["roots"]["build"], producer["roots"]["target"]);
+            assert_eq!(producer["invocations"][0]["operation"], slot.operation);
+
+            let (queried, history) = producer_result_request(&slot, "outcome", 1);
+            assert!(queried.status.success(), "{history}");
+            assert_eq!(history["kind"], "producer_complete");
+            assert_eq!(history["current"], false);
+            let (acknowledged, ack) = producer_result_request(&slot, "ack", 1);
+            assert!(acknowledged.status.success(), "{ack}");
+            assert_eq!(ack["kind"], "acknowledged");
+            assert_eq!(
+                producer_result_request(&slot, "outcome", 1).0.status.code(),
+                Some(1)
+            );
+            let (repeated, _) = finish_private(start_producer(
+                &slot,
+                1,
+                &slot.operation,
+                &producer_input(&slot),
+                Some(&lock),
+                |_| (),
+            ));
+            assert_eq!(repeated.status.code(), Some(1));
+            slot.fixture.hive.check_crate(&slot.path);
+            let start = producer_input(&slot);
+            let report = json!({
+                "action": "report_bypass", "credential": start["credential"], "nonce": start["nonce"],
+                "profile": start["shape"]["profile"]
+            });
+            let bypass_operation = "b".repeat(32);
+            let run = |request: &Value, operation: &str| {
+                finish_private(start_producer(
+                    &slot,
+                    1,
+                    operation,
+                    request,
+                    Some(&lock),
+                    |_| (),
+                ))
+            };
+            let (reported, result) = run(&report, &bypass_operation);
+            assert!(reported.status.success(), "{result}");
+            assert_eq!(result["kind"], "producer_tainted");
+            let bypass = slot.fixture.record();
+            let tainted = &bypass["pools"][0]["slots"][0]["producer"];
+            assert_eq!(tainted["kind"], "tainted");
+            assert_eq!(tainted["epoch"], producer["epoch"]);
+            assert_eq!(tainted["roots"], producer["roots"]);
+            assert_eq!(tainted["reason"], "off_profile");
+            let (replayed, result) = run(&report, &bypass_operation);
+            assert!(replayed.status.success(), "{result}");
+            assert_eq!(result["phase"], "held");
+            assert_eq!(slot.fixture.record(), bypass);
+            assert!(
+                !run(&producer_input(&slot), &"a".repeat(32))
+                    .0
+                    .status
+                    .success()
+            );
+            assert_eq!(slot.fixture.record(), bypass);
+        } else {
+            let (out, result) = finish_private(watcher);
+            cargo.kill().unwrap();
+            cargo.wait().unwrap();
+            assert_eq!(out.status.code(), Some(1), "{result}");
+            let reason = if bad_env {
+                "environment allowlist"
+            } else {
+                "custody"
+            };
+            assert!(
+                result["detail"].as_str().unwrap().contains(reason),
+                "{result}"
+            );
+            assert!(!slot.path.join("target").exists());
+            assert_eq!(
+                slot.fixture.record()["pools"][0]["slots"][0]["producer"]["kind"],
+                "pending"
+            );
+        }
+    }
+}
+
+#[test]
+fn losing_the_guide_during_a_live_writer_keeps_the_output_pending() {
+    use std::fmt::Write as _;
+    let mut source = String::new();
+    for i in 0..70_000 {
+        writeln!(
+            source,
+            "pub fn proof_{i}(n: u64) -> u64 {{ n.wrapping_add({i}) }}"
+        )
+        .unwrap();
+    }
+    let slot = producer_slot_with_source(Some(&source));
+    let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+    let guard = cargo_hive_platform::flock::try_exclusive(&lock)
+        .unwrap()
+        .unwrap();
+    let scope = slot
+        .fixture
+        .replay("producer", &slot.pool, 1, 1, &slot.operation);
+    let input_dir = &slot.fixture._repo_dir.path;
+    let start_path = input_dir.join("producer-start");
+    let watch_path = input_dir.join("producer-watch");
+    let watch_prefix_path = input_dir.join("producer-watch-prefix");
+    let started = input_dir.join("producer-start-result");
+    let ended = input_dir.join("producer-watch-result");
+    let mut payload = producer_input(&slot);
+    let write_private = |path: &Path, contents: &str| {
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap()
+            .write_all(contents.as_bytes())
+            .unwrap();
+    };
+    write_private(&start_path, &payload.to_string());
+    payload["action"] = json!("watch");
+    write_private(&watch_prefix_path, &format!("{}\n", payload));
+    let mut guide = slot.fixture.hive.command_with(Path::new("/bin/bash"), &[]);
+    guide.args(["--noprofile", "--norc", "-c", r#"
+set -m
+bin=$1 start=$2 watch=$3 prefix=$4 started=$5 ended=$6
+shift 6
+args=()
+while [[ $1 != --gate ]]; do args+=("$1"); shift; done
+shift
+"$bin" "${args[@]}" --lock-fd 198 < "$start" > "$started" || exit 41
+/bin/bash --noprofile --norc -c 'builtin kill -STOP "$$"; builtin exec -c /usr/bin/env -i "$@"' producer-gate "$@" &
+cargo_pid=$!
+IFS= read -r payload < "$prefix"
+(umask 077; printf '%s,"child_pid":%s}
+' "${payload%?}" "$cargo_pid" > "$watch")
+"$bin" "${args[@]}" --lock-fd 198 < "$watch" > "$ended" &
+monitor=$!
+wait "$monitor"
+wait "$cargo_pid"
+"#, "guide-fixture", env!("CARGO_BIN_EXE_cargo-hive")])
+        .args([&start_path, &watch_path, &watch_prefix_path, &started, &ended])
+        .args(scope)
+        .arg("--gate")
+        .args(producer_gate_args(&slot))
+        .current_dir(&slot.path)
+        .process_group(0)
+        .env("CARGO_HOME", &slot.fixture.hive.cargo_home.path)
+        .env("HIVE_HOME", &slot.fixture.hive.home.path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    producer_environment(&mut guide);
+    pass_producer_lock(&mut guide, &lock);
+    let mut guide = guide.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (cargo_pid, born) = loop {
+        let record = slot.fixture.record();
+        let pending = &record["pools"][0]["slots"][0]["producer"];
+        let foreground = &pending["foreground"];
+        if let (Some(pid), Some(secs), Some(micros)) = (
+            foreground["pid"].as_u64(),
+            foreground["start_secs"].as_u64(),
+            foreground["start_micros"].as_u64(),
+        ) && slot.path.join("target/debug").exists()
+        {
+            break (pid as i32, (secs, micros));
+        }
+        if guide.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+            let _ = guide.kill();
+            let _ = guide.wait();
+            if let Ok(data) = fs::read(&watch_path)
+                && let Ok(value) = serde_json::from_slice::<Value>(&data)
+                && let Some(pid) = value["child_pid"].as_u64()
+            {
+                // SAFETY: this is the guide fixture's dedicated writer process group.
+                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            }
+            panic!(
+                "guide did not reach a live Cargo writer: {:?} {:?}",
+                fs::read_to_string(started),
+                fs::read_to_string(ended)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert!(running_fixture_writer(cargo_pid, born));
+    guide.kill().unwrap();
+    guide.wait().unwrap();
+    assert!(
+        running_fixture_writer(cargo_pid, born),
+        "fixture writer exited before guide loss"
+    );
+    drop(guard);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while running_fixture_writer(cargo_pid, born) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if running_fixture_writer(cargo_pid, born) {
+        // SAFETY: this is the process group of the test's recorded Cargo writer.
+        unsafe { libc::kill(-cargo_pid, libc::SIGKILL) };
+        panic!("fixture writer failed to exit");
+    }
+    let record = slot.fixture.record();
+    assert_eq!(
+        record["pools"][0]["slots"][0]["producer"]["kind"],
+        "pending"
+    );
+    let (_, status) = slot.fixture.status();
+    assert_eq!(status["slots"][0]["phase"], "held");
+}
+
+fn running_fixture_writer(pid: i32, born: (u64, u64)) -> bool {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: PROC_PIDTBSDINFO writes one proc_bsdinfo into the sized buffer.
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if read != size {
+        return false;
+    }
+    // SAFETY: the return count confirmed the complete structure.
+    let info = unsafe { info.assume_init() };
+    info.pbi_pid == pid as u32
+        && info.pbi_pgid == pid as u32
+        && (info.pbi_start_tvsec, info.pbi_start_tvusec) == born
+        && info.pbi_status != libc::SZOMB
+}
+
+#[test]
+fn uncovered_producer_shapes_are_refused_before_output_is_created() {
+    for case in [
+        "profile revision",
+        "argv",
+        "cwd",
+        "environment",
+        "layout",
+        "discovered root",
+        "graph input",
+        "consumer anchor",
+        "mutable input",
+        "changed manifest",
+        "new config",
+    ] {
+        let slot = producer_slot();
+        let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+        let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+            .unwrap()
+            .unwrap();
+        let mut request = producer_input(&slot);
+        let mut record = slot.fixture.record();
+        let pool = &mut record["pools"][0];
+        let expected = match case {
+            "profile revision" => {
+                request["shape"]["profile"]["revision"] = json!(2);
+                "revision"
+            }
+            "argv" => {
+                request["shape"]["argv"] =
+                    json!(["check", "--locked", "--target-dir", "/somewhere"]);
+                "command"
+            }
+            "cwd" => {
+                request["shape"]["cwd"] = json!("src");
+                "working directory"
+            }
+            "environment" => "environment",
+            "layout" => {
+                let wrong = if pool["profile"]["invocations"][0]["layout"] == "flat" {
+                    "unit_dir"
+                } else {
+                    "flat"
+                };
+                pool["profile"]["invocations"][0]["layout"] = json!(wrong);
+                pool["profile"]["proofs"][0]["layout"] = json!(wrong);
+                "layout"
+            }
+            "discovered root" => {
+                pool["profile"]["invocations"][0]["target_root"] = json!("elsewhere");
+                pool["profile"]["invocations"][0]["build_root"] = json!("elsewhere");
+                let roots = &mut pool["slots"][0]["producer"]["evidence"]["roots"];
+                roots["target"]["path"] = json!(slot.path.join("elsewhere"));
+                roots["build"]["path"] = json!(slot.path.join("elsewhere"));
+                "output roots"
+            }
+            "graph input" => {
+                pool["profile"]["graph_inputs"]
+                    .as_array_mut()
+                    .unwrap()
+                    .pop();
+                "Cargo graph"
+            }
+            "consumer anchor" => {
+                let consumer = &mut pool["profile"]["consumers"][0];
+                consumer["prior_object"] = json!("f".repeat(40));
+                consumer["requested_object"] = json!("e".repeat(40));
+                "consumer anchor"
+            }
+            "mutable input" => {
+                fs::write(slot.path.join(".env"), "PRODUCER_TEST=off-profile\n").unwrap();
+                "outside verified generated output"
+            }
+            "changed manifest" => {
+                let manifest = slot.path.join("Cargo.toml");
+                let file = fs::OpenOptions::new().append(true).open(&manifest).unwrap();
+                let mtime = file.metadata().unwrap().modified().unwrap();
+                (&file).write_all(b"# changed fixed bytes\n").unwrap();
+                file.set_times(fs::FileTimes::new().set_modified(mtime))
+                    .unwrap();
+                "tracked or index changes"
+            }
+            "new config" => {
+                let ancestor = &slot.fixture.hive.secondary_root.path;
+                fs::create_dir(ancestor.join(".cargo")).unwrap();
+                fs::write(
+                    ancestor.join(".cargo/config.toml"),
+                    "[build]\n target-dir = 'elsewhere'\n",
+                )
+                .unwrap();
+                "configuration path"
+            }
+            _ => unreachable!("test case"),
+        };
+        fs::write(slot.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+        let before = fs::read(slot.fixture.file()).unwrap();
+        let (out, result) = finish_private(start_producer(
+            &slot,
+            1,
+            &slot.operation,
+            &request,
+            Some(&lock),
+            |command| {
+                if case == "environment" {
+                    command.env("RUSTC_WRAPPER", "/somewhere");
+                }
+            },
+        ));
+        assert_eq!(out.status.code(), Some(1), "{case}: {result}");
+        assert!(
+            result["detail"].as_str().unwrap().contains(expected),
+            "{case}: {result}"
+        );
+        assert_no_credential(&out, &slot.credential);
+        assert!(!slot.path.join("target").exists(), "{case}");
+        assert!(!slot.path.join("elsewhere").exists(), "{case}");
+        assert_eq!(fs::read(slot.fixture.file()).unwrap(), before, "{case}");
+    }
+}
+
+#[test]
+fn a_lost_start_and_stale_generation_cannot_be_given_a_new_writer() {
+    let slot = producer_slot();
+    let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+    let guard = cargo_hive_platform::flock::try_exclusive(&lock)
+        .unwrap()
+        .unwrap();
+    let request = producer_input(&slot);
+    let run = |generation: u64, op: &str| {
+        finish_private(start_producer(
+            &slot,
+            generation,
+            op,
+            &request,
+            Some(&lock),
+            |_| (),
+        ))
+    };
+    let (stale, _) = run(0, &slot.operation);
+    assert_eq!(stale.status.code(), Some(1));
+    let (start, result) = run(1, &slot.operation);
+    assert!(start.status.success(), "{result}");
+    let pending = fs::read(slot.fixture.file()).unwrap();
+    for op in [slot.operation.clone(), "8".repeat(32)] {
+        let (again, _) = run(1, &op);
+        assert_eq!(again.status.code(), Some(1));
+        assert_eq!(fs::read(slot.fixture.file()).unwrap(), pending);
+    }
+    drop(guard);
+    let (returned, result) = finish_private(slot.start("return"));
+    assert_eq!(returned.status.code(), Some(1), "{result}");
+    assert_eq!(fs::read(slot.fixture.file()).unwrap(), pending);
+    let (_, status) = slot.fixture.status();
+    assert_eq!(status["slots"][0]["phase"], "held");
+}
+
+#[test]
+fn a_successful_off_protocol_build_cannot_restore_lost_provenance() {
+    for reason in ["tainted", "unknown"] {
+        let slot = producer_slot();
+        let mut record = slot.fixture.record();
+        let production = &mut record["pools"][0]["slots"][0]["producer"];
+        *production = json!({
+            "kind": reason, "epoch": production["evidence"]["epoch"], "generation": 1,
+            "roots": {"target": null, "build": null},
+            "reason": if reason == "tainted" { "off_profile" } else { "lost_writer" }
+        });
+        fs::write(slot.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+        slot.fixture.hive.check_crate(&slot.path);
+        assert!(slot.path.join("target").is_dir());
+        let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+        let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+            .unwrap()
+            .unwrap();
+        let (out, result) = finish_private(start_producer(
+            &slot,
+            1,
+            &slot.operation,
+            &producer_input(&slot),
+            Some(&lock),
+            |_| (),
+        ));
+        assert_eq!(out.status.code(), Some(1), "{result}");
+        assert_eq!(
+            slot.fixture.record()["pools"][0]["slots"][0]["producer"]["kind"],
+            reason
+        );
+    }
+}
+
+#[test]
+fn completed_history_limit_does_not_ask_to_acknowledge_absent_outcomes() {
+    let slot = producer_slot();
+    let target = slot.path.join("target");
+    fs::create_dir(&target).unwrap();
+    slot.retain(&target);
+    let mut record = slot.fixture.record();
+    let state = &mut record["pools"][0]["slots"][0];
+    let template = state["producer"]["invocations"][0].clone();
+    state["producer"]["invocations"] = json!(
+        (0..32)
+            .map(|number| {
+                let mut entry = template.clone();
+                entry["operation"] = json!(format!("{number:032x}"));
+                entry["foreground"] = json!({"pid": 2, "start_secs": 1, "start_micros": 0});
+                entry
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(state["outcomes"], json!([]));
+    fs::write(slot.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+    let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+    let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
+        .unwrap()
+        .unwrap();
+    let (out, result) = finish_private(start_producer(
+        &slot,
+        1,
+        &slot.operation,
+        &producer_input(&slot),
+        Some(&lock),
+        |_| (),
+    ));
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert!(
+        result["detail"]
+            .as_str()
+            .unwrap()
+            .contains("completed Cargo invocations"),
+        "{result}"
+    );
+    assert!(
+        result["next_action"].as_str().unwrap().contains("return"),
+        "{result}"
+    );
+    assert_eq!(slot.fixture.record(), record);
 }
 
 type PathSnapshot = (PathBuf, u64, u64, i64, i64, Option<Vec<u8>>);
@@ -2760,7 +4148,7 @@ fn a_pending_producer_requires_a_ready_lease() {
     });
     let ready = json!({"kind": "leased", "lease": lease, "ready_commit": head});
     for (phase, projected) in [
-        (ready.clone(), "leased"),
+        (ready.clone(), "held"),
         (
             json!({"kind": "held", "reason": "interrupted", "prior": ready}),
             "held",

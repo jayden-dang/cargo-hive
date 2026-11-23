@@ -5,7 +5,7 @@ Status: Approved
 Approved: 2026-11-23 13:39 +07 by Jayden, who replied "approve" on the spec sheet at `99fcdb1faeadd60fcb3dd86047127e27d03c8a40` (recorded in `.skills/_pending-warm_slot_pool/auto/operator-reply.md`).
 Date: 2026-11-23
 Execution-mode: continuous
-Delivery boundary for this integration: Tasks 1–4. The operator directed a stop after Task 4 and a local main merge and push on 2026-11-23. Tasks 5–10 remain approved and pending.
+Delivery boundary for this integration: Tasks 5–10. Tasks 1–4 were merged and pushed on 2026-11-23. The operator resumed the remaining approved tasks through /go on 2026-11-23 19:55 +07; deliver the completed feature as a pull request.
 Requirements: ./requirements.md
 Design: ./design.md
 
@@ -31,10 +31,16 @@ Design: ./design.md
 
 | File | Responsibility |
 |---|---|
+| `crates/core/src/fingerprint.rs` | Add bounded no-follow strict fingerprint input while retaining legacy decoding behavior. |
+| `crates/core/src/locks.rs` | Add separately verified current Cargo lock and profile namespace evidence. |
+| `crates/core/src/target.rs` | Add bounded strict target identification while retaining the standalone path. |
+| `crates/cargo/src/discover.rs` | Add strict bounded checkout and workspace discovery without changing standalone readers. |
+| `crates/core/src/ledger/account.rs` | Add final checked removal after accounting for strict callers. |
+| `crates/core/src/ledger/mod.rs` | Export the generic checked removal seam. |
 | `crates/state/src/lib.rs` | Extend bounded private state writes and named recovery without changing old readers. |
 | `crates/state/src/slots.rs` | New strict layout 2 record, checked revisions, transition/outcome I/O with fault tests. |
 | `crates/platform/src/flock.rs` | Check inherited writer and credential descriptors and owner-controlled paths for slot state. |
-| `crates/platform/src/lib.rs` | Export slot-only platform support. |
+| `crates/platform/src/lib.rs` | Export slot support and bounded regular-file input for strict callers. |
 | `crates/platform/src/proc.rs` | Confirm complete slot Git pipe capture and bound private CLI input. |
 | `crates/platform/src/testing.rs` | Inspect pipe readiness and inherited flags for the native CLI cancellation fixture. |
 | `crates/platform/src/slot.rs` | New local process instance, boot session and entropy helpers. |
@@ -199,6 +205,8 @@ _Requirements: SLOTS-1.5, SLOTS-1.9, SLOTS-2.1, SLOTS-2.2, SLOTS-2.3, SLOTS-2.4,
 ### Task 5: Admit only proved producer history for a guarded checkout
 
 **Files:**
+- Modify: `crates/platform/src/slot.rs`
+- Modify: `crates/cargo-hive/src/slot/inspect.rs`
 - Create: `crates/cargo-hive/src/slot/profile.rs`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
 - Modify: `crates/state/src/slots.rs`
@@ -227,6 +235,15 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 ### Task 6: Prove exactly which roots checkout GC completed
 
 **Files:**
+- Modify: `crates/state/src/lib.rs`
+- Modify: `crates/core/src/fingerprint.rs`
+- Modify: `crates/core/src/locks.rs`
+- Modify: `crates/core/src/target.rs`
+- Modify: `crates/platform/src/lib.rs`
+- Modify: `crates/cargo/src/git.rs`
+- Modify: `crates/cargo/src/discover.rs`
+- Modify: `crates/core/src/ledger/account.rs`
+- Modify: `crates/core/src/ledger/mod.rs`
 - Modify: `crates/cargo-hive/src/cli.rs`
 - Modify: `crates/gc/src/checkout.rs`
 - Modify: `crates/cargo-hive/tests/checkout_gc.rs`
@@ -236,7 +253,17 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 **Interfaces:**
 - Consumes: existing CLI/GC operation, both independently resolved output-root identities and scoped ownership facts from the design.
 - Consumes (existing): `checkout::run(input: &CheckoutInput<'_>, cancel: &dyn Fn() -> bool) -> CheckoutReport`, and CLI `checkout_cmd(state: &State, checkout: &Path, out: &OutputArgs) -> i32`.
-- Produces (proposed): `checkout::run_with_evidence(input: &CheckoutInput<'_>, expected: &[RequiredRoot], cancel: &dyn Fn() -> bool) -> EvidencedCheckoutReport`, with root path, role and device/inode proof; `cli::checkout_gc_for_slot(state: &State, proof: &CheckoutProof, cancel: &dyn Fn() -> bool) -> Result<SlotGcReport, SlotRefusal>` brings in checkout/target scan faults. Exercise crate-private orchestration with in-module tests and preserve the existing public standalone seam.
+- Produces (proposed): `checkout::run_with_evidence(input: &CheckoutInput<'_>, expected: &[RequiredRoot], cancel: &dyn Fn() -> bool) -> EvidencedCheckoutReport`, with root path, role and device/inode proof; `cli::checkout_gc_for_slot(state: &State, checkout: &Path, expected: &[RequiredRoot], cancel: &(dyn Fn() -> bool + Sync)) -> Result<SlotGcReport, SlotGcRefusal>` brings in checkout/target scan faults. Exercise crate-private orchestration with in-module tests and preserve the existing public standalone seam.
+
+- Consumes (proposed): `discover::checkouts_complete` and `discover::targets_for_checkout_gc` for bounded complete inventory and all admitted manifest candidates, preserving the existing standalone discovery modes.
+- Produces (proposed): `ledger::remove_counted_guarded` with a final validation callback after accounting and immediately before removal; the existing `remove_counted` contract remains unchanged.
+
+- Consumes (proposed): `locks::acquire_verified`, `target::identify_strict`, and `Fs::read_regular_bounded` for current Cargo lock namespace proof and bounded strict input reads; legacy defaults remain unchanged.
+- Consumes (proposed): cancellation-aware `Git::slot_read_only_until` and `Git::worktrees_complete_until` through the existing strict reader defaults.
+
+- Consumes (proposed): a strict `fingerprint` reader using bounded regular no-follow reads and known flat/unit-dir decoding under the verified Cargo guard; the existing reader remains unchanged.
+
+- Consumes (proposed): a regular bounded state artifact reader preserving the existing layout/codec rules, plus `State::slot_config`, for strict setup; standalone state readers retain their behavior.
 
 **Depends-on:** Task 4.
 
@@ -253,6 +280,7 @@ _Requirements: SLOTS-3.6, SLOTS-3.7, SLOTS-3.10_
 ### Task 7: Deliver a ready slot at the requested commit
 
 **Files:**
+- Modify: `crates/cargo-hive/src/slot/result.rs`
 - Modify: `crates/cargo-hive/src/cli.rs`
 - Modify: `crates/cargo-hive/tests/skill.rs`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
@@ -288,6 +316,9 @@ _Requirements: SLOTS-1.2, SLOTS-1.6, SLOTS-1.7, SLOTS-1.8, SLOTS-2.4, SLOTS-3.1,
 ### Task 8: Recover an abandoned slot without replaying old authority
 
 **Files:**
+- Modify: `crates/cargo-hive/src/cli.rs`
+- Modify: `crates/cargo-hive/tests/cli_tree.rs`
+- Modify: `crates/cargo-hive/tests/fixtures/current/cli-tree.txt`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
 - Modify: `crates/state/src/slots.rs`
 - Modify: `crates/cargo-hive/tests/slots.rs`

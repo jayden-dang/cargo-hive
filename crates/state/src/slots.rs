@@ -130,6 +130,7 @@ impl SlotsFile {
                         || old.generation.checked_add(1) == Some(new.generation),
                     "slot generation is stale or skipped",
                 )?;
+                old.producer.validate_successor(&new.producer, old, new)?;
             }
         }
         Ok(())
@@ -551,6 +552,8 @@ pub enum Producer {
         generation: u64,
         roots: OutputRoots<Option<VerifiedRoot>>,
         reason: ProvenanceLoss,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<BypassReport>,
     },
     Unknown {
         epoch: OutputEpoch,
@@ -558,6 +561,13 @@ pub enum Producer {
         roots: OutputRoots<Option<VerifiedRoot>>,
         reason: ProvenanceLoss,
     },
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BypassReport {
+    pub operation: String,
+    pub runner: Runner,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -571,6 +581,8 @@ pub struct PendingProducer {
     pub operation: String,
     pub runner: Runner,
     pub prior: EligibleProducer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<ForegroundInstance>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -579,17 +591,31 @@ pub enum EligibleProducer {
     NeverBuilt {
         evidence: EmptyEpoch,
     },
-    SeedOnly {
-        evidence: EmptyEpoch,
-        generation: u64,
-        final_roots: OutputRoots<RootExpectation>,
-        registry_units: u64,
-    },
+    SeedOnly(SeedEvidence),
     Complete {
         generation: u64,
         roots: OutputRoots<VerifiedRoot>,
         invocations: Vec<CompletedInvocation>,
     },
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeedEvidence {
+    pub evidence: EmptyEpoch,
+    pub generation: u64,
+    pub final_roots: OutputRoots<RootExpectation>,
+    pub registry_units: u64,
+}
+
+impl SeedEvidence {
+    fn derives_from_empty(
+        evidence: &EmptyEpoch,
+        final_roots: &OutputRoots<RootExpectation>,
+    ) -> bool {
+        evidence.roots.target.accepts_seed(&final_roots.target)
+            && evidence.roots.build.accepts_seed(&final_roots.build)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -645,6 +671,19 @@ impl RootExpectation {
 }
 
 impl RootProof {
+    fn accepts_seed(&self, later: &RootExpectation) -> bool {
+        match (self, later) {
+            (Self::Absent { path }, RootExpectation::Absent { path: final_path }) => {
+                path == final_path
+            }
+            (Self::Absent { path }, RootExpectation::Present { root }) => path == &root.path,
+            (Self::Empty { root }, RootExpectation::Present { root: final_root }) => {
+                root == final_root
+            }
+            _ => false,
+        }
+    }
+
     fn validate(&self, slot_path: &Path) -> FormatResult {
         match self {
             Self::Absent { path } => validate_output_path(path, slot_path),
@@ -706,6 +745,28 @@ pub struct CompletedInvocation {
     pub evidence: InvocationEvidence,
     pub operation: String,
     pub runner: Runner,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<ForegroundInstance>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForegroundInstance {
+    pub pid: u32,
+    pub start_secs: u64,
+    pub start_micros: u64,
+}
+
+impl ForegroundInstance {
+    fn validate(&self, runner: &Runner) -> FormatResult {
+        require(
+            self.pid > 1
+                && self.pid != runner.pid
+                && (self.start_secs, self.start_micros) >= (runner.start_secs, runner.start_micros)
+                && self.start_micros < 1_000_000,
+            "invalid foreground writer instance",
+        )
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -720,6 +781,156 @@ pub enum ProvenanceLoss {
 impl Producer {
     pub fn lost(&self) -> bool {
         matches!(self, Self::Tainted { .. } | Self::Unknown { .. })
+    }
+
+    pub fn has_eligible_evidence(&self, generation: u64) -> bool {
+        let current_or_previous =
+            |prior: u64| prior == generation || prior.checked_add(1) == Some(generation);
+        match self {
+            Self::NeverBuilt { evidence } => evidence.is_some(),
+            Self::SeedOnly { generation, .. } => current_or_previous(*generation),
+            Self::Complete {
+                generation,
+                invocations,
+                ..
+            } => {
+                current_or_previous(*generation)
+                    && !invocations.is_empty()
+                    && invocations.iter().all(|record| record.foreground.is_some())
+            }
+            _ => false,
+        }
+    }
+
+    pub fn eligible(&self, generation: u64) -> Option<EligibleProducer> {
+        if !self.has_eligible_evidence(generation) {
+            return None;
+        }
+        match self {
+            Self::NeverBuilt {
+                evidence: Some(evidence),
+            } => Some(EligibleProducer::NeverBuilt {
+                evidence: evidence.clone(),
+            }),
+            Self::SeedOnly {
+                evidence,
+                generation,
+                final_roots,
+                registry_units,
+                ..
+            } => Some(EligibleProducer::SeedOnly(SeedEvidence {
+                evidence: evidence.clone(),
+                generation: *generation,
+                final_roots: final_roots.clone(),
+                registry_units: *registry_units,
+            })),
+            Self::Complete {
+                generation,
+                roots,
+                invocations,
+                ..
+            } => Some(EligibleProducer::Complete {
+                generation: *generation,
+                roots: roots.clone(),
+                invocations: invocations.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn validate_successor(&self, next: &Self, old: &Slot, new: &Slot) -> FormatResult {
+        if self == next {
+            return Ok(());
+        }
+        if self.lost() {
+            return Err("lost producer provenance cannot be reset on the retained checkout");
+        }
+        if let Self::Pending(pending) = self {
+            return match next {
+                Self::Pending(watching)
+                    if pending.foreground.is_none()
+                        && watching.foreground.is_some()
+                        && new.generation == old.generation
+                        && new.phase == old.phase
+                        && pending.matches_start(watching) =>
+                {
+                    Ok(())
+                }
+                Self::Complete {
+                    epoch,
+                    generation,
+                    profile,
+                    roots,
+                    invocations,
+                } if epoch == &pending.epoch
+                    && generation == &pending.generation
+                    && profile == &pending.profile
+                    && new.generation == old.generation
+                    && new.phase == old.phase
+                    && pending.roots.target.accepts(&roots.target)
+                    && pending.roots.build.accepts(&roots.build)
+                    && pending.completed_records_match(invocations) =>
+                {
+                    Ok(())
+                }
+                Self::Unknown {
+                    epoch, generation, ..
+                } if epoch == &pending.epoch && generation == &pending.generation => Ok(()),
+                Self::Tainted {
+                    epoch,
+                    generation,
+                    report: Some(report),
+                    ..
+                } if epoch == &pending.epoch
+                    && generation == &pending.generation
+                    && report.runner == pending.runner
+                    && new.phase == old.phase =>
+                {
+                    Ok(())
+                }
+                _ => {
+                    Err("pending producer may only complete its exact invocation or become unknown")
+                }
+            };
+        }
+        match next {
+            Self::Tainted {
+                generation,
+                report: Some(_),
+                ..
+            } => require(
+                *generation == old.generation
+                    && new.generation == old.generation
+                    && new.phase == old.phase
+                    && matches!(old.phase, Phase::Leased { .. }),
+                "off-profile report does not match the current ready lease",
+            ),
+            Self::Pending(pending) => require(
+                old.generation == new.generation
+                    && old.phase == new.phase
+                    && matches!(old.phase, Phase::Leased { .. })
+                    && pending.foreground.is_none()
+                    && self.eligible(new.generation).as_ref() == Some(&pending.prior)
+                    && pending.prior.roots() == pending.roots,
+                "pending producer does not match the current eligible lease and output",
+            ),
+            Self::Complete { .. } => Err("producer completion requires its durable pending start"),
+            Self::NeverBuilt { evidence: Some(_) } => require(
+                matches!(self, Self::NeverBuilt { evidence: None }) && old.checkout_id.is_none(),
+                "initial output evidence requires a new checkout",
+            ),
+            Self::SeedOnly { evidence, .. } => require(
+                match self {
+                    Self::NeverBuilt { evidence: None } => old.checkout_id.is_none(),
+                    Self::NeverBuilt {
+                        evidence: Some(empty),
+                    } => empty == evidence,
+                    _ => false,
+                },
+                "registry-only seed evidence requires the initial empty checkout",
+            ),
+            _ => Ok(()),
+        }
     }
 
     fn validate(&self, pool: &Pool, slot: &Slot) -> FormatResult {
@@ -767,6 +978,9 @@ impl Producer {
                 )?;
                 validate_invocation(&item.evidence)?;
                 item.runner.validate()?;
+                if let Some(foreground) = &item.foreground {
+                    foreground.validate(&item.runner)?;
+                }
             }
             Ok(())
         };
@@ -788,7 +1002,11 @@ impl Producer {
                 validate_generation(*generation)?;
                 validate_empty(evidence)?;
                 validate_profile(profile)?;
-                final_roots.validate(|root| root.validate(&slot_path))
+                final_roots.validate(|root| root.validate(&slot_path))?;
+                require(
+                    SeedEvidence::derives_from_empty(evidence, final_roots),
+                    "seed output roots differ from their empty proof",
+                )
             }
             Self::Pending(pending) => {
                 require(
@@ -811,6 +1029,7 @@ impl Producer {
                     operation,
                     runner,
                     prior,
+                    foreground,
                 } = pending.as_ref();
                 epoch_matches(epoch)?;
                 validate_generation(*generation)?;
@@ -820,19 +1039,22 @@ impl Producer {
                     "invalid pending invocation binding",
                 )?;
                 runner.validate()?;
+                if let Some(foreground) = foreground {
+                    foreground.validate(runner)?;
+                }
                 validate_invocation(invocation)?;
                 roots.validate(|root| root.validate(&slot_path))?;
                 match prior {
                     EligibleProducer::NeverBuilt { evidence } => validate_empty(evidence),
-                    EligibleProducer::SeedOnly {
-                        evidence,
-                        generation,
-                        final_roots,
-                        ..
-                    } => {
-                        validate_generation(*generation)?;
-                        validate_empty(evidence)?;
-                        final_roots.validate(|root| root.validate(&slot_path))
+                    EligibleProducer::SeedOnly(seed) => {
+                        validate_generation(seed.generation)?;
+                        validate_empty(&seed.evidence)?;
+                        seed.final_roots
+                            .validate(|root| root.validate(&slot_path))?;
+                        require(
+                            SeedEvidence::derives_from_empty(&seed.evidence, &seed.final_roots),
+                            "seed output roots differ from their empty proof",
+                        )
                     }
                     EligibleProducer::Complete {
                         generation,
@@ -862,9 +1084,24 @@ impl Producer {
                 epoch,
                 generation,
                 roots,
-                ..
+                reason,
+                report,
+            } => {
+                if let Some(report) = report {
+                    require(
+                        *reason == ProvenanceLoss::OffProfile && hex(&report.operation, 32),
+                        "invalid reported off-profile write",
+                    )?;
+                    report.runner.validate()?;
+                }
+                epoch_matches(epoch)?;
+                validate_generation(*generation)?;
+                roots.validate(|root| {
+                    root.as_ref()
+                        .map_or(Ok(()), |root| root.validate(&slot_path))
+                })
             }
-            | Self::Unknown {
+            Self::Unknown {
                 epoch,
                 generation,
                 roots,
@@ -878,6 +1115,67 @@ impl Producer {
                 })
             }
         }
+    }
+}
+
+impl EligibleProducer {
+    pub fn roots(&self) -> OutputRoots<RootExpectation> {
+        let occupied = |root: &VerifiedRoot| RootExpectation::Present { root: root.clone() };
+        let initial = |proof: &RootProof| match proof {
+            RootProof::Absent { path } => RootExpectation::Absent { path: path.clone() },
+            RootProof::Empty { root } => occupied(root),
+        };
+        match self {
+            Self::NeverBuilt { evidence } => OutputRoots {
+                target: initial(&evidence.roots.target),
+                build: initial(&evidence.roots.build),
+            },
+            Self::SeedOnly(seed) => seed.final_roots.clone(),
+            Self::Complete { roots, .. } => OutputRoots {
+                target: occupied(&roots.target),
+                build: occupied(&roots.build),
+            },
+        }
+    }
+
+    pub fn completed_in_generation(&self, current: u64) -> &[CompletedInvocation] {
+        match self {
+            Self::Complete {
+                generation,
+                invocations,
+                ..
+            } if *generation == current => invocations,
+            _ => &[],
+        }
+    }
+}
+
+impl RootExpectation {
+    pub fn accepts(&self, observed: &VerifiedRoot) -> bool {
+        match self {
+            Self::Absent { path } => path == &observed.path,
+            Self::Present { root } => root == observed,
+        }
+    }
+}
+
+impl PendingProducer {
+    fn matches_start(&self, watching: &Self) -> bool {
+        let mut start = watching.clone();
+        start.foreground = None;
+        self == &start
+    }
+
+    fn completed_records_match(&self, records: &[CompletedInvocation]) -> bool {
+        let Some((record, prior)) = records.split_last() else {
+            return false;
+        };
+        prior == self.prior.completed_in_generation(self.generation)
+            && record.operation == self.operation
+            && record.runner == self.runner
+            && record.evidence == self.invocation
+            && self.foreground.is_some()
+            && record.foreground == self.foreground
     }
 }
 
@@ -945,6 +1243,8 @@ pub enum OutcomeRequest {
     Producer {
         runner: Runner,
         invocation: InvocationEvidence,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ready_commit: Option<String>,
     },
     Recover,
 }
@@ -1038,16 +1338,33 @@ impl Outcome {
             }
             (
                 OperationKind::ProducerStart,
-                OutcomeRequest::Producer { runner, invocation },
+                OutcomeRequest::Producer {
+                    runner,
+                    invocation,
+                    ready_commit,
+                },
                 TransitionResult::ProducerPending,
             )
             | (
                 OperationKind::ProducerComplete,
-                OutcomeRequest::Producer { runner, invocation },
+                OutcomeRequest::Producer {
+                    runner,
+                    invocation,
+                    ready_commit,
+                },
                 TransitionResult::ProducerComplete,
             ) => {
                 require(
-                    self.attempt_id.is_none() && invocation.is_valid_for(&pool.profile),
+                    self.attempt_id.is_none()
+                        && invocation.is_valid_for(&pool.profile)
+                        && ready_commit.as_deref().is_none_or(|commit| {
+                            object_id(commit)
+                                && (self.generation != slot.generation
+                                    || slot
+                                        .phase
+                                        .active_lease()
+                                        .is_none_or(|lease| lease.requested_commit == commit))
+                        }),
                     "invalid producer outcome",
                 )?;
                 runner.validate()
@@ -2172,6 +2489,112 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn retained_output_cannot_reset_lost_or_interrupted_provenance() {
+        let scratch = Scratch::new();
+        let state = State::open_at(scratch.0.clone()).unwrap();
+        let (_, mut initial) = reservation_records(state.root());
+        let pool = &mut initial.pools[0];
+        let root = pool.checkout_path(&pool.slots[0]).join("target");
+        let slot = &mut pool.slots[0];
+        let checkout = CheckoutIdentity {
+            directory: FileIdentity { dev: 1, ino: 4 },
+            admin: GitIdentity {
+                path: pool.main.join(".git/worktrees/other"),
+                dev: 1,
+                ino: 5,
+            },
+        };
+        let epoch = OutputEpoch {
+            pool_id: pool.pool_id.clone(),
+            slot: 1,
+            checkout: checkout.clone(),
+        };
+        let Phase::Reserved { lease } = &slot.phase else {
+            panic!("fixture must be reserved");
+        };
+        slot.checkout_id = Some(checkout);
+        slot.last_head = Some(lease.requested_commit.clone());
+        slot.phase = Phase::Leased {
+            lease: lease.clone(),
+            ready_commit: lease.requested_commit.clone(),
+        };
+        let evidence = EmptyEpoch {
+            epoch: epoch.clone(),
+            roots: OutputRoots {
+                target: RootProof::Absent { path: root.clone() },
+                build: RootProof::Absent { path: root.clone() },
+            },
+        };
+        let reasons = OutputRoots {
+            target: None,
+            build: None,
+        };
+        let pending = Producer::Pending(Box::new(PendingProducer {
+            epoch: epoch.clone(),
+            generation: 1,
+            profile: ProfileBinding {
+                id: "fixture".into(),
+                revision: 1,
+            },
+            invocation: InvocationEvidence {
+                invocation: "check".into(),
+                graph_digest: "a".repeat(64),
+                environment_digest: "b".repeat(64),
+            },
+            roots: OutputRoots {
+                target: RootExpectation::Absent { path: root.clone() },
+                build: RootExpectation::Absent { path: root },
+            },
+            operation: "4".repeat(32),
+            runner: Runner {
+                boot_session: "boot".into(),
+                pid: 2,
+                start_secs: 1,
+                start_micros: 0,
+                nonce: "c".repeat(64),
+            },
+            prior: EligibleProducer::NeverBuilt {
+                evidence: evidence.clone(),
+            },
+            foreground: None,
+        }));
+        for producer in [
+            pending,
+            Producer::Unknown {
+                epoch: epoch.clone(),
+                generation: 1,
+                roots: reasons.clone(),
+                reason: ProvenanceLoss::LostWriter,
+            },
+            Producer::Tainted {
+                epoch,
+                generation: 1,
+                roots: reasons,
+                reason: ProvenanceLoss::OffProfile,
+                report: None,
+            },
+        ] {
+            let isolated = Scratch::new();
+            let state = State::open_at(isolated.0.clone()).unwrap();
+            initial.revision = 1;
+            initial.pools[0].slots[0].producer = producer;
+            state
+                .locked(|tx| {
+                    tx.commit_slots(None, &initial)?;
+                    let mut proposed = initial.clone();
+                    proposed.revision = 2;
+                    proposed.pools[0].slots[0].producer = Producer::NeverBuilt {
+                        evidence: Some(evidence.clone()),
+                    };
+                    assert!(tx.commit_slots(Some(1), &proposed).is_err());
+                    assert!(tx.read_slots()?.as_ref() == Some(&initial));
+                    Ok(())
+                })
+                .unwrap();
+        }
     }
 
     fn reservation_records(root: &Path) -> (SlotsFile, SlotsFile) {
