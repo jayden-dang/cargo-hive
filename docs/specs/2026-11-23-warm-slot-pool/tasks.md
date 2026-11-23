@@ -83,11 +83,11 @@ reader keeps its contract.
 
 **Depends-on:** none.
 
-- [ ] Write a real macOS subprocess fixture for an inherited open description, a separate open of the same inode, a paused runner, and a killed parent with a live child that can still write. Test both inherited and intentionally stripped descriptors, with uncertain custody in the latter case.
-- [ ] Run `cargo test -p cargo-hive-platform --test slot_fence`. Observe absence of the new fence before relying on it.
-- [ ] Implement nonblocking borrowed-lock ownership, close without explicit unlock, no-follow identity and bounded process/entropy operations. A missed child or unproved process identity must remain uncertain.
-- [ ] Re-run the subprocess fixture and the platform tests. Show that separate opens cannot govern writes while an old description holds the guard, and that a surviving or uncertain child cannot justify takeover. Block dependent writes if the mechanism fails on the admitted macOS platform.
-- [ ] Commit the proved platform primitive as `feat(platform): fence warm slot writer processes`.
+- [x] Write a real macOS subprocess fixture for an inherited open description, a separate open of the same inode, a paused runner, and a killed parent with a live child that can still write. Test both inherited and intentionally stripped descriptors, with uncertain custody in the latter case.
+- [x] Run `cargo test -p cargo-hive-platform --test slot_fence`. Observe absence of the new fence before relying on it.
+- [x] Implement nonblocking borrowed-lock ownership, close without explicit unlock, no-follow identity and bounded process/entropy operations. A missed child or unproved process identity must remain uncertain.
+- [x] Re-run the subprocess fixture and the platform tests. Show that separate opens cannot govern writes while an old description holds the guard, and that a surviving or uncertain child cannot justify takeover. Block dependent writes if the mechanism fails on the admitted macOS platform.
+- [x] Commit the proved platform primitive as `feat(platform): fence warm slot writer processes`.
 
 _Requirements: SLOTS-5.4_
 
