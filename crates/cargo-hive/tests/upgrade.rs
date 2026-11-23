@@ -641,3 +641,56 @@ fn gc_plan_stops_on_a_damaged_plans_file_and_leaves_it_untouched() {
         assert_eq!(fs::read(&path).unwrap(), damaged);
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn slot_status_audit_keeps_archived_receipts_and_old_state_readers() {
+    let hive = Hive::ready();
+    let scratch = Scratch::new("upgrade-slot-audit");
+    let repo = init_repo(&scratch.path.join("main"), "");
+    let old_registry = serde_json::json!({"repos": [{
+        "main": repo,
+        "root_commits": [common::git(&repo, &["rev-parse", "HEAD"])]
+    }]});
+    let old_registry = serde_json::to_vec(&old_registry).unwrap();
+    fs::write(hive.home.path.join(registry::FILE), &old_registry).unwrap();
+    let archive = fixture_homes().into_iter().next().unwrap().join("receipts");
+    let old = fs::read(archive.read_dir().unwrap().next().unwrap().unwrap().path()).unwrap();
+    fs::create_dir(hive.home.path.join("receipts")).unwrap();
+    let log = hive
+        .home
+        .path
+        .join("receipts")
+        .join(format!("{}.jsonl", utc_date(SystemTime::now())));
+    fs::write(&log, &old).unwrap();
+
+    let (out, result) = hive.json(&["slot", "status", "--repo", repo.to_str().unwrap()]);
+    assert!(out.status.success(), "{result}");
+    assert_eq!(result["kind"], "unconfigured");
+    assert!(result.get("scope").is_none(), "{result}");
+    let appended = fs::read(&log).unwrap();
+    assert!(appended.starts_with(&old));
+    let new_line = std::str::from_utf8(&appended[old.len()..]).unwrap();
+    let slot_audit: Receipt = serde_json::from_str(new_line).unwrap();
+    assert_eq!(slot_audit.schema, 2);
+    assert_eq!(slot_audit.command, "slot status");
+    assert_eq!(slot_audit.scope.repos, std::slice::from_ref(&repo));
+    assert!(!new_line.contains("unconfigured"));
+    assert_eq!(
+        fs::read(hive.home.path.join(registry::FILE)).unwrap(),
+        old_registry
+    );
+
+    let malformed = b"not a slot record";
+    let file = hive.home.path.join("slots.json");
+    fs::write(&file, malformed).unwrap();
+    let (out, receipt) = hive.json(&["repo", "list"]);
+    assert!(out.status.success(), "{receipt}");
+    assert_eq!(receipt["schema"], 2);
+    assert_eq!(receipt["scope"]["repos"], serde_json::json!([repo]));
+    assert_eq!(fs::read(file).unwrap(), malformed);
+    assert_eq!(
+        fs::read(hive.home.path.join(registry::FILE)).unwrap(),
+        old_registry
+    );
+}

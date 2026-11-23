@@ -219,9 +219,10 @@ fn walk(command: &clap::Command, path: &str, out: &mut Vec<String>) {
 }
 
 #[test]
-fn the_cli_has_no_new_subcommand_or_flag() {
+fn the_cli_outside_the_slot_branch_has_no_new_subcommand_or_flag() {
     let mut surface = Vec::new();
     walk(&cargo_hive::cli::Cli::command(), "cargo-hive", &mut surface);
+    surface.retain(|name| name != "cargo-hive slot" && !name.starts_with("cargo-hive slot "));
     surface.sort();
     let expected = [
         "cargo-hive __hold-lock",

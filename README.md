@@ -164,7 +164,13 @@ When a command refuses:
 - `store.busy` means run `cargo hive gc` again when no seed runs. `store.held_over_cap` names
   the targets to retire.
 
-Every command accepts `--json`. With it, a command prints exactly one receipt on stdout.
+With `--json`, commands print exactly one JSON object on stdout. Ordinary commands
+print a receipt. The slot commands print a scoped slot result.
+
+`cargo hive slot init --repo /path/to/main --root /path/to/secondary --profile /path/to/reviewed.json`
+records two unused paths for a registered repository.
+`cargo hive slot status --repo /path/to/main` reports the current pool and any holds.
+Slot recovery and the warm checkout workflow are unavailable in this version.
 
 ## Commands
 

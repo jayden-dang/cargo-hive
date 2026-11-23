@@ -4,9 +4,12 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use crate::metadata::METADATA_DEADLINE;
+use crate::metadata::{METADATA_DEADLINE, TARGET_VARS};
 use cargo_hive_platform::proc::{self, Capture, ChildOutputError, Ran, Spec};
+use cargo_hive_platform::signals::cancelled;
+use cargo_hive_state::slots::object_id;
 
 #[derive(Debug)]
 pub enum GitError {
@@ -28,6 +31,25 @@ impl fmt::Display for GitError {
 }
 
 impl std::error::Error for GitError {}
+
+#[derive(Debug)]
+pub enum SlotGitError {
+    Cancelled,
+    Incomplete,
+}
+
+impl fmt::Display for SlotGitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Cancelled => "The slot Git check was cancelled.",
+            Self::Incomplete => {
+                "Could not establish a complete slot Git result. Check the repository and retry."
+            }
+        })
+    }
+}
+
+impl std::error::Error for SlotGitError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WorktreeRecord {
@@ -240,6 +262,111 @@ impl Git {
         records.extend(current);
         Ok(records)
     }
+
+    /// Reads Git evidence for a guarded slot with a strict byte limit.
+    pub fn slot_read_only(&self, args: &[&str], max: usize) -> Result<Vec<u8>, SlotGitError> {
+        let stdout_cap = max.checked_add(1).ok_or(SlotGitError::Incomplete)?;
+        let mut spec = self.git_cmd(&["--no-optional-locks", "--no-replace-objects"]);
+        spec.args.extend(args.iter().map(|arg| (*arg).into()));
+        // Older Git versions without the lazy-fetch switch still honor the transport allowlist.
+        let controlled = [("GIT_NO_LAZY_FETCH", "1"), ("GIT_ALLOW_PROTOCOL", "")];
+        spec.env_remove
+            .retain(|key| !controlled.iter().any(|(name, _)| key == *name));
+        spec.env_remove.extend(TARGET_VARS.map(Into::into));
+        spec.env_set
+            .extend(controlled.map(|(key, value)| (key.into(), value.into())));
+        match proc::run_bounded_complete(
+            &spec,
+            Duration::from_secs(10),
+            Capture {
+                stdout_cap,
+                stderr_cap: 1,
+            },
+            cancelled,
+        ) {
+            Ok(ran)
+                if ran.status.success()
+                    && ran.stderr_tail.is_empty()
+                    && ran.stdout.len() <= max =>
+            {
+                Ok(ran.stdout)
+            }
+            Err(ChildOutputError::Cancelled) => Err(SlotGitError::Cancelled),
+            _ => Err(SlotGitError::Incomplete),
+        }
+    }
+
+    /// Requires complete NUL records from a non-bare repository's worktree inventory.
+    pub fn worktrees_complete(&self, max: usize) -> Result<Vec<WorktreeRecord>, SlotGitError> {
+        let bytes = self.slot_read_only(&["worktree", "list", "--porcelain", "-z"], max)?;
+        complete_worktrees(&bytes).ok_or(SlotGitError::Incomplete)
+    }
+}
+
+fn complete_worktrees(bytes: &[u8]) -> Option<Vec<WorktreeRecord>> {
+    let records = std::str::from_utf8(bytes).ok()?.strip_suffix("\0\0")?;
+    let mut paths = BTreeSet::new();
+    let mut oid_len = None;
+    records
+        .split("\0\0")
+        .map(|record| {
+            let mut fields = record.split('\0');
+            let path = fields.next()?.strip_prefix("worktree ")?;
+            if path.len() > 4096
+                || !path.starts_with('/')
+                || path[1..]
+                    .split('/')
+                    .any(|part| matches!(part, "" | "." | ".."))
+                || !paths.insert(path)
+            {
+                return None;
+            }
+            let head = fields.next()?.strip_prefix("HEAD ")?;
+            if !object_id(head) || *oid_len.get_or_insert(head.len()) != head.len() {
+                return None;
+            }
+            let mut record = WorktreeRecord {
+                path: PathBuf::from(path),
+                head: Some(head.into()),
+                ..Default::default()
+            };
+            match fields.next()? {
+                "detached" => record.detached = true,
+                kind => {
+                    let branch = kind
+                        .strip_prefix("branch ")
+                        .filter(|name| valid_git_ref(name))?;
+                    record.branch = Some(branch.into());
+                }
+            }
+            for field in fields {
+                let (name, reason) = field.split_once(' ').unwrap_or((field, ""));
+                let seen = match name {
+                    "locked" => &mut record.locked,
+                    "prunable" => &mut record.prunable,
+                    _ => return None,
+                };
+                if (reason.is_empty() && name != field) || std::mem::replace(seen, true) {
+                    return None;
+                }
+            }
+            Some(record)
+        })
+        .collect()
+}
+
+fn valid_git_ref(name: &str) -> bool {
+    name.contains('/')
+        && !name.ends_with('.')
+        && !name.contains("..")
+        && !name.contains("@{")
+        && !name.bytes().any(|byte| {
+            byte.is_ascii_control()
+                || matches!(byte, b' ' | b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+        })
+        && name
+            .split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
 }
 
 #[cfg(test)]
@@ -327,6 +454,64 @@ mod tests {
         assert!(Git::at(dir).has_tracked_changes().unwrap());
     }
 
+    #[test]
+    fn slot_git_errors_expose_only_sanitized_details() {
+        for (error, message) in [
+            (SlotGitError::Cancelled, "The slot Git check was cancelled."),
+            (
+                SlotGitError::Incomplete,
+                "Could not establish a complete slot Git result. Check the repository and retry.",
+            ),
+        ] {
+            let error: &dyn std::error::Error = &error;
+            assert_eq!(error.to_string(), message);
+            assert!(error.source().is_none());
+        }
+    }
+
+    #[test]
+    fn slot_inventory_accepts_the_exact_cap_and_rejects_a_complete_retained_prefix() {
+        let repo = scratch_repo("slot-git-cap");
+        let linked = repo.path().join("linked");
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let cap = 64 * 1024;
+        let inventory = Git::at(repo.path());
+        let baseline = inventory
+            .run(&["worktree", "list", "--porcelain", "-z"])
+            .unwrap()
+            .stdout;
+        let reason = "a".repeat(cap - baseline.len() - b"locked \0".len());
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                &reason,
+                linked.to_str().unwrap(),
+            ],
+        );
+        let exact = inventory
+            .run(&["worktree", "list", "--porcelain", "-z"])
+            .unwrap()
+            .stdout;
+        assert_eq!(exact.len(), cap);
+        assert_eq!(inventory.worktrees_complete(cap).unwrap().len(), 2);
+        assert!(inventory.worktrees_complete(cap - 1).is_err());
+        assert!(complete_worktrees(&exact[..exact.len() - 1]).is_none());
+        let overflow = [&exact[..], b"w"].concat();
+        assert!(complete_worktrees(&overflow).is_none());
+    }
+
     fn assert_error<E: std::error::Error>(_: &E) {}
 
     #[test]
@@ -335,5 +520,41 @@ mod tests {
         assert_error(&err);
         assert_eq!(err.to_string(), "not inside a git checkout");
         assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn worktree_inventory_requires_complete_exclusive_fields() {
+        let head = "a".repeat(40);
+        let valid_main =
+            format!("worktree /registered-main\0HEAD {head}\0branch refs/heads/main\0\0");
+        let linked = format!(
+            "worktree /linked\0HEAD {head}\0detached\0locked because\nof this\0prunable reason\0\0"
+        );
+        let records = complete_worktrees(format!("{valid_main}{linked}").as_bytes()).unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records[1].locked && records[1].prunable);
+        assert!(complete_worktrees(b"worktree /registered-main\0bare\0\0").is_none());
+
+        for fields in [
+            "branch refs/heads/main".to_owned(),
+            "HEAD short\0detached".to_owned(),
+            format!("HEAD {}\0detached", "a".repeat(64)),
+            format!("HEAD {}\0detached", "z".repeat(40)),
+            format!("HEAD {head}"),
+            format!("HEAD {head}\0HEAD {head}\0detached"),
+            format!("HEAD {head}\0detached extra"),
+            format!("HEAD {head}\0branch refs/heads/m..ain"),
+            format!("HEAD {head}\0branch refs/heads/main\0detached"),
+            "bare".to_owned(),
+            format!("HEAD {head}\0bare"),
+            format!("HEAD {head}\0detached\0locked\0locked again"),
+            format!("HEAD {head}\0detached\0prunable one\0prunable two"),
+        ] {
+            let malformed = format!("{valid_main}worktree /linked\0{fields}\0\0");
+            assert!(
+                complete_worktrees(malformed.as_bytes()).is_none(),
+                "accepted {fields:?}"
+            );
+        }
     }
 }
