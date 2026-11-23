@@ -69,11 +69,11 @@ impl EvidencedCheckoutReport {
         &self.completed
     }
 
-    pub fn into_complete(self) -> Option<[RequiredRoot; 2]> {
+    pub fn complete_roots(&self) -> Option<&[RequiredRoot; 2]> {
         if self.report.failed || self.report.cancelled {
             return None;
         }
-        self.completed.try_into().ok()
+        self.completed.as_slice().try_into().ok()
     }
 }
 
@@ -385,12 +385,16 @@ fn check_root(input: &CheckoutInput<'_>, root: &RequiredRoot, report: &mut Check
     if matches_presence(input, root) {
         return true;
     }
-    incomplete_root(
-        report,
-        Some(&root.path),
-        "the required root identity or initial absence no longer matches",
-    );
+    report.failed = true;
+    report.findings.push(root_identity_finding(&root.path));
     false
+}
+
+fn root_identity_finding(path: &Path) -> Finding {
+    incomplete_finding(
+        Some(path),
+        "the required root identity or initial absence no longer matches",
+    )
 }
 
 fn matches_presence(input: &CheckoutInput<'_>, root: &RequiredRoot) -> bool {
@@ -430,12 +434,16 @@ fn matches_presence(input: &CheckoutInput<'_>, root: &RequiredRoot) -> bool {
 
 fn incomplete_root(report: &mut CheckoutReport, path: Option<&Path>, detail: &str) {
     report.failed = true;
-    report.findings.push(Finding {
+    report.findings.push(incomplete_finding(path, detail));
+}
+
+fn incomplete_finding(path: Option<&Path>, detail: &str) -> Finding {
+    Finding {
         kind: "gc.root_incomplete".into(),
         path: path.map(Path::to_path_buf),
         detail: detail.into(),
         measured: BTreeMap::new(),
-    });
+    }
 }
 
 fn selection_report(input: &CheckoutInput<'_>, selected: &Selection) -> CheckoutReport {
@@ -547,6 +555,9 @@ fn clean_target(
         skip_target(&mut counts, report, path, Reason::ProfileSet);
         return (counts, false);
     }
+    if required.is_some_and(|root| !check_root(input, root, report)) {
+        return (counts, false);
+    }
     let reports: Vec<ProfileReport> = found
         .iter()
         .map(|(p, _)| fingerprint::read_profile(p))
@@ -608,59 +619,69 @@ fn clean_target(
                     }
                 }
                 let mut deleted_files = 0u64;
-                for (entry, stat) in &stats {
-                    if let Err(reason) = guard::check_entry(
-                        input.fs,
-                        path,
-                        entry,
-                        Expect::Entry {
-                            kind: stat.kind,
-                            dev: stat.dev,
-                            ino: stat.ino,
-                        },
-                    ) {
-                        complete = false;
-                        report.failed = true;
-                        report.findings.push(Finding {
-                            kind: "gc.delete_failed".into(),
-                            path: Some((*entry).clone()),
-                            detail: format!("{} ({reason:?})", entry.display()),
-                            measured: BTreeMap::new(),
-                        });
-                        break 'units;
-                    }
-                    match ledger::remove_counted(
-                        input.fs,
-                        &mut ledger,
-                        path,
-                        entry,
-                        input.account_bytes,
-                        false,
-                    ) {
-                        Ok(removed) if removed.existed => {
-                            if unit_path::unit_dir_of(entry).is_some() {
-                                deleted_files = deleted_files.saturating_add(removed.files);
-                            } else {
-                                deleted_files = deleted_files.saturating_add(1);
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(err) => {
-                            complete = false;
+                let removed_all = 'remove: {
+                    for (entry, stat) in &stats {
+                        if let Err(reason) = guard::check_entry(
+                            input.fs,
+                            path,
+                            entry,
+                            Expect::Entry {
+                                kind: stat.kind,
+                                dev: stat.dev,
+                                ino: stat.ino,
+                            },
+                        ) {
                             report.failed = true;
                             report.findings.push(Finding {
                                 kind: "gc.delete_failed".into(),
                                 path: Some((*entry).clone()),
-                                detail: err.to_string(),
+                                detail: format!("{} ({reason:?})", entry.display()),
                                 measured: BTreeMap::new(),
                             });
-                            break 'units;
+                            break 'remove false;
+                        }
+                        if required.is_some_and(|root| !check_root(input, root, report)) {
+                            break 'remove false;
+                        }
+                        match ledger::remove_counted(
+                            input.fs,
+                            &mut ledger,
+                            path,
+                            entry,
+                            input.account_bytes,
+                            false,
+                        ) {
+                            Ok(removed) if removed.existed => {
+                                if unit_path::unit_dir_of(entry).is_some() {
+                                    deleted_files = deleted_files.saturating_add(removed.files);
+                                } else {
+                                    deleted_files = deleted_files.saturating_add(1);
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(err) => {
+                                report.failed = true;
+                                report.findings.push(Finding {
+                                    kind: "gc.delete_failed".into(),
+                                    path: Some((*entry).clone()),
+                                    detail: err.to_string(),
+                                    measured: BTreeMap::new(),
+                                });
+                                break 'remove false;
+                            }
                         }
                     }
-                }
-                if deleted_files > 0 {
+                    true
+                };
+                if removed_all && deleted_files > 0 {
                     counts.units_deleted += 1;
+                }
+                if removed_all || required.is_some() {
                     counts.unit_files_deleted += deleted_files;
+                }
+                if !removed_all {
+                    complete = false;
+                    break;
                 }
             }
         }
@@ -674,6 +695,7 @@ fn clean_target(
                 profile_report,
                 account_bytes: input.account_bytes,
                 cancel,
+                root_valid: &|| required.is_none_or(|root| matches_presence(input, root)),
                 ledger: &mut ledger,
             });
             counts.binaries_read = counts.binaries_read.saturating_add(outcome.binaries_read);
@@ -719,6 +741,7 @@ struct ObjectsClean<'a> {
     profile_report: &'a ProfileReport,
     account_bytes: bool,
     cancel: &'a dyn Fn() -> bool,
+    root_valid: &'a dyn Fn() -> bool,
     ledger: &'a mut Ledger,
 }
 
@@ -820,6 +843,11 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
                 detail: format!("{} ({reason:?})", object.display()),
                 measured: BTreeMap::new(),
             });
+            return out;
+        }
+        if !(ctx.root_valid)() {
+            out.failed = true;
+            out.findings.push(root_identity_finding(ctx.target));
             return out;
         }
         match ledger::remove_counted(

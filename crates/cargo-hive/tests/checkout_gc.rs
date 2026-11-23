@@ -1131,6 +1131,15 @@ fn checkout_gc_refuses_shared_outside_nested_and_unreadable_scope_without_effect
 
 #[test]
 fn checkout_gc_rechecks_the_root_inode_after_cargo_exclusion() {
+    checkout_gc_refuses_root_exchange(false);
+}
+
+#[test]
+fn checkout_gc_does_not_delete_after_a_root_exchange_following_the_first_locked_stat() {
+    checkout_gc_refuses_root_exchange(true);
+}
+
+fn checkout_gc_refuses_root_exchange(exchange_after_observation: bool) {
     use cargo_hive_platform::testing::Hooked;
     use cargo_hive_platform::{Fs, TryLock};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1140,6 +1149,11 @@ fn checkout_gc_rechecks_the_root_inode_after_cargo_exclusion() {
     let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
     let target = checkout.join("target");
     let original = repo.scratch.path.join("original");
+    let stash = original.clone();
+    let original_before: std::collections::BTreeMap<_, _> = tree(&target)
+        .into_iter()
+        .map(|(path, evidence)| (original.join(path.strip_prefix(&target).unwrap()), evidence))
+        .collect();
     let replacement = repo.scratch.path.join("replacement");
     assert!(
         Command::new("cp")
@@ -1177,9 +1191,13 @@ fn checkout_gc_rechecks_the_root_inode_after_cargo_exclusion() {
                     TryLock::Held
                 )
             {
-                fs::rename(path, &original).unwrap();
+                let stat_before = real.entry_stat(path);
+                fs::rename(path, &stash).unwrap();
                 fs::rename(&replacement, path).unwrap();
                 did_swap.store(true, Ordering::Relaxed);
+                if exchange_after_observation {
+                    return stat_before;
+                }
             }
             real.entry_stat(path)
         })),
@@ -1196,6 +1214,30 @@ fn checkout_gc_rechecks_the_root_inode_after_cargo_exclusion() {
         tree(&target) == before,
         "replacement changed during cleanup: {report:?}"
     );
+    assert!(
+        tree(&original) == original_before,
+        "original changed during cleanup: {report:?}"
+    );
+}
+
+#[test]
+fn checkout_gc_retains_measured_file_effects_when_a_later_removal_fails() {
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let before = tree(&target);
+    let rec = Recording::over_real().fail_removes_after(1);
+    let (report, completed) =
+        checkout_with_evidence(&rec, &scan, &checkout, &nested, &required, &|| false);
+    assert!(completed.is_empty(), "{report:?}");
+    assert!(report.failed, "{report:?}");
+    assert!(
+        tree(&target).len() < before.len(),
+        "fixture removed no files"
+    );
+    assert!(report.totals.unit_files_deleted > 0, "{report:?}");
 }
 
 #[test]

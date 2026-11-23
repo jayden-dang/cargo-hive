@@ -1336,6 +1336,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
 
 enum CheckoutGcError {
     State(StateError),
+    Discovery(WalkFault),
     Unsupported,
     Refused {
         release: Option<String>,
@@ -1355,6 +1356,48 @@ struct CheckoutGc {
     release: Option<String>,
     window: Duration,
     account_bytes: bool,
+}
+
+fn complete_worktree_paths(registry: &Registry) -> Result<Vec<PathBuf>, WalkFault> {
+    const WORKTREE_INVENTORY_LIMIT: usize = 64 * 1024;
+
+    let mut live = Vec::new();
+    for repo in &registry.repos {
+        let fault = |path: &Path, detail: String| WalkFault {
+            path: path.to_path_buf(),
+            detail,
+            cannot_enter: false,
+        };
+        let records = cargo_hive_cargo::git::Git::at(&repo.main)
+            .worktrees_complete(WORKTREE_INVENTORY_LIMIT)
+            .map_err(|err| fault(&repo.main, err.to_string()))?;
+        if records.first().map(|record| record.path.as_path()) != Some(repo.main.as_path()) {
+            return Err(fault(
+                &repo.main,
+                "worktree inventory did not name the registered main".into(),
+            ));
+        }
+        for record in records {
+            match record.path.symlink_metadata() {
+                Ok(meta) if meta.is_dir() => live.push(
+                    record
+                        .path
+                        .canonicalize()
+                        .map_err(|err| fault(&record.path, err.to_string()))?,
+                ),
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::NotFound && record.path != repo.main => {}
+                Err(err) => return Err(fault(&record.path, err.to_string())),
+                Ok(_) => {
+                    return Err(fault(
+                        &record.path,
+                        "worktree path is not a directory".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(live)
 }
 
 impl CheckoutGc {
@@ -1403,6 +1446,11 @@ impl CheckoutGc {
                 });
             }
         }
+        let verified_worktrees = if standalone {
+            Vec::new()
+        } else {
+            complete_worktree_paths(&reg).map_err(CheckoutGcError::Discovery)?
+        };
         let Found {
             repo,
             row,
@@ -1443,6 +1491,18 @@ impl CheckoutGc {
                 rows.append(&mut found);
                 faults.append(&mut unreadable);
             }
+            for path in verified_worktrees {
+                if !rows
+                    .iter()
+                    .any(|candidate| !candidate.missing && candidate.path == path)
+                {
+                    faults.push(WalkFault {
+                        path,
+                        detail: "a live worktree was omitted from checkout discovery".into(),
+                        cannot_enter: false,
+                    });
+                }
+            }
             for row in &rows {
                 if row.reason.starts_with("unclassifiable:") {
                     faults.push(WalkFault {
@@ -1481,6 +1541,47 @@ impl CheckoutGc {
         discover::targets(&self.live, &self.cfg, false, &mut self.snapshot, cancel)
     }
 
+    #[cfg(all(test, target_os = "macos"))]
+    fn scan_for_slot(&self, cancel: &(dyn Fn() -> bool + Sync)) -> TargetScan {
+        use std::collections::BTreeSet;
+
+        let own = self
+            .live
+            .iter()
+            .find(|candidate| candidate.path == self.checkout);
+        let mut scan = discover::targets(
+            own.map_or(&[], std::slice::from_ref),
+            &self.cfg,
+            false,
+            &mut Snapshot::default(),
+            cancel,
+        );
+        let mut cfg = self.cfg.clone();
+        cfg.cache_roots.clear();
+        let mut seen = BTreeSet::from([&self.checkout]);
+        for other in &self.live {
+            if cancel() {
+                break;
+            }
+            if !seen.insert(&other.path) {
+                continue;
+            }
+            // A parent workspace must not suppress resolution inside a separate checkout.
+            let scanned = discover::targets(
+                std::slice::from_ref(other),
+                &cfg,
+                false,
+                &mut Snapshot::default(),
+                cancel,
+            );
+            scan.workspaces.extend(scanned.workspaces);
+            scan.walk_faults.extend(scanned.walk_faults);
+            scan.metadata_calls += scanned.metadata_calls;
+            scan.metadata_cache_hits += scanned.metadata_cache_hits;
+        }
+        scan
+    }
+
     fn input<'a>(&'a self, scan: &'a TargetScan) -> CheckoutInput<'a> {
         CheckoutInput {
             fs: &*self.fs,
@@ -1498,6 +1599,26 @@ impl CheckoutGc {
 #[derive(Debug)]
 pub(crate) struct SlotGcReport {
     pub(crate) completed: [checkout::RequiredRoot; 2],
+    pub(crate) report: checkout::CheckoutReport,
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[derive(Debug)]
+pub(crate) struct SlotGcRefusal {
+    pub(crate) reason: Refusal,
+    pub(crate) evidence: Box<SlotGcFailure>,
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[derive(Debug)]
+pub(crate) enum SlotGcFailure {
+    Setup,
+    Discovery {
+        checkout_faults: Vec<WalkFault>,
+        target_faults: Vec<WalkFault>,
+        unresolved: Vec<(PathBuf, String)>,
+    },
+    Run(checkout::EvidencedCheckoutReport),
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -1506,45 +1627,93 @@ pub(crate) fn checkout_gc_for_slot(
     path: &Path,
     expected: &[checkout::RequiredRoot],
     cancel: &(dyn Fn() -> bool + Sync),
-) -> Result<SlotGcReport, Refusal> {
-    let refuse = |detail: &str| Refusal {
-        kind: "refusal",
-        path: None,
-        detail: detail.into(),
-        code: 1,
+) -> Result<SlotGcReport, SlotGcRefusal> {
+    let refuse = |detail: &str, evidence| SlotGcRefusal {
+        reason: Refusal {
+            kind: "refusal",
+            path: None,
+            detail: detail.into(),
+            code: 1,
+        },
+        evidence: Box::new(evidence),
     };
-    let cancelled = || Refusal {
-        kind: "error",
-        path: None,
-        detail: "gc was cancelled".into(),
-        code: 130,
+    let cancelled = |evidence| SlotGcRefusal {
+        reason: Refusal {
+            kind: "error",
+            path: None,
+            detail: "gc was cancelled".into(),
+            code: 130,
+        },
+        evidence: Box::new(evidence),
+    };
+    let checkout_fault = |checkout_faults| SlotGcFailure::Discovery {
+        checkout_faults,
+        target_faults: Vec::new(),
+        unresolved: Vec::new(),
     };
     if cancel() {
-        return Err(cancelled());
+        return Err(cancelled(SlotGcFailure::Setup));
     }
-    let mut operation = CheckoutGc::prepare(state, path, false)
-        .map_err(|_| refuse("could not establish scoped cleanup inputs and capabilities"))?;
+    let operation = match CheckoutGc::prepare(state, path, false) {
+        Ok(operation) => operation,
+        Err(CheckoutGcError::Discovery(fault)) => {
+            let evidence = checkout_fault(vec![fault]);
+            return Err(if cancel() {
+                cancelled(evidence)
+            } else {
+                refuse("checkout discovery was incomplete", evidence)
+            });
+        }
+        Err(_) if cancel() => return Err(cancelled(SlotGcFailure::Setup)),
+        Err(_) => {
+            return Err(refuse(
+                "could not establish scoped cleanup inputs and capabilities",
+                SlotGcFailure::Setup,
+            ));
+        }
+    };
     if cancel() {
-        return Err(cancelled());
+        return Err(cancelled(checkout_fault(operation.checkout_faults)));
     }
     if !operation.checkout_faults.is_empty() {
-        return Err(refuse("checkout discovery was incomplete"));
+        return Err(refuse(
+            "checkout discovery was incomplete",
+            checkout_fault(operation.checkout_faults),
+        ));
     }
-    let scan = operation.scan(cancel);
-    if cancel() {
-        return Err(cancelled());
+    let scan = operation.scan_for_slot(cancel);
+    let unresolved = discover::failed_workspaces(&scan);
+    let interrupted = cancel();
+    if interrupted || !scan.walk_faults.is_empty() || !unresolved.is_empty() {
+        let evidence = SlotGcFailure::Discovery {
+            checkout_faults: Vec::new(),
+            target_faults: scan.walk_faults,
+            unresolved,
+        };
+        return Err(if interrupted {
+            cancelled(evidence)
+        } else {
+            refuse(
+                "Cargo target discovery or ownership was incomplete",
+                evidence,
+            )
+        });
     }
-    if !scan.walk_faults.is_empty() || !discover::failed_workspaces(&scan).is_empty() {
-        return Err(refuse("Cargo target discovery or ownership was incomplete"));
-    }
-    let evidence = checkout::run_with_evidence(&operation.input(&scan), expected, cancel);
+    let mut evidence = checkout::run_with_evidence(&operation.input(&scan), expected, cancel);
     if evidence.report.cancelled || cancel() {
-        return Err(cancelled());
+        evidence.report.cancelled = true;
+        return Err(cancelled(SlotGcFailure::Run(evidence)));
     }
-    let completed = evidence.into_complete().ok_or_else(|| {
-        refuse("scoped cleanup could not prove completion for both Cargo output roots")
-    })?;
-    Ok(SlotGcReport { completed })
+    let Some(completed) = evidence.complete_roots().cloned() else {
+        return Err(refuse(
+            "scoped cleanup could not prove completion for both Cargo output roots",
+            SlotGcFailure::Run(evidence),
+        ));
+    };
+    Ok(SlotGcReport {
+        completed,
+        report: evidence.report,
+    })
 }
 
 fn checkout_cmd(state: &State, path: &Path, out: &OutputArgs) -> i32 {
@@ -1565,6 +1734,9 @@ fn checkout_cmd(state: &State, path: &Path, out: &OutputArgs) -> i32 {
         Ok(operation) => operation,
         Err(CheckoutGcError::State(err)) => {
             return emit_failure(state, *out, command, &err.to_string(), 1);
+        }
+        Err(CheckoutGcError::Discovery(fault)) => {
+            return emit_failure(state, *out, command, &fault.detail, 1);
         }
         Err(CheckoutGcError::Unsupported) => {
             eprintln!("{MACOS_ONLY_MESSAGE}");
@@ -2120,6 +2292,7 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
     emit(state, out, b.finish(), &explanation.human, code)
 }
 
+#[derive(Debug)]
 pub(crate) struct Refusal {
     pub kind: &'static str,
     pub path: Option<std::path::PathBuf>,
@@ -2490,8 +2663,7 @@ mod tests {
     use std::process::Command;
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn slot_checkout_gc_refuses_incomplete_discovery() {
+    fn checkout_gc_fixture() -> (platform::TempDir, State, Registry, PathBuf) {
         let fs = platform::current().unwrap().fs;
         let scratch = fs
             .temp_dir(Path::new("/private/tmp"), "slot-checkout-gc")
@@ -2501,21 +2673,7 @@ mod tests {
         let lane = main.join("lane");
         let cache = scratch.path().join("missing-cache");
         std::fs::create_dir(&main).unwrap();
-        let git = |args: &[&str]| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(&main)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
-        git(&["init", "-q"]);
+        fixture_git(&main, &["init", "-q"]);
         std::fs::write(
             main.join("Cargo.toml"),
             "[package]\nname = \"slot-fixture\"\nversion = \"0.1.0\"\n",
@@ -2523,17 +2681,23 @@ mod tests {
         .unwrap();
         std::fs::create_dir(main.join("src")).unwrap();
         std::fs::write(main.join("src/lib.rs"), "").unwrap();
-        git(&["add", "."]);
-        git(&[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "-qm",
-            "fixture",
-        ]);
-        git(&["worktree", "add", "-q", "--detach", lane.to_str().unwrap()]);
+        fixture_git(&main, &["add", "."]);
+        fixture_git(
+            &main,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        );
+        fixture_git(
+            &main,
+            &["worktree", "add", "-q", "--detach", lane.to_str().unwrap()],
+        );
         let roots = Git::at(&main).root_commits().unwrap();
         let reg = Registry {
             repos: vec![registry::Repo {
@@ -2561,22 +2725,61 @@ mod tests {
                 )
             })
             .unwrap();
-        let required = [checkout::RootRole::Target, checkout::RootRole::Build].map(|role| {
-            checkout::RequiredRoot {
-                path: lane.join("target"),
-                role,
-                presence: checkout::RootPresence::InitiallyAbsent,
-            }
-        });
+        (scratch, state, reg, lane)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fixture_git(path: &Path, args: &[&str]) -> std::process::Output {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    }
+
+    #[cfg(target_os = "macos")]
+    fn absent_roots(lane: &Path) -> [checkout::RequiredRoot; 2] {
+        [checkout::RootRole::Target, checkout::RootRole::Build].map(|role| checkout::RequiredRoot {
+            path: lane.join("target"),
+            role,
+            presence: checkout::RootPresence::InitiallyAbsent,
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_refuses_incomplete_discovery() {
+        let (scratch, state, reg, lane) = checkout_gc_fixture();
+        let cache = scratch.path().join("missing-cache");
+        let required = absent_roots(&lane);
         let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
             .err()
             .unwrap();
-        assert_eq!(refusal.code, 1);
+        assert_eq!(refusal.reason.code, 1);
         assert!(
-            refusal.detail.contains("target discovery"),
+            refusal.reason.detail.contains("target discovery"),
             "{}",
-            refusal.detail
+            refusal.reason.detail
         );
+
+        let SlotGcFailure::Discovery {
+            checkout_faults,
+            target_faults,
+            unresolved,
+        } = *refusal.evidence
+        else {
+            panic!("expected target scan evidence");
+        };
+        assert!(checkout_faults.is_empty() && unresolved.is_empty());
+        assert_eq!(target_faults[0].path, cache);
 
         std::fs::create_dir(&cache).unwrap();
         let positive = checkout_gc_for_slot(&state, &lane, &required, &|| false)
@@ -2600,12 +2803,23 @@ mod tests {
         let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
             .err()
             .unwrap();
-        assert_eq!(refusal.code, 1);
+        assert_eq!(refusal.reason.code, 1);
         assert!(
-            refusal.detail.contains("checkout discovery"),
+            refusal.reason.detail.contains("checkout discovery"),
             "{}",
-            refusal.detail
+            refusal.reason.detail
         );
+
+        let SlotGcFailure::Discovery {
+            checkout_faults,
+            target_faults,
+            unresolved,
+        } = *refusal.evidence
+        else {
+            panic!("expected checkout scan evidence");
+        };
+        assert!(target_faults.is_empty() && unresolved.is_empty());
+        assert_eq!(checkout_faults[0].path, missing);
 
         let other = scratch.path().join("other");
         std::fs::create_dir(&other).unwrap();
@@ -2622,31 +2836,20 @@ mod tests {
             format!("[build]\ntarget-dir = {:?}", required[0].path),
         )
         .unwrap();
-        let other_git = |args: &[&str]| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(&other)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
-        other_git(&["init", "-q"]);
-        other_git(&["add", "."]);
-        other_git(&[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "-qm",
-            "other",
-        ]);
+        fixture_git(&other, &["init", "-q"]);
+        fixture_git(&other, &["add", "."]);
+        fixture_git(
+            &other,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "other",
+            ],
+        );
         let mut reg = reg;
         reg.repos.push(registry::Repo {
             root_commits: Git::at(&other).root_commits().unwrap(),
@@ -2666,20 +2869,280 @@ mod tests {
         let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
             .err()
             .unwrap();
-        assert_eq!(refusal.code, 1);
+        assert_eq!(refusal.reason.code, 1);
         assert!(
-            refusal.detail.contains("prove completion"),
+            refusal.reason.detail.contains("prove completion"),
             "{}",
-            refusal.detail
+            refusal.reason.detail
         );
         assert!(!required[0].path.exists());
+
+        let SlotGcFailure::Run(evidence) = *refusal.evidence else {
+            panic!("expected incomplete ownership evidence");
+        };
+        assert!(evidence.completed().is_empty());
+        assert!(
+            evidence
+                .report
+                .findings
+                .iter()
+                .any(|finding| finding.kind == "gc.root_incomplete")
+        );
 
         std::fs::write(reg.repos[1].main.join("Cargo.toml"), "[broken").unwrap();
         let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
             .err()
             .unwrap();
-        assert_eq!(refusal.code, 1);
-        assert!(refusal.detail.contains("ownership"), "{}", refusal.detail);
+        assert_eq!(refusal.reason.code, 1);
+        assert!(
+            refusal.reason.detail.contains("ownership"),
+            "{}",
+            refusal.reason.detail
+        );
+        let SlotGcFailure::Discovery {
+            checkout_faults,
+            target_faults,
+            unresolved,
+        } = *refusal.evidence
+        else {
+            panic!("expected unresolved workspace evidence");
+        };
+        assert!(checkout_faults.is_empty() && target_faults.is_empty());
+        assert_eq!(unresolved[0].0, reg.repos[1].main);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_resolves_nested_linked_checkout_workspaces_independently() {
+        let (scratch, state, mut reg, lane) = checkout_gc_fixture();
+        std::fs::create_dir(scratch.path().join("missing-cache")).unwrap();
+        let other = scratch.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::create_dir(other.join("src")).unwrap();
+        std::fs::write(
+            other.join("Cargo.toml"),
+            "[package]\nname = \"outer\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(other.join("src/lib.rs"), "").unwrap();
+        fixture_git(&other, &["init", "-q"]);
+        fixture_git(&other, &["add", "."]);
+        fixture_git(
+            &other,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "other",
+            ],
+        );
+        let nested = other.join("nested");
+        fixture_git(
+            &other,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                nested.to_str().unwrap(),
+            ],
+        );
+        fixture_git(&nested, &["rm", "Cargo.toml", "src/lib.rs"]);
+        let project = nested.join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir(project.join(".cargo")).unwrap();
+        std::fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"nested\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("src/lib.rs"), "").unwrap();
+        std::fs::write(
+            project.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = {:?}", lane.join("target")),
+        )
+        .unwrap();
+        fixture_git(&nested, &["add", "."]);
+        fixture_git(
+            &nested,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "nested project",
+            ],
+        );
+        reg.repos.push(registry::Repo {
+            root_commits: Git::at(&other).root_commits().unwrap(),
+            main: other,
+        });
+        state.locked(|tx| tx.write(registry::FILE, &reg)).unwrap();
+        let result = checkout_gc_for_slot(&state, &lane, &absent_roots(&lane), &|| false);
+        let refusal = result.expect_err("the nested checkout shares the slot output");
+        assert_eq!(refusal.reason.code, 1);
+        assert!(!lane.join("target").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_keeps_measured_effects_on_success_and_cancellation() {
+        let (scratch, state, _, lane) = checkout_gc_fixture();
+        std::fs::create_dir(scratch.path().join("missing-cache")).unwrap();
+        let target = lane.join("target");
+        let debug = target.join("debug");
+        std::fs::create_dir_all(debug.join(".fingerprint")).unwrap();
+        std::fs::create_dir_all(debug.join("deps")).unwrap();
+        std::fs::write(
+            target.join("CACHEDIR.TAG"),
+            cargo_hive_core::target::TAG_LINE,
+        )
+        .unwrap();
+        std::fs::write(debug.join(".cargo-build-lock"), "").unwrap();
+        let fs = platform::current().unwrap().fs;
+        let identity = fs.entry_stat(&target).unwrap();
+        let expectations = absent_roots(&lane).map(|mut root| {
+            root.presence = checkout::RootPresence::Present {
+                dev: identity.dev,
+                ino: identity.ino,
+            };
+            root
+        });
+
+        let object = debug.join("deps/orphan.0.rcgu.o");
+        let second = debug.join("deps/second.0.rcgu.o");
+        std::fs::write(&object, "object").unwrap();
+        let complete = checkout_gc_for_slot(&state, &lane, &expectations, &|| false)
+            .expect("cleanup completes");
+        assert_eq!(complete.completed, expectations);
+        assert_eq!(complete.report.totals.objects_deleted, 1);
+        assert!(!object.exists());
+
+        std::fs::write(&object, "object").unwrap();
+        std::fs::write(&second, "object").unwrap();
+        let refused = checkout_gc_for_slot(&state, &lane, &expectations, &|| {
+            !object.exists() || !second.exists()
+        })
+        .expect_err("cancellation follows the first effect");
+        assert_eq!(refused.reason.code, 130);
+        assert_ne!(object.exists(), second.exists());
+        let SlotGcFailure::Run(evidence) = *refused.evidence else {
+            panic!("expected partial cleanup evidence");
+        };
+        assert!(evidence.report.cancelled);
+        assert!(evidence.completed().is_empty());
+        assert_eq!(evidence.report.totals.objects_deleted, 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_requires_complete_git_inventory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_ROOT: &str = "HIVE_TEST_CHECKOUT_GC_INVENTORY_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let state = State::open_at(root.join("hive")).unwrap();
+            let lane = root.join("main/lane");
+            let result = checkout_gc_for_slot(&state, &lane, &absent_roots(&lane), &|| false);
+            let refusal = result.expect_err("unproved Git checkout scope allowed cleanup");
+            assert_eq!(refusal.reason.code, 1);
+            assert!(
+                refusal.reason.detail.contains("checkout discovery"),
+                "{}",
+                refusal.reason.detail
+            );
+            assert!(!state.root().join(discover::SNAPSHOT_FILE).exists());
+            return;
+        }
+
+        let (scratch, _, reg, lane) = checkout_gc_fixture();
+        let root = scratch.path();
+        std::fs::create_dir(root.join("missing-cache")).unwrap();
+        let main = &reg.repos[0].main;
+        let valid = fixture_git(main, &["worktree", "list", "--porcelain", "-z"]).stdout;
+        assert!(valid.ends_with(b"\0\0"), "{valid:?}");
+        let incomplete = valid[..valid.len() - 1].to_vec();
+        let mut malformed = incomplete.clone();
+        malformed.extend_from_slice(b"unexpected attribute\0\0");
+        let mut oversize = incomplete.clone();
+        oversize.extend_from_slice(b"locked ");
+        oversize.resize(64 * 1024 - 1, b'x');
+        oversize.extend_from_slice(b"\0\0");
+
+        let hidden = main.join("hidden");
+        fixture_git(
+            main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                hidden.to_str().unwrap(),
+            ],
+        );
+        std::fs::create_dir(hidden.join(".cargo")).unwrap();
+        std::fs::write(
+            hidden.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = {:?}", lane.join("target")),
+        )
+        .unwrap();
+        let complete = fixture_git(main, &["worktree", "list", "--porcelain", "-z"]).stdout;
+        assert!(complete.len() > valid.len());
+
+        let shim = root.join("git");
+        std::fs::write(
+            &shim,
+            r#"#!/bin/sh
+case " $* " in
+    *" worktree list "*)
+        if [ "$1" = "--no-optional-locks" ]; then exec cat "$HIVE_TEST_STRICT_GIT"; fi
+        exec cat "$HIVE_TEST_LEGACY_GIT"
+        ;;
+esac
+exec /usr/bin/git "$@"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut path = vec![root.to_path_buf()];
+        path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let path = std::env::join_paths(path).unwrap();
+        let legacy_data = root.join("legacy");
+        let strict_data = root.join("strict");
+        let mut failures = Vec::new();
+        for (label, legacy, strict) in [
+            ("incomplete", &incomplete, &incomplete),
+            ("malformed", &malformed, &malformed),
+            ("oversize", &oversize, &oversize),
+            ("live record missing from discovery", &valid, &complete),
+        ] {
+            std::fs::write(&legacy_data, legacy).unwrap();
+            std::fs::write(&strict_data, strict).unwrap();
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::tests::slot_checkout_gc_requires_complete_git_inventory",
+                ])
+                .env(CHILD_ROOT, root)
+                .env("PATH", &path)
+                .env("HIVE_TEST_LEGACY_GIT", &legacy_data)
+                .env("HIVE_TEST_STRICT_GIT", &strict_data)
+                .output()
+                .unwrap();
+            if !child.status.success() {
+                failures.push(format!(
+                    "{label}: {}",
+                    String::from_utf8_lossy(&child.stdout)
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
