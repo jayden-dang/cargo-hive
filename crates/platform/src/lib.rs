@@ -36,6 +36,7 @@ pub mod clock;
 pub mod flock;
 pub mod proc;
 pub mod signals;
+pub mod slot;
 #[doc(hidden)]
 pub mod testing;
 

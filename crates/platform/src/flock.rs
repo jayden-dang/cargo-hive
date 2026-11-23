@@ -1,8 +1,11 @@
-//! Advisory flock helpers: exclusive/shared with cancel poll, and a one-shot try.
+//! Advisory flock helpers for independent opens and inherited open descriptions.
 
-use std::fs::File;
+use crate::slot::effective_uid;
+use std::fs::{File, Metadata, OpenOptions, symlink_metadata};
 use std::io;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::Path;
 use std::time::Duration;
 
 const LOCK_POLL: Duration = Duration::from_millis(10);
@@ -84,6 +87,103 @@ pub fn try_exclusive(file: &File) -> io::Result<Option<FlockGuard>> {
             _ => return Err(err),
         }
     }
+}
+
+/// Device and inode of a private regular lock file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LockFileIdentity {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+impl LockFileIdentity {
+    /// Reads the identity of the named lock file without following the final path component.
+    pub fn from_path(path: &Path) -> io::Result<Self> {
+        Self::from_metadata(&symlink_metadata(path)?)
+    }
+
+    fn from_metadata(metadata: &Metadata) -> io::Result<Self> {
+        if !metadata.is_file()
+            || metadata.uid() != effective_uid()
+            || metadata.mode() & 0o7077 != 0
+            || metadata.nlink() != 1
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "private file must be a singly linked regular file owned by the effective user",
+            ));
+        }
+        Ok(Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+}
+
+/// Opens a private regular file for reading and verifies that the named inode survived the open.
+pub fn open_private_file(path: &Path) -> io::Result<File> {
+    let expected = LockFileIdentity::from_path(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    check_identity(&file, expected)?;
+    Ok(file)
+}
+
+/// Copies an inherited descriptor into an owned, close-on-exec reference.
+pub fn duplicate_inherited_fd(fd: RawFd) -> io::Result<OwnedFd> {
+    // SAFETY: fcntl validates the raw descriptor and attests ownership of any returned duplicate.
+    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if copy == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fcntl returned a new owned descriptor.
+    Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+}
+
+/// Outcome of a checked nonblocking flock.
+#[derive(Debug)]
+pub enum InheritedLock {
+    Acquired(InheritedLockGuard),
+    Held,
+}
+
+/// A reference to the locked open description. Drop closes only this reference.
+#[derive(Debug)]
+pub struct InheritedLockGuard {
+    _file: File,
+}
+
+/// Tries an exclusive flock on the provided open description after checking its identity.
+///
+/// The caller must establish descriptor custody independently. A successful flock
+/// can come from a fresh open if no other description holds the lock.
+pub fn try_lock_inherited(
+    fd: BorrowedFd<'_>,
+    expected: LockFileIdentity,
+) -> io::Result<InheritedLock> {
+    let file = File::from(fd.try_clone_to_owned()?);
+    check_identity(&file, expected)?;
+    // SAFETY: file keeps this descriptor alive through the flock call.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(InheritedLock::Acquired(InheritedLockGuard { _file: file }));
+    }
+    let err = io::Error::last_os_error();
+    if err.kind() == io::ErrorKind::WouldBlock {
+        return Ok(InheritedLock::Held);
+    }
+    Err(err)
+}
+
+fn check_identity(file: &File, expected: LockFileIdentity) -> io::Result<()> {
+    if LockFileIdentity::from_metadata(&file.metadata()?)? == expected {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "private file descriptor does not match the expected inode",
+    ))
 }
 
 #[cfg(test)]
