@@ -91,11 +91,11 @@ _Requirements: FUZZ-1.1, FUZZ-2.1, FUZZ-2.6_
 **Interfaces:** Produces `debug_map::fuzzing::debug_map`, `gc::fuzzing::incremental_names`, `liveness::fuzzing::timestamp_metadata`, `explain::fuzzing::{diagnostics,artifact_names}`, all `fn(&[u8])`. Existing public Fs, DebugMap and MapError remain unchanged; only private thin-reader bounds change.
 **Depends-on:** Task 1
 
-- [ ] Add a deterministic fat-slice fixture whose tables lie beyond the declared slice, plus checked-overflow and short-read controls; record RED with `cargo test -p cargo-hive-gc --lib debug_map` before correction.
-- [ ] Investigate and enforce declared slice bounds and checked offsets; prove regression reversal.
-- [ ] Exercise exact decoded object sets, archive counts and fat unions through sparse bounded Fs reads.
-- [ ] Add classifier and timestamp metadata oracles covering current and not-current timestamp paths, missing versus unreadable, future/cutoff times and extreme durations; extend aggregate diagnostics and explain artifact-mode/name checks. Explicitly re-export plan::fuzzing from gc.rs.
-- [ ] Run GC library tests and fuzz-config GC check, then commit `test(gc): exercise bounded binary and metadata readers` with evidence.
+- [x] Add a deterministic fat-slice fixture whose tables lie beyond the declared slice, plus checked-overflow and short-read controls; record RED with `cargo test -p cargo-hive-gc --lib debug_map` before correction.
+- [x] Investigate and enforce declared slice bounds and checked offsets; prove regression reversal.
+- [x] Exercise exact decoded object sets, archive counts and fat unions through sparse bounded Fs reads.
+- [x] Add classifier and timestamp metadata oracles covering current and not-current timestamp paths, missing versus unreadable, future/cutoff times and extreme durations; extend aggregate diagnostics and explain artifact-mode/name checks. Explicitly re-export plan::fuzzing from gc.rs.
+- [x] Run GC library tests and fuzz-config GC check, then commit `test(gc): exercise bounded binary and metadata readers` with evidence.
 
 _Requirements: FUZZ-1.4, FUZZ-2.3, FUZZ-2.5_
 
