@@ -5576,6 +5576,91 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
 }
 
 #[test]
+fn a_future_library_test_stamp_blocks_a_retained_clippy_handoff() {
+    let fixture = reviewed_pool_fixture(Some(
+        "pub fn answer() -> u32 { 42 }\n#[cfg(test)]\n#[test]\nfn compile_only() { assert_eq!(answer(), 42); }\n",
+    ));
+    fixture.hive.write_ready_capabilities();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let args = [
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+    ];
+    external_fixture_seal(&fixture, &head, "clippy", &args);
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let key = fixture._repo_dir.path.join("retained-library-test-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let out = run_packaged_take(&fixture, pool, &head, &key, "take");
+    assert!(out.status.success(), "{out:?}");
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
+    let mut command = fixture
+        .hive
+        .command_with(Path::new("/bin/bash"), &["--noprofile", "--norc"]);
+    producer_environment(&mut command);
+    let child = command
+        .arg(helper)
+        .args(["produce", env!("CARGO_BIN_EXE_cargo-hive")])
+        .arg(&fixture.repo)
+        .args([pool, "1", "1", &"5".repeat(32), "check"])
+        .stdin(fs::File::open(&key).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = common::wait_within(child, Duration::from_secs(50));
+    assert!(out.status.success(), "{out:?}");
+    let cargo_profile = checkout.join("target/debug");
+    let graph = cargo_hive_core::fingerprint::read_profile(&cargo_profile)
+        .graph
+        .unwrap();
+    let mut test_units = graph
+        .units
+        .iter()
+        .filter(|unit| unit.loc.package() == "fixture" && unit.stem == "test-lib-fixture");
+    let mode = test_units.next().unwrap();
+    assert!(test_units.next().is_none());
+    let stamp = cargo_hive_core::unit_path::stamp(&cargo_profile, &mode.loc, mode.kind);
+    let credential = fs::read_to_string(&key).unwrap();
+    let request = fixture.replay("return", pool, 1, 1, &"6".repeat(32));
+    let (out, returned) = finish_private(start_private(&fixture.hive, request, &credential));
+    assert!(out.status.success(), "{returned}");
+    fs::File::open(stamp)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + Duration::from_secs(3600))
+        .unwrap();
+    let child = start_packaged_take_at(&fixture, pool, &head, &key, "take", "1");
+    let out = common::wait_within(child, Duration::from_secs(50));
+    let refused: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{refused}");
+    assert!(refused.get("path").is_none());
+    assert!(
+        refused["detail"].as_str().is_some_and(
+            |reason| reason.contains("reviewed prior Cargo unit has a future timestamp")
+        ),
+        "{refused}"
+    );
+    assert_eq!(
+        fixture.record()["pools"][0]["slots"][0]["phase"]["attempt"]["stage"],
+        "awaiting_anchors"
+    );
+}
+
+#[test]
 fn the_gateways_nextest_recipe_lists_only_the_exact_selected_package() {
     let args = [
         "nextest",
