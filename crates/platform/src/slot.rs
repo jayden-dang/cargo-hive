@@ -244,9 +244,24 @@ mod foreground {
             lock: LockFileIdentity,
             inherited: BorrowedFd<'_>,
         ) -> io::Result<Self> {
+            Self::start_with_offset(parent, child, lock_fd, lock, inherited, None)
+        }
+
+        pub fn start_with_offset(
+            parent: ProcessInstance,
+            child: u32,
+            lock_fd: i32,
+            lock: LockFileIdentity,
+            inherited: BorrowedFd<'_>,
+            guide_guard_offset: Option<i64>,
+        ) -> io::Result<Self> {
             let pid = i32::try_from(child).map_err(|_| invalid("invalid foreground child PID"))?;
             let info = process(pid)?;
-            let offset = challenge_offset(inherited)?;
+            let offset = if let Some(offset) = guide_guard_offset {
+                verify_guide_lock(&parent, lock_fd, lock, inherited, Some(offset))?
+            } else {
+                challenge_offset(inherited)?
+            };
             if !same_child(&info, &parent, child)
                 || info.pbi_status != libc::SSTOP
                 || parent_instance()? != parent
@@ -1063,6 +1078,20 @@ impl ForegroundWatch {
         _lock_fd: i32,
         _lock: crate::flock::LockFileIdentity,
         _inherited: std::os::fd::BorrowedFd<'_>,
+    ) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            MACOS_ONLY_MESSAGE,
+        ))
+    }
+
+    pub fn start_with_offset(
+        _parent: ProcessInstance,
+        _child: u32,
+        _lock_fd: i32,
+        _lock: crate::flock::LockFileIdentity,
+        _inherited: std::os::fd::BorrowedFd<'_>,
+        _guide_guard_offset: Option<i64>,
     ) -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,

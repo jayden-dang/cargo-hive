@@ -590,6 +590,8 @@ pub struct PendingProducer {
     pub prior: EligibleProducer,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground: Option<ForegroundInstance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guide_guard_offset: Option<i64>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -733,6 +735,8 @@ pub struct InvocationEvidence {
     pub invocation: String,
     pub graph_digest: String,
     pub environment_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_digest: Option<String>,
 }
 
 impl InvocationEvidence {
@@ -743,6 +747,10 @@ impl InvocationEvidence {
             .any(|item| item.id == self.invocation)
             && hex(&self.graph_digest, 64)
             && hex(&self.environment_digest, 64)
+            && self
+                .stable_digest
+                .as_ref()
+                .is_none_or(|digest| hex(digest, 64))
     }
 }
 
@@ -1037,8 +1045,13 @@ impl Producer {
                     runner,
                     prior,
                     foreground,
+                    guide_guard_offset,
                 } = pending.as_ref();
                 epoch_matches(epoch)?;
+                require(
+                    guide_guard_offset.is_none_or(|offset| offset > 0),
+                    "invalid producer guide guard",
+                )?;
                 validate_generation(*generation)?;
                 validate_profile(profile)?;
                 require(
@@ -2550,6 +2563,7 @@ mod tests {
                 invocation: "check".into(),
                 graph_digest: "a".repeat(64),
                 environment_digest: "b".repeat(64),
+                stable_digest: None,
             },
             roots: OutputRoots {
                 target: RootExpectation::Absent { path: root.clone() },
@@ -2567,6 +2581,7 @@ mod tests {
                 evidence: evidence.clone(),
             },
             foreground: None,
+            guide_guard_offset: None,
         }));
         for producer in [
             pending,

@@ -1,5 +1,6 @@
 //! The slot CLI scopes operations to a registered main and its private pool namespace.
 
+mod admission;
 mod inspect;
 mod profile;
 mod result;
@@ -108,12 +109,15 @@ pub(super) fn dispatch(command: SlotCommand) -> i32 {
                 step_check(state, &scope, generation, attempt, lock_fd)
             });
         }
-        SlotCommand::Producer(op) => {
+        SlotCommand::Producer {
+            request,
+            control_fd,
+        } => {
             return run_scoped(
                 "slot producer",
-                &op.operation.scope.repo,
-                op.operation.out.json,
-                |state| producer(state, &op),
+                &request.operation.scope.repo,
+                request.operation.out.json,
+                |state| producer(state, &request, control_fd),
             );
         }
         SlotCommand::Ready { request, attempt } => {
@@ -502,6 +506,17 @@ enum ProducerInput {
         shape: InvocationInput,
         child_pid: u32,
     },
+    GuidedStart {
+        credential: String,
+        nonce: String,
+        invocation: String,
+    },
+    GuidedWatch {
+        credential: String,
+        nonce: String,
+        invocation: String,
+        child_pid: u32,
+    },
     ReportBypass {
         credential: String,
         nonce: String,
@@ -518,6 +533,12 @@ impl ProducerInput {
             | Self::Watch {
                 credential, nonce, ..
             }
+            | Self::GuidedStart {
+                credential, nonce, ..
+            }
+            | Self::GuidedWatch {
+                credential, nonce, ..
+            }
             | Self::ReportBypass {
                 credential, nonce, ..
             } => (credential, nonce),
@@ -530,7 +551,11 @@ struct ProducerInvocation {
     shape: InvocationInput,
 }
 
-fn producer(state: &State, request: &SlotLockedOperation) -> Result<SlotResult, Refusal> {
+fn producer(
+    state: &State,
+    request: &SlotLockedOperation,
+    control_fd: Option<u32>,
+) -> Result<SlotResult, Refusal> {
     let op = &request.operation;
     let key = request_key(
         &op.scope,
@@ -564,13 +589,22 @@ fn producer(state: &State, request: &SlotLockedOperation) -> Result<SlotResult, 
         .filter(|fd| *fd > 2)
         .ok_or_else(producer_fence_refusal)?;
     let inherited = duplicate_inherited_fd(fd).map_err(|_| producer_fence_refusal())?;
-    let (independent, _) =
-        slots::open_slot_lock(&lock_path).map_err(|_| producer_fence_refusal())?;
-    if try_exclusive(&independent)
-        .map_err(|_| producer_fence_refusal())?
-        .is_some()
-    {
+    let guided_start = matches!(input, ProducerInput::GuidedStart { .. });
+    if guided_start != control_fd.is_some() {
         return Err(producer_fence_refusal());
+    }
+    let control = control_fd
+        .map(|fd| private_output(fd, Some(lock_id)).map_err(|_| producer_fence_refusal()))
+        .transpose()?;
+    if !guided_start {
+        let (independent, _) =
+            slots::open_slot_lock(&lock_path).map_err(|_| producer_fence_refusal())?;
+        if try_exclusive(&independent)
+            .map_err(|_| producer_fence_refusal())?
+            .is_some()
+        {
+            return Err(producer_fence_refusal());
+        }
     }
     let lock = LockFileIdentity {
         dev: lock_id.dev,
@@ -593,7 +627,7 @@ fn producer(state: &State, request: &SlotLockedOperation) -> Result<SlotResult, 
     match input {
         ProducerInput::Start {
             credential, shape, ..
-        } => command.start(&snapshot, ProducerInvocation { credential, shape }),
+        } => command.start(&snapshot, ProducerInvocation { credential, shape }, None),
         ProducerInput::Watch {
             credential,
             shape,
@@ -605,13 +639,68 @@ fn producer(state: &State, request: &SlotLockedOperation) -> Result<SlotResult, 
             child_pid,
             fd,
             inherited.as_fd(),
+            false,
         ),
+        ProducerInput::GuidedStart {
+            credential,
+            invocation,
+            ..
+        } => {
+            let shape = guided_shape(&snapshot.pool.profile, &invocation)?;
+            let offset = verify_guide_lock(
+                &runner_instance(&command.runner),
+                fd,
+                lock,
+                inherited.as_fd(),
+                None,
+            )
+            .map_err(|_| producer_fence_refusal())?;
+            let output = control.ok_or_else(producer_fence_refusal)?;
+            command.start(
+                &snapshot,
+                ProducerInvocation { credential, shape },
+                Some((output, offset)),
+            )
+        }
+        ProducerInput::GuidedWatch {
+            credential,
+            invocation,
+            child_pid,
+            ..
+        } => {
+            let shape = guided_shape(&snapshot.pool.profile, &invocation)?;
+            command.watch(
+                snapshot,
+                ProducerInvocation { credential, shape },
+                child_pid,
+                fd,
+                inherited.as_fd(),
+                true,
+            )
+        }
         ProducerInput::ReportBypass {
             credential,
             profile,
             ..
         } => command.report_bypass(&snapshot, &credential, &profile),
     }
+}
+
+fn guided_shape(profile: &PoolProfile, id: &str) -> Result<InvocationInput, Refusal> {
+    let invocation = profile
+        .invocations
+        .iter()
+        .find(|item| item.id == id)
+        .ok_or_else(watch_refusal)?;
+    Ok(InvocationInput {
+        profile: slots::ProfileBinding {
+            id: profile.id.clone(),
+            revision: profile.revision,
+        },
+        invocation: invocation.id.clone(),
+        argv: invocation.argv.clone(),
+        cwd: invocation.cwd.clone(),
+    })
 }
 
 struct ProducerCommand<'a> {
@@ -686,6 +775,7 @@ impl ProducerCommand<'_> {
         &self,
         snapshot: &ReturnScope,
         input: ProducerInvocation,
+        control: Option<(File, i64)>,
     ) -> Result<SlotResult, Refusal> {
         let pool = &snapshot.pool;
         let slot = &pool.slots[self.slot_index()];
@@ -718,6 +808,16 @@ impl ProducerCommand<'_> {
         let roots = prior.roots();
         let mut proof = self.inspect(snapshot, &input, &roots, empty_proof(&prior))?;
         let checked = profile::check_invocation(&pool.profile, &input.shape, &proof, &roots)?;
+        if checked.needs_guide && control.is_none() {
+            return Err(Refusal::ReturnUncertain(
+                "This reviewed producer requires the packaged guide's checked launch.",
+            ));
+        }
+        let permit = control
+            .as_ref()
+            .map(|_| launch_permit(&checked, &input.shape.argv))
+            .transpose()?;
+        let guide_guard_offset = control.as_ref().map(|(_, offset)| *offset);
         let pending = PendingProducer {
             epoch: OutputEpoch {
                 pool_id: pool.pool_id.clone(),
@@ -732,6 +832,7 @@ impl ProducerCommand<'_> {
             prior,
             runner: self.runner.clone(),
             foreground: None,
+            guide_guard_offset,
         };
         let outcome = Outcome {
             pool_id: pool.pool_id.clone(),
@@ -754,6 +855,11 @@ impl ProducerCommand<'_> {
             Ok(())
         })?;
         proof.release_output_locks();
+        if let Some(((mut file, _), bytes)) = control.zip(permit) {
+            file.write_all(&bytes).and_then(|()| file.flush()).map_err(|_| {
+                Refusal::ReturnUncertain("Could not deliver the checked producer launch. Its pending start remains held.")
+            })?;
+        }
         Ok(producer_result(pool, slot, &proof, "producer_started"))
     }
 
@@ -909,6 +1015,7 @@ impl ProducerCommand<'_> {
         pid: u32,
         fd: i32,
         inherited: BorrowedFd<'_>,
+        guided: bool,
     ) -> Result<SlotResult, Refusal> {
         let slot = &snapshot.pool.slots[self.slot_index()];
         let Producer::Pending(pending) = &slot.producer else {
@@ -918,6 +1025,7 @@ impl ProducerCommand<'_> {
             || pending.runner != self.runner
             || pending.foreground.is_some()
             || pending.profile != input.shape.profile
+            || guided != pending.guide_guard_offset.is_some()
         {
             return Err(watch_refusal());
         }
@@ -937,16 +1045,16 @@ impl ProducerCommand<'_> {
         if checked.evidence != pending.invocation {
             return Err(watch_refusal());
         }
-        let watcher = ForegroundWatch::start(
-            runner_instance(&self.runner),
-            pid,
-            fd,
-            LockFileIdentity {
-                dev: self.lock_id.dev,
-                ino: self.lock_id.ino,
-            },
-            inherited,
-        )
+        let parent = runner_instance(&self.runner);
+        let lock = LockFileIdentity {
+            dev: self.lock_id.dev,
+            ino: self.lock_id.ino,
+        };
+        let watcher = if let Some(offset) = pending.guide_guard_offset {
+            ForegroundWatch::start_with_offset(parent, pid, fd, lock, inherited, Some(offset))
+        } else {
+            ForegroundWatch::start(parent, pid, fd, lock, inherited)
+        }
         .map_err(foreground_refusal)?;
         let profile = &snapshot.pool.profile;
         let invocation = profile::reviewed_shape(profile, &input.shape)?;
@@ -1029,6 +1137,16 @@ impl ProducerCommand<'_> {
             || exited.start_micros != child.start_micros
         {
             return Err(watch_refusal());
+        }
+        if let Some(offset) = pending.guide_guard_offset {
+            verify_guide_lock(
+                &runner_instance(&self.runner),
+                fd,
+                lock,
+                inherited,
+                Some(offset),
+            )
+            .map_err(foreground_refusal)?;
         }
         let finished = self.snapshot(&input.credential)?;
         if finished.pool.slots[self.slot_index()] != snapshot.pool.slots[self.slot_index()] {
@@ -1115,6 +1233,38 @@ fn replay_reported_bypass(
         confirm()?;
     }
     Ok(matched)
+}
+
+fn launch_permit(
+    checked: &profile::CheckedInvocation,
+    argv: &[String],
+) -> Result<Vec<u8>, Refusal> {
+    let mut output = Vec::new();
+    let mut append = |value: &[u8]| {
+        if value.contains(&0) || output.len() + value.len() + 1 > 64 * 1024 {
+            return Err(Refusal::ReturnUncertain(
+                "The checked producer launch exceeds its control bound.",
+            ));
+        }
+        output.extend_from_slice(value);
+        output.push(0);
+        Ok(())
+    };
+    append(b"producer_permit")?;
+    append(checked.cwd.as_os_str().as_encoded_bytes())?;
+    append(checked.environment.len().to_string().as_bytes())?;
+    for (key, value) in &checked.environment {
+        let mut assignment = key.clone();
+        assignment.push("=");
+        assignment.push(value);
+        append(assignment.as_encoded_bytes())?;
+    }
+    append((argv.len() + 1).to_string().as_bytes())?;
+    append(checked.cargo.as_os_str().as_encoded_bytes())?;
+    for arg in argv {
+        append(arg.as_bytes())?;
+    }
+    Ok(output)
 }
 
 fn empty_proof(prior: &EligibleProducer) -> Option<&slots::EmptyEpoch> {
