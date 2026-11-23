@@ -255,6 +255,7 @@ _Requirements: SLOTS-3.6, SLOTS-3.7, SLOTS-3.10_
 ### Task 7: Deliver a ready slot at the requested commit
 
 **Files:**
+- Modify: `crates/cargo-hive/src/slot/result.rs`
 - Modify: `crates/cargo-hive/src/cli.rs`
 - Modify: `crates/cargo-hive/tests/skill.rs`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
@@ -290,6 +291,9 @@ _Requirements: SLOTS-1.2, SLOTS-1.6, SLOTS-1.7, SLOTS-1.8, SLOTS-2.4, SLOTS-3.1,
 ### Task 8: Recover an abandoned slot without replaying old authority
 
 **Files:**
+- Modify: `crates/cargo-hive/src/cli.rs`
+- Modify: `crates/cargo-hive/tests/cli_tree.rs`
+- Modify: `crates/cargo-hive/tests/fixtures/current/cli-tree.txt`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
 - Modify: `crates/state/src/slots.rs`
 - Modify: `crates/cargo-hive/tests/slots.rs`
