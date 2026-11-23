@@ -1417,6 +1417,7 @@ fn begin(
                 lock_offset: Some(lock_offset),
                 prior_head: slot.last_head.clone(),
                 anchors: Vec::new(),
+                anchor_cursor: 0,
             },
         };
         next.outcomes.push(outcome);
@@ -1474,6 +1475,7 @@ enum PreparationStep {
     Checkout,
     CheckoutDone,
     Anchors,
+    AnchorDescriptor { index: usize, fd: u32 },
     AnchorsDone,
     Seed,
 }
@@ -1759,11 +1761,67 @@ fn step_check(
             })?;
             "anchor_touch_permitted"
         }
+        PreparationStep::AnchorDescriptor { index, fd } => {
+            let snapshot = fence.snapshot(AttemptStage::AnchorsInProgress)?;
+            let slot = &snapshot.pool.slots[fence.index()];
+            let (lease, attempt) = fence.check(slot)?;
+            if index != attempt.anchor_cursor {
+                return Err(producer_fence_refusal());
+            }
+            let witness = attempt
+                .anchors
+                .get(index)
+                .ok_or_else(producer_fence_refusal)?;
+            let fd = i32::try_from(fd)
+                .ok()
+                .filter(|fd| *fd > 2 && *fd != fence.fd)
+                .ok_or_else(producer_fence_refusal)?;
+            let descriptor =
+                File::from(duplicate_inherited_fd(fd).map_err(|_| producer_fence_refusal())?);
+            let checkout = slot
+                .checkout_id
+                .as_ref()
+                .ok_or_else(producer_fence_refusal)?;
+            let proof = inspect_checkout(
+                &SlotScope {
+                    pool: &snapshot.pool,
+                    slot,
+                    registry: &snapshot.registry,
+                    secondary_roots: &snapshot.secondary_roots,
+                },
+                &ExpectedCheckout {
+                    identity: checkout,
+                    head: Some(&lease.requested_commit),
+                },
+            )?;
+            check_producer_inventory(&proof)?;
+            prepare::verify_anchor_descriptor(&proof, witness, &descriptor)?;
+            let lock = LockFileIdentity {
+                dev: witness.identity.dev,
+                ino: witness.identity.ino,
+            };
+            let runner = runner_instance(&fence.runner);
+            let offset = verify_guide_lock(&runner, fd, lock, descriptor.as_fd(), None)
+                .map_err(|_| producer_fence_refusal())?;
+            fence.update(&snapshot, |slot| {
+                let Phase::Preparing { attempt, .. } = &mut slot.phase else {
+                    return Err(producer_fence_refusal());
+                };
+                verify_guide_lock(&runner, fd, lock, descriptor.as_fd(), Some(offset))
+                    .map_err(|_| producer_fence_refusal())?;
+                attempt.anchor_cursor += 1;
+                Ok(())
+            })?;
+            "anchor_descriptor_permitted"
+        }
         PreparationStep::AnchorsDone => {
             let snapshot = fence.snapshot(AttemptStage::AnchorsInProgress)?;
             let index = fence.index();
             let slot = &snapshot.pool.slots[index];
             let (lease, attempt) = fence.check(slot)?;
+            if attempt.anchor_cursor != attempt.anchors.len() {
+                return Err(producer_fence_refusal());
+            }
             let proof = inspect_prepared_checkout(
                 &snapshot.pool,
                 &snapshot,
@@ -2115,7 +2173,7 @@ fn ready(
     };
     let mut proof =
         inspect_prepared_checkout(&snapshot.pool, &snapshot, index, &lease.requested_commit)?;
-    prepare::verify_touch(&proof, &snapshot.pool.profile, &slot.producer, &anchors)?;
+    let units = prepare::before_gc(&proof, &snapshot.pool.profile, &slot.producer, &anchors)?;
     fence.update(&snapshot, |slot| {
         if slot.outcomes.len() >= MAX_OUTCOMES {
             return Err(Refusal::OutcomeLimit);
@@ -2152,11 +2210,12 @@ fn ready(
     }
     let final_proof =
         inspect_prepared_checkout(&snapshot.pool, &snapshot, index, &lease.requested_commit)?;
-    prepare::verify_touch(
+    prepare::after_gc(
         &final_proof,
         &snapshot.pool.profile,
         &snapshot.pool.slots[index].producer,
         &anchors,
+        &units,
     )?;
     let outcome = Outcome {
         pool_id: key.pool_id.into(),

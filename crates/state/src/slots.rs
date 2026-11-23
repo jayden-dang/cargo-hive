@@ -490,6 +490,12 @@ pub struct Attempt {
     pub prior_head: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub anchors: Vec<AnchorWitness>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub anchor_cursor: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 impl Attempt {
@@ -503,6 +509,7 @@ impl Attempt {
         require(
             self.prior_head.as_ref().is_none_or(|head| object_id(head))
                 && self.anchors.len() <= MAX_PROFILE_ENTRIES
+                && self.anchor_cursor <= self.anchors.len()
                 && unique(self.anchors.iter().map(|anchor| &anchor.path))
                 && self.anchors.iter().all(AnchorWitness::valid),
             "invalid preparation input witness",
@@ -531,6 +538,8 @@ pub struct AnchorWitness {
     pub object: String,
     pub mode: u32,
     pub prior_unit: (i64, i64),
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_digest: Option<String>,
     pub floor: (i64, i64),
     pub touched: Option<(i64, i64)>,
 }
@@ -542,6 +551,10 @@ impl AnchorWitness {
         relative(&self.path)
             && self.identity.valid()
             && object_id(&self.object)
+            && self
+                .unit_digest
+                .as_ref()
+                .is_none_or(|digest| hex(digest, 64))
             && valid_stamp(&self.prior_unit)
             && valid_stamp(&self.floor)
             && self.floor >= self.prior_unit

@@ -941,7 +941,7 @@ fn reviewed_source_facts(
     Ok(sources)
 }
 
-fn digest(bytes: &[u8]) -> Result<String, Refusal> {
+pub(super) fn digest(bytes: &[u8]) -> Result<String, Refusal> {
     let bytes =
         sha256(bytes).map_err(|_| refused("Could not bind the producer evidence digest."))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())

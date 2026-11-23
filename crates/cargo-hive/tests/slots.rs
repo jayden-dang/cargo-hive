@@ -4097,6 +4097,27 @@ fn packaged_take_command(
     mode: &str,
     expect: &str,
 ) -> std::process::Command {
+    packaged_take_with_binary(
+        fixture,
+        pool,
+        head,
+        key_path,
+        mode,
+        expect,
+        Path::new(env!("CARGO_BIN_EXE_cargo-hive")),
+    )
+}
+
+#[allow(clippy::disallowed_types)]
+fn packaged_take_with_binary(
+    fixture: &PoolFixture,
+    pool: &str,
+    head: &str,
+    key_path: &Path,
+    mode: &str,
+    expect: &str,
+    binary: &Path,
+) -> std::process::Command {
     let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
     let mut command = fixture
@@ -4105,7 +4126,8 @@ fn packaged_take_command(
     producer_environment(&mut command);
     command
         .arg(helper)
-        .args([mode, env!("CARGO_BIN_EXE_cargo-hive")])
+        .arg(mode)
+        .arg(binary)
         .arg(&fixture.repo)
         .args([
             pool,
@@ -4172,6 +4194,13 @@ fn guarded_workspace_check(slot: &LeasedSlot, generation: u64) {
 }
 
 fn workspace_unit_stamp(path: &Path, package: &str) -> std::time::SystemTime {
+    fs::metadata(workspace_unit_stamp_path(path, package))
+        .unwrap()
+        .modified()
+        .unwrap()
+}
+
+fn workspace_unit_stamp_path(path: &Path, package: &str) -> PathBuf {
     use cargo_hive_core::{fingerprint, unit_path};
     let profile = path.join("target/debug");
     let report = fingerprint::read_profile(&profile);
@@ -4182,10 +4211,7 @@ fn workspace_unit_stamp(path: &Path, package: &str) -> std::time::SystemTime {
         .filter(|unit| unit.loc.package() == package);
     let unit = units.next().unwrap();
     assert!(units.next().is_none());
-    fs::metadata(unit_path::stamp(&profile, &unit.loc, unit.kind))
-        .unwrap()
-        .modified()
-        .unwrap()
+    unit_path::stamp(&profile, &unit.loc, unit.kind)
 }
 
 const RETAINED_EDIT: &str = "pub fn answer() -> u32 { 43 }\n";
@@ -4380,6 +4406,134 @@ fn a_retained_attempt_refuses_changed_effective_fixed_tool_selection_before_perm
     assert_eq!(git(&slot.path, &["rev-parse", "HEAD"]), slot.head);
     let saved = slot.fixture.record();
     assert_eq!(saved["pools"][0]["slots"][0]["phase"]["kind"], "reserved");
+}
+
+#[test]
+fn a_replaced_unit_stamp_with_the_same_mtime_blocks_retained_ready() {
+    let (slot, key, next) = first_completed_workspace();
+    return_workspace(&slot, 1);
+    let stamp = workspace_unit_stamp_path(&slot.path, "fixture");
+    let before = fs::metadata(&stamp).unwrap();
+    let wrapper = slot.fixture._repo_dir.path.join("replace-unit-stamp");
+    let counter = slot.fixture._repo_dir.path.join("preparation-checkpoints");
+    fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+if [ "$1" = slot ] && [ "$2" = step-check ]; then
+    count=0
+    if [ -f "$HIVE_TEST_COUNTER" ]; then IFS= read -r count < "$HIVE_TEST_COUNTER"; fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$HIVE_TEST_COUNTER"
+    if [ "$count" = 4 ]; then
+        /bin/cp -p "$HIVE_TEST_UNIT_STAMP" "$HIVE_TEST_UNIT_STAMP.replacement" || exit 20
+        /bin/mv -f "$HIVE_TEST_UNIT_STAMP.replacement" "$HIVE_TEST_UNIT_STAMP" || exit 21
+    fi
+fi
+exec "$HIVE_TEST_BINARY" "$@"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    let child = packaged_take_with_binary(
+        &slot.fixture,
+        &slot.pool,
+        &next,
+        &key,
+        "take",
+        "1",
+        &wrapper,
+    )
+    .env("HIVE_TEST_BINARY", env!("CARGO_BIN_EXE_cargo-hive"))
+    .env("HIVE_TEST_COUNTER", &counter)
+    .env("HIVE_TEST_UNIT_STAMP", &stamp)
+    .spawn()
+    .unwrap();
+    let out = common::wait_within(child, Duration::from_secs(30));
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let after = fs::metadata(&stamp).unwrap();
+    assert_ne!(after.ino(), before.ino());
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert!(result.get("path").is_none());
+    let saved = slot.fixture.record();
+    assert_eq!(
+        saved["pools"][0]["slots"][0]["phase"]["attempt"]["stage"],
+        "anchors_in_progress"
+    );
+}
+
+#[test]
+fn a_swapped_anchor_parent_receives_no_mtime_effect() {
+    let (slot, key, _) = first_completed_workspace();
+    return_workspace(&slot, 1);
+    let outside = slot.fixture._repo_dir.path.join("outside-anchor-parent");
+    fs::create_dir(&outside).unwrap();
+    let sentinel = outside.join("lib.rs");
+    fs::write(&sentinel, b"outside content").unwrap();
+    let before_outside = fs::metadata(&sentinel).unwrap().modified().unwrap();
+    let source = slot.path.join("src");
+    let before_anchor = fs::metadata(source.join("lib.rs"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let displaced = slot.path.join("src-displaced");
+    let wrapper = slot.fixture._repo_dir.path.join("swap-anchor-parent");
+    let counter = slot.fixture._repo_dir.path.join("anchor-fd-checkpoint");
+    fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+if [ "$1" = slot ] && [ "$2" = step-check ]; then
+    count=0
+    if [ -f "$HIVE_TEST_COUNTER" ]; then IFS= read -r count < "$HIVE_TEST_COUNTER"; fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$HIVE_TEST_COUNTER"
+    if [ "$count" = 4 ]; then
+        /bin/mv "$HIVE_TEST_SOURCE" "$HIVE_TEST_DISPLACED" || exit 20
+        /bin/ln -s "$HIVE_TEST_OUTSIDE" "$HIVE_TEST_SOURCE" || exit 21
+    fi
+fi
+exec "$HIVE_TEST_BINARY" "$@"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    let child = packaged_take_with_binary(
+        &slot.fixture,
+        &slot.pool,
+        &slot.head,
+        &key,
+        "take",
+        "1",
+        &wrapper,
+    )
+    .env("HIVE_TEST_BINARY", env!("CARGO_BIN_EXE_cargo-hive"))
+    .env("HIVE_TEST_COUNTER", &counter)
+    .env("HIVE_TEST_SOURCE", &source)
+    .env("HIVE_TEST_DISPLACED", &displaced)
+    .env("HIVE_TEST_OUTSIDE", &outside)
+    .spawn()
+    .unwrap();
+    let out = common::wait_within(child, Duration::from_secs(30));
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert!(result.get("path").is_none());
+    assert_eq!(
+        fs::metadata(&sentinel).unwrap().modified().unwrap(),
+        before_outside
+    );
+    assert_eq!(fs::read(&sentinel).unwrap(), b"outside content");
+    assert_eq!(
+        fs::metadata(displaced.join("lib.rs"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        before_anchor
+    );
+    let saved = slot.fixture.record();
+    assert_eq!(
+        saved["pools"][0]["slots"][0]["phase"]["attempt"]["stage"],
+        "anchors_in_progress"
+    );
 }
 
 #[test]

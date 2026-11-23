@@ -247,13 +247,50 @@ fn role(kind: UnitKind, role: &str) -> bool {
     kind.as_str() == role || (kind == UnitKind::Lib && role == "library")
 }
 
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+struct FileWitness {
+    path: PathBuf,
+    identity: FileIdentity,
+    mode: u32,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+    bytes: u64,
+}
+
+impl FileWitness {
+    fn read(path: &Path) -> Result<Self, Refusal> {
+        let file = open_owner_state_file(path).map_err(|_| unproved())?;
+        let meta = file.metadata().map_err(|_| unproved())?;
+        if path.canonicalize().as_deref().ok() != Some(path) || meta.len() > 1024 * 1024 {
+            return Err(unproved());
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+            identity: FileIdentity::of(&meta),
+            mode: meta.mode(),
+            mtime: mtime(&meta),
+            ctime: (meta.ctime(), meta.ctime_nsec()),
+            bytes: meta.len(),
+        })
+    }
+}
+
+#[derive(PartialEq, Eq, serde::Serialize)]
+struct UnitWitness {
+    stamp: FileWitness,
+    dep_info: FileWitness,
+    source_digest: String,
+}
+
+pub(super) struct UnitWitnesses(BTreeMap<PathBuf, BTreeMap<PathBuf, UnitWitness>>);
+
 fn unit_names_anchor(
     fs: &dyn Fs,
     directory: &Path,
     unit: &Unit,
     checkout: &Path,
     anchor: &Path,
-) -> Result<bool, Refusal> {
+) -> Result<Option<(FileWitness, String)>, Refusal> {
     let crate_name = unit
         .stem
         .strip_prefix(unit.kind.as_str())
@@ -283,9 +320,13 @@ fn unit_names_anchor(
             _ => return Err(unproved()),
         }
     };
+    let before = FileWitness::read(&dep_info)?;
     let bytes = fs
         .read_regular_bounded(&dep_info, 1024 * 1024)
         .map_err(|_| unproved())?;
+    if before != FileWitness::read(&dep_info)? {
+        return Err(unproved());
+    }
     let text = std::str::from_utf8(&bytes).map_err(|_| unproved())?;
     let (_, inputs) = text
         .lines()
@@ -299,31 +340,36 @@ fn unit_names_anchor(
             .strip_prefix(&expected)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
         {
-            return Ok(true);
+            return Ok(Some((before, profile::digest(&bytes)?)));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
-fn floors(
+fn cargo_units(
     checkout: &CheckoutProof,
     profile: &PoolProfile,
     producer: &Producer,
-) -> Result<BTreeMap<PathBuf, (i64, i64)>, Refusal> {
+    require_all: bool,
+) -> Result<UnitWitnesses, Refusal> {
     let Producer::Complete { roots, .. } = producer else {
-        return Ok(BTreeMap::new());
+        return Ok(UnitWitnesses(BTreeMap::new()));
     };
     let anchors = consumers(profile, producer);
     if anchors.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok(UnitWitnesses(BTreeMap::new()));
     }
     let fs = host_fs();
     let profiles =
         target::identify_strict(fs.as_ref(), &roots.build.path, CRATE_DIR_CAP, &cancelled)
             .map_err(|_| unproved())?;
     let reader = StrictProfileReader::new(fs.as_ref(), &cancelled);
-    let mut witnessed = BTreeMap::new();
-    let mut by_consumer = BTreeMap::new();
+    let mut witnessed: BTreeMap<_, BTreeMap<_, _>> = anchors
+        .keys()
+        .cloned()
+        .map(|key| (key, BTreeMap::new()))
+        .collect();
+    let mut proved = BTreeSet::new();
     let mut by_package = BTreeMap::<_, Vec<_>>::new();
     for consumer in anchors.values().flatten() {
         by_package
@@ -342,6 +388,7 @@ fn floors(
         }
         let graph = report.graph.ok_or_else(unproved)?;
         for unit in graph.units {
+            check_cancelled()?;
             let Some(consumers) = by_package.get(unit.loc.package()) else {
                 continue;
             };
@@ -349,15 +396,16 @@ fn floors(
                 .iter()
                 .filter(|consumer| role(unit.kind, &consumer.role))
             {
-                if !unit_names_anchor(
+                let Some((dep_info, source_digest)) = unit_names_anchor(
                     fs.as_ref(),
                     &directory,
                     &unit,
                     &checkout.path,
                     &consumer.anchor,
-                )? {
+                )?
+                else {
                     continue;
-                }
+                };
                 let invocation = profile
                     .invocations
                     .iter()
@@ -371,29 +419,41 @@ fn floors(
                     return Err(unproved());
                 }
                 let stamp_path = unit_path::stamp(&directory, &unit.loc, unit.kind);
-                let file = open_owner_state_file(&stamp_path).map_err(|_| unproved())?;
-                let stamp = mtime(&file.metadata().map_err(|_| unproved())?);
-                if !stamp_path.starts_with(&roots.build.path) || stamp.0 <= 0 || stamp > now()? {
+                let stamp = FileWitness::read(&stamp_path)?;
+                if !stamp_path.starts_with(&roots.build.path)
+                    || stamp.mtime.0 <= 0
+                    || stamp.mtime > now()?
+                {
                     return Err(unproved());
                 }
-                by_consumer
-                    .entry(&consumer.id)
-                    .and_modify(|seen: &mut (i64, i64)| *seen = (*seen).max(stamp))
-                    .or_insert(stamp);
+                proved.insert(&consumer.id);
+                let witnesses = witnessed.get_mut(&consumer.anchor).ok_or_else(unproved)?;
+                let unit = UnitWitness {
+                    stamp,
+                    dep_info,
+                    source_digest,
+                };
+                if let Some(previous) = witnesses.get(&stamp_path) {
+                    if previous != &unit {
+                        return Err(unproved());
+                    }
+                } else {
+                    witnesses.insert(stamp_path, unit);
+                }
             }
         }
     }
     for (path, consumers) in anchors {
-        if checkout.path.join(&path).starts_with(&roots.build.path) {
+        if checkout.path.join(&path).starts_with(&roots.build.path)
+            || (require_all
+                && consumers
+                    .iter()
+                    .any(|consumer| !proved.contains(&consumer.id)))
+        {
             return Err(unproved());
         }
-        let mut floor = (0, 0);
-        for consumer in consumers {
-            floor = floor.max(*by_consumer.get(&consumer.id).ok_or_else(unproved)?);
-        }
-        witnessed.insert(path, floor);
     }
-    Ok(witnessed)
+    Ok(UnitWitnesses(witnessed))
 }
 
 fn anchor(checkout: &CheckoutProof, path: &Path) -> Result<(Metadata, String), Refusal> {
@@ -415,14 +475,58 @@ fn anchor(checkout: &CheckoutProof, path: &Path) -> Result<(Metadata, String), R
     Ok((meta, object))
 }
 
+pub(super) fn verify_anchor_descriptor(
+    checkout: &CheckoutProof,
+    witness: &AnchorWitness,
+    descriptor: &std::fs::File,
+) -> Result<(), Refusal> {
+    let (named, object) = anchor(checkout, &witness.path)?;
+    let inherited = descriptor.metadata().map_err(|_| unproved())?;
+    if !inherited.is_file()
+        || FileIdentity::of(&inherited) != witness.identity
+        || super::directory_stamp(&named) != super::directory_stamp(&inherited)
+        || object != witness.object
+        || inherited.mode() != witness.mode
+        || mtime(&inherited) > witness.floor
+    {
+        return Err(unproved());
+    }
+    Ok(())
+}
+
+fn digest_units(units: &BTreeMap<PathBuf, UnitWitness>) -> Result<String, Refusal> {
+    let bytes = serde_json::to_vec(units).map_err(|_| unproved())?;
+    profile::digest(&bytes)
+}
+
+fn verify_unit_sets(units: &UnitWitnesses, witnesses: &[AnchorWitness]) -> Result<(), Refusal> {
+    if units.0.len() != witnesses.len() {
+        return Err(unproved());
+    }
+    for proof in witnesses {
+        let current = units.0.get(&proof.path).ok_or_else(unproved)?;
+        let recorded = proof.unit_digest.as_deref().ok_or_else(unproved)?;
+        if digest_units(current)? != recorded {
+            return Err(unproved());
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn witness(
     checkout: &CheckoutProof,
     profile: &PoolProfile,
     producer: &Producer,
 ) -> Result<Vec<AnchorWitness>, Refusal> {
-    floors(checkout, profile, producer)?
+    cargo_units(checkout, profile, producer, true)?
+        .0
         .into_iter()
-        .map(|(path, prior_unit)| {
+        .map(|(path, units)| {
+            let prior_unit = units
+                .values()
+                .map(|unit| unit.stamp.mtime)
+                .max()
+                .ok_or_else(unproved)?;
             let (meta, object) = anchor(checkout, &path)?;
             let current = now()?;
             if mtime(&meta) > current {
@@ -434,6 +538,7 @@ pub(super) fn witness(
                 object,
                 mode: meta.mode(),
                 prior_unit,
+                unit_digest: Some(digest_units(&units)?),
                 floor: current.max(prior_unit),
                 touched: None,
             })
@@ -447,14 +552,8 @@ pub(super) fn observe_touch(
     producer: &Producer,
     witnesses: &[AnchorWitness],
 ) -> Result<Vec<AnchorWitness>, Refusal> {
-    let floors = floors(checkout, profile, producer)?;
-    if floors.len() != witnesses.len()
-        || witnesses
-            .iter()
-            .any(|proof| floors.get(&proof.path) != Some(&proof.prior_unit))
-    {
-        return Err(unproved());
-    }
+    let units = cargo_units(checkout, profile, producer, true)?;
+    verify_unit_sets(&units, witnesses)?;
     witnesses
         .iter()
         .map(|proof| {
@@ -466,7 +565,7 @@ pub(super) fn observe_touch(
         .collect()
 }
 
-pub(super) fn verify_touch(
+fn verify_touch(
     checkout: &CheckoutProof,
     profile: &PoolProfile,
     producer: &Producer,
@@ -479,6 +578,41 @@ pub(super) fn verify_touch(
     for proof in witnesses {
         if !expected.contains_key(&proof.path)
             || proof.touched != Some(verify_one(checkout, proof)?)
+        {
+            return Err(unproved());
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn before_gc(
+    checkout: &CheckoutProof,
+    profile: &PoolProfile,
+    producer: &Producer,
+    witnesses: &[AnchorWitness],
+) -> Result<UnitWitnesses, Refusal> {
+    verify_touch(checkout, profile, producer, witnesses)?;
+    let units = cargo_units(checkout, profile, producer, true)?;
+    verify_unit_sets(&units, witnesses)?;
+    Ok(units)
+}
+
+pub(super) fn after_gc(
+    checkout: &CheckoutProof,
+    profile: &PoolProfile,
+    producer: &Producer,
+    witnesses: &[AnchorWitness],
+    prior: &UnitWitnesses,
+) -> Result<(), Refusal> {
+    verify_touch(checkout, profile, producer, witnesses)?;
+    let remaining = cargo_units(checkout, profile, producer, false)?;
+    for proof in witnesses {
+        let touched = proof.touched.ok_or_else(unproved)?;
+        let old = prior.0.get(&proof.path).ok_or_else(unproved)?;
+        let current = remaining.0.get(&proof.path).ok_or_else(unproved)?;
+        if current
+            .iter()
+            .any(|(path, unit)| old.get(path) != Some(unit) || unit.stamp.mtime >= touched)
         {
             return Err(unproved());
         }
