@@ -69,10 +69,10 @@ _Requirements: FUZZ-1.2, FUZZ-1.3, FUZZ-2.2, FUZZ-2.4, FUZZ-5.2_
 **Interfaces:** Consumes existing seed functions and Skip/error outcomes. Produces `source::fuzzing::dep_info` and `fill::fuzzing::rustc_info`, both `fn(&[u8])`, using shared production byte/stream decoding.
 **Depends-on:** Task 1
 
-- [ ] Assert independently generated registry/workspace/escaped-space classifications, current textual-prefix behavior, the unit-dir Workspace veto, and absent/ambiguous rustc-info outputs. Matching output entries, not the number of release lines inside one entry, decides ambiguity.
-- [ ] Add invalid UTF-8, exact-cap, over-cap and short/error-stream cases, including the distinct fill::hash_unchanged staging hash re-reader. If a behavior correction is needed, reproduce RED before changing production decoding.
-- [ ] Add adapters exercising raw and structured cases without host filesystem or subprocess effects.
-- [ ] Run `cargo test -p cargo-hive-seed --lib` and fuzz-config seed check, then commit `test(seed): fuzz dependency and toolchain readers` with evidence.
+- [x] Assert independently generated registry/workspace/escaped-space classifications, current textual-prefix behavior, the unit-dir Workspace veto, and absent/ambiguous rustc-info outputs. Matching output entries, not the number of release lines inside one entry, decides ambiguity.
+- [x] Add invalid UTF-8, exact-cap, over-cap and short/error-stream cases, including the distinct fill::hash_unchanged staging hash re-reader. If a behavior correction is needed, reproduce RED before changing production decoding.
+- [x] Add adapters exercising raw and structured cases without host filesystem or subprocess effects.
+- [x] Run `cargo test -p cargo-hive-seed --lib` and fuzz-config seed check, then commit `test(seed): fuzz dependency and toolchain readers` with evidence.
 
 _Requirements: FUZZ-1.1, FUZZ-2.1, FUZZ-2.6_
 
