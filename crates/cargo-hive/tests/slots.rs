@@ -26,10 +26,14 @@ struct PoolFixture {
 
 impl PoolFixture {
     fn new() -> Self {
-        let hive = Hive::new();
-        hive.config(&json!({"secondary_roots": [hive.secondary_root.path]}).to_string());
         let repo_dir = Scratch::new("slot-registry");
         let repo = init_repo(&repo_dir.path.join("main"), "");
+        Self::from_repo(repo_dir, repo)
+    }
+
+    fn from_repo(repo_dir: Scratch, repo: PathBuf) -> Self {
+        let hive = Hive::new();
+        hive.config(&json!({"secondary_roots": [hive.secondary_root.path]}).to_string());
         register(&hive, &repo);
         let profile = repo_dir.path.join("reviewed.json");
         let common = repo.join(".git");
@@ -590,6 +594,100 @@ fn reserve_refuses_inexact_commits_and_malformed_private_input() {
         assert_no_credential(&out, &key);
         assert_eq!(fs::read(fixture.file()).unwrap(), saved);
     }
+}
+
+#[test]
+fn reserve_leaves_unfetched_commits_and_their_object_store_untouched() {
+    let repo_dir = Scratch::new("slot-partial-clone");
+    let origin = init_repo(&repo_dir.path.join("origin"), "");
+    let local_commit = git(&origin, &["rev-parse", "HEAD"]);
+    let missing_commit = git(
+        &origin,
+        &[
+            "commit-tree",
+            "HEAD^{tree}",
+            "-p",
+            "HEAD",
+            "-m",
+            "unfetched",
+        ],
+    );
+    git(
+        &origin,
+        &["update-ref", "refs/heads/unfetched", &missing_commit],
+    );
+    git(&origin, &["config", "uploadpack.allowFilter", "true"]);
+    git(
+        &origin,
+        &["config", "uploadpack.allowAnySHA1InWant", "true"],
+    );
+    git(
+        &repo_dir.path,
+        &[
+            "clone",
+            "--no-local",
+            "--single-branch",
+            "--filter=blob:none",
+            origin.to_str().unwrap(),
+            "main",
+        ],
+    );
+    let repo = repo_dir.path.join("main").canonicalize().unwrap();
+    git(&repo, &["config", "protocol.file.allow", "always"]);
+    assert_eq!(git(&repo, &["config", "remote.origin.promisor"]), "true");
+
+    let fixture = PoolFixture::from_repo(repo_dir, repo);
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let saved = fs::read(fixture.file()).unwrap();
+    let local_objects = || {
+        git(
+            &fixture.repo,
+            &[
+                "cat-file",
+                "--batch-all-objects",
+                "--batch-check=%(objectname)",
+            ],
+        )
+    };
+    let inventory = local_objects();
+    assert!(!inventory.lines().any(|oid| oid == missing_commit));
+    assert!(inventory.lines().any(|oid| oid == local_commit));
+    let key = "a".repeat(64);
+    let op = "f".repeat(32);
+    let stale_pool = "0".repeat(32);
+    for (namespace, detail) in [
+        (stale_pool.as_str(), "pool namespace is stale"),
+        (pool, "full object ID"),
+    ] {
+        let (out, refused) = finish_private(start_private(
+            &fixture.hive,
+            fixture.reservation(namespace, 1, 0, &missing_commit, &op),
+            &key,
+        ));
+        assert_eq!(out.status.code(), Some(1), "{refused}");
+        assert!(
+            refused["detail"].as_str().unwrap().contains(detail),
+            "{refused}"
+        );
+        assert_eq!(
+            local_objects(),
+            inventory,
+            "the slot probe changed the local objects"
+        );
+        assert_eq!(fs::read(fixture.file()).unwrap(), saved);
+        assert!(out.stderr.is_empty(), "{out:?}");
+    }
+
+    let (out, reserved) = finish_private(start_private(
+        &fixture.hive,
+        fixture.reservation(pool, 1, 0, &local_commit, &op),
+        &key,
+    ));
+    assert!(out.status.success(), "{reserved}");
+    assert_eq!(reserved["generation"], 1);
+    assert_eq!(local_objects(), inventory);
 }
 
 #[test]
@@ -1436,7 +1534,13 @@ fn cancelling_the_git_probe_in_existing_pool_status_exits_130() {
     fs::write(
         &shim,
         r#"#!/bin/sh
-printf '%s\n' "$*" > "$SLOT_TEST_GIT_PROBE"
+printf '%s\n' "$*" \
+    "GIT_DIR=${GIT_DIR-unset}" \
+    "GIT_NO_LAZY_FETCH=${GIT_NO_LAZY_FETCH-unset}" \
+    "GIT_ALLOW_PROTOCOL=${GIT_ALLOW_PROTOCOL-unset}" \
+    "CARGO_TARGET_DIR=${CARGO_TARGET_DIR-unset}" \
+    "CARGO_BUILD_TARGET_DIR=${CARGO_BUILD_TARGET_DIR-unset}" \
+    "CARGO_BUILD_BUILD_DIR=${CARGO_BUILD_BUILD_DIR-unset}" > "$SLOT_TEST_GIT_PROBE"
 kill -INT "$PPID"
 exec /bin/sleep 8
 "#,
@@ -1459,12 +1563,34 @@ exec /bin/sleep 8
         ])
         .env("PATH", path)
         .env("SLOT_TEST_GIT_PROBE", &probe)
+        .env("GIT_DIR", fixture.repo.join("caller-git"))
+        .env("GIT_NO_LAZY_FETCH", "0")
+        .env("GIT_ALLOW_PROTOCOL", "file")
+        .env("CARGO_TARGET_DIR", fixture.repo.join("caller-target"))
+        .env(
+            "CARGO_BUILD_TARGET_DIR",
+            fixture.repo.join("caller-build-target"),
+        )
+        .env("CARGO_BUILD_BUILD_DIR", fixture.repo.join("caller-build"))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     let out = common::wait_within(child, std::time::Duration::from_secs(5));
-    assert!(fs::read_to_string(probe).unwrap().contains("rev-parse"));
+    let recorded = fs::read_to_string(probe).unwrap();
+    let mut lines = recorded.lines();
+    assert!(lines.next().unwrap().contains("rev-parse"));
+    assert_eq!(
+        lines.collect::<Vec<_>>(),
+        [
+            "GIT_DIR=unset",
+            "GIT_NO_LAZY_FETCH=1",
+            "GIT_ALLOW_PROTOCOL=",
+            "CARGO_TARGET_DIR=unset",
+            "CARGO_BUILD_TARGET_DIR=unset",
+            "CARGO_BUILD_BUILD_DIR=unset",
+        ]
+    );
     let result: Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|err| panic!("{err}: {out:?}"));
     assert_eq!(out.status.code(), Some(130), "{result}");

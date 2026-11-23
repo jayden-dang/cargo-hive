@@ -752,6 +752,20 @@ fn git_scope(main: &Path, args: &[&str]) -> Result<Vec<u8>, Refusal> {
     spec.args.extend(args.iter().map(|arg| (*arg).into()));
     let parent: Vec<_> = std::env::vars_os().collect();
     env::git(&mut spec, &parent);
+    // Git versions without the lazy-fetch switch still honor the transport allowlist.
+    let controlled = [("GIT_NO_LAZY_FETCH", "1"), ("GIT_ALLOW_PROTOCOL", "")];
+    spec.env_remove
+        .retain(|key| !controlled.iter().any(|(name, _)| key == *name));
+    spec.env_remove.extend(
+        [
+            "CARGO_TARGET_DIR",
+            "CARGO_BUILD_TARGET_DIR",
+            "CARGO_BUILD_BUILD_DIR",
+        ]
+        .map(Into::into),
+    );
+    spec.env_set
+        .extend(controlled.map(|(key, value)| (key.into(), value.into())));
     match proc::run_bounded(
         &spec,
         Duration::from_secs(10),
