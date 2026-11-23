@@ -1,6 +1,9 @@
 #!/bin/bash
 
 # Private entry point used by the installed guide.
+set +x +a
+unset -v credential nonce request step_request extra
+export -n SHELLOPTS
 check_slot_version() {
     local binary=$1 metadata version actual
     local version_pattern='^  hive-version: "([0-9]+\.[0-9]+\.[0-9]+)"$'
@@ -29,7 +32,8 @@ check_slot_version() {
 }
 
 git_for_slot() {
-    /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= \
+    /usr/bin/env -i PATH=/usr/bin:/bin GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
         /usr/bin/git --no-replace-objects -c core.fsmonitor=false -c core.hooksPath=/dev/null \
         -c submodule.recurse=false -c maintenance.auto=false -c gc.auto=0 "$@"
 }
@@ -140,7 +144,6 @@ if [[ $# == 2 && $1 == check-version ]]; then
 fi
 
 if [[ $# == 10 && ( $1 == take || $1 == take-seeded ) ]]; then
-    set +x
     mode=$1
     shift
     take_slot "$@" "$mode" && exit 0

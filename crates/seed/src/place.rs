@@ -187,26 +187,107 @@ pub fn place(
     dir_cap: usize,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<PlaceReport, Error> {
+    place_selected(ctx, checkout, units, window, dir_cap, None, cancel)
+}
+
+/// An independently verified, initially absent slot output, using coincident Cargo roles.
+pub struct SlotDestination<'a> {
+    pub target: &'a Path,
+    pub checkout_identity: cargo_hive_state::slots::FileIdentity,
+}
+
+impl SlotDestination<'_> {
+    fn checkout_matches(&self, fs: &dyn Fs, checkout: &Path) -> bool {
+        self.target != checkout
+            && self.target.starts_with(checkout)
+            && checkout.canonicalize().as_deref().ok() == Some(checkout)
+            && fs.entry_stat(checkout).is_ok_and(|stat| {
+                stat.kind == EntryKind::Dir
+                    && (stat.dev, stat.ino)
+                        == (self.checkout_identity.dev, self.checkout_identity.ino)
+            })
+    }
+}
+
+pub(crate) fn place_for_slot(
+    ctx: &Ctx<'_>,
+    checkout: &Path,
+    units: &[Row],
+    window: Duration,
+    dir_cap: usize,
+    destination: &SlotDestination<'_>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<PlaceReport, Error> {
+    place_selected(
+        ctx,
+        checkout,
+        units,
+        window,
+        dir_cap,
+        Some(destination),
+        cancel,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct PlacementRoot<'a> {
+    path: &'a Path,
+    guard: Option<&'a dyn Fn(&Path) -> bool>,
+}
+
+impl PlacementRoot<'_> {
+    fn permits(self, directory: &Path) -> bool {
+        self.guard.is_none_or(|check| check(directory))
+    }
+}
+
+fn place_selected(
+    ctx: &Ctx<'_>,
+    checkout: &Path,
+    units: &[Row],
+    window: Duration,
+    dir_cap: usize,
+    destination: Option<&SlotDestination<'_>>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<PlaceReport, Error> {
     if units.is_empty() {
         return finish(ctx, PlaceReport::default(), &mut Added::default());
     }
     let mut report = PlaceReport::default();
-    let resolved = match cargo_hive_cargo::metadata::resolve(checkout, cancel) {
-        Ok(resolved) => resolved,
-        Err(reason) => {
-            report.findings.push((
-                "target.unresolved".to_string(),
-                Some(checkout.to_path_buf()),
-                format!(
-                    "{checkout}: {reason}; nothing was cloned",
-                    checkout = checkout.display()
-                ),
+    let target = if let Some(destination) = destination {
+        let ready = !cancel()
+            && destination.checkout_matches(ctx.fs, checkout)
+            && destination
+                .target
+                .parent()
+                .is_some_and(|parent| parent.canonicalize().as_deref().ok() == Some(parent))
+            && ctx
+                .fs
+                .entry_stat(destination.target)
+                .is_err_and(|err| err.kind() == io::ErrorKind::NotFound);
+        if !ready {
+            return Err(Error::Failed(
+                "the verified slot seed destination changed".into(),
             ));
-            return finish(ctx, report, &mut Added::default());
         }
-    };
-    if resolved.build_directory != resolved.target_directory {
-        report.findings.push((
+        destination.target.to_path_buf()
+    } else {
+        let resolved = match cargo_hive_cargo::metadata::resolve(checkout, cancel) {
+            Ok(resolved) => resolved,
+            Err(reason) => {
+                report.findings.push((
+                    "target.unresolved".to_string(),
+                    Some(checkout.to_path_buf()),
+                    format!(
+                        "{checkout}: {reason}; nothing was cloned",
+                        checkout = checkout.display()
+                    ),
+                ));
+                return finish(ctx, report, &mut Added::default());
+            }
+        };
+        if resolved.build_directory != resolved.target_directory {
+            report.findings.push((
             "target.split".to_string(),
             Some(resolved.target_directory.clone()),
             format!(
@@ -215,9 +296,10 @@ pub fn place(
                 resolved.target_directory.display()
             ),
         ));
-        return finish(ctx, report, &mut Added::default());
-    }
-    let target = resolved.target_directory;
+            return finish(ctx, report, &mut Added::default());
+        }
+        resolved.target_directory
+    };
     report.target_directory = Some(target.clone());
     match ctx.fs.create_dir(&target) {
         Ok(()) => {}
@@ -252,6 +334,25 @@ pub fn place(
         ))
     })?;
     report.target_identity = Some((stat.dev, stat.ino));
+    let check = |directory: &Path| {
+        destination.is_some_and(|destination| {
+            !cancel()
+                && destination.checkout_matches(ctx.fs, checkout)
+                && directory.starts_with(&target)
+                && directory.canonicalize().as_deref().ok() == Some(directory)
+                && ctx.fs.entry_stat(&target).is_ok_and(|actual| {
+                    actual.kind == EntryKind::Dir
+                        && (actual.dev, actual.ino) == (stat.dev, stat.ino)
+                })
+        })
+    };
+    let root = PlacementRoot {
+        path: &target,
+        guard: destination.map(|_| &check as &dyn Fn(&Path) -> bool),
+    };
+    if !root.permits(&target) {
+        return Err(Error::Failed("the created slot seed target changed".into()));
+    }
     let mut added = Added::default();
     if let Err(stop) = clone_tag(ctx, &mut added, &target) {
         return match stop.into_result(&mut report, "tag.clone", &target) {
@@ -266,7 +367,7 @@ pub fn place(
             report.cancelled = true;
             break;
         }
-        match place_unit(ctx, &target, row, window, dir_cap, &mut made, &mut added) {
+        match place_unit(ctx, root, row, window, dir_cap, &mut made, &mut added) {
             Ok(UnitOutcome::Cloned(unit, outside)) => {
                 report.cloned += 1;
                 if outside {
@@ -287,10 +388,17 @@ pub fn place(
                     return Err(Error::disk_full(why));
                 }
                 report.disk_full = Some(why);
-                align_mtimes(ctx, &target, &mut report);
+                if root.permits(&target) {
+                    align_mtimes(ctx, &target, &mut report);
+                }
                 return finish(ctx, report, &mut added);
             }
         }
+    }
+    if !root.permits(&target) {
+        return Err(Error::Failed(
+            "the slot seed target changed before completion".into(),
+        ));
     }
     align_mtimes(ctx, &target, &mut report);
     finish(ctx, report, &mut added)
@@ -356,13 +464,14 @@ enum UnitOutcome {
 
 fn place_unit(
     ctx: &Ctx<'_>,
-    target: &Path,
+    root: PlacementRoot<'_>,
     row: &Row,
     window: Duration,
     dir_cap: usize,
     made: &mut HashSet<PathBuf>,
     added: &mut Added,
 ) -> Result<UnitOutcome, String> {
+    let target = root.path;
     if !normal_only(&row.rel_profile) {
         return Ok(UnitOutcome::Failed(
             target.to_path_buf(),
@@ -395,6 +504,12 @@ fn place_unit(
     let mut has_build = false;
     for rel in &files {
         let dst = target.join(rel);
+        if !root.permits(target) {
+            return Ok(UnitOutcome::Failed(
+                dst,
+                "the slot seed target changed before directory creation".into(),
+            ));
+        }
         if let Some(parent) = dst.parent()
             && let Err(stop) = ensure_dirs(ctx.fs, parent, target, made)
         {
@@ -402,6 +517,12 @@ fn place_unit(
                 Stop::Full(why) => Err(why),
                 Stop::Failed(detail) => Ok(UnitOutcome::Failed(dst, detail)),
             };
+        }
+        if !dst.parent().is_some_and(|parent| root.permits(parent)) {
+            return Ok(UnitOutcome::Failed(
+                dst,
+                "the slot seed destination changed before cloning".into(),
+            ));
         }
         let src = entry.join(rel);
         match ctx.fs.clone_file(&src, &dst) {

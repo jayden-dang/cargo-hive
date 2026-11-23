@@ -289,8 +289,33 @@ pub(super) fn check_invocation(
     let reviewed_sources =
         reviewed_source_facts(&inputs, &discovered, checkout, profile, invocation)?;
     let graph_digest = digest(
-        &serde_json::to_vec(&(&inputs, reviewed_sources, &cargo, &rustc, tools_before))
+        &serde_json::to_vec(&(&inputs, reviewed_sources, &cargo, &rustc, &tools_before))
             .map_err(|_| refused("Could not bind the producer graph evidence."))?,
+    )?;
+
+    let fixed_environment: Vec<_> = environment
+        .iter()
+        .filter(|(key, _)| {
+            !invocation.environment.iter().any(|item| {
+                key.as_os_str() == std::ffi::OsStr::new(&item.name)
+                    && matches!(item.expectation, EnvironmentExpectation::Mutable { .. })
+            })
+        })
+        .map(|(key, value)| (key.as_encoded_bytes(), value.as_encoded_bytes()))
+        .collect();
+    let stable_digest = digest(
+        &serde_json::to_vec(&(
+            &inputs,
+            &discovered.graph_digest,
+            &cargo,
+            &rustc,
+            &tools_before,
+            &invocation.argv,
+            invocation.layout,
+            &cwd,
+            fixed_environment,
+        ))
+        .map_err(|_| refused("Could not bind the stable producer profile inputs."))?,
     )?;
 
     Ok(CheckedInvocation {
@@ -298,6 +323,7 @@ pub(super) fn check_invocation(
             invocation: invocation.id.clone(),
             graph_digest,
             environment_digest,
+            stable_digest: Some(stable_digest),
         },
         cargo,
         cwd,
@@ -770,6 +796,7 @@ struct PackageTarget {
 struct Discovered {
     resolved: metadata::Resolved,
     packages: Vec<Package>,
+    graph_digest: String,
 }
 
 fn deserialize_discovery<T: DeserializeOwned>(value: &serde_json::Value) -> Result<T, Refusal> {
@@ -798,6 +825,17 @@ fn discover(
     )?;
     let metadata: serde_json::Value = serde_json::from_slice(&output)
         .map_err(|_| refused("Cargo reported an incomplete reviewed graph."))?;
+    let graph_digest = digest(
+        &serde_json::to_vec(&[
+            &metadata["packages"],
+            &metadata["resolve"],
+            &metadata["workspace_members"],
+            &metadata["workspace_default_members"],
+            &metadata["target_directory"],
+            &metadata["build_directory"],
+        ])
+        .map_err(|_| refused("Could not bind the resolved Cargo graph."))?,
+    )?;
     Ok(Discovered {
         resolved: metadata::Resolved {
             workspace_root: deserialize_discovery(&metadata["workspace_root"])?,
@@ -809,6 +847,7 @@ fn discover(
             )?,
         },
         packages: deserialize_discovery(&metadata["packages"])?,
+        graph_digest,
     })
 }
 

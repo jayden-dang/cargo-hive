@@ -1,13 +1,17 @@
 //! Read-only proof for invalidating the consumers of a retained producer.
 
-use super::{CheckoutProof, Refusal, check_cancelled, git_scope, profile};
+use super::{CheckoutProof, Refusal, check_cancelled, profile};
 use cargo_hive_core::{
     caps::CRATE_DIR_CAP,
     fingerprint::{Format, StrictProfileReader, Unit, UnitKind},
     target, unit_path,
 };
 use cargo_hive_platform::{
-    EntryKind, Fs, flock::open_owner_state_file, host_fs, signals::cancelled,
+    EntryKind, Fs,
+    flock::open_owner_state_file,
+    host_fs,
+    proc::{Capture, ChildOutputError, Spec, run_bounded_complete},
+    signals::cancelled,
 };
 use cargo_hive_state::slots::{
     AnchorWitness, CargoLayout, Consumer, Coverage, FileIdentity, Locator, PoolProfile, Producer,
@@ -18,13 +22,102 @@ use std::{
     fs::Metadata,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 fn unproved() -> Refusal {
     Refusal::ReturnUncertain(
         "Could not establish the reviewed retained inputs and Cargo invalidation boundary.",
     )
+}
+
+/// The effective write configuration must match the packaged guide exactly.
+pub(super) fn git_write_scope(
+    path: &Path,
+    args: &[&str],
+    bound: usize,
+) -> Result<Vec<u8>, Refusal> {
+    let mut spec = Spec::new("/usr/bin/git");
+    spec.env_clear = true;
+    spec.env_set = [
+        ("PATH", "/usr/bin:/bin"),
+        ("GIT_NO_LAZY_FETCH", "1"),
+        ("GIT_ALLOW_PROTOCOL", ""),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.into(), value.into()))
+    .collect();
+    spec.args.extend(
+        [
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "submodule.recurse=false",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "gc.auto=0",
+            "-C",
+        ]
+        .into_iter()
+        .map(Into::into),
+    );
+    spec.args.push(path.as_os_str().into());
+    spec.args.extend(args.iter().map(Into::into));
+    match run_bounded_complete(
+        &spec,
+        Duration::from_secs(10),
+        Capture {
+            stdout_cap: bound + 1,
+            stderr_cap: 1,
+        },
+        &cancelled,
+    ) {
+        Ok(output)
+            if output.status.success()
+                && output.stdout.len() <= bound
+                && output.stderr_tail.is_empty() =>
+        {
+            Ok(output.stdout)
+        }
+        Err(ChildOutputError::Cancelled) => Err(cargo_hive_state::StateError::Cancelled.into()),
+        _ => Err(Refusal::ReturnUncertain(
+            "Could not verify the guide's bounded Git scope.",
+        )),
+    }
+}
+
+pub(super) fn verify_write_configuration(checkout: &Path) -> Result<(), Refusal> {
+    let refused = || {
+        Refusal::ReturnUncertain(
+            "The guide cannot safely run Git with conditional configuration or external filters.",
+        )
+    };
+    let settings = git_write_scope(
+        checkout,
+        &["config", "--no-includes", "--null", "--list"],
+        super::GIT_OUTPUT_LIMIT,
+    )?;
+    let records = settings.strip_suffix(b"\0").ok_or_else(refused)?;
+    for item in records.split(|&byte| byte == 0) {
+        let text = std::str::from_utf8(item).map_err(|_| refused())?;
+        let (key, _) = text.split_once('\n').unwrap_or((text, ""));
+        let key = key.to_ascii_lowercase();
+        if key.is_empty()
+            || key.starts_with("include.")
+            || key.starts_with("includeif.")
+            || key == "extensions.worktreeconfig"
+            || key.starts_with("filter.")
+        {
+            return Err(refused());
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn consumers<'a>(
@@ -68,7 +161,7 @@ pub(super) fn verify_changes(
     if prior == requested {
         return Ok(());
     }
-    let paths = git_scope(
+    let paths = git_write_scope(
         main,
         &[
             "diff",
@@ -80,6 +173,7 @@ pub(super) fn verify_changes(
             requested,
             "--",
         ],
+        super::GIT_OUTPUT_LIMIT,
     )?;
     if paths.is_empty() {
         return Ok(());
@@ -113,9 +207,10 @@ pub(super) fn verify_changes(
 }
 
 fn endpoint_object(main: &Path, endpoint: &str, path: &str) -> Result<(u32, String), Refusal> {
-    let raw = git_scope(
+    let raw = git_write_scope(
         main,
         &["--literal-pathspecs", "ls-tree", "-z", endpoint, "--", path],
+        super::GIT_OUTPUT_LIMIT,
     )?;
     let row = raw
         .strip_suffix(b"\0")

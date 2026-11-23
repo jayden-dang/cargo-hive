@@ -1661,7 +1661,7 @@ fn step_check(
             let inspection = if let Some(prior_head) = &attempt.prior_head {
                 let proof =
                     inspect_prepared_checkout(&snapshot.pool, &snapshot, index, prior_head)?;
-                inspect::reject_checkout_filters(&proof.path)?;
+                prepare::verify_write_configuration(&proof.path)?;
                 prepare::verify_changes(
                     &snapshot.pool.main,
                     prior_head,
@@ -1676,7 +1676,7 @@ fn step_check(
                     &snapshot.registry,
                     Some(&snapshot.pool),
                 )?;
-                inspect::reject_checkout_filters(&snapshot.pool.main)?;
+                prepare::verify_write_configuration(&snapshot.pool.main)?;
                 None
             };
             fence.update(&snapshot, |slot| {
@@ -1859,18 +1859,17 @@ fn step_check(
 
 fn verify_requested_tree(main: &Path, commit: &str) -> Result<(), Refusal> {
     let root = format!("{commit}^{{tree}}");
-    let output = Git::at(main)
-        .slot_read_only(
-            &[
-                "rev-list",
-                "--objects",
-                "--no-object-names",
-                "--missing=print",
-                &root,
-            ],
-            1024 * 1024,
-        )
-        .map_err(|err| git_error(main, err))?;
+    let output = prepare::git_write_scope(
+        main,
+        &[
+            "rev-list",
+            "--objects",
+            "--no-object-names",
+            "--missing=print",
+            &root,
+        ],
+        1024 * 1024,
+    )?;
     let mut lines = complete_git_lines(&output).ok_or_else(commit_refusal)?;
     let valid = |line: &str| line.len() == commit.len() && slots::object_id(line);
     if !lines.next().is_some_and(valid) || !lines.all(valid) {
@@ -2000,7 +1999,20 @@ fn inspect_prepared_checkout(
             argv: invocation.argv.clone(),
             cwd: invocation.cwd.clone(),
         };
-        profile::check_invocation(&pool.profile, &shape, &proof, &roots)?;
+        let checked = profile::check_invocation(&pool.profile, &shape, &proof, &roots)?;
+        if let Producer::Complete { invocations, .. } = &slot.producer
+            && invocations
+                .iter()
+                .filter(|completed| completed.evidence.invocation == invocation.id)
+                .any(|completed| {
+                    completed.evidence.stable_digest.is_none()
+                        || completed.evidence.stable_digest != checked.evidence.stable_digest
+                })
+        {
+            return Err(Refusal::ReturnUncertain(
+                "The current producer inputs differ from the retained generation's fixed graph, tools or environment.",
+            ));
+        }
     }
     Ok(proof)
 }

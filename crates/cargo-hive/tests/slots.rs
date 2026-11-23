@@ -4083,6 +4083,20 @@ fn start_packaged_take_at(
     mode: &str,
     expect: &str,
 ) -> Child {
+    packaged_take_command(fixture, pool, head, key_path, mode, expect)
+        .spawn()
+        .unwrap()
+}
+
+#[allow(clippy::disallowed_types)]
+fn packaged_take_command(
+    fixture: &PoolFixture,
+    pool: &str,
+    head: &str,
+    key_path: &Path,
+    mode: &str,
+    expect: &str,
+) -> std::process::Command {
     let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
     let mut command = fixture
@@ -4105,9 +4119,8 @@ fn start_packaged_take_at(
         .env_remove("BASH_ENV")
         .stdin(fs::File::open(key_path).unwrap())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::piped());
+    command
 }
 
 fn guarded_workspace_check(slot: &LeasedSlot, generation: u64) {
@@ -4348,6 +4361,28 @@ fn retained_preparation_refuses_a_different_prior_head_or_unreviewed_commit() {
 }
 
 #[test]
+fn a_retained_attempt_refuses_changed_effective_fixed_tool_selection_before_permit() {
+    let (slot, key, next) = first_completed_workspace();
+    return_workspace(&slot, 1);
+    let empty = slot.fixture._repo_dir.path.join("empty-path-entry");
+    fs::create_dir(&empty).unwrap();
+    let mut path = std::env::var_os("PATH").unwrap();
+    path.push(":");
+    path.push(&empty);
+    let child = packaged_take_command(&slot.fixture, &slot.pool, &next, &key, "take", "1")
+        .env("PATH", path)
+        .spawn()
+        .unwrap();
+    let out = common::wait_within(child, Duration::from_secs(30));
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert!(result.get("path").is_none());
+    assert_eq!(git(&slot.path, &["rev-parse", "HEAD"]), slot.head);
+    let saved = slot.fixture.record();
+    assert_eq!(saved["pools"][0]["slots"][0]["phase"]["kind"], "reserved");
+}
+
+#[test]
 fn a_retained_cleanup_skip_never_publishes_ready() {
     let (slot, key, next) = first_completed_workspace();
     return_workspace(&slot, 1);
@@ -4373,6 +4408,126 @@ fn a_retained_cleanup_skip_never_publishes_ready() {
     let record = &saved["pools"][0]["slots"][0];
     assert_eq!(record["phase"]["attempt"]["stage"], "gc_in_progress");
     assert_eq!(record["producer"]["kind"], "complete");
+}
+
+#[test]
+fn the_packaged_checkout_refuses_conditional_git_configuration_before_effects() {
+    let fixture = reviewed_pool_fixture(None);
+    fixture.hive.write_ready_capabilities();
+    let included = fixture._repo_dir.path.join("slot-only.gitconfig");
+    let marker = fixture._repo_dir.path.join("unreviewed-filter-ran");
+    fs::write(
+        &included,
+        format!(
+            "[filter \"review_probe\"]\nsmudge = touch {} && cat\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        fixture.repo.join(".gitattributes"),
+        "src/lib.rs filter=review_probe\n",
+    )
+    .unwrap();
+    git(&fixture.repo, &["add", ".gitattributes"]);
+    git(&fixture.repo, &["commit", "-qm", "Track filter attributes"]);
+    let target_admin = fixture.repo.join(".git/worktrees/slot-1");
+    git(
+        &fixture.repo,
+        &[
+            "config",
+            &format!("includeIf.gitdir:{}.path", target_admin.display()),
+            included.to_str().unwrap(),
+        ],
+    );
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success());
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let slot = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let key = fixture._repo_dir.path.join("conditional-config-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let out = run_packaged_take(&fixture, pool, &head, &key, "take");
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert!(!marker.exists());
+    assert!(!slot.exists());
+}
+
+#[test]
+fn packaged_guide_secrets_never_inherit_caller_export_attributes() {
+    let fixture = reviewed_pool_fixture(None);
+    fixture.hive.write_ready_capabilities();
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success());
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let key = fixture._repo_dir.path.join("export-sentinel-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let wrapped = fixture._repo_dir.path.join("observe-export-attributes");
+    let log = fixture._repo_dir.path.join("unexpected-exports");
+    fs::write(&wrapped, r#"#!/bin/sh
+if [ "$1" = slot ] && { [ "${credential+x}" ] || [ "${nonce+x}" ] || [ "${request+x}" ] || [ "${step_request+x}" ] || [ "${extra+x}" ]; }; then
+    printf 'unexpected export\n' >> "$HIVE_TEST_EXPORT_LOG"
+fi
+exec "$HIVE_TEST_BINARY" "$@"
+"#).unwrap();
+    fs::set_permissions(&wrapped, fs::Permissions::from_mode(0o700)).unwrap();
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
+    let mut command = fixture
+        .hive
+        .command_with(Path::new("/bin/bash"), &["--noprofile", "--norc"]);
+    producer_environment(&mut command);
+    let child = command
+        .arg(helper)
+        .arg("take")
+        .arg(&wrapped)
+        .arg(&fixture.repo)
+        .args([
+            pool,
+            "1",
+            "0",
+            &head,
+            &"1".repeat(32),
+            &"2".repeat(32),
+            &"3".repeat(32),
+        ])
+        .env_remove("BASH_ENV")
+        .env("SHELLOPTS", "allexport")
+        .env("HIVE_TEST_BINARY", env!("CARGO_BIN_EXE_cargo-hive"))
+        .env("HIVE_TEST_EXPORT_LOG", &log)
+        .envs(
+            ["credential", "nonce", "request", "step_request", "extra"]
+                .map(|name| (name, "synthetic-sentinel")),
+        )
+        .stdin(fs::File::open(&key).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = common::wait_within(child, Duration::from_secs(30));
+    assert_no_credential(&out, &fs::read_to_string(&key).unwrap());
+    assert!(
+        !log.exists(),
+        "an internal credential variable was present in a child environment"
+    );
+    assert!(
+        out.status.success(),
+        "packaged take failed: {}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -4451,13 +4606,12 @@ fn a_requested_initial_seed_without_registry_units_stays_unavailable() {
     assert!(!checkout.join("target").exists());
 }
 
-#[test]
-fn the_packaged_guide_can_attest_a_nonempty_registry_only_initial_seed() {
+fn registry_seed_pool() -> (PoolFixture, common::registry_fixture::RegistryRepo, PathBuf) {
     use common::registry_fixture::{RegistryRepo, cargo_json};
     let fixture = reviewed_pool_fixture(None);
     fixture.hive.write_ready_capabilities();
     fs::create_dir(fixture.hive.home.path.join("no-cache")).unwrap();
-    let _registry_fixture = RegistryRepo::new(&fixture.hive);
+    let registry_fixture = RegistryRepo::new(&fixture.hive);
     let manifest = fixture.repo.join("Cargo.toml");
     let donor = fs::read_to_string(&manifest)
         .unwrap()
@@ -4479,7 +4633,32 @@ fn the_packaged_guide_can_attest_a_nonempty_registry_only_initial_seed() {
     fixture
         .hive
         .config(&json!({"secondary_roots": [fixture.hive.secondary_root.path]}).to_string());
-    let (out, initialized) = fixture.init();
+    let prefill = fixture.hive.secondary_root.path.join("prefill");
+    git(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            prefill.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let (out, seeded) = fixture.hive.json(&["seed", prefill.to_str().unwrap()]);
+    assert!(out.status.success(), "{seeded}");
+    assert!(
+        seeded["counts"]["fill_entries_added"].as_u64().unwrap() > 0,
+        "{seeded}"
+    );
+    let pool_root = fixture.hive.secondary_root.path.join("pool-root");
+    fs::create_dir(&pool_root).unwrap();
+    (fixture, registry_fixture, pool_root)
+}
+
+#[test]
+fn the_packaged_guide_can_attest_a_nonempty_registry_only_initial_seed() {
+    let (fixture, _registry_fixture, pool_root) = registry_seed_pool();
+    let (out, initialized) = fixture.init_at(&pool_root);
     assert!(out.status.success(), "{initialized}");
     let pool = initialized["pool_id"].as_str().unwrap();
     let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
@@ -4510,6 +4689,42 @@ fn the_packaged_guide_can_attest_a_nonempty_registry_only_initial_seed() {
     assert_eq!(producer["evidence"]["roots"]["target"]["kind"], "absent");
     assert_eq!(producer["final_roots"]["target"]["kind"], "present");
     assert!(checkout.join("target/CACHEDIR.TAG").is_file());
+}
+
+#[test]
+fn slot_seed_refuses_a_foreign_resolver_without_creating_the_target() {
+    let (fixture, _registry_fixture, pool_root) = registry_seed_pool();
+    let (out, initialized) = fixture.init_at(&pool_root);
+    assert!(out.status.success());
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let target = checkout.join("target");
+    let foreign = init_repo(&fixture._repo_dir.path.join("foreign-owner"), "");
+    register(&fixture.hive, &foreign);
+    fs::create_dir(foreign.join(".cargo")).unwrap();
+    fs::write(
+        foreign.join(".cargo/config.toml"),
+        format!("[build]\ntarget-dir = {:?}\n", target),
+    )
+    .unwrap();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let key = fixture._repo_dir.path.join("foreign-seed-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let out = run_packaged_take(&fixture, pool, &head, &key, "take-seeded");
+    let refused: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{refused}");
+    assert!(
+        !target.exists(),
+        "slot seed wrote to a target resolved by another workspace"
+    );
+    let saved = fixture.record();
+    let slot = &saved["pools"][0]["slots"][0];
+    assert_eq!(slot["producer"]["kind"], "never_built");
 }
 
 #[test]

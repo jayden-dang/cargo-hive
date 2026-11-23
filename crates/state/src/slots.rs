@@ -775,6 +775,8 @@ pub struct InvocationEvidence {
     pub invocation: String,
     pub graph_digest: String,
     pub environment_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_digest: Option<String>,
 }
 
 impl InvocationEvidence {
@@ -785,6 +787,10 @@ impl InvocationEvidence {
             .any(|item| item.id == self.invocation)
             && hex(&self.graph_digest, 64)
             && hex(&self.environment_digest, 64)
+            && self
+                .stable_digest
+                .as_ref()
+                .is_none_or(|digest| hex(digest, 64))
     }
 }
 
@@ -2592,6 +2598,7 @@ mod tests {
                 invocation: "check".into(),
                 graph_digest: "a".repeat(64),
                 environment_digest: "b".repeat(64),
+                stable_digest: None,
             },
             roots: OutputRoots {
                 target: RootExpectation::Absent { path: root.clone() },
