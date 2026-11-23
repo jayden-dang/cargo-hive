@@ -6,7 +6,7 @@ mod account;
 #[doc(hidden)]
 pub use account::Removed;
 #[doc(hidden)]
-pub use account::{RemoveFailed, remove_counted};
+pub use account::{RemoveFailed, remove_counted, remove_counted_guarded};
 
 use crate::caps::CRATE_DIR_CAP;
 use crate::size::MAX_DEPTH;

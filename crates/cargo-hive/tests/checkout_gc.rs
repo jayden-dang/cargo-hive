@@ -1131,15 +1131,27 @@ fn checkout_gc_refuses_shared_outside_nested_and_unreadable_scope_without_effect
 
 #[test]
 fn checkout_gc_rechecks_the_root_inode_after_cargo_exclusion() {
-    checkout_gc_refuses_root_exchange(false);
+    checkout_gc_refuses_root_exchange(RootExchange::BeforeLockedStat);
 }
 
 #[test]
 fn checkout_gc_does_not_delete_after_a_root_exchange_following_the_first_locked_stat() {
-    checkout_gc_refuses_root_exchange(true);
+    checkout_gc_refuses_root_exchange(RootExchange::AfterLockedStat);
 }
 
-fn checkout_gc_refuses_root_exchange(exchange_after_observation: bool) {
+#[test]
+fn checkout_gc_rechecks_identity_after_accounting_and_before_removing() {
+    checkout_gc_refuses_root_exchange(RootExchange::DuringAccounting);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RootExchange {
+    BeforeLockedStat,
+    AfterLockedStat,
+    DuringAccounting,
+}
+
+fn checkout_gc_refuses_root_exchange(timing: RootExchange) {
     use cargo_hive_platform::testing::Hooked;
     use cargo_hive_platform::{Fs, TryLock};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1178,24 +1190,37 @@ fn checkout_gc_refuses_root_exchange(exchange_after_observation: bool) {
     let selected = target.clone();
     let swapped = Arc::new(AtomicBool::new(false));
     let did_swap = swapped.clone();
+    let exchange = Arc::new(move |root: &Path| {
+        if !did_swap.swap(true, Ordering::Relaxed) {
+            fs::rename(root, &stash).unwrap();
+            fs::rename(&replacement, root).unwrap();
+        }
+    });
+    let exchange_during_accounting = exchange.clone();
+    let accounting_root = target.clone();
+    let sharing_fs = cargo_hive_platform::apfs::Apfs::new(std::env::current_exe().unwrap());
     let hooked = Hooked {
         inner: fs,
         compress: None,
         volume: None,
-        sharing: None,
+        sharing: Some(Box::new(move |path| {
+            let result = sharing_fs.sharing(path);
+            if timing == RootExchange::DuringAccounting && path.starts_with(&accounting_root) {
+                exchange_during_accounting(&accounting_root);
+            }
+            result
+        })),
         entry_stat: Some(Box::new(move |path| {
-            if path == selected
-                && !did_swap.load(Ordering::Relaxed)
+            if timing != RootExchange::DuringAccounting
+                && path == selected
                 && matches!(
                     real.try_lock_exclusive(&path.join("debug/.cargo-build-lock")),
                     TryLock::Held
                 )
             {
                 let stat_before = real.entry_stat(path);
-                fs::rename(path, &stash).unwrap();
-                fs::rename(&replacement, path).unwrap();
-                did_swap.store(true, Ordering::Relaxed);
-                if exchange_after_observation {
+                exchange(path);
+                if timing == RootExchange::AfterLockedStat {
                     return stat_before;
                 }
             }

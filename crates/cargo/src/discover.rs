@@ -1,7 +1,7 @@
 //! Checkouts of a registered repo and its Cargo target dirs. Every walk is
 //! depth-bounded and never enters `node_modules`, `target` or `.git`.
 
-use crate::git::Git;
+use crate::git::{Git, WorktreeRecord};
 use crate::metadata::{self, Resolved};
 use crate::object_store;
 use crate::registry::Repo;
@@ -174,6 +174,63 @@ pub fn checkouts(
     registered_mains: &[PathBuf],
     cfg: &Config,
 ) -> (Vec<Checkout>, Vec<WalkFault>) {
+    let records = Git::at(&repo.main)
+        .worktrees()
+        .map_err(|err| err.to_string());
+    checkouts_from_inventory(repo, registered_mains, cfg, records, false)
+}
+
+const GIT_DISCOVERY_BYTES: usize = 64 * 1024;
+
+/// Uses one bounded, complete Git inventory as the source of all linked checkout rows.
+pub fn checkouts_complete(
+    repo: &Repo,
+    registered_mains: &[PathBuf],
+    cfg: &Config,
+) -> (Vec<Checkout>, Vec<WalkFault>) {
+    let records = Git::at(&repo.main)
+        .worktrees_complete(GIT_DISCOVERY_BYTES)
+        .map_err(|err| err.to_string())
+        .and_then(|records| {
+            if records.first().map(|record| &record.path) == Some(&repo.main) {
+                Ok(records)
+            } else {
+                Err("worktree inventory did not name the registered main".into())
+            }
+        });
+    match records {
+        Ok(records) => {
+            let (rows, mut faults) =
+                checkouts_from_inventory(repo, registered_mains, cfg, Ok(records), true);
+            faults.extend(
+                rows.iter()
+                    .filter(|row| row.reason.starts_with("unclassifiable:"))
+                    .map(|row| WalkFault {
+                        path: row.path.clone(),
+                        detail: row.reason.clone(),
+                        cannot_enter: false,
+                    }),
+            );
+            (rows, faults)
+        }
+        Err(detail) => (
+            Vec::new(),
+            vec![WalkFault {
+                path: repo.main.clone(),
+                detail,
+                cannot_enter: false,
+            }],
+        ),
+    }
+}
+
+fn checkouts_from_inventory(
+    repo: &Repo,
+    registered_mains: &[PathBuf],
+    cfg: &Config,
+    records: Result<Vec<WorktreeRecord>, String>,
+    strict: bool,
+) -> (Vec<Checkout>, Vec<WalkFault>) {
     let mut out: Vec<Checkout> = Vec::new();
     let mut faults: Vec<WalkFault> = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
@@ -194,7 +251,7 @@ pub fn checkouts(
                 missing: false,
             });
         };
-    match Git::at(&repo.main).worktrees() {
+    match records {
         Ok(records) => {
             for rec in records.into_iter().filter(|r| !r.bare) {
                 let is_main = rec.path.canonicalize().ok().as_ref() == Some(&repo.main)
@@ -219,6 +276,15 @@ pub fn checkouts(
                     }
                     Err(e) => {
                         push(&mut out, rec.path, kind, Err(e.to_string()));
+                        continue;
+                    }
+                    Ok(meta) if strict && !meta.is_dir() => {
+                        push(
+                            &mut out,
+                            rec.path,
+                            kind,
+                            Err("worktree path is not a directory".into()),
+                        );
                         continue;
                     }
                     Ok(_) => {}
@@ -254,35 +320,20 @@ pub fn checkouts(
                 continue;
             }
             let g = Git::at(&real);
-            let (git_dir, common) = match (g.git_dir(), g.common_dir()) {
-                (Ok(git_dir), Ok(common)) => (git_dir, common),
-                (Err(e), _) | (_, Err(e)) => {
-                    seen.insert(real.clone());
-                    push(&mut out, real, CheckoutKind::Clone, Err(e.to_string()));
-                    continue;
-                }
+            let related = if strict {
+                related_clone_complete(&g, repo)
+            } else {
+                related_clone(&g, repo)
             };
-            if git_dir != common {
-                continue;
-            }
-            match g.superproject() {
-                Ok(None) => {}
-                Ok(Some(_)) => continue,
-                Err(e) => {
-                    seen.insert(real.clone());
-                    push(&mut out, real, CheckoutKind::Clone, Err(e.to_string()));
-                    continue;
-                }
-            }
-            match g.root_commits() {
-                Ok(roots) if !roots.is_disjoint(&repo.root_commits) => {
+            match related {
+                Ok(true) => {
                     seen.insert(real.clone());
                     clones.push(real);
                 }
-                Ok(_) => {}
-                Err(e) => {
+                Ok(false) => {}
+                Err(err) => {
                     seen.insert(real.clone());
-                    push(&mut out, real, CheckoutKind::Clone, Err(e.to_string()));
+                    push(&mut out, real, CheckoutKind::Clone, Err(err));
                 }
             }
         }
@@ -292,6 +343,61 @@ pub fn checkouts(
         push(&mut out, c, CheckoutKind::Clone, Ok(()));
     }
     (out, faults)
+}
+
+fn related_clone(git: &Git, repo: &Repo) -> Result<bool, String> {
+    let (dir, common) = match (git.git_dir(), git.common_dir()) {
+        (Ok(dir), Ok(common)) => (dir, common),
+        (Err(err), _) | (_, Err(err)) => return Err(err.to_string()),
+    };
+    if dir != common || git.superproject().map_err(|err| err.to_string())?.is_some() {
+        return Ok(false);
+    }
+    git.root_commits()
+        .map(|roots| !roots.is_disjoint(&repo.root_commits))
+        .map_err(|err| err.to_string())
+}
+
+fn related_clone_complete(git: &Git, repo: &Repo) -> Result<bool, String> {
+    let read = |args: &[&str]| -> Result<String, String> {
+        let bytes = git
+            .slot_read_only(args, GIT_DISCOVERY_BYTES)
+            .map_err(|err| err.to_string())?;
+        String::from_utf8(bytes).map_err(|err| err.to_string())
+    };
+    let paths = read(&[
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-dir",
+        "--git-common-dir",
+        "--show-superproject-working-tree",
+    ])?;
+    let fields: Vec<_> = paths
+        .strip_suffix('\n')
+        .ok_or("unterminated Git path inventory")?
+        .split('\n')
+        .collect();
+    let [dir, common, remaining @ ..] = fields.as_slice() else {
+        return Err("incomplete Git path inventory".into());
+    };
+    if fields.iter().any(|path| !Path::new(path).is_absolute()) || remaining.len() > 1 {
+        return Err("invalid Git path inventory".into());
+    }
+    if dir != common || !remaining.is_empty() {
+        return Ok(false);
+    }
+    let roots = read(&["rev-list", "--max-parents=0", "HEAD"])?;
+    let roots = roots
+        .strip_suffix('\n')
+        .ok_or("unterminated Git root inventory")?;
+    let mut related = false;
+    for root in roots.split('\n') {
+        if !cargo_hive_state::slots::object_id(root) {
+            return Err("invalid Git root identity".into());
+        }
+        related |= repo.root_commits.contains(root);
+    }
+    Ok(related)
 }
 
 pub const SNAPSHOT_FILE: &str = "snapshot.json";
@@ -463,6 +569,7 @@ fn resolve_workspaces(
     snapshot: &mut Snapshot,
     faults: &mut Vec<WalkFault>,
     cancel: &(impl Fn() -> bool + Sync),
+    group_workspaces: bool,
 ) -> Vec<Resolution> {
     let mut by_depth: BTreeMap<usize, BTreeSet<PathBuf>> = BTreeMap::new();
     for checkout in checkouts {
@@ -471,6 +578,7 @@ fn resolve_workspaces(
         }
     }
     let mut roots: Vec<PathBuf> = Vec::new();
+    let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for dirs in by_depth.into_values() {
         let mut uncached = Vec::new();
@@ -478,7 +586,12 @@ fn resolve_workspaces(
         // cache or from cargo metadata, so a cache hit cannot hide a nested checkout.
         let mut found_here = Vec::new();
         for dir in dirs {
-            if roots.iter().any(|r| dir.starts_with(r)) {
+            let already_discovered = if group_workspaces {
+                roots.iter().any(|root| dir.starts_with(root))
+            } else {
+                !seen.insert(dir.clone())
+            };
+            if already_discovered {
                 continue;
             }
             match cached(snapshot, &dir) {
@@ -610,13 +723,41 @@ pub fn targets(
     snapshot: &mut Snapshot,
     cancel: impl Fn() -> bool + Sync,
 ) -> TargetScan {
+    scan_targets(checkouts, cfg, all_repos, snapshot, cancel, true)
+}
+
+/// Resolves Cargo's configuration from every admitted manifest directory independently.
+pub fn targets_for_checkout_gc(
+    checkouts: &[Checkout],
+    cfg: &Config,
+    cancel: impl Fn() -> bool + Sync,
+) -> TargetScan {
+    scan_targets(
+        checkouts,
+        cfg,
+        false,
+        &mut Snapshot::default(),
+        cancel,
+        false,
+    )
+}
+
+fn scan_targets(
+    checkouts: &[Checkout],
+    cfg: &Config,
+    all_repos: bool,
+    snapshot: &mut Snapshot,
+    cancel: impl Fn() -> bool + Sync,
+    group_workspaces: bool,
+) -> TargetScan {
     let live: Vec<PathBuf> = checkouts
         .iter()
         .filter(|c| !c.missing)
         .map(|c| c.path.clone())
         .collect();
     let mut walk_faults = Vec::new();
-    let resolutions = resolve_workspaces(&live, snapshot, &mut walk_faults, &cancel);
+    let resolutions =
+        resolve_workspaces(&live, snapshot, &mut walk_faults, &cancel, group_workspaces);
     let resolved: Vec<&Resolved> = resolutions
         .iter()
         .filter_map(|r| r.result.as_ref().ok())

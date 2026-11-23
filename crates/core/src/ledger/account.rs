@@ -49,6 +49,64 @@ pub fn remove_counted(
     account_bytes: bool,
     dry_run: bool,
 ) -> Result<Removed, RemoveFailed> {
+    remove_counted_with(
+        fs,
+        ledger,
+        target,
+        path,
+        Removal {
+            account_bytes,
+            dry_run,
+            check: None,
+        },
+    )
+}
+
+/// Checks the caller's identity guard after measurement, immediately before removal.
+#[doc(hidden)]
+pub fn remove_counted_guarded(
+    fs: &dyn Fs,
+    ledger: &mut Ledger,
+    target: &Path,
+    path: &Path,
+    account_bytes: bool,
+    check: &dyn Fn() -> Result<(), String>,
+) -> Result<Removed, RemoveFailed> {
+    remove_counted_with(
+        fs,
+        ledger,
+        target,
+        path,
+        Removal {
+            account_bytes,
+            dry_run: false,
+            check: Some(check),
+        },
+    )
+}
+
+struct Removal<'a> {
+    account_bytes: bool,
+    dry_run: bool,
+    check: Option<&'a dyn Fn() -> Result<(), String>>,
+}
+
+impl Removal<'_> {
+    fn check(&self) -> Result<(), RemoveFailed> {
+        if let Some(check) = self.check {
+            check().map_err(RemoveFailed::Scan)?;
+        }
+        Ok(())
+    }
+}
+
+fn remove_counted_with(
+    fs: &dyn Fs,
+    ledger: &mut Ledger,
+    target: &Path,
+    path: &Path,
+    removal: Removal<'_>,
+) -> Result<Removed, RemoveFailed> {
     let stat = match fs.entry_stat(path) {
         Ok(stat) => stat,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -66,11 +124,9 @@ pub fn remove_counted(
     };
     match stat.kind {
         EntryKind::File | EntryKind::Symlink => {
-            remove_leaf(fs, ledger, target, path, stat, account_bytes, dry_run)
+            remove_leaf(fs, ledger, target, path, stat, removal)
         }
-        EntryKind::Dir | EntryKind::Other => {
-            remove_dir(fs, ledger, target, path, account_bytes, dry_run)
-        }
+        EntryKind::Dir | EntryKind::Other => remove_dir(fs, ledger, target, path, removal),
     }
 }
 
@@ -80,15 +136,15 @@ fn remove_leaf(
     target: &Path,
     path: &Path,
     stat: EntryStat,
-    account_bytes: bool,
-    dry_run: bool,
+    removal: Removal<'_>,
 ) -> Result<Removed, RemoveFailed> {
-    let measured = if account_bytes {
+    let measured = if removal.account_bytes {
         fs.sharing(path).map(|sharing| (stat, Some(sharing)))
     } else {
         Ok((stat, None))
     };
-    if !dry_run {
+    if !removal.dry_run {
+        removal.check()?;
         match fs.remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -118,10 +174,9 @@ fn remove_dir(
     ledger: &mut Ledger,
     target: &Path,
     path: &Path,
-    account_bytes: bool,
-    dry_run: bool,
+    removal: Removal<'_>,
 ) -> Result<Removed, RemoveFailed> {
-    let files = match scan(fs, path, account_bytes) {
+    let files = match scan(fs, path, removal.account_bytes) {
         Ok(None) => {
             return Ok(Removed {
                 files: 0,
@@ -132,7 +187,8 @@ fn remove_dir(
         Err(why) => return Err(RemoveFailed::Scan(why)),
     };
     let count = files.len() as u64;
-    if !dry_run {
+    if !removal.dry_run {
+        removal.check()?;
         match fs.remove_tree(path) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {

@@ -390,11 +390,11 @@ fn check_root(input: &CheckoutInput<'_>, root: &RequiredRoot, report: &mut Check
     false
 }
 
+const ROOT_IDENTITY_CHANGED: &str =
+    "the required root identity or initial absence no longer matches";
+
 fn root_identity_finding(path: &Path) -> Finding {
-    incomplete_finding(
-        Some(path),
-        "the required root identity or initial absence no longer matches",
-    )
+    incomplete_finding(Some(path), ROOT_IDENTITY_CHANGED)
 }
 
 fn matches_presence(input: &CheckoutInput<'_>, root: &RequiredRoot) -> bool {
@@ -621,16 +621,12 @@ fn clean_target(
                 let mut deleted_files = 0u64;
                 let removed_all = 'remove: {
                     for (entry, stat) in &stats {
-                        if let Err(reason) = guard::check_entry(
-                            input.fs,
-                            path,
-                            entry,
-                            Expect::Entry {
-                                kind: stat.kind,
-                                dev: stat.dev,
-                                ino: stat.ino,
-                            },
-                        ) {
+                        let expect = Expect::Entry {
+                            kind: stat.kind,
+                            dev: stat.dev,
+                            ino: stat.ino,
+                        };
+                        if let Err(reason) = guard::check_entry(input.fs, path, entry, expect) {
                             report.failed = true;
                             report.findings.push(Finding {
                                 kind: "gc.delete_failed".into(),
@@ -643,14 +639,38 @@ fn clean_target(
                         if required.is_some_and(|root| !check_root(input, root, report)) {
                             break 'remove false;
                         }
-                        match ledger::remove_counted(
-                            input.fs,
-                            &mut ledger,
-                            path,
-                            entry,
-                            input.account_bytes,
-                            false,
-                        ) {
+                        let removed = if let Some(root) = required {
+                            ledger::remove_counted_guarded(
+                                input.fs,
+                                &mut ledger,
+                                path,
+                                entry,
+                                input.account_bytes,
+                                &|| {
+                                    removal_identity(
+                                        input.fs,
+                                        path,
+                                        entry,
+                                        Expect::Entry {
+                                            kind: stat.kind,
+                                            dev: stat.dev,
+                                            ino: stat.ino,
+                                        },
+                                        &|| matches_presence(input, root),
+                                    )
+                                },
+                            )
+                        } else {
+                            ledger::remove_counted(
+                                input.fs,
+                                &mut ledger,
+                                path,
+                                entry,
+                                input.account_bytes,
+                                false,
+                            )
+                        };
+                        match removed {
                             Ok(removed) if removed.existed => {
                                 if unit_path::unit_dir_of(entry).is_some() {
                                     deleted_files = deleted_files.saturating_add(removed.files);
@@ -695,7 +715,7 @@ fn clean_target(
                 profile_report,
                 account_bytes: input.account_bytes,
                 cancel,
-                root_valid: &|| required.is_none_or(|root| matches_presence(input, root)),
+                root_valid: required.map(|root| (input, root)),
                 ledger: &mut ledger,
             });
             counts.binaries_read = counts.binaries_read.saturating_add(outcome.binaries_read);
@@ -741,7 +761,7 @@ struct ObjectsClean<'a> {
     profile_report: &'a ProfileReport,
     account_bytes: bool,
     cancel: &'a dyn Fn() -> bool,
-    root_valid: &'a dyn Fn() -> bool,
+    root_valid: Option<(&'a CheckoutInput<'a>, &'a RequiredRoot)>,
     ledger: &'a mut Ledger,
 }
 
@@ -845,19 +865,38 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
             });
             return out;
         }
-        if !(ctx.root_valid)() {
-            out.failed = true;
-            out.findings.push(root_identity_finding(ctx.target));
-            return out;
-        }
-        match ledger::remove_counted(
-            ctx.fs,
-            ctx.ledger,
-            ctx.target,
-            object,
-            ctx.account_bytes,
-            false,
-        ) {
+        let removed = if let Some((input, root)) = ctx.root_valid {
+            ledger::remove_counted_guarded(
+                ctx.fs,
+                ctx.ledger,
+                ctx.target,
+                object,
+                ctx.account_bytes,
+                &|| {
+                    removal_identity(
+                        ctx.fs,
+                        ctx.target,
+                        object,
+                        Expect::Entry {
+                            kind: EntryKind::File,
+                            dev: *dev,
+                            ino: *ino,
+                        },
+                        &|| matches_presence(input, root),
+                    )
+                },
+            )
+        } else {
+            ledger::remove_counted(
+                ctx.fs,
+                ctx.ledger,
+                ctx.target,
+                object,
+                ctx.account_bytes,
+                false,
+            )
+        };
+        match removed {
             Ok(removed) if removed.existed => {
                 out.objects_deleted = out.objects_deleted.saturating_add(1);
             }
@@ -876,6 +915,22 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
     }
     out.completed = true;
     out
+}
+
+fn removal_identity(
+    fs: &dyn Fs,
+    root: &Path,
+    path: &Path,
+    expect: Expect,
+    root_valid: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    let entry = guard::check_entry(fs, root, path, expect);
+    if !root_valid() {
+        return Err(ROOT_IDENTITY_CHANGED.into());
+    }
+    entry
+        .map(|_| ())
+        .map_err(|reason| format!("{} ({reason:?})", path.display()))
 }
 
 fn objects_finding(path: &Path, detail: String) -> Finding {

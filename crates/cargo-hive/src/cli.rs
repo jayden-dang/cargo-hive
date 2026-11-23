@@ -1336,7 +1336,7 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
 
 enum CheckoutGcError {
     State(StateError),
-    Discovery(WalkFault),
+    Discovery(Vec<WalkFault>),
     Unsupported,
     Refused {
         release: Option<String>,
@@ -1358,51 +1358,57 @@ struct CheckoutGc {
     account_bytes: bool,
 }
 
-fn complete_worktree_paths(registry: &Registry) -> Result<Vec<PathBuf>, WalkFault> {
-    const WORKTREE_INVENTORY_LIMIT: usize = 64 * 1024;
-
-    let mut live = Vec::new();
+fn find_checkout_complete(
+    registry: &Registry,
+    cfg: &Config,
+    path: &Path,
+) -> Result<Found, CheckoutGcError> {
+    let mains: Vec<_> = registry
+        .repos
+        .iter()
+        .map(|repo| repo.main.clone())
+        .collect();
+    let mut selected = None;
+    let mut rows = Vec::new();
+    let mut faults = Vec::new();
     for repo in &registry.repos {
-        let fault = |path: &Path, detail: String| WalkFault {
-            path: path.to_path_buf(),
-            detail,
-            cannot_enter: false,
-        };
-        let records = cargo_hive_cargo::git::Git::at(&repo.main)
-            .worktrees_complete(WORKTREE_INVENTORY_LIMIT)
-            .map_err(|err| fault(&repo.main, err.to_string()))?;
-        if records.first().map(|record| record.path.as_path()) != Some(repo.main.as_path()) {
-            return Err(fault(
-                &repo.main,
-                "worktree inventory did not name the registered main".into(),
-            ));
+        let (mut checkouts, mut unreadable) = discover::checkouts_complete(repo, &mains, cfg);
+        if selected.is_none()
+            && let Some(row) = checkouts.iter().find(|candidate| {
+                !candidate.missing
+                    && candidate.path == path
+                    && candidate.class == cargo_hive_core::classify::Class::Secondary
+            })
+        {
+            selected = Some((repo.clone(), row.clone()));
         }
-        for record in records {
-            match record.path.symlink_metadata() {
-                Ok(meta) if meta.is_dir() => live.push(
-                    record
-                        .path
-                        .canonicalize()
-                        .map_err(|err| fault(&record.path, err.to_string()))?,
-                ),
-                Err(err)
-                    if err.kind() == std::io::ErrorKind::NotFound && record.path != repo.main => {}
-                Err(err) => return Err(fault(&record.path, err.to_string())),
-                Ok(_) => {
-                    return Err(fault(
-                        &record.path,
-                        "worktree path is not a directory".into(),
-                    ));
-                }
-            }
-        }
+        rows.append(&mut checkouts);
+        faults.append(&mut unreadable);
     }
-    Ok(live)
+    if !faults.is_empty() {
+        return Err(CheckoutGcError::Discovery(faults));
+    }
+    let Some((repo, row)) = selected else {
+        return Err(CheckoutGcError::Refused {
+            release: None,
+            reason: Refusal {
+                kind: "refusal",
+                path: None,
+                detail: "could not verify the exact secondary checkout for cleanup".into(),
+                code: 1,
+            },
+        });
+    };
+    Ok(Found {
+        repo,
+        row,
+        rows,
+        faults,
+    })
 }
 
 impl CheckoutGc {
     fn prepare(state: &State, path: &Path, standalone: bool) -> Result<Self, CheckoutGcError> {
-        use cargo_hive_core::classify::Class;
         use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
 
         let loaded = (|| -> Result<_, StateError> {
@@ -1446,73 +1452,32 @@ impl CheckoutGc {
                 });
             }
         }
-        let verified_worktrees = if standalone {
-            Vec::new()
-        } else {
-            complete_worktree_paths(&reg).map_err(CheckoutGcError::Discovery)?
-        };
         let Found {
             repo,
             row,
-            mut rows,
-            mut faults,
-        } = find_checkout(&reg, &cfg, path).map_err(|mut reason| {
-            if let Some((p, owner)) = reason
-                .path
-                .as_ref()
-                .and_then(|p| owning_repo(&reg, p).map(|owner| (p, owner)))
-            {
-                reason.detail = format!(
-                    "{path} is not a checkout of {main}; name the checkout's root directory",
-                    path = p.display(),
-                    main = owner.main.display(),
-                );
-            }
-            CheckoutGcError::Refused {
-                release: release.clone(),
-                reason,
-            }
-        })?;
-        if !standalone {
-            if row.path != path || row.class != Class::Secondary {
-                return Err(CheckoutGcError::Refused {
-                    release,
-                    reason: Refusal {
-                        kind: "refusal",
-                        path: None,
-                        detail: "could not verify the exact secondary checkout for cleanup".into(),
-                        code: 1,
-                    },
-                });
-            }
-            let mains: Vec<_> = reg.repos.iter().map(|entry| entry.main.clone()).collect();
-            for other in reg.repos.iter().filter(|entry| entry.main != repo.main) {
-                let (mut found, mut unreadable) = discover::checkouts(other, &mains, &cfg);
-                rows.append(&mut found);
-                faults.append(&mut unreadable);
-            }
-            for path in verified_worktrees {
-                if !rows
-                    .iter()
-                    .any(|candidate| !candidate.missing && candidate.path == path)
+            rows,
+            faults,
+        } = if standalone {
+            find_checkout(&reg, &cfg, path).map_err(|mut reason| {
+                if let Some((p, owner)) = reason
+                    .path
+                    .as_ref()
+                    .and_then(|p| owning_repo(&reg, p).map(|owner| (p, owner)))
                 {
-                    faults.push(WalkFault {
-                        path,
-                        detail: "a live worktree was omitted from checkout discovery".into(),
-                        cannot_enter: false,
-                    });
+                    reason.detail = format!(
+                        "{path} is not a checkout of {main}; name the checkout's root directory",
+                        path = p.display(),
+                        main = owner.main.display(),
+                    );
                 }
-            }
-            for row in &rows {
-                if row.reason.starts_with("unclassifiable:") {
-                    faults.push(WalkFault {
-                        path: row.path.clone(),
-                        detail: row.reason.clone(),
-                        cannot_enter: false,
-                    });
+                CheckoutGcError::Refused {
+                    release: release.clone(),
+                    reason,
                 }
-            }
-        }
+            })
+        } else {
+            find_checkout_complete(&reg, &cfg, path)
+        }?;
         let live: Vec<_> = rows.into_iter().filter(|c| !c.missing).collect();
         let nested = live
             .iter()
@@ -1539,47 +1504,6 @@ impl CheckoutGc {
 
     fn scan(&mut self, cancel: impl Fn() -> bool + Sync) -> TargetScan {
         discover::targets(&self.live, &self.cfg, false, &mut self.snapshot, cancel)
-    }
-
-    #[cfg(all(test, target_os = "macos"))]
-    fn scan_for_slot(&self, cancel: &(dyn Fn() -> bool + Sync)) -> TargetScan {
-        use std::collections::BTreeSet;
-
-        let own = self
-            .live
-            .iter()
-            .find(|candidate| candidate.path == self.checkout);
-        let mut scan = discover::targets(
-            own.map_or(&[], std::slice::from_ref),
-            &self.cfg,
-            false,
-            &mut Snapshot::default(),
-            cancel,
-        );
-        let mut cfg = self.cfg.clone();
-        cfg.cache_roots.clear();
-        let mut seen = BTreeSet::from([&self.checkout]);
-        for other in &self.live {
-            if cancel() {
-                break;
-            }
-            if !seen.insert(&other.path) {
-                continue;
-            }
-            // A parent workspace must not suppress resolution inside a separate checkout.
-            let scanned = discover::targets(
-                std::slice::from_ref(other),
-                &cfg,
-                false,
-                &mut Snapshot::default(),
-                cancel,
-            );
-            scan.workspaces.extend(scanned.workspaces);
-            scan.walk_faults.extend(scanned.walk_faults);
-            scan.metadata_calls += scanned.metadata_calls;
-            scan.metadata_cache_hits += scanned.metadata_cache_hits;
-        }
-        scan
     }
 
     fn input<'a>(&'a self, scan: &'a TargetScan) -> CheckoutInput<'a> {
@@ -1656,8 +1580,8 @@ pub(crate) fn checkout_gc_for_slot(
     }
     let operation = match CheckoutGc::prepare(state, path, false) {
         Ok(operation) => operation,
-        Err(CheckoutGcError::Discovery(fault)) => {
-            let evidence = checkout_fault(vec![fault]);
+        Err(CheckoutGcError::Discovery(faults)) => {
+            let evidence = checkout_fault(faults);
             return Err(if cancel() {
                 cancelled(evidence)
             } else {
@@ -1681,7 +1605,7 @@ pub(crate) fn checkout_gc_for_slot(
             checkout_fault(operation.checkout_faults),
         ));
     }
-    let scan = operation.scan_for_slot(cancel);
+    let scan = discover::targets_for_checkout_gc(&operation.live, &operation.cfg, cancel);
     let unresolved = discover::failed_workspaces(&scan);
     let interrupted = cancel();
     if interrupted || !scan.walk_faults.is_empty() || !unresolved.is_empty() {
@@ -1735,8 +1659,11 @@ fn checkout_cmd(state: &State, path: &Path, out: &OutputArgs) -> i32 {
         Err(CheckoutGcError::State(err)) => {
             return emit_failure(state, *out, command, &err.to_string(), 1);
         }
-        Err(CheckoutGcError::Discovery(fault)) => {
-            return emit_failure(state, *out, command, &fault.detail, 1);
+        Err(CheckoutGcError::Discovery(faults)) => {
+            let detail = faults
+                .first()
+                .map_or("checkout discovery was incomplete", |fault| &fault.detail);
+            return emit_failure(state, *out, command, detail, 1);
         }
         Err(CheckoutGcError::Unsupported) => {
             eprintln!("{MACOS_ONLY_MESSAGE}");
@@ -2789,6 +2716,42 @@ mod tests {
         assert!(!state.root().join(discover::SNAPSHOT_FILE).exists());
         assert!(!required[0].path.exists());
 
+        let clones = scratch.path().join("clones");
+        let clone = clones.join("related");
+        std::fs::create_dir(&clones).unwrap();
+        fixture_git(
+            &clones,
+            &[
+                "clone",
+                "--quiet",
+                reg.repos[0].main.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+        std::fs::create_dir(clone.join(".cargo")).unwrap();
+        std::fs::write(
+            clone.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = {:?}", required[0].path),
+        )
+        .unwrap();
+        state
+            .locked(|tx| {
+                tx.write(
+                    "config.json",
+                    &serde_json::json!({
+                        "secondary_roots": [clones], "cache_roots": [cache]
+                    }),
+                )
+            })
+            .unwrap();
+        let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .expect_err("the related clone resolves the slot output");
+        assert_eq!(refusal.reason.code, 1);
+        let SlotGcFailure::Run(evidence) = *refusal.evidence else {
+            panic!("expected recognized clone ownership");
+        };
+        assert!(evidence.completed().is_empty());
+
         let missing = scratch.path().join("missing-secondary");
         state
             .locked(|tx| {
@@ -2914,6 +2877,17 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn slot_checkout_gc_resolves_nested_linked_checkout_workspaces_independently() {
+        assert_shared_nested_project(true);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_resolves_independent_workspaces_in_one_checkout() {
+        assert_shared_nested_project(false);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_shared_nested_project(linked: bool) {
         let (scratch, state, mut reg, lane) = checkout_gc_fixture();
         std::fs::create_dir(scratch.path().join("missing-cache")).unwrap();
         let other = scratch.path().join("other");
@@ -2939,19 +2913,24 @@ mod tests {
                 "other",
             ],
         );
-        let nested = other.join("nested");
-        fixture_git(
-            &other,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "--detach",
-                nested.to_str().unwrap(),
-            ],
-        );
-        fixture_git(&nested, &["rm", "Cargo.toml", "src/lib.rs"]);
-        let project = nested.join("project");
+        let workspace_checkout = if linked {
+            let nested = other.join("nested");
+            fixture_git(
+                &other,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "--detach",
+                    nested.to_str().unwrap(),
+                ],
+            );
+            fixture_git(&nested, &["rm", "Cargo.toml", "src/lib.rs"]);
+            nested
+        } else {
+            other.clone()
+        };
+        let project = workspace_checkout.join("project");
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::create_dir(project.join(".cargo")).unwrap();
         std::fs::write(
@@ -2965,9 +2944,9 @@ mod tests {
             format!("[build]\ntarget-dir = {:?}", lane.join("target")),
         )
         .unwrap();
-        fixture_git(&nested, &["add", "."]);
+        fixture_git(&workspace_checkout, &["add", "."]);
         fixture_git(
-            &nested,
+            &workspace_checkout,
             &[
                 "-c",
                 "user.name=t",
@@ -3052,11 +3031,15 @@ mod tests {
             let result = checkout_gc_for_slot(&state, &lane, &absent_roots(&lane), &|| false);
             let refusal = result.expect_err("unproved Git checkout scope allowed cleanup");
             assert_eq!(refusal.reason.code, 1);
-            assert!(
-                refusal.reason.detail.contains("checkout discovery"),
-                "{}",
-                refusal.reason.detail
-            );
+            if std::env::var_os("HIVE_TEST_GIT_INVENTORY_CASE").as_deref()
+                != Some(std::ffi::OsStr::new("covered-live-record"))
+            {
+                assert!(
+                    refusal.reason.detail.contains("checkout discovery"),
+                    "{}",
+                    refusal.reason.detail
+                );
+            }
             assert!(!state.root().join(discover::SNAPSHOT_FILE).exists());
             return;
         }
@@ -3102,6 +3085,7 @@ mod tests {
 case " $* " in
     *" worktree list "*)
         if [ "$1" = "--no-optional-locks" ]; then exec cat "$HIVE_TEST_STRICT_GIT"; fi
+        printf 'legacy worktree listing\n' >> "$HIVE_TEST_LEGACY_GIT_CALLS"
         exec cat "$HIVE_TEST_LEGACY_GIT"
         ;;
 esac
@@ -3115,12 +3099,13 @@ exec /usr/bin/git "$@"
         let path = std::env::join_paths(path).unwrap();
         let legacy_data = root.join("legacy");
         let strict_data = root.join("strict");
+        let legacy_calls = root.join("legacy-calls");
         let mut failures = Vec::new();
         for (label, legacy, strict) in [
             ("incomplete", &incomplete, &incomplete),
             ("malformed", &malformed, &malformed),
             ("oversize", &oversize, &oversize),
-            ("live record missing from discovery", &valid, &complete),
+            ("covered-live-record", &valid, &complete),
         ] {
             std::fs::write(&legacy_data, legacy).unwrap();
             std::fs::write(&strict_data, strict).unwrap();
@@ -3131,6 +3116,8 @@ exec /usr/bin/git "$@"
                 ])
                 .env(CHILD_ROOT, root)
                 .env("PATH", &path)
+                .env("HIVE_TEST_GIT_INVENTORY_CASE", label)
+                .env("HIVE_TEST_LEGACY_GIT_CALLS", &legacy_calls)
                 .env("HIVE_TEST_LEGACY_GIT", &legacy_data)
                 .env("HIVE_TEST_STRICT_GIT", &strict_data)
                 .output()
@@ -3143,6 +3130,10 @@ exec /usr/bin/git "$@"
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+        assert!(
+            !legacy_calls.exists(),
+            "strict discovery invoked the unbounded worktree listing"
+        );
     }
 
     #[test]
