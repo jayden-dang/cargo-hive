@@ -31,6 +31,7 @@ Design: ./design.md
 
 | File | Responsibility |
 |---|---|
+| `crates/core/src/fingerprint.rs` | Add bounded no-follow strict fingerprint input while retaining legacy decoding behavior. |
 | `crates/core/src/locks.rs` | Add separately verified current Cargo lock and profile namespace evidence. |
 | `crates/core/src/target.rs` | Add bounded strict target identification while retaining the standalone path. |
 | `crates/cargo/src/discover.rs` | Add strict bounded checkout and workspace discovery without changing standalone readers. |
@@ -234,6 +235,7 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 ### Task 6: Prove exactly which roots checkout GC completed
 
 **Files:**
+- Modify: `crates/core/src/fingerprint.rs`
 - Modify: `crates/core/src/locks.rs`
 - Modify: `crates/core/src/target.rs`
 - Modify: `crates/platform/src/lib.rs`
@@ -257,6 +259,8 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 
 - Consumes (proposed): `locks::acquire_verified`, `target::identify_strict`, and `Fs::read_regular_bounded` for current Cargo lock namespace proof and bounded strict input reads; legacy defaults remain unchanged.
 - Consumes (proposed): cancellation-aware `Git::slot_read_only_until` and `Git::worktrees_complete_until` through the existing strict reader defaults.
+
+- Consumes (proposed): a strict `fingerprint` reader using bounded regular no-follow reads and known flat/unit-dir decoding under the verified Cargo guard; the existing reader remains unchanged.
 
 **Depends-on:** Task 4.
 
