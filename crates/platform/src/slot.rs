@@ -14,6 +14,17 @@ pub struct ProcessInstance {
     pub start_micros: u64,
 }
 
+/// Verifies that a private protocol output descriptor was opened for writing.
+pub fn descriptor_writable(fd: std::os::fd::BorrowedFd<'_>) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the borrowed descriptor is open for this fcntl query.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(flags & libc::O_ACCMODE != libc::O_RDONLY)
+}
+
 /// Effective user ID for checking private filesystem ownership.
 pub fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no arguments and cannot fail.
@@ -235,15 +246,7 @@ mod foreground {
         ) -> io::Result<Self> {
             let pid = i32::try_from(child).map_err(|_| invalid("invalid foreground child PID"))?;
             let info = process(pid)?;
-            let random = random_slot_bytes()?;
-            let offset = (i64::from_ne_bytes(
-                random[..8]
-                    .try_into()
-                    .map_err(|_| invalid("could not create a lock descriptor challenge"))?,
-            ) & 0x1fff_ffff_ffff_ffff)
-                | (1 << 32);
-            // A random file offset changes only the inherited open description, not the inode.
-            File::from(inherited.try_clone_to_owned()?).seek(SeekFrom::Start(offset as u64))?;
+            let offset = challenge_offset(inherited)?;
             if !same_child(&info, &parent, child)
                 || info.pbi_status != libc::SSTOP
                 || parent_instance()? != parent
@@ -474,6 +477,55 @@ mod foreground {
                 }
             }
         }
+    }
+
+    fn challenge_offset(inherited: BorrowedFd<'_>) -> io::Result<i64> {
+        let random = random_slot_bytes()?;
+        let offset = (i64::from_ne_bytes(
+            random[..8]
+                .try_into()
+                .map_err(|_| invalid("could not create a lock descriptor challenge"))?,
+        ) & 0x1fff_ffff_ffff_ffff)
+            | (1 << 32);
+        // A random seek changes only the shared open description, not the inode.
+        File::from(inherited.try_clone_to_owned()?).seek(SeekFrom::Start(offset as u64))?;
+        Ok(offset)
+    }
+
+    pub fn verify_guide_lock(
+        parent: &ProcessInstance,
+        fd: i32,
+        lock: LockFileIdentity,
+        inherited: BorrowedFd<'_>,
+        expected_offset: Option<i64>,
+    ) -> io::Result<i64> {
+        if &parent_instance()? != parent {
+            return Err(invalid("guide parent changed"));
+        }
+        let pid = i32::try_from(parent.pid).map_err(|_| invalid("invalid guide parent PID"))?;
+        let mut image = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: image is writable for its entire bounded length.
+        let length =
+            unsafe { libc::proc_pidpath(pid, image.as_mut_ptr().cast(), image.len() as u32) };
+        if length <= 0 || image.split(|byte| *byte == 0).next() != Some(b"/bin/bash") {
+            return Err(invalid("guide parent is not the bundled Bash runner"));
+        }
+        let offset = match expected_offset {
+            Some(expected)
+                if File::from(inherited.try_clone_to_owned()?).stream_position()?
+                    == expected as u64 =>
+            {
+                expected
+            }
+            Some(_) => return Err(invalid("guide inherited a different lock description")),
+            None => challenge_offset(inherited)?,
+        };
+        if !owns_lock(pid, fd, lock, Some(offset))? || &parent_instance()? != parent {
+            return Err(invalid(
+                "guide parent did not retain the inherited slot lock",
+            ));
+        }
+        Ok(offset)
     }
 
     fn invalid(message: &'static str) -> io::Error {
@@ -982,7 +1034,21 @@ mod foreground {
 }
 
 #[cfg(target_os = "macos")]
-pub use foreground::ForegroundWatch;
+pub use foreground::{ForegroundWatch, verify_guide_lock};
+
+#[cfg(not(target_os = "macos"))]
+pub fn verify_guide_lock(
+    _parent: &ProcessInstance,
+    _fd: i32,
+    _lock: crate::flock::LockFileIdentity,
+    _inherited: std::os::fd::BorrowedFd<'_>,
+    _expected_offset: Option<i64>,
+) -> io::Result<i64> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        MACOS_ONLY_MESSAGE,
+    ))
+}
 
 #[cfg(not(target_os = "macos"))]
 pub struct ForegroundWatch {

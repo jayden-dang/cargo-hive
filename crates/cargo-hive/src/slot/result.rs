@@ -22,6 +22,10 @@ pub(super) struct SlotResult {
     #[serde(flatten)]
     pub transition: Option<SlotTransition>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<&'static str>,
@@ -63,6 +67,8 @@ impl SlotResult {
             pool_id: None,
             slots: Vec::new(),
             transition: None,
+            attempt: None,
+            current: None,
             detail: None,
             next_action: None,
             code,

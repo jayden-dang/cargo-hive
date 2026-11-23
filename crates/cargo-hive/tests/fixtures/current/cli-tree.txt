@@ -322,6 +322,7 @@ Options:
           Print help
 
     cmd begin hidden=true about=None long_about=None
+      arg control_fd long=Some("control-fd") short=None hidden=false required=true defaults=[] help=Some("Private output descriptor for the first preparation permit") long_help=None
       arg generation long=Some("generation") short=None hidden=false required=true defaults=[] help=Some("Expected slot generation") long_help=None
       arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
       arg lock_fd long=Some("lock-fd") short=None hidden=false required=true defaults=[] help=Some("Inherited slot lock descriptor") long_help=None
@@ -330,7 +331,7 @@ Options:
       arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
       arg slot long=Some("slot") short=None hidden=false required=true defaults=[] help=Some("Slot number within the pool") long_help=None
       long_help_render:
-Usage: begin [OPTIONS] --repo <MAIN> --pool <POOL> --slot <N> --generation <GEN> --op <ID> --lock-fd <N>
+Usage: begin [OPTIONS] --repo <MAIN> --pool <POOL> --slot <N> --generation <GEN> --op <ID> --lock-fd <N> --control-fd <N>
 
 Options:
       --repo <MAIN>
@@ -353,6 +354,9 @@ Options:
 
       --lock-fd <N>
           Inherited slot lock descriptor
+
+      --control-fd <N>
+          Private output descriptor for the first preparation permit
 
   -h, --help
           Print help

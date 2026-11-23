@@ -3783,6 +3783,172 @@ fn an_unrepresentable_repository_has_one_sanitized_json_refusal() {
 }
 
 #[test]
+fn a_native_guide_begin_issues_only_one_durable_permit() {
+    let fixture = PoolFixture::new();
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success());
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let lock = fixture
+        .hive
+        .home
+        .path
+        .join("slot-locks")
+        .join(pool)
+        .join("slot-1.lock");
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let proof = &fixture._repo_dir.path;
+    let key_path = proof.join("begin-key");
+    let nonce_path = proof.join("begin-nonce");
+    for secret in [&key_path, &nonce_path] {
+        private_file(secret);
+        let out = key_command(&fixture, PRIVATE_KEY_COMMAND, secret, "3");
+        assert!(out.status.success());
+    }
+    let key = fs::read_to_string(&key_path).unwrap();
+    let nonce = fs::read_to_string(&nonce_path).unwrap();
+    let reserve_op = "1".repeat(32);
+    let begin_op = "2".repeat(32);
+    let args = fixture.reservation(pool, 1, 0, &head, &reserve_op);
+    let (out, reserved) = finish_private(start_private(&fixture.hive, args, &key));
+    assert!(out.status.success(), "{reserved}");
+    let reserved_revision = fixture.record()["revision"].as_u64().unwrap();
+    for name in ["first-control", "retry-control"] {
+        private_file(&proof.join(name));
+    }
+
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugin/skills/hive/scripts/slot-handoff.sh")
+        .canonicalize()
+        .unwrap();
+    // Use the packaged version check, then exercise the native checkpoint from its dedicated
+    // Bash parent. No pipeline or command substitution may interpose on the CLI's parent.
+    let script = r#"
+set +x
+bin=$1 helper=$2 lock=$3 proof=$4 repo=$5 pool=$6 operation=$7
+/bin/bash "$helper" check-version "$bin" || exit 20
+IFS= read -r credential < "$proof/begin-key" || exit 21
+IFS= read -r nonce < "$proof/begin-nonce" || exit 22
+printf -v request '{"credential":"%s","nonce":"%s"}' "$credential" "$nonce"
+exec 9< "$lock" || exit 23
+for call in first retry; do
+    exec 8<> "$proof/$call-control" || exit 24
+    "$bin" slot begin --repo "$repo" --pool "$pool" --slot 1 --generation 1 \
+        --op "$operation" --lock-fd 9 --control-fd 8 --json \
+        <<< "$request" > "$proof/$call-result"
+    printf '%s\n' "$?" > "$proof/$call-status" || exit 25
+    exec 8>&-
+    : > "$proof/$call-exited"
+    # Rust checks the lock independently while this parent retains FD 9.
+    IFS= read -r _ || :
+done
+"#;
+    let mut guide = fixture
+        .hive
+        .command_with(
+            Path::new("/bin/bash"),
+            &["--noprofile", "--norc", "-c", script, "guide"],
+        )
+        .arg(env!("CARGO_BIN_EXE_cargo-hive"))
+        .arg(helper)
+        .arg(&lock)
+        .arg(proof)
+        .arg(&fixture.repo)
+        .arg(pool)
+        .arg(&begin_op)
+        .env_remove("BASH_ENV")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let independent = fs::File::open(lock).unwrap();
+    let mut held_after_call = Vec::new();
+    let mut guide_input = guide.stdin.take().unwrap();
+    for name in ["first-exited", "retry-exited"] {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let checkpoint = proof.join(name);
+        while !checkpoint.is_file()
+            && guide.try_wait().unwrap().is_none()
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !checkpoint.is_file() {
+            break;
+        }
+        held_after_call.push(
+            cargo_hive_platform::flock::try_exclusive(&independent)
+                .unwrap()
+                .is_none(),
+        );
+        guide_input.write_all(b"continue\n").unwrap();
+    }
+    drop(guide_input);
+    let out = common::wait_within(guide, Duration::from_secs(5));
+    assert_no_credential(&out, &key);
+    assert_no_credential(&out, &nonce);
+    assert!(out.status.success());
+    assert_eq!(held_after_call.len(), 2);
+    assert_eq!(
+        fs::read_to_string(proof.join("first-status")).unwrap(),
+        "0\n",
+        "the native guide should receive its first preparation permit"
+    );
+    assert_eq!(
+        fs::read_to_string(proof.join("retry-status")).unwrap(),
+        "0\n"
+    );
+    for name in [
+        "first-result",
+        "retry-result",
+        "first-control",
+        "retry-control",
+    ] {
+        let result = fs::read(proof.join(name)).unwrap();
+        let text = String::from_utf8_lossy(&result);
+        assert!(!text.contains(key.trim_end()) && !text.contains(nonce.trim_end()));
+    }
+    let first_control = fs::read(proof.join("first-control")).unwrap();
+    assert!(!first_control.is_empty() && first_control.ends_with(b"\0"));
+    assert_eq!(fs::metadata(proof.join("retry-control")).unwrap().len(), 0);
+    let retry: Value =
+        serde_json::from_slice(&fs::read(proof.join("retry-result")).unwrap()).unwrap();
+    assert_eq!(retry["current"], false);
+    assert_eq!(
+        held_after_call,
+        [true, true],
+        "checkpoint children must leave the guide's flock held"
+    );
+    assert!(
+        cargo_hive_platform::flock::try_exclusive(&independent)
+            .unwrap()
+            .is_some()
+    );
+
+    let saved = fixture.record();
+    let slot = &saved["pools"][0]["slots"][0];
+    assert_eq!(saved["revision"], reserved_revision + 1);
+    assert_eq!(slot["phase"]["kind"], "preparing");
+    assert_eq!(slot["phase"]["attempt"]["stage"], "permit_issued");
+    assert_eq!(slot["phase"]["attempt"]["begin_op"], begin_op);
+    let outcomes = slot["outcomes"].as_array().unwrap();
+    let begin_outcomes: Vec<_> = outcomes
+        .iter()
+        .filter(|outcome| outcome["kind"] == "begin")
+        .collect();
+    assert_eq!(begin_outcomes.len(), 1);
+    assert_eq!(
+        begin_outcomes[0]["attempt_id"],
+        slot["phase"]["attempt"]["attempt_id"]
+    );
+    assert!(
+        !checkout.exists(),
+        "begin must not launch any checkout writer"
+    );
+}
+
+#[test]
 fn unavailable_protocol_has_no_state_effects() {
     let fixture = PoolFixture::new();
     let absent = fixture._repo_dir.path.join("must-stay-absent");
@@ -3790,7 +3956,7 @@ fn unavailable_protocol_has_no_state_effects() {
         .hive
         .command(&[
             "slot",
-            "begin",
+            "ready",
             "--repo",
             fixture.repo.to_str().unwrap(),
             "--pool",
@@ -3801,6 +3967,8 @@ fn unavailable_protocol_has_no_state_effects() {
             "1",
             "--op",
             &"2".repeat(32),
+            "--attempt",
+            "1",
             "--lock-fd",
             "3",
             "--json",

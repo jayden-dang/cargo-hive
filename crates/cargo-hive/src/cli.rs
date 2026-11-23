@@ -170,7 +170,13 @@ pub enum SlotCommand {
         out: SlotOutputArgs,
     },
     #[command(hide = true)]
-    Begin(SlotLockedOperation),
+    Begin {
+        #[command(flatten)]
+        request: SlotLockedOperation,
+        /// Private output descriptor for the first preparation permit
+        #[arg(long, value_name = "N")]
+        control_fd: u32,
+    },
     #[command(hide = true)]
     StepCheck {
         #[command(flatten)]

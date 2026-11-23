@@ -484,12 +484,16 @@ pub struct Attempt {
     pub begin_op: String,
     pub runner: Runner,
     pub stage: AttemptStage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_offset: Option<i64>,
 }
 
 impl Attempt {
     fn validate(&self) -> FormatResult {
         require(
-            self.attempt_id > 0 && hex(&self.begin_op, 32),
+            self.attempt_id > 0
+                && hex(&self.begin_op, 32)
+                && self.lock_offset.is_none_or(|offset| offset >= (1 << 32)),
             "invalid attempt identity",
         )?;
         self.runner.validate()

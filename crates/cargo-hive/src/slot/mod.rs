@@ -16,14 +16,15 @@ use cargo_hive_platform::flock::{
 use cargo_hive_platform::proc::read_stdin_complete;
 use cargo_hive_platform::signals::{self, cancelled};
 use cargo_hive_platform::slot::{
-    ForegroundExec, ForegroundWatch, ProcessInstance, parent_instance,
+    ForegroundExec, ForegroundWatch, ProcessInstance, descriptor_writable, parent_instance,
+    verify_guide_lock,
 };
 use cargo_hive_state::slots::{
-    self, BypassReport, CHECKOUT_NAMESPACE, CompletedInvocation, EligibleProducer, FileIdentity,
-    ForegroundInstance, GitIdentity, LOCK_NAMESPACE, Lease, MAX_OUTCOMES, MAX_POOLS, OperationKind,
-    Outcome, OutcomeRequest, OutputEpoch, OutputRoots, PendingProducer, Phase, Pool, PoolProfile,
-    Producer, ProvenanceLoss, RootExpectation, Runner, Slot, SlotRequestKey, SlotsFile,
-    TransitionResult,
+    self, Attempt, AttemptStage, BypassReport, CHECKOUT_NAMESPACE, CompletedInvocation,
+    EligibleProducer, FileIdentity, ForegroundInstance, GitIdentity, LOCK_NAMESPACE, Lease,
+    MAX_OUTCOMES, MAX_POOLS, OperationKind, Outcome, OutcomeRequest, OutputEpoch, OutputRoots,
+    PendingProducer, Phase, Pool, PoolProfile, Producer, ProvenanceLoss, RootExpectation, Runner,
+    Slot, SlotRequestKey, SlotsFile, TransitionResult,
 };
 use cargo_hive_state::{State, StateError, Tx};
 pub(crate) use inspect::CheckoutProof;
@@ -85,11 +86,15 @@ pub(super) fn dispatch(command: SlotCommand) -> i32 {
                 reserve(state, &scope, expect, &commit, &op)
             });
         }
-        SlotCommand::Begin(op) => {
-            return unavailable(
+        SlotCommand::Begin {
+            request,
+            control_fd,
+        } => {
+            return run_scoped(
                 "slot begin",
-                Some(op.operation.scope.repo),
-                op.operation.out.json,
+                &request.operation.scope.repo,
+                request.operation.out.json,
+                |state| begin(state, &request, control_fd),
             );
         }
         SlotCommand::StepCheck { scope, out, .. } => {
@@ -144,7 +149,7 @@ fn generate_key(fd: u32) -> SlotResult {
     refused
 }
 
-fn write_key(fd: u32) -> io::Result<()> {
+fn private_output(fd: u32, excluded: Option<FileIdentity>) -> io::Result<File> {
     let invalid = || {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -156,9 +161,16 @@ fn write_key(fd: u32) -> io::Result<()> {
         .filter(|&fd| fd > 2)
         .ok_or_else(invalid)?;
     let mut file = File::from(duplicate_inherited_fd(fd)?);
+    if !descriptor_writable(file.as_fd())? {
+        return Err(invalid());
+    }
     let metadata = private_file_metadata(&file)?;
     let identity = FileIdentity::of(&metadata);
-    if metadata.mode() & 0o7777 != 0o600 || metadata.len() != 0 || file.stream_position()? != 0 {
+    if metadata.mode() & 0o7777 != 0o600
+        || metadata.len() != 0
+        || file.stream_position()? != 0
+        || excluded == Some(identity)
+    {
         return Err(invalid());
     }
     for standard in 0..=2 {
@@ -167,6 +179,11 @@ fn write_key(fd: u32) -> io::Result<()> {
             return Err(invalid());
         }
     }
+    Ok(file)
+}
+
+fn write_key(fd: u32) -> io::Result<()> {
+    let mut file = private_output(fd, None)?;
     let mut key = slots::random_credential()?;
     key.push('\n');
     file.write_all(key.as_bytes())
@@ -1183,6 +1200,246 @@ fn check_producer_inventory(proof: &CheckoutProof) -> Result<(), Refusal> {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparationInput {
+    credential: String,
+    nonce: String,
+}
+
+impl PreparationInput {
+    fn read() -> Result<Self, Refusal> {
+        let bytes = read_stdin_complete(512, CREDENTIAL_DEADLINE, cancelled).map_err(|err| {
+            if err.kind() == io::ErrorKind::Interrupted {
+                StateError::Cancelled.into()
+            } else {
+                credential_refusal()
+            }
+        })?;
+        let input: Self = serde_json::from_slice(&bytes).map_err(|_| credential_refusal())?;
+        if !slots::hex(&input.credential, KEY_HEX_LEN) || !slots::hex(&input.nonce, KEY_HEX_LEN) {
+            return Err(credential_refusal());
+        }
+        Ok(input)
+    }
+}
+
+fn begin(
+    state: &State,
+    request: &SlotLockedOperation,
+    control_fd: u32,
+) -> Result<SlotResult, Refusal> {
+    const COMMAND: &str = "slot begin";
+    let op = &request.operation;
+    let key = request_key(&op.scope, op.generation, OperationKind::Begin, &op.op, None)?;
+    let input = PreparationInput::read()?;
+    let runner = producer_runner(&input.nonce)?;
+    let registered = verify_operation_repo(state, &op.scope.repo)?;
+    let lock_path = state
+        .root()
+        .join(LOCK_NAMESPACE)
+        .join(key.pool_id)
+        .join(Slot::lock_name_for(key.slot));
+    let lock_id = slots::checked_slot_lock(&lock_path).map_err(|_| producer_fence_refusal())?;
+    let mut control = private_output(control_fd, Some(lock_id)).map_err(|_| {
+        Refusal::ReturnUncertain(
+            "Could not verify a separate private preparation output descriptor.",
+        )
+    })?;
+    let fd = i32::try_from(request.lock_fd)
+        .ok()
+        .filter(|fd| *fd > 2)
+        .ok_or_else(producer_fence_refusal)?;
+    let inherited = duplicate_inherited_fd(fd).map_err(|_| producer_fence_refusal())?;
+    let identity = LockFileIdentity {
+        dev: lock_id.dev,
+        ino: lock_id.ino,
+    };
+    let check_runner = |expected_offset| {
+        verify_guide_lock(
+            &runner_instance(&runner),
+            fd,
+            identity,
+            inherited.as_fd(),
+            expected_offset,
+        )
+        .map_err(|_| producer_fence_refusal())
+    };
+    let InheritedLock::Acquired(_guard) =
+        try_lock_inherited(inherited.as_fd(), identity).map_err(|_| producer_fence_refusal())?
+    else {
+        return Err(producer_fence_refusal());
+    };
+    let slot_index = usize::from(key.slot - 1);
+    let plan = with_slot_state(state, |tx| {
+        let (mut saved, index) = checked_pool(tx, state, &op.scope, &registered)?;
+        let pool = &saved.pools[index];
+        let slot = &pool.slots[slot_index];
+        if slot.lock_id != lock_id {
+            return Err(producer_fence_refusal());
+        }
+        if let Some(outcome) = slot.outcomes.iter().find(|outcome| {
+            outcome.generation == key.generation && outcome.operation == key.operation
+        }) {
+            if outcome.kind != OperationKind::Begin
+                || outcome.credential != input.credential
+                || outcome.request
+                    != (OutcomeRequest::Begin {
+                        runner: runner.clone(),
+                    })
+            {
+                return Err(Refusal::Scope(
+                    "The operation ID belongs to a different request.".into(),
+                ));
+            }
+            if slot.generation == key.generation
+                && let Phase::Preparing { attempt, .. } = &slot.phase
+            {
+                check_runner(Some(
+                    attempt.lock_offset.ok_or_else(producer_fence_refusal)?,
+                ))?;
+            }
+            tx.sync_slots(&saved)?;
+            return Ok(ReturnPlan::Replay(begin_result(
+                COMMAND, pool, outcome, false,
+            )));
+        }
+        if slot.generation != key.generation
+            || !matches!(&slot.phase, Phase::Reserved { lease } if lease.credential == input.credential)
+            || !slot_producer_is_eligible(slot)
+            || !slot_identity_present(state.root(), pool, slot)
+        {
+            return Err(Refusal::ReturnUncertain(
+                "Begin requires the original current reservation and proved checkout identity.",
+            ));
+        }
+        if slot.outcomes.len() >= MAX_OUTCOMES {
+            return Err(Refusal::OutcomeLimit);
+        }
+        Ok(ReturnPlan::Inspect(Box::new(ReturnScope {
+            pool: saved.pools.swap_remove(index),
+            registry: tx.read_slot_registry()?,
+            secondary_roots: state.slot_config()?.secondary_roots,
+        })))
+    })?;
+    let snapshot = match plan {
+        ReturnPlan::Replay(result) => return Ok(result),
+        ReturnPlan::Inspect(snapshot) => snapshot,
+    };
+    let pool = &snapshot.pool;
+    let slot = &pool.slots[slot_index];
+    let Phase::Reserved { lease } = &slot.phase else {
+        return Err(producer_fence_refusal());
+    };
+    let path = pool.checkout_path(slot);
+    if path.as_os_str().as_encoded_bytes().len() > 4096 {
+        return Err(Refusal::ReturnUncertain(
+            "The preparation path is outside the private protocol bound.",
+        ));
+    }
+    let lock_offset = check_runner(None)?;
+    let inspection = if let Some(checkout) = &slot.checkout_id {
+        let proof = inspect_checkout(
+            &SlotScope {
+                pool,
+                slot,
+                registry: &snapshot.registry,
+                secondary_roots: &snapshot.secondary_roots,
+            },
+            &ExpectedCheckout {
+                identity: checkout,
+                head: slot.last_head.as_deref(),
+            },
+        )?;
+        check_producer_inventory(&proof)?;
+        Some(proof)
+    } else {
+        verify_no_checkout_ancestor(&pool.root)?;
+        let records = owner_worktree_inventory(&pool.root, &snapshot.registry, Some(pool))?;
+        let checked_paths = records
+            .into_iter()
+            .map(|record| record.path)
+            .collect::<Vec<_>>();
+        let mut remaining = MAX_ROOT_ENTRIES;
+        check_nested_checkouts(&pool.root, 0, &mut remaining, &checked_paths)?;
+        None
+    };
+    let (result, attempt) = with_slot_state(state, |tx| {
+        let (mut saved, index) = checked_pool(tx, state, &op.scope, &registered)?;
+        let current = &saved.pools[index];
+        if &current.slots[slot_index] != slot
+            || current.profile != pool.profile
+            || tx.read_slot_registry::<Registry>()? != snapshot.registry
+            || state.slot_config()?.secondary_roots != snapshot.secondary_roots
+            || !slot_identity_present(state.root(), current, slot)
+        {
+            return Err(producer_fence_refusal());
+        }
+        check_runner(Some(lock_offset))?;
+        let attempt_id = saved
+            .revision
+            .checked_add(1)
+            .ok_or(Refusal::Capacity("The slot attempt counter is exhausted."))?;
+        let outcome = Outcome {
+            pool_id: key.pool_id.into(),
+            slot: key.slot,
+            generation: key.generation,
+            operation: key.operation.into(),
+            kind: key.kind,
+            attempt_id: Some(attempt_id),
+            request: OutcomeRequest::Begin {
+                runner: runner.clone(),
+            },
+            credential: input.credential.clone(),
+            result: TransitionResult::PermitIssued,
+        };
+        let result = begin_result(COMMAND, current, &outcome, true);
+        let next = &mut saved.pools[index].slots[slot_index];
+        next.phase = Phase::Preparing {
+            lease: lease.clone(),
+            attempt: Attempt {
+                attempt_id,
+                begin_op: key.operation.into(),
+                runner: runner.clone(),
+                stage: AttemptStage::PermitIssued,
+                lock_offset: Some(lock_offset),
+            },
+        };
+        next.outcomes.push(outcome);
+        commit_slot_update(tx, &mut saved)?;
+        Ok((result, attempt_id))
+    })?;
+    drop(inspection);
+    check_runner(Some(lock_offset))?;
+    let mut payload = format!("permit_issued\0{attempt}\0").into_bytes();
+    payload.extend(path.as_os_str().as_encoded_bytes());
+    payload.extend(b"\0");
+    payload.extend(lease.requested_commit.as_bytes());
+    payload.extend(b"\0");
+    if payload.len() > 8192 || control.write_all(&payload).is_err() {
+        return Err(Refusal::ReturnUncertain(
+            "The first preparation permit could not be delivered.",
+        ));
+    }
+    Ok(result)
+}
+
+fn begin_result(command: &'static str, pool: &Pool, outcome: &Outcome, live: bool) -> SlotResult {
+    let kind = if live {
+        "permit_issued"
+    } else {
+        "permit_recorded"
+    };
+    let mut result = SlotResult::new(command, kind, Some(pool.main.clone()), 0);
+    result.pool_id = Some(pool.pool_id.clone());
+    result.attempt = outcome.attempt_id;
+    result.current = Some(live);
+    if !live {
+        result.next_action = Some(HELD_ACTION);
+    }
+    result
+}
+
 enum ReturnPlan {
     Inspect(Box<ReturnScope>),
     Replay(SlotResult),
@@ -1388,9 +1645,6 @@ fn replay_outcome(
     let missing = || {
         Refusal::Scope("No matching unresolved slot operation was found. Use the guide's original request or ask the repository operator to inspect the current slot.".into())
     };
-    if key.attempt_id.is_some() {
-        return Err(missing());
-    }
     let acknowledging = matches!(action, ReplayAction::Acknowledge);
     let input = SlotOperationInput::read()?;
     let registered = verify_operation_repo(state, &scope.repo)?;
@@ -1409,6 +1663,7 @@ fn replay_outcome(
                         outcome.kind,
                         OperationKind::Reserve
                             | OperationKind::Return
+                            | OperationKind::Begin
                             | OperationKind::ProducerComplete
                     ) || (!acknowledging && outcome.kind == OperationKind::ProducerStart))
                     && outcome.credential == input.credential
@@ -1424,6 +1679,13 @@ fn replay_outcome(
                 outcome,
                 state.root(),
             ),
+            OperationKind::Begin => {
+                let mut result = begin_result(command, pool, outcome, false);
+                if let Some(kind) = acknowledgement {
+                    result.kind = kind;
+                }
+                Ok(result)
+            }
             OperationKind::Return => return_result(
                 command,
                 acknowledgement.unwrap_or("returned"),
