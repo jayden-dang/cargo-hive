@@ -2586,6 +2586,196 @@ mod tests {
     }
 
     #[test]
+    fn ready_publication_reopens_only_the_exact_committed_outcome() {
+        for rename_visible in [false, true] {
+            let scratch = Scratch::new();
+            let (initial, reserved) = reservation_records(&scratch.0);
+            let (preparing, ready) = ready_publication_records(&reserved);
+            State::open_at(scratch.0.clone())
+                .unwrap()
+                .locked(|tx| {
+                    tx.commit_slots(None, &initial)?;
+                    tx.commit_slots(Some(initial.revision), &reserved)?;
+                    tx.commit_slots(Some(reserved.revision), &preparing)?;
+                    let publication =
+                        tx.commit_slots_with(Some(preparing.revision), &ready, |temp, path| {
+                            if rename_visible {
+                                fs::rename(temp, path)?;
+                            }
+                            Err(io::Error::other("injected ready publication failure"))
+                        });
+                    if rename_visible {
+                        publication?;
+                    } else {
+                        let error = publication.unwrap_err().to_string();
+                        assert!(
+                            error.contains("injected ready publication failure"),
+                            "{error}"
+                        );
+                    }
+                    Ok(())
+                })
+                .unwrap();
+
+            let reader = State::open_at(scratch.0.clone()).unwrap();
+            reader
+                .slot_locked_or_cancelled(
+                    || false,
+                    |tx| {
+                        let visible = tx.read_slots()?.unwrap();
+                        if !rename_visible {
+                            assert!(
+                                visible == preparing,
+                                "the prior lease and permit must survive"
+                            );
+                            assert!(tx.sync_slots(&ready).is_err());
+                            tx.commit_slots(Some(preparing.revision), &ready)?;
+                        } else {
+                            assert!(visible == ready, "the published Ready record must survive");
+                        }
+
+                        let recovered = tx.read_slots()?.unwrap();
+                        tx.sync_slots(&recovered)?;
+                        assert!(recovered == ready, "one exact Ready outcome must survive");
+                        assert!(tx.commit_slots(Some(preparing.revision), &ready).is_err());
+
+                        let mut wrong_runner = recovered.clone();
+                        let outcome = wrong_runner.pools[0].slots[0].outcomes.last_mut().unwrap();
+                        let OutcomeRequest::Ready { runner } = &mut outcome.request else {
+                            panic!("expected a Ready request");
+                        };
+                        runner.nonce = "f".repeat(64);
+                        assert!(tx.sync_slots(&wrong_runner).is_err());
+
+                        let mut vacant = recovered;
+                        vacant.revision += 1;
+                        vacant.pools[0].slots[0].phase = Phase::Vacant;
+                        tx.commit_slots(Some(ready.revision), &vacant)?;
+                        let mut renewed = vacant.clone();
+                        renewed.revision += 1;
+                        let renewed_slot = &mut renewed.pools[0].slots[0];
+                        renewed_slot.generation += 1;
+                        renewed_slot.phase = Phase::Reserved {
+                            lease: Lease {
+                                requested_commit: "d".repeat(40),
+                                credential: "e".repeat(64),
+                                reservation_op: "4".repeat(32),
+                            },
+                        };
+                        tx.commit_slots(Some(vacant.revision), &renewed)?;
+                        assert!(tx.sync_slots(&ready).is_err());
+                        let mut stale_ready = ready.clone();
+                        stale_ready.revision = renewed.revision + 1;
+                        let error = tx
+                            .commit_slots(Some(renewed.revision), &stale_ready)
+                            .unwrap_err()
+                            .to_string();
+                        assert!(
+                            error.contains("slot generation is stale or skipped"),
+                            "{error}"
+                        );
+                        assert!(tx.read_slots()?.as_ref() == Some(&renewed));
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    fn ready_publication_records(reserved: &SlotsFile) -> (SlotsFile, SlotsFile) {
+        let mut preparing = reserved.clone();
+        preparing.revision += 1;
+        let pool = &mut preparing.pools[0];
+        let root = pool.checkout_path(&pool.slots[0]).join("target");
+        let slot = &mut pool.slots[0];
+        let Phase::Reserved { lease } = &slot.phase else {
+            panic!("fixture must be reserved");
+        };
+        let lease = lease.clone();
+        let runner = Runner {
+            boot_session: "boot".into(),
+            pid: 2,
+            start_secs: 1,
+            start_micros: 0,
+            nonce: "d".repeat(64),
+        };
+        let attempt_id = 1;
+        let begin_op = "2".repeat(32);
+        slot.outcomes.push(Outcome {
+            pool_id: pool.pool_id.clone(),
+            slot: slot.number,
+            generation: slot.generation,
+            operation: begin_op.clone(),
+            kind: OperationKind::Begin,
+            attempt_id: Some(attempt_id),
+            request: OutcomeRequest::Begin {
+                runner: runner.clone(),
+            },
+            credential: lease.credential.clone(),
+            result: TransitionResult::PermitIssued,
+        });
+        let checkout = CheckoutIdentity {
+            directory: FileIdentity { dev: 1, ino: 4 },
+            admin: GitIdentity {
+                path: pool.common_git_id.path.join("worktrees/slot-1"),
+                dev: 1,
+                ino: 5,
+            },
+        };
+        slot.checkout_id = Some(checkout.clone());
+        slot.producer = Producer::NeverBuilt {
+            evidence: Some(EmptyEpoch {
+                epoch: OutputEpoch {
+                    pool_id: pool.pool_id.clone(),
+                    slot: slot.number,
+                    checkout,
+                },
+                roots: OutputRoots {
+                    target: RootProof::Absent { path: root.clone() },
+                    build: RootProof::Absent { path: root },
+                },
+            }),
+        };
+        slot.last_head = Some(lease.requested_commit.clone());
+        slot.phase = Phase::Preparing {
+            lease: lease.clone(),
+            attempt: Attempt {
+                attempt_id,
+                begin_op,
+                runner: runner.clone(),
+                stage: AttemptStage::GcInProgress,
+                lock_offset: Some(1 << 32),
+                prior_head: None,
+                anchors: Vec::new(),
+                anchor_cursor: 0,
+            },
+        };
+
+        let mut ready = preparing.clone();
+        ready.revision += 1;
+        let pool = &mut ready.pools[0];
+        let slot = &mut pool.slots[0];
+        let commit = lease.requested_commit.clone();
+        let credential = lease.credential.clone();
+        slot.phase = Phase::Leased {
+            lease,
+            ready_commit: commit.clone(),
+        };
+        slot.outcomes.push(Outcome {
+            pool_id: pool.pool_id.clone(),
+            slot: slot.number,
+            generation: slot.generation,
+            operation: "3".repeat(32),
+            kind: OperationKind::Ready,
+            attempt_id: Some(attempt_id),
+            request: OutcomeRequest::Ready { runner },
+            credential,
+            result: TransitionResult::Ready { commit },
+        });
+        (preparing, ready)
+    }
+
+    #[test]
     fn retained_output_cannot_reset_lost_or_interrupted_provenance() {
         let scratch = Scratch::new();
         let state = State::open_at(scratch.0.clone()).unwrap();
