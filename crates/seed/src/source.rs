@@ -631,10 +631,19 @@ fn unit_dir_dep_class(
     if names.is_empty() {
         return Ok(DepClass::Absent);
     }
+    classify_dep_lines(
+        names.into_iter().map(|name| read_dep_info(&out.join(name))),
+        cargo_home,
+    )
+}
+
+fn classify_dep_lines(
+    lines: impl IntoIterator<Item = Result<Option<String>, Skip>>,
+    cargo_home: &Path,
+) -> Result<DepClass, Skip> {
     let mut saw_registry = false;
-    for name in names {
-        let path = out.join(name);
-        let Some(line) = read_dep_info(&path)? else {
+    for line in lines {
+        let Some(line) = line? else {
             continue;
         };
         if is_registry_dep_info(&line, cargo_home) {
@@ -700,8 +709,13 @@ fn read_dep_info(path: &Path) -> Result<Option<String>, Skip> {
             )));
         }
     };
+    read_dep_info_line(&mut file, path).map(Some)
+}
+
+fn read_dep_info_line(mut reader: impl Read, path: &Path) -> Result<String, Skip> {
     let mut buf = Vec::new();
-    file.by_ref()
+    reader
+        .by_ref()
         .take(DEP_INFO_CAP + 1)
         .read_to_end(&mut buf)
         .map_err(|err| {
@@ -722,7 +736,7 @@ fn read_dep_info(path: &Path) -> Result<Option<String>, Skip> {
             path.display()
         ))
     })?;
-    Ok(Some(text.split('\n').next().unwrap_or("").to_string()))
+    Ok(text.split('\n').next().unwrap_or("").to_string())
 }
 
 fn settle_units_without_dep_info(cands: &mut [Cand], by_hash: &HashMap<String, Vec<usize>>) {
@@ -920,10 +934,84 @@ fn unescape_spaces(input: &str) -> String {
     out
 }
 
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+    pub fn dep_info(data: &[u8]) {
+        let home = Path::new("cargo-home");
+        if let Ok(line) = read_dep_info_line(data, Path::new("probe.d")) {
+            let _ = is_registry_dep_info(&line, home);
+        }
+        let suffix = match data.first().copied().unwrap_or(0) % 3 {
+            0 => "name.rs",
+            1 => "file\\ name.rs",
+            _ => "unicode-λ.rs",
+        };
+        let registry =
+            format!("object: cargo-home/registry/src/package/{suffix} other.rs\nignored: line\n");
+        let workspace = "object: project/src/lib.rs\n".to_string();
+        let line = read_dep_info_line(registry.as_bytes(), Path::new("probe.d")).unwrap();
+        assert!(is_registry_dep_info(&line, home));
+        assert!(!is_registry_dep_info(&workspace, home));
+        assert!(!is_registry_dep_info(
+            "object: cargo-home/registry/src-other/pkg.rs",
+            home
+        ));
+        assert!(is_registry_dep_info(
+            "object: cargo-home/registry/src/",
+            home
+        ));
+        assert!(matches!(
+            classify_dep_lines([Ok(Some(line.clone())), Ok(Some(workspace))], home).unwrap(),
+            DepClass::Workspace
+        ));
+        assert!(matches!(
+            classify_dep_lines([Ok(Some(line)), Ok(None)], home).unwrap(),
+            DepClass::Registry
+        ));
+        assert!(matches!(
+            classify_dep_lines([Ok(None)], home).unwrap(),
+            DepClass::Absent
+        ));
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_reader_models_keep_prefix_rules_and_workspace_veto() {
+        for input in [&b""[..], &b"\xff\n"[..], &b"2"[..], &b"target: x\n"[..]] {
+            fuzzing::dep_info(input);
+        }
+        assert!(read_dep_info_line(&b"\xff"[..], Path::new("probe.d")).is_err());
+        let exact = std::io::repeat(b'x').take(DEP_INFO_CAP);
+        assert_eq!(
+            read_dep_info_line(exact, Path::new("probe.d"))
+                .unwrap()
+                .len() as u64,
+            DEP_INFO_CAP
+        );
+        assert!(
+            read_dep_info_line(
+                std::io::repeat(b'x').take(DEP_INFO_CAP + 1),
+                Path::new("probe.d")
+            )
+            .is_err()
+        );
+        assert!(read_dep_info_line(FailingRead, Path::new("probe.d")).is_err());
+    }
+
+    struct FailingRead;
+    impl Read for FailingRead {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::PermissionDenied.into())
+        }
+    }
+
     use cargo_hive_cargo::ctx::Ctx;
     use cargo_hive_cargo::registry::Repo;
     use cargo_hive_core::fingerprint::le_hex;

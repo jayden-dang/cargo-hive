@@ -717,8 +717,13 @@ fn profile_listings(
 
 fn hash_unchanged(path: &Path, expected: &str) -> Result<bool, String> {
     let mut file = File::open(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    hash_matches(&mut file, path, expected)
+}
+
+fn hash_matches(mut reader: impl Read, path: &Path, expected: &str) -> Result<bool, String> {
     let mut buf = Vec::new();
-    file.by_ref()
+    reader
+        .by_ref()
         .take(HASH_CAP + 1)
         .read_to_end(&mut buf)
         .map_err(|err| format!("{}: {err}", path.display()))?;
@@ -982,8 +987,13 @@ fn read_capped(path: &Path, cap: u64) -> Result<String, String> {
             ));
         }
     };
+    read_capped_stream(&mut file, path, cap)
+}
+
+fn read_capped_stream(mut reader: impl Read, path: &Path, cap: u64) -> Result<String, String> {
     let mut buf = Vec::new();
-    file.by_ref()
+    reader
+        .by_ref()
         .take(cap + 1)
         .read_to_end(&mut buf)
         .map_err(|err| {
@@ -1012,6 +1022,36 @@ fn epoch_secs(now: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing {
+    use super::*;
+    pub fn rustc_info(data: &[u8]) {
+        if let Ok(text) = read_capped_stream(data, Path::new("rustc-info.json"), RUSTC_INFO_CAP) {
+            let _ = rustc_info_version(&text);
+        }
+        let _ = hash_matches(data, Path::new("hash"), "0123456789abcdef");
+        let stdout = format!(
+            "rustc probe\nrelease: {}\nrelease: repeated within one entry\n",
+            data.first().copied().unwrap_or(0)
+        );
+        let mut value = serde_json::json!({"outputs":{"probe":{"stdout":"libprobe.rlib"},"version":{"stdout":stdout}}});
+        let text = value.to_string();
+        assert_eq!(rustc_info_version(&text).unwrap(), stdout);
+        value["outputs"]["other"] = serde_json::json!({"stdout":"release: other"});
+        assert!(rustc_info_version(&value.to_string()).is_err());
+        assert!(
+            hash_matches(
+                &b"0123456789abcdef"[..],
+                Path::new("hash"),
+                "0123456789abcdef"
+            )
+            .unwrap()
+        );
+        assert!(!hash_matches(&b"other"[..], Path::new("hash"), "0123456789abcdef").unwrap());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::rustc_info_version;
@@ -1025,6 +1065,25 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn toolchain_and_staging_hash_models_cover_raw_and_bounded_inputs() {
+        use std::io::Read;
+        for input in [&b""[..], &b"\xff"[..], &b"{}"[..], &b"a"[..]] {
+            super::fuzzing::rustc_info(input);
+        }
+        let path = Path::new("probe");
+        assert!(super::hash_matches(std::io::repeat(b'a').take(65), path, "a").is_err());
+        assert!(
+            super::read_capped_stream(
+                std::io::repeat(b'a').take(1024 * 1024 + 1),
+                path,
+                1024 * 1024
+            )
+            .is_err()
+        );
+        assert!(super::read_capped_stream(&b"\xff"[..], path, 1024).is_err());
+    }
 
     fn info(entries: &[(&str, &str)]) -> String {
         let mut outputs = serde_json::Map::new();
