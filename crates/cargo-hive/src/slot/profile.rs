@@ -1,5 +1,6 @@
 //! Admits only the actual command and graph covered by the pool's reviewed profile.
 
+use super::admission::{NativeBuild, NativePackage, NativeTarget};
 use super::{CheckoutProof, Refusal, canonical_worktree_path, check_cancelled, exists, git_scope};
 use cargo_hive_cargo::metadata;
 use cargo_hive_platform::{
@@ -36,10 +37,11 @@ pub(super) struct CheckedInvocation {
     pub evidence: InvocationEvidence,
     pub cargo: PathBuf,
     pub cwd: PathBuf,
+    pub needs_guide: bool,
     pub environment: BTreeMap<std::ffi::OsString, std::ffi::OsString>,
 }
 
-fn refused(detail: &'static str) -> Refusal {
+pub(super) fn refused(detail: &'static str) -> Refusal {
     Refusal::ReturnUncertain(detail)
 }
 
@@ -130,11 +132,18 @@ pub(super) fn reviewed_shape<'a>(
             invocation.id == input.invocation
                 && invocation.argv == input.argv
                 && invocation.cwd == input.cwd
-                && supported_args(&invocation.argv)
         })
         .ok_or_else(|| {
             refused("The producer command or working directory is outside the reviewed invocation.")
         })?;
+    if NativeBuild::read(profile, invocation, &native_target())?.is_some() {
+        return Ok(invocation);
+    }
+    if !supported_args(&invocation.argv) {
+        return Err(refused(
+            "The producer command or working directory is outside the reviewed invocation.",
+        ));
+    }
     for mutable in profile
         .mutable_inputs
         .iter()
@@ -214,6 +223,11 @@ pub(super) fn check_invocation(
 ) -> Result<CheckedInvocation, Refusal> {
     check_cancelled()?;
     let invocation = reviewed_shape(profile, input)?;
+    let native = NativeBuild::read(profile, invocation, &native_target())?;
+    let variants = native
+        .as_ref()
+        .map(|seal| seal.verify_checkout(profile, invocation, checkout))
+        .transpose()?;
     let cwd = if invocation.cwd == Path::new(".") {
         checkout.path.clone()
     } else {
@@ -242,6 +256,10 @@ pub(super) fn check_invocation(
     let (cargo, rustc) = verified_executables(invocation, &environment)?;
     environment.insert("RUSTC".into(), rustc.as_os_str().to_owned());
     environment.insert("RUSTUP_AUTO_INSTALL".into(), "0".into());
+    let native_tools = native
+        .as_ref()
+        .map(|seal| seal.bind_tools(&cargo, &rustc, &cwd, &mut environment))
+        .transpose()?;
     let environment_digest = digest(
         &serde_json::to_vec(
             &environment
@@ -253,6 +271,23 @@ pub(super) fn check_invocation(
     )?;
     let tools_before = tool_identities(&cargo, &rustc)?;
     verify_tools(invocation, &cwd, &cargo, &rustc, &environment)?;
+    if let Some(seal) = &native {
+        let expected = seal
+            .target_libdir()
+            .ok_or_else(|| refused("The reviewed Rust target sysroot is unavailable."))?;
+        let actual = cargo_output(
+            &rustc,
+            &cwd,
+            &["--print", "target-libdir"],
+            4096,
+            &environment,
+        )?;
+        if actual.strip_suffix(b"\n") != Some(expected.as_os_str().as_encoded_bytes()) {
+            return Err(refused(
+                "The active Rust target sysroot differs from the reviewed compiler material.",
+            ));
+        }
+    }
     let discovered = discover(&cargo, &cwd, &environment)?;
     if tools_before != tool_identities(&cargo, &rustc)? {
         return Err(refused(
@@ -286,12 +321,26 @@ pub(super) fn check_invocation(
             "The actual workspace or Cargo output roots differ from the reviewed slot paths.",
         ));
     }
-    let reviewed_sources =
-        reviewed_source_facts(&inputs, &discovered, checkout, profile, invocation)?;
-    let graph_digest = digest(
-        &serde_json::to_vec(&(&inputs, reviewed_sources, &cargo, &rustc, &tools_before))
-            .map_err(|_| refused("Could not bind the producer graph evidence."))?,
+    if let Some(seal) = &native {
+        verify_native_graph(&discovered, &checkout.path, seal.packages())?;
+    }
+    let reviewed_sources = reviewed_source_facts(
+        &inputs,
+        &discovered,
+        checkout,
+        profile,
+        invocation,
+        native.is_some(),
     )?;
+    let seal_digest = native.as_ref().map(|seal| &seal.seal_digest);
+    let graph_parts = (&inputs, reviewed_sources, &cargo, &rustc, &tools_before);
+    let graph_bytes = if seal_digest.is_some() {
+        serde_json::to_vec(&(&graph_parts, seal_digest, &native_tools, variants))
+    } else {
+        serde_json::to_vec(&graph_parts)
+    }
+    .map_err(|_| refused("Could not bind the producer graph evidence."))?;
+    let graph_digest = digest(&graph_bytes)?;
 
     let fixed_environment: Vec<_> = environment
         .iter()
@@ -303,20 +352,24 @@ pub(super) fn check_invocation(
         })
         .map(|(key, value)| (key.as_encoded_bytes(), value.as_encoded_bytes()))
         .collect();
-    let stable_digest = digest(
-        &serde_json::to_vec(&(
-            &inputs,
-            &discovered.graph_digest,
-            &cargo,
-            &rustc,
-            &tools_before,
-            &invocation.argv,
-            invocation.layout,
-            &cwd,
-            fixed_environment,
-        ))
-        .map_err(|_| refused("Could not bind the stable producer profile inputs."))?,
-    )?;
+    let stable_parts = (
+        &inputs,
+        &discovered.graph_digest,
+        &cargo,
+        &rustc,
+        &tools_before,
+        &invocation.argv,
+        invocation.layout,
+        &cwd,
+        fixed_environment,
+    );
+    let stable_bytes = if seal_digest.is_some() {
+        serde_json::to_vec(&(&stable_parts, seal_digest, &native_tools))
+    } else {
+        serde_json::to_vec(&stable_parts)
+    }
+    .map_err(|_| refused("Could not bind the stable producer profile inputs."))?;
+    let stable_digest = digest(&stable_bytes)?;
 
     Ok(CheckedInvocation {
         evidence: InvocationEvidence {
@@ -328,6 +381,7 @@ pub(super) fn check_invocation(
         cargo,
         cwd,
         environment,
+        needs_guide: native.is_some(),
     })
 }
 
@@ -467,6 +521,10 @@ fn fixed_inputs(
 }
 
 pub(super) fn read_input(path: &Path) -> Result<Option<Vec<u8>>, Refusal> {
+    read_input_bounded(path, INPUT_LIMIT)
+}
+
+pub(super) fn read_input_bounded(path: &Path, cap: usize) -> Result<Option<Vec<u8>>, Refusal> {
     let unproved =
         || refused("Could not establish a canonical regular reviewed input or prove its absence.");
     let canonical = canonical_worktree_path(path).map_err(|_| unproved())?;
@@ -486,11 +544,11 @@ pub(super) fn read_input(path: &Path) -> Result<Option<Vec<u8>>, Refusal> {
     let before = file.metadata().map_err(|_| unproved())?;
     let mut bytes = Vec::new();
     (&file)
-        .take(INPUT_LIMIT as u64 + 1)
+        .take(cap as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| unproved())?;
     let after = fs::symlink_metadata(path).map_err(|_| unproved())?;
-    if bytes.len() > INPUT_LIMIT
+    if bytes.len() > cap
         || super::directory_stamp(&before) != super::directory_stamp(&after)
         || before.len() != after.len()
         || !after.is_file()
@@ -782,13 +840,16 @@ fn cargo_output(
 #[derive(Deserialize)]
 struct Package {
     manifest_path: PathBuf,
+    id: String,
     name: String,
+    version: String,
     source: Option<String>,
     targets: Vec<PackageTarget>,
 }
 
 #[derive(Deserialize)]
 struct PackageTarget {
+    name: String,
     kind: Vec<String>,
     src_path: PathBuf,
 }
@@ -797,6 +858,28 @@ struct Discovered {
     resolved: metadata::Resolved,
     packages: Vec<Package>,
     graph_digest: String,
+    workspace_members: Vec<String>,
+    nodes: Vec<ResolveNode>,
+}
+
+#[derive(Deserialize)]
+struct ResolveNode {
+    id: String,
+    deps: Vec<ResolveDependency>,
+    features: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ResolveDependency {
+    name: String,
+    pkg: String,
+    dep_kinds: Vec<ResolveKind>,
+}
+
+#[derive(Deserialize)]
+struct ResolveKind {
+    kind: Option<String>,
+    target: Option<String>,
 }
 
 fn deserialize_discovery<T: DeserializeOwned>(value: &serde_json::Value) -> Result<T, Refusal> {
@@ -848,7 +931,86 @@ fn discover(
         },
         packages: deserialize_discovery(&metadata["packages"])?,
         graph_digest,
+        workspace_members: deserialize_discovery(&metadata["workspace_members"])?,
+        nodes: deserialize_discovery(&metadata["resolve"]["nodes"])?,
     })
+}
+
+fn verify_native_graph(
+    graph: &Discovered,
+    checkout: &Path,
+    expected: &[NativePackage],
+) -> Result<(), Refusal> {
+    let unproved = || refused("The actual Cargo graph differs from the sealed native build.");
+    let ids: BTreeMap<_, _> = graph
+        .packages
+        .iter()
+        .map(|pkg| (&pkg.id, &pkg.name))
+        .collect();
+    let members: BTreeSet<_> = graph.workspace_members.iter().collect();
+    let nodes: BTreeMap<_, _> = graph.nodes.iter().map(|node| (&node.id, node)).collect();
+    if graph.packages.len() != expected.len()
+        || ids.len() != expected.len()
+        || graph.nodes.len() != expected.len()
+        || nodes.len() != expected.len()
+        || graph.workspace_members.len() != expected.len()
+        || members.len() != expected.len()
+    {
+        return Err(unproved());
+    }
+    for package in &graph.packages {
+        if package.source.is_some() || !members.contains(&package.id) {
+            return Err(unproved());
+        }
+        let node = nodes.get(&package.id).ok_or_else(unproved)?;
+        if !node.features.is_empty() {
+            return Err(unproved());
+        }
+        let mut dependencies = Vec::new();
+        for dependency in &node.deps {
+            let name = ids.get(&dependency.pkg).ok_or_else(unproved)?;
+            if dependency.name != **name
+                || dependency.dep_kinds.len() != 1
+                || dependency.dep_kinds[0].kind.is_some()
+                || dependency.dep_kinds[0].target.is_some()
+            {
+                return Err(unproved());
+            }
+            dependencies.push((*name).clone());
+        }
+        dependencies.sort();
+        let mut targets = Vec::new();
+        for target in &package.targets {
+            let [kind] = target.kind.as_slice() else {
+                return Err(unproved());
+            };
+            targets.push(NativeTarget {
+                name: target.name.clone(),
+                kind: kind.clone(),
+                source: target
+                    .src_path
+                    .strip_prefix(checkout)
+                    .map_err(|_| unproved())?
+                    .to_path_buf(),
+            });
+        }
+        targets.sort_by(|left, right| left.name.cmp(&right.name));
+        let actual = NativePackage {
+            name: package.name.clone(),
+            version: package.version.clone(),
+            manifest: package
+                .manifest_path
+                .strip_prefix(checkout)
+                .map_err(|_| unproved())?
+                .to_path_buf(),
+            targets,
+            dependencies,
+        };
+        if !expected.contains(&actual) {
+            return Err(unproved());
+        }
+    }
+    Ok(())
 }
 
 fn reviewed_source_facts(
@@ -857,6 +1019,7 @@ fn reviewed_source_facts(
     checkout: &CheckoutProof,
     profile: &PoolProfile,
     invocation: &Invocation,
+    sealed: bool,
 ) -> Result<BTreeMap<PathBuf, String>, Refusal> {
     let unproved = || {
         refused(
@@ -874,14 +1037,16 @@ fn reviewed_source_facts(
     {
         return Err(unproved());
     }
-    if graph.packages.iter().any(|package| {
-        package.targets.iter().any(|target| {
-            target
-                .kind
-                .iter()
-                .any(|kind| matches!(kind.as_str(), "custom-build" | "proc-macro"))
+    if !sealed
+        && graph.packages.iter().any(|package| {
+            package.targets.iter().any(|target| {
+                target
+                    .kind
+                    .iter()
+                    .any(|kind| matches!(kind.as_str(), "custom-build" | "proc-macro"))
+            })
         })
-    }) {
+    {
         return Err(refused(
             "The reviewed graph contains an executable build target without foreground custody proof.",
         ));

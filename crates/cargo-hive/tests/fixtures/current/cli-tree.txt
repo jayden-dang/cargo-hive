@@ -440,6 +440,7 @@ Options:
           Print help
 
     cmd producer hidden=true about=None long_about=None
+      arg control_fd long=Some("control-fd") short=None hidden=false required=false defaults=[] help=Some("Private descriptor for the checked producer launch") long_help=None
       arg generation long=Some("generation") short=None hidden=false required=true defaults=[] help=Some("Expected slot generation") long_help=None
       arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
       arg lock_fd long=Some("lock-fd") short=None hidden=false required=true defaults=[] help=Some("Inherited slot lock descriptor") long_help=None
@@ -471,6 +472,9 @@ Options:
 
       --lock-fd <N>
           Inherited slot lock descriptor
+
+      --control-fd <N>
+          Private descriptor for the checked producer launch
 
   -h, --help
           Print help

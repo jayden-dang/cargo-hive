@@ -1,9 +1,9 @@
 #!/bin/bash
-
 # Private entry point used by the installed guide.
 set +x +a
-unset -v credential nonce request step_request extra
+unset -v credential nonce request step_request producer_request extra
 export -n SHELLOPTS
+
 check_slot_version() {
     local binary=$1 metadata version actual
     local version_pattern='^  hive-version: "([0-9]+\.[0-9]+\.[0-9]+)"$'
@@ -143,6 +143,71 @@ take_slot() {
     /bin/cat "$scratch/result" || return 1
 }
 
+produce_slot() {
+    local binary=$1 repo=$2 pool=$3 slot=$4 generation=$5 operation=$6 invocation=$7
+    local id_pattern='^[0-9a-f]{32}$' key_pattern='^[0-9a-f]{64}$'
+    local count_pattern='^[1-9][0-9]{0,2}$' invocation_pattern='^[a-zA-Z0-9_.-]{1,64}$'
+    local hive_root=${HIVE_HOME:-$HOME/.hive} credential nonce producer_request extra
+    local scratch field cwd total i stopped writer cleanup stop_cleanup
+    local -a scope assignments argv
+    check_slot_version "$binary" || return 1
+    [[ $repo == /* && $hive_root == /* && ( $slot == 1 || $slot == 2 ) &&
+        $pool =~ $id_pattern && $operation =~ $id_pattern &&
+        $generation =~ ^[1-9][0-9]{0,19}$ && $invocation =~ $invocation_pattern ]] || return 1
+    IFS= read -r credential && [[ $credential =~ $key_pattern ]] || return 1
+    extra=
+    if IFS= read -r extra || [[ -n $extra ]]; then return 1; fi
+    umask 077
+    scratch=$(/usr/bin/mktemp -d "${TMPDIR:-/private/tmp}/hive-slot-producer.XXXXXXXX") || return 1
+    printf -v cleanup '/bin/rm -f -- %q %q %q; /bin/rmdir -- %q' "$scratch/nonce" "$scratch/permit" "$scratch/result" "$scratch"
+    trap "$cleanup" EXIT
+    : > "$scratch/nonce" && : > "$scratch/permit" || return 1
+    "$binary" slot key --out-fd 8 --json 8<> "$scratch/nonce" > "$scratch/result" || return 1
+    IFS= read -r nonce < "$scratch/nonce" && [[ $nonce =~ $key_pattern ]] || return 1
+    scope=(--repo "$repo" --pool "$pool" --slot "$slot" --generation "$generation" --op "$operation" --lock-fd 9)
+    exec 9< "$hive_root/slot-locks/$pool/slot-$slot.lock" || return 1
+    printf -v producer_request '{"action":"guided_start","credential":"%s","nonce":"%s","invocation":"%s"}' "$credential" "$nonce" "$invocation"
+    "$binary" slot producer "${scope[@]}" --control-fd 8 --json <<< "$producer_request"         8<> "$scratch/permit" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+    assignments=() argv=()
+    {
+        IFS= read -r -d '' field && [[ $field == producer_permit ]] &&
+            IFS= read -r -d '' cwd && [[ $cwd == /* ]] &&
+            IFS= read -r -d '' total && [[ $total =~ $count_pattern && $total -le 256 ]] || return 1
+        for (( i=0; i<total; i++ )); do
+            IFS= read -r -d '' field && [[ $field =~ ^[a-zA-Z_][a-zA-Z0-9_]*= ]] || return 1
+            assignments+=("$field")
+        done
+        IFS= read -r -d '' total && [[ $total =~ $count_pattern && $total -le 65 ]] || return 1
+        for (( i=0; i<total; i++ )); do
+            IFS= read -r -d '' field || return 1
+            argv+=("$field")
+        done
+        extra=
+        if IFS= read -r -d '' extra || [[ -n $extra ]]; then return 1; fi
+    } < "$scratch/permit"
+    [[ ${argv[0]} == /* ]] || return 1
+    cd -P -- "$cwd" || return 1
+    set -m
+    /usr/bin/env -i /bin/bash --noprofile --norc -c         'builtin kill -STOP "$$"; builtin exec -c /usr/bin/env -i "$@"'         producer-gate "${assignments[@]}" "${argv[@]}" </dev/null >&2 &
+    writer=$!
+    printf -v stop_cleanup 'builtin kill -KILL %%+ 2>/dev/null; wait %%+ 2>/dev/null; %s' "$cleanup"
+    trap "$stop_cleanup" EXIT
+    for (( i=0; i<250; i++ )); do
+        stopped=$(/bin/ps -p "$writer" -o state= 9<&-) || return 1
+        [[ $stopped =~ ^[[:space:]]*T ]] && break
+        /bin/sleep 0.02 9<&- || return 1
+    done
+    [[ $stopped =~ ^[[:space:]]*T ]] || return 1
+    printf -v producer_request '{"action":"guided_watch","credential":"%s","nonce":"%s","invocation":"%s","child_pid":%s}' "$credential" "$nonce" "$invocation" "$writer"
+    "$binary" slot producer "${scope[@]}" --json <<< "$producer_request" > "$scratch/result" || {
+        /bin/cat "$scratch/result"
+        return 1
+    }
+    trap "$cleanup" EXIT
+    wait "$writer" || return 1
+    /bin/cat "$scratch/result"
+}
+
 if [[ $# == 2 && $1 == check-version ]]; then
     if check_slot_version "$2"; then
         exit 0
@@ -159,5 +224,12 @@ if [[ $# == 10 && ( $1 == take || $1 == take-seeded ) ]]; then
     exit 1
 fi
 
-printf '%s\n' 'Expected check-version or a private take request.' >&2
+if [[ $# == 8 && $1 == produce ]]; then
+    shift
+    produce_slot "$@" && exit 0
+    printf '%s\n' 'Slot producer could not be confirmed. Preserve its pending or held evidence.' >&2
+    exit 1
+fi
+
+printf '%s\n' 'Expected check-version or a private slot request.' >&2
 exit 2

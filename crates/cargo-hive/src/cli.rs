@@ -194,7 +194,13 @@ pub enum SlotCommand {
         out: SlotOutputArgs,
     },
     #[command(hide = true)]
-    Producer(SlotLockedOperation),
+    Producer {
+        #[command(flatten)]
+        request: SlotLockedOperation,
+        /// Private descriptor for the checked producer launch
+        #[arg(long, value_name = "N")]
+        control_fd: Option<u32>,
+    },
     #[command(hide = true)]
     Ready {
         #[command(flatten)]

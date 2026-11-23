@@ -645,6 +645,8 @@ pub struct PendingProducer {
     pub prior: EligibleProducer,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground: Option<ForegroundInstance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guide_guard_offset: Option<i64>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1098,8 +1100,13 @@ impl Producer {
                     runner,
                     prior,
                     foreground,
+                    guide_guard_offset,
                 } = pending.as_ref();
                 epoch_matches(epoch)?;
+                require(
+                    guide_guard_offset.is_none_or(|offset| offset > 0),
+                    "invalid producer guide guard",
+                )?;
                 validate_generation(*generation)?;
                 validate_profile(profile)?;
                 require(
@@ -2648,6 +2655,7 @@ mod tests {
                 evidence: evidence.clone(),
             },
             foreground: None,
+            guide_guard_offset: None,
         }));
         for producer in [
             pending,
