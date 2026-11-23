@@ -143,7 +143,7 @@ pub enum SlotCommand {
         #[command(flatten)]
         out: SlotOutputArgs,
     },
-    /// Recover a held slot (unavailable in this version)
+    /// Recover a held slot after verifying scope and quiescence
     Recover(SlotOperation),
     #[command(hide = true)]
     Key {

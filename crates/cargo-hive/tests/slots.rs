@@ -3797,6 +3797,19 @@ fn an_unrepresentable_repository_has_one_sanitized_json_refusal() {
 
 #[test]
 fn a_native_guide_begin_issues_only_one_durable_permit() {
+    let _ = native_guide_before_first_checkout();
+}
+
+struct PreparingSlot {
+    fixture: PoolFixture,
+    pool: String,
+    checkout: PathBuf,
+    lock: PathBuf,
+    credential: String,
+    nonce: String,
+}
+
+fn native_guide_before_first_checkout() -> PreparingSlot {
     let fixture = PoolFixture::new();
     let (out, initialized) = fixture.init();
     assert!(out.status.success());
@@ -3982,6 +3995,200 @@ done
         !checkout.exists(),
         "begin must not launch any checkout writer"
     );
+    PreparingSlot {
+        fixture,
+        pool: pool.to_owned(),
+        checkout,
+        lock,
+        credential: key,
+        nonce,
+    }
+}
+
+#[test]
+fn recovery_retires_a_preparation_before_checkout_without_granting_access() {
+    let PreparingSlot {
+        fixture,
+        pool,
+        checkout,
+        lock,
+        credential,
+        nonce,
+    } = native_guide_before_first_checkout();
+    let prior_bytes = fs::read(fixture.file()).unwrap();
+    let prior = fixture.record();
+    let slot = &prior["pools"][0]["slots"][0];
+    let generation = slot["generation"].as_u64().unwrap();
+    let revision = prior["revision"].as_u64().unwrap();
+    let attempt = slot["phase"]["attempt"]["attempt_id"].as_u64().unwrap();
+    let begin_op = slot["phase"]["attempt"]["begin_op"].as_str().unwrap();
+    let commit = slot["phase"]["lease"]["requested_commit"].as_str().unwrap();
+    let inventory = || git(&fixture.repo, &["worktree", "list", "--porcelain"]);
+    let prior_inventory = inventory();
+    let absent_checkout = || {
+        assert_eq!(
+            fs::symlink_metadata(&checkout).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(inventory(), prior_inventory);
+    };
+    absent_checkout();
+
+    // Proposed private RecoveryInput encoding. The handler must compare these
+    // bindings with authoritative state under the checked slot lock.
+    let request = json!({
+        "observed_revision": revision,
+        "attempt_id": attempt,
+        "begin_op": begin_op,
+        "authority": {
+            "kind": "holder",
+            "credential": credential.trim_end(),
+            "nonce": nonce.trim_end()
+        },
+        "quiescence": { "kind": "before_first_effect" }
+    });
+    let recovery_op = "3".repeat(32);
+    let recover = |scope: &str, slot: u8, generation: u64, op: &str, request: &Value| {
+        let args = fixture.replay("recover", scope, slot, generation, op);
+        assert!(
+            args.iter()
+                .all(|arg| arg != credential.trim_end() && arg != nonce.trim_end())
+        );
+        let child = start_private(&fixture.hive, args, &request.to_string());
+        let out = common::wait_within(child, Duration::from_secs(15));
+        assert_no_credential(&out, &credential);
+        assert_no_credential(&out, &nonce);
+        let result =
+            serde_json::from_slice::<Value>(&out.stdout).expect("one recovery JSON result");
+        (out, result)
+    };
+    let refused = |(out, result): (Output, Value)| {
+        assert_eq!(out.status.code(), Some(1), "{result}");
+        assert_ne!(result["current"], true);
+        assert!(result.get("path").is_none());
+        assert!(fs::read(fixture.file()).unwrap() == prior_bytes);
+        absent_checkout();
+    };
+
+    let other_pool = if pool.starts_with('a') { "b" } else { "a" }.repeat(32);
+    refused(recover(&other_pool, 1, generation, &recovery_op, &request));
+    refused(recover(&pool, 2, generation, &recovery_op, &request));
+    refused(recover(&pool, 1, generation - 1, &recovery_op, &request));
+    refused(recover(&pool, 1, generation, begin_op, &request));
+    for (field, stale) in [
+        ("observed_revision", json!(revision - 1)),
+        ("attempt_id", json!(attempt + 1)),
+        ("quiescence", json!({ "kind": "verified_later_boot" })),
+    ] {
+        let mut wrong = request.clone();
+        wrong[field] = stale;
+        refused(recover(&pool, 1, generation, &recovery_op, &wrong));
+    }
+
+    for (field, original) in [("credential", &credential), ("nonce", &nonce)] {
+        let replacement = if original.starts_with('f') { "e" } else { "f" }.repeat(64);
+        let mut wrong = request.clone();
+        wrong["authority"][field] = json!(replacement);
+        refused(recover(&pool, 1, generation, &recovery_op, &wrong));
+    }
+
+    let independent = fs::File::open(&lock).unwrap();
+    let lock_before = independent.metadata().unwrap();
+    let occupied = cargo_hive_platform::flock::try_exclusive(&independent)
+        .unwrap()
+        .expect("the fixture guide has fully exited and released its slot lock");
+    refused(recover(&pool, 1, generation, &recovery_op, &request));
+    drop(occupied);
+
+    let (out, recovered) = recover(&pool, 1, generation, &recovery_op, &request);
+    assert!(
+        out.status.success(),
+        "the exact preparation before checkout should recover: {recovered}"
+    );
+    assert_eq!(recovered["kind"], "recovered");
+    assert_ne!(recovered["current"], true);
+    assert!(recovered.get("path").is_none() && recovered.get("use_policy").is_none());
+    let saved_bytes = fs::read(fixture.file()).unwrap();
+    let saved = fixture.record();
+    let recovered_slot = &saved["pools"][0]["slots"][0];
+    assert_eq!(saved["revision"], revision + 1);
+    assert_eq!(recovered_slot["phase"]["kind"], "vacant");
+    assert_eq!(recovered_slot["generation"], generation);
+    for field in ["lock_id", "checkout_id", "last_head", "producer"] {
+        assert!(recovered_slot[field] == slot[field], "preserve {field}");
+    }
+    let outcomes = recovered_slot["outcomes"].as_array().unwrap();
+    let completed: Vec<_> = outcomes
+        .iter()
+        .filter(|entry| entry["kind"] == "recover")
+        .collect();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0]["operation"], recovery_op);
+    assert_eq!(completed[0]["attempt_id"], attempt);
+    let lock_after = fs::symlink_metadata(&lock).unwrap();
+    assert_eq!(
+        (lock_after.dev(), lock_after.ino()),
+        (lock_before.dev(), lock_before.ino())
+    );
+    absent_checkout();
+
+    let (out, retry) = recover(&pool, 1, generation, &recovery_op, &request);
+    assert!(out.status.success(), "{retry}");
+    assert_eq!(retry, recovered);
+    assert!(fs::read(fixture.file()).unwrap() == saved_bytes);
+    let reserve = fixture.reservation(&pool, 1, generation, commit, &"4".repeat(32));
+    let (out, reserved) = finish_private(start_private(&fixture.hive, reserve, &"f".repeat(64)));
+    assert!(out.status.success(), "{reserved}");
+    assert_eq!(reserved["generation"], generation + 1);
+
+    let next_bytes = fs::read(fixture.file()).unwrap();
+    let mut old_permit = fixture.replay("outcome", &pool, 1, generation, begin_op);
+    old_permit.extend(["--attempt".into(), attempt.to_string()]);
+    let (out, historical) = finish_private(start_private(&fixture.hive, old_permit, &credential));
+    assert_no_credential(&out, &credential);
+    assert!(out.status.success(), "{historical}");
+    assert_eq!(historical["kind"], "permit_recorded");
+    assert_eq!(historical["current"], false);
+    assert!(historical.get("path").is_none());
+    assert!(fs::read(fixture.file()).unwrap() == next_bytes);
+    absent_checkout();
+
+    let lookup = |command| {
+        let mut args = fixture.replay(command, &pool, 1, generation, &recovery_op);
+        args.extend(["--attempt".into(), attempt.to_string()]);
+        let (out, result) = finish_private(start_private(&fixture.hive, args, &credential));
+        assert_no_credential(&out, &credential);
+        assert!(result.get("path").is_none());
+        (out, result)
+    };
+    let (out, historical_recovery) = lookup("outcome");
+    assert!(out.status.success(), "{historical_recovery}");
+    assert_eq!(historical_recovery, recovered);
+    assert!(fs::read(fixture.file()).unwrap() == next_bytes);
+    let before_ack = fixture.record();
+    let (out, ack) = lookup("ack");
+    assert!(out.status.success(), "{ack}");
+    assert_eq!(ack["kind"], "acknowledged");
+    assert_eq!(ack["current"], false);
+    let after_ack = fixture.record();
+    assert_eq!(
+        after_ack["revision"],
+        before_ack["revision"].as_u64().unwrap() + 1
+    );
+    assert!(
+        after_ack["pools"][0]["slots"][0]["phase"] == before_ack["pools"][0]["slots"][0]["phase"]
+    );
+    let compacted = fs::read(fixture.file()).unwrap();
+    assert_eq!(lookup("outcome").0.status.code(), Some(1));
+    assert_eq!(
+        recover(&pool, 1, generation, &recovery_op, &request)
+            .0
+            .status
+            .code(),
+        Some(1)
+    );
+    assert!(fs::read(fixture.file()).unwrap() == compacted);
+    absent_checkout();
 }
 
 #[test]
@@ -6205,7 +6412,7 @@ fn the_packaged_guide_refuses_an_unfetched_tree_input_before_any_checkout() {
 }
 
 #[test]
-fn unavailable_protocol_has_no_state_effects() {
+fn recovery_does_not_create_missing_state() {
     let fixture = PoolFixture::new();
     let absent = fixture._repo_dir.path.join("must-stay-absent");
     let out = fixture
@@ -6231,7 +6438,7 @@ fn unavailable_protocol_has_no_state_effects() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         serde_json::from_slice::<Value>(&out.stdout).unwrap()["kind"],
-        "unavailable"
+        "refused"
     );
     assert!(!absent.exists());
 }

@@ -1321,7 +1321,26 @@ pub enum OutcomeRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ready_commit: Option<String>,
     },
-    Recover,
+    Recover {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recovery: Option<RecoveryRequest>,
+    },
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryRequest {
+    pub observed_revision: u64,
+    pub begin_op: String,
+    pub nonce: String,
+    pub quiescence: RecoveryQuiescence,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RecoveryQuiescence {
+    BeforeFirstEffect,
+    VerifiedLaterBoot,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1408,9 +1427,21 @@ impl Outcome {
                 self.attempt_id.is_none() && object_id(commit),
                 "invalid return outcome",
             ),
-            (OperationKind::Recover, OutcomeRequest::Recover, TransitionResult::Recovered) => {
-                require(self.attempt_id.is_none(), "unexpected attempt on outcome")
-            }
+            (
+                OperationKind::Recover,
+                OutcomeRequest::Recover { recovery },
+                TransitionResult::Recovered,
+            ) => match recovery {
+                Some(recovery) => require(
+                    preparing
+                        && recovery.observed_revision > 0
+                        && hex(&recovery.begin_op, 32)
+                        && hex(&recovery.nonce, 64)
+                        && recovery.begin_op != self.operation,
+                    "invalid recovery attempt binding",
+                ),
+                None => require(self.attempt_id.is_none(), "unexpected attempt on outcome"),
+            },
             (
                 OperationKind::ProducerStart,
                 OutcomeRequest::Producer {

@@ -4,6 +4,7 @@ mod admission;
 mod inspect;
 mod prepare;
 mod profile;
+mod recover;
 mod result;
 
 use crate::cli::{SlotCommand, SlotLockedOperation, SlotOperation, SlotReplay, SlotScopeArgs};
@@ -75,7 +76,9 @@ pub(super) fn dispatch(command: SlotCommand) -> i32 {
         } => ("slot init", repo, out.json, Some((root, profile))),
         SlotCommand::Status { repo, out } => ("slot status", repo, out.json, None),
         SlotCommand::Recover(op) => {
-            return unavailable("slot recover", Some(op.scope.repo), op.out.json);
+            return run_scoped("slot recover", &op.scope.repo, op.out.json, |state| {
+                recover::run(state, &op)
+            });
         }
         SlotCommand::Key { out_fd, out } => return generate_key(out_fd).emit(out.json),
         SlotCommand::Reserve {
@@ -141,13 +144,6 @@ pub(super) fn dispatch(command: SlotCommand) -> i32 {
     run_scoped(name, &repo, json, |state| {
         with_slot_state(state, |tx| inspect_or_init(tx, state, name, &repo, init))
     })
-}
-
-fn unavailable(command: &'static str, repo: Option<PathBuf>, json: bool) -> i32 {
-    let mut result = SlotResult::new(command, "unavailable", repo, 1);
-    result.detail = Some("This slot operation is unavailable in this version.".into());
-    result.next_action = Some(FRESH_FALLBACK);
-    result.emit(json)
 }
 
 fn generate_key(fd: u32) -> SlotResult {
@@ -2868,6 +2864,7 @@ fn replay_outcome(
                         OperationKind::Reserve
                             | OperationKind::Return
                             | OperationKind::Begin
+                            | OperationKind::Recover
                             | OperationKind::ProducerComplete
                     ) || (!acknowledging && outcome.kind == OperationKind::ProducerStart))
                     && outcome.credential == input.credential
@@ -2911,6 +2908,10 @@ fn replay_outcome(
                 pool,
                 outcome,
             ),
+            OperationKind::Recover => {
+                recover::recorded_result(command, acknowledgement, pool, outcome)
+                    .ok_or_else(missing)
+            }
             OperationKind::ProducerStart | OperationKind::ProducerComplete => {
                 producer_outcome_result(command, acknowledgement, pool, outcome)
             }
