@@ -5130,6 +5130,646 @@ fn exercise_external_recipe(
     }
 }
 
+fn fixture_sha(bytes: &[u8]) -> String {
+    cargo_hive_platform::slot::sha256(bytes)
+        .unwrap()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn fixture_inventory(root: &Path, exclude_git: bool) -> String {
+    fn collect(
+        root: &Path,
+        directory: &Path,
+        exclude_git: bool,
+        rows: &mut Vec<(PathBuf, u64, Option<String>)>,
+    ) {
+        for item in fs::read_dir(directory).unwrap() {
+            let item = item.unwrap();
+            if exclude_git && directory == root && item.file_name() == ".git" {
+                continue;
+            }
+            let path = item.path();
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if item.file_type().unwrap().is_dir() {
+                rows.push((relative, 0, None));
+                collect(root, &path, exclude_git, rows);
+            } else {
+                assert!(item.file_type().unwrap().is_file());
+                let bytes = fs::read(path).unwrap();
+                rows.push((relative, bytes.len() as u64, Some(fixture_sha(&bytes))));
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    collect(root, root, exclude_git, &mut rows);
+    rows.sort();
+    fixture_sha(&serde_json::to_vec(&rows).unwrap())
+}
+
+fn fixture_resolve_digest(metadata: &Value, checkout: &Path) -> String {
+    let ids: std::collections::BTreeMap<_, _> = metadata["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pkg| {
+            let id = pkg["id"].as_str().unwrap();
+            let logical = if pkg["source"].is_null() {
+                format!(
+                    "workspace:{}",
+                    Path::new(pkg["manifest_path"].as_str().unwrap())
+                        .strip_prefix(checkout)
+                        .unwrap()
+                        .display()
+                )
+            } else {
+                id.to_owned()
+            };
+            (id, logical)
+        })
+        .collect();
+    let nodes: std::collections::BTreeMap<_, _> = metadata["resolve"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| {
+            let mut features: Vec<_> = node["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|val| val.as_str().unwrap())
+                .collect();
+            features.sort();
+            let mut deps: Vec<_> = node["deps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|dep| {
+                    let mut kinds: Vec<_> = dep["dep_kinds"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|kind| (kind["kind"].as_str(), kind["target"].as_str()))
+                        .collect();
+                    kinds.sort();
+                    (
+                        dep["name"].as_str().unwrap(),
+                        &ids[dep["pkg"].as_str().unwrap()],
+                        kinds,
+                    )
+                })
+                .collect();
+            deps.sort();
+            (&ids[node["id"].as_str().unwrap()], (features, deps))
+        })
+        .collect();
+    fixture_sha(&serde_json::to_vec(&nodes).unwrap())
+}
+
+#[test]
+fn the_guarded_producer_binds_extracted_registry_bytes_before_writing() {
+    exercise_materialized_dependency(DependencyFixture::Registry);
+}
+
+#[test]
+fn the_guarded_producer_binds_local_git_revision_and_bytes_before_writing() {
+    exercise_materialized_dependency(DependencyFixture::Git);
+}
+
+#[test]
+fn the_guarded_producer_requires_exact_review_for_an_external_build_script() {
+    exercise_materialized_dependency(DependencyFixture::ReviewedBuild);
+}
+
+#[test]
+fn the_guarded_producer_refuses_an_incomplete_registry_extraction_before_metadata() {
+    exercise_materialized_dependency(DependencyFixture::IncompleteRegistry);
+}
+
+#[test]
+fn an_executable_review_of_the_old_git_tree_cannot_admit_a_changed_sibling() {
+    exercise_materialized_dependency(DependencyFixture::StaleBuildReview);
+}
+
+#[test]
+fn the_guarded_producer_requires_exact_review_for_an_external_proc_macro() {
+    exercise_materialized_dependency(DependencyFixture::ReviewedMacro);
+}
+
+#[derive(Clone, Copy)]
+enum DependencyFixture {
+    Registry,
+    IncompleteRegistry,
+    Git,
+    ReviewedBuild,
+    StaleBuildReview,
+    ReviewedMacro,
+}
+
+fn exercise_materialized_dependency(scenario: DependencyFixture) {
+    let git_dependency = matches!(
+        scenario,
+        DependencyFixture::Git
+            | DependencyFixture::ReviewedBuild
+            | DependencyFixture::StaleBuildReview
+            | DependencyFixture::ReviewedMacro
+    );
+    let incomplete = matches!(scenario, DependencyFixture::IncompleteRegistry);
+    let reviewed_build = matches!(
+        scenario,
+        DependencyFixture::ReviewedBuild | DependencyFixture::StaleBuildReview
+    );
+    let stale_review = matches!(scenario, DependencyFixture::StaleBuildReview);
+    let reviewed_macro = matches!(scenario, DependencyFixture::ReviewedMacro);
+    let fixture = reviewed_pool_fixture(Some(if reviewed_macro {
+        "pub fn answer() -> u32 { git_leaf::identity!(42) }\n"
+    } else if git_dependency {
+        "pub fn answer() -> u32 { git_leaf::value() }\n"
+    } else {
+        "use pin_project_lite::pin_project;\npin_project! { struct Sample { value: u32 } }\npub fn answer() -> u32 { Sample { value: 42 }.value }\n"
+    }));
+    fixture.hive.write_ready_capabilities();
+    let home = &fixture.hive.cargo_home.path;
+    let (dependency, requirement, git_revision) = if git_dependency {
+        let donor = init_repo(&fixture._repo_dir.path.join("material-donor"), "");
+        let manifest = fs::read_to_string(donor.join("Cargo.toml")).unwrap();
+        fs::write(
+            donor.join("Cargo.toml"),
+            manifest.replace("name = \"fixture\"", "name = \"git-leaf\""),
+        )
+        .unwrap();
+        fs::write(donor.join("src/lib.rs"), "pub fn value() -> u32 { 42 }\n").unwrap();
+        if reviewed_macro {
+            fs::OpenOptions::new()
+                .append(true)
+                .open(donor.join("Cargo.toml"))
+                .unwrap()
+                .write_all(b"\n[lib]\nproc-macro = true\n")
+                .unwrap();
+            fs::write(donor.join("src/lib.rs"), "use proc_macro::TokenStream;\n#[proc_macro]\npub fn identity(input: TokenStream) -> TokenStream { input }\n").unwrap();
+        }
+        if reviewed_build {
+            fs::write(
+                donor.join("build.rs"),
+                "fn main() { println!(\"cargo:rustc-env=ROAD17_REVIEWED_BUILD={}\", include_str!(\"../shared.txt\")); }\n",
+            )
+            .unwrap();
+            fs::write(
+                donor.join("src/lib.rs"),
+                "const _: &str = env!(\"ROAD17_REVIEWED_BUILD\");\npub fn value() -> u32 { 42 }\n",
+            )
+            .unwrap();
+            git(&donor, &["add", "build.rs"]);
+        }
+        {
+            let nested = donor.join("leaf");
+            fs::create_dir(&nested).unwrap();
+            fs::rename(donor.join("Cargo.toml"), nested.join("Cargo.toml")).unwrap();
+            fs::rename(donor.join("src"), nested.join("src")).unwrap();
+            fs::write(
+                donor.join("Cargo.toml"),
+                "[workspace]\nmembers = [\"leaf\"]\nresolver = \"2\"\n",
+            )
+            .unwrap();
+            fs::write(donor.join("shared.txt"), "reviewed checkout-level data").unwrap();
+            if reviewed_build {
+                fs::rename(donor.join("build.rs"), nested.join("build.rs")).unwrap();
+            } else if !reviewed_macro {
+                fs::write(
+                    nested.join("src/lib.rs"),
+                    "pub fn value() -> u32 { include_str!(\"../../shared.txt\").len() as u32 }\n",
+                )
+                .unwrap();
+            }
+            git(&donor, &["add", "-A"]);
+        }
+        git(
+            &donor,
+            &["commit", "-qam", "Name the compiled Git dependency"],
+        );
+        let revision = git(&donor, &["rev-parse", "HEAD"]);
+        let requirement = format!(
+            "git-leaf = {{ git = \"file://{}\", rev = \"{}\" }}\n",
+            donor.display(),
+            revision
+        );
+        ("git-leaf", requirement, Some(revision))
+    } else {
+        let cache = PathBuf::from(std::env::var_os("CARGO_HOME").unwrap());
+        let repository = "index.crates.io-1949cf8c6b5b557f";
+        let archive = format!("registry/cache/{repository}/pin-project-lite-0.2.17.crate");
+        for path in [
+            format!("registry/index/{repository}/config.json"),
+            format!("registry/index/{repository}/.cache/pi/n-/pin-project-lite"),
+            archive,
+        ] {
+            let output = home.join(&path);
+            fs::create_dir_all(output.parent().unwrap()).unwrap();
+            fs::copy(cache.join(path), output).unwrap();
+        }
+        (
+            "pin-project-lite",
+            "pin-project-lite = \"=0.2.17\"\n".to_owned(),
+            None,
+        )
+    };
+    let manifest = fixture.repo.join("Cargo.toml");
+    let updated = fs::read_to_string(&manifest).unwrap().replace(
+        "[dependencies]\n",
+        &format!("[dependencies]\n{requirement}"),
+    );
+    fs::write(manifest, updated).unwrap();
+    let cargo = |args: &[&str]| {
+        let out = fixture
+            .hive
+            .command_with(Path::new("cargo"), args)
+            .current_dir(&fixture.repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        out.stdout
+    };
+    if git_dependency {
+        let out = fixture
+            .hive
+            .command_with(Path::new("cargo"), &["generate-lockfile"])
+            .current_dir(&fixture.repo)
+            .env("CARGO_NET_OFFLINE", "false")
+            .env("CARGO_NET_GIT_FETCH_WITH_CLI", "true")
+            .env("GIT_ALLOW_PROTOCOL", "file")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    } else {
+        cargo(&["generate-lockfile", "--offline"]);
+    }
+    git(
+        &fixture.repo,
+        &[
+            "commit",
+            "-qm",
+            "Pin the isolated dependency",
+            "--",
+            "Cargo.toml",
+            "Cargo.lock",
+        ],
+    );
+    let metadata: Value = serde_json::from_slice(&cargo(&[
+        "metadata",
+        "--format-version",
+        "1",
+        "--all-features",
+        "--locked",
+        "--offline",
+    ]))
+    .unwrap();
+    let package = metadata["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pkg| pkg["name"] == dependency)
+        .unwrap();
+    let root = Path::new(package["manifest_path"].as_str().unwrap())
+        .parent()
+        .unwrap();
+    let marker = root.join(".cargo-ok");
+    if incomplete {
+        fs::remove_file(&marker).unwrap();
+    }
+    let pin = root.join("src/lib.rs");
+    let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+    for fact in profile["graph_inputs"].as_array_mut().unwrap() {
+        let path = fact["locator"]["path"].as_str().unwrap();
+        fact["expectation"]["identity"]["oid"] =
+            json!(git(&fixture.repo, &["rev-parse", &format!("HEAD:{path}")]));
+    }
+    fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let args = [
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+    ];
+    external_fixture_seal(&fixture, &head, "clippy", &args);
+    let seal = fixture._repo_dir.path.join("external-recipe.json");
+    let mut closure: Value = serde_json::from_slice(&fs::read(&seal).unwrap()).unwrap();
+    let relative = root.strip_prefix(home).unwrap();
+    let reviewed_git_tree = git_revision.as_ref().map(|_| {
+        let git_checkout: PathBuf = relative.iter().take(4).collect();
+        fixture_inventory(&home.join(git_checkout), true)
+    });
+    if stale_review {
+        let checkout_root = root.parent().unwrap();
+        fs::write(
+            checkout_root.join("shared.txt"),
+            b"changed checkout-level data",
+        )
+        .unwrap();
+        assert_ne!(
+            Some(fixture_inventory(checkout_root, true)),
+            reviewed_git_tree
+        );
+    }
+    let origin = if let Some(revision) = &git_revision {
+        let git_checkout: PathBuf = relative.iter().take(4).collect();
+        json!({"kind":"git", "revision":revision, "checkout":git_checkout, "tree_sha256":fixture_inventory(&home.join(&git_checkout), true)})
+    } else {
+        let index = relative.parent().unwrap().file_name().unwrap();
+        let leaf = format!(
+            "{dependency}-{}.crate",
+            package["version"].as_str().unwrap()
+        );
+        let archive = home.join("registry/cache").join(index).join(leaf);
+        json!({"kind":"registry", "checksum":fixture_sha(&fs::read(archive).unwrap())})
+    };
+    closure["packages"][0]["dependencies"] = json!([dependency]);
+    closure["materialized"] = json!({"resolve_sha256":fixture_resolve_digest(&metadata, &fixture.repo),
+        "packages":[{"id":package["id"],"name":dependency,"version":package["version"], "source":package["source"],
+            "root":relative, "inventory_sha256":fixture_inventory(root,git_dependency), "origin":origin}]});
+    let review = (reviewed_build || reviewed_macro).then(|| {
+        let review = fixture._repo_dir.path.join("reviewed-executable.json");
+        let (name, kind, source, behavior) = if reviewed_macro {
+            ("git_leaf", "proc_macro", "src/lib.rs", "sealed_inputs_token_transform")
+        } else { ("build-script-build", "custom_build", "build.rs", "metadata_only_build_script") };
+        let target = json!({"name":name, "kind":kind, "source":source});
+        let bytes = serde_json::to_vec(&json!({
+            "schema":1,"profile":{"id":"fixture","revision":1},"invocation":"check","recipe":"clippy",
+            "package_id":package["id"],"inventory_sha256":fixture_inventory(root,true),
+            "git_checkout_sha256":reviewed_git_tree,
+            "source_sha256":fixture_sha(&fs::read(root.join(source)).unwrap()),
+            "target":target,"behavior":behavior
+        })).unwrap();
+        fs::write(&review, &bytes).unwrap();
+        closure["materialized"]["packages"][0]["executables"] = json!([
+            {"target":target,"review_sha256":fixture_sha(&bytes)}
+        ]);
+        (review, bytes)
+    });
+    let bytes = serde_json::to_vec(&closure).unwrap();
+    fs::write(&seal, &bytes).unwrap();
+    let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+    profile["graph_inputs"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap()["expectation"]["identity"]["sha256"] = json!(fixture_sha(&bytes));
+    profile["proofs"][0]["evidence"] = json!(format!("closure-v1:sha256={}", fixture_sha(&bytes)));
+    if let Some((path, bytes)) = &review {
+        profile["graph_inputs"].as_array_mut().unwrap().push(json!({
+            "locator":{"kind":"external","path":path},
+            "expectation":{"kind":"present","identity":{"kind":"reviewed_bytes","sha256":fixture_sha(bytes)}}
+        }));
+    }
+    fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let key = fixture._repo_dir.path.join("registry-material-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let out = run_packaged_take(&fixture, pool, &head, &key, "take");
+    if incomplete {
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        assert!(
+            !marker.exists(),
+            "Cargo metadata tried to re-extract a sealed package"
+        );
+        assert!(!checkout.join("target").exists());
+        return;
+    }
+    if stale_review {
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let refused: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(
+            refused["detail"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("exact sealed behavior review")),
+            "{refused}"
+        );
+        assert!(!checkout.join("target").exists());
+        return;
+    }
+    assert!(out.status.success(), "{out:?}");
+    let produce = |operation: &str| {
+        let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
+        let mut cmd = fixture
+            .hive
+            .command_with(Path::new("/bin/bash"), &["--noprofile", "--norc"]);
+        producer_environment(&mut cmd);
+        let child = cmd
+            .arg(helper)
+            .args(["produce", env!("CARGO_BIN_EXE_cargo-hive")])
+            .arg(&fixture.repo)
+            .args([pool, "1", "1", operation, "check"])
+            .stdin(fs::File::open(&key).unwrap())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        common::wait_within(child, Duration::from_secs(50))
+    };
+    if let Some((path, bytes)) = &review {
+        fs::remove_file(path).unwrap();
+        assert_eq!(produce(&"9".repeat(32)).status.code(), Some(1));
+        assert!(!checkout.join("target").exists());
+        fs::write(path, b"{}").unwrap();
+        assert_eq!(produce(&"b".repeat(32)).status.code(), Some(1));
+        assert!(!checkout.join("target").exists());
+        fs::write(path, bytes).unwrap();
+    }
+    if let Some(revision) = &git_revision {
+        git(
+            root,
+            &[
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "Same bytes at an unapproved commit",
+            ],
+        );
+        assert_eq!(produce(&"8".repeat(32)).status.code(), Some(1));
+        assert!(!checkout.join("target").exists());
+        git(root, &["reset", "--soft", revision]);
+    }
+    if matches!(scenario, DependencyFixture::Git) {
+        let shared = root.parent().unwrap().join("shared.txt");
+        let original = fs::read(&shared).unwrap();
+        let mtime = fs::metadata(&shared).unwrap().modified().unwrap();
+        fs::write(&shared, b"unapproved sibling source").unwrap();
+        fs::File::open(&shared)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let out = produce(&"a".repeat(32));
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        assert!(!checkout.join("target").exists());
+        fs::write(&shared, original).unwrap();
+        fs::File::open(&shared)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+    }
+    let original = fs::read(&pin).unwrap();
+    let modified = fs::metadata(&pin).unwrap().modified().unwrap();
+    fs::write(
+        &pin,
+        [original.as_slice(), b"\n// altered cached source\n"].concat(),
+    )
+    .unwrap();
+    fs::File::open(&pin)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let out = produce(&"5".repeat(32));
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!checkout.join("target").exists());
+    fs::write(&pin, original).unwrap();
+    fs::File::open(&pin)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let added = root.join("unreviewed-input");
+    fs::write(&added, b"outside the approved package inventory").unwrap();
+    assert_eq!(produce(&"6".repeat(32)).status.code(), Some(1));
+    assert!(!checkout.join("target").exists());
+    fs::remove_file(added).unwrap();
+    let out = produce(&"7".repeat(32));
+    assert!(out.status.success(), "{out:?}");
+    let record: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(record["kind"], "producer_complete");
+    let built = cargo_hive_core::fingerprint::read_profile(&checkout.join("target/debug"))
+        .graph
+        .unwrap();
+    assert!(
+        built
+            .units
+            .iter()
+            .any(|unit| unit.loc.package() == dependency)
+    );
+    if reviewed_build {
+        assert!(
+            built
+                .units
+                .iter()
+                .any(|unit| unit.loc.package() == dependency
+                    && unit.kind == cargo_hive_core::fingerprint::UnitKind::RunBuildScript)
+        );
+    }
+    if reviewed_macro {
+        let unit = built
+            .units
+            .iter()
+            .find(|unit| unit.loc.package() == dependency)
+            .unwrap();
+        let outputs =
+            cargo_hive_core::unit_path::outputs(&checkout.join("target/debug"), &unit.loc);
+        assert!(fs::read_dir(outputs).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "dylib")
+        }));
+    }
+}
+
+#[test]
+fn a_future_library_test_stamp_blocks_a_retained_clippy_handoff() {
+    let fixture = reviewed_pool_fixture(Some(
+        "pub fn answer() -> u32 { 42 }\n#[cfg(test)]\n#[test]\nfn compile_only() { assert_eq!(answer(), 42); }\n",
+    ));
+    fixture.hive.write_ready_capabilities();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let args = [
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+    ];
+    external_fixture_seal(&fixture, &head, "clippy", &args);
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let key = fixture._repo_dir.path.join("retained-library-test-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let out = run_packaged_take(&fixture, pool, &head, &key, "take");
+    assert!(out.status.success(), "{out:?}");
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
+    let mut command = fixture
+        .hive
+        .command_with(Path::new("/bin/bash"), &["--noprofile", "--norc"]);
+    producer_environment(&mut command);
+    let child = command
+        .arg(helper)
+        .args(["produce", env!("CARGO_BIN_EXE_cargo-hive")])
+        .arg(&fixture.repo)
+        .args([pool, "1", "1", &"5".repeat(32), "check"])
+        .stdin(fs::File::open(&key).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = common::wait_within(child, Duration::from_secs(50));
+    assert!(out.status.success(), "{out:?}");
+    let cargo_profile = checkout.join("target/debug");
+    let graph = cargo_hive_core::fingerprint::read_profile(&cargo_profile)
+        .graph
+        .unwrap();
+    let mut test_units = graph
+        .units
+        .iter()
+        .filter(|unit| unit.loc.package() == "fixture" && unit.stem == "test-lib-fixture");
+    let mode = test_units.next().unwrap();
+    assert!(test_units.next().is_none());
+    let stamp = cargo_hive_core::unit_path::stamp(&cargo_profile, &mode.loc, mode.kind);
+    let credential = fs::read_to_string(&key).unwrap();
+    let request = fixture.replay("return", pool, 1, 1, &"6".repeat(32));
+    let (out, returned) = finish_private(start_private(&fixture.hive, request, &credential));
+    assert!(out.status.success(), "{returned}");
+    fs::File::open(stamp)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + Duration::from_secs(3600))
+        .unwrap();
+    let child = start_packaged_take_at(&fixture, pool, &head, &key, "take", "1");
+    let out = common::wait_within(child, Duration::from_secs(50));
+    let refused: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{refused}");
+    assert!(refused.get("path").is_none());
+    assert!(
+        refused["detail"].as_str().is_some_and(
+            |reason| reason.contains("reviewed prior Cargo unit has a future timestamp")
+        ),
+        "{refused}"
+    );
+    assert_eq!(
+        fixture.record()["pools"][0]["slots"][0]["phase"]["attempt"]["stage"],
+        "awaiting_anchors"
+    );
+}
+
 #[test]
 fn the_gateways_nextest_recipe_lists_only_the_exact_selected_package() {
     let args = [

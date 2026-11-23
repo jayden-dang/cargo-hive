@@ -75,9 +75,10 @@ struct Seal {
     tools: Tools,
     packages: Vec<NativePackage>,
     data: Vec<FiniteData>,
+    materialized: Option<MaterializedGraph>,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Recipe {
     NativeBuild,
@@ -149,6 +150,699 @@ pub(super) struct NativeTarget {
     pub name: String,
     pub kind: String,
     pub source: PathBuf,
+}
+
+const PACKAGE_LIMIT: usize = 1024;
+const ROOT_ENTRY_LIMIT: usize = 4096;
+const DEPENDENCY_ENTRY_LIMIT: usize = 65536;
+const DEPENDENCY_BYTES_LIMIT: u64 = 1024 * 1024 * 1024;
+const SOURCE_FILE_LIMIT: u64 = 16 * 1024 * 1024;
+const SOURCE_DEPTH_LIMIT: usize = 32;
+const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MaterializedGraph {
+    pub resolve_sha256: String,
+    pub packages: Vec<MaterializedPackage>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MaterializedPackage {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub source: String,
+    pub root: PathBuf,
+    inventory_sha256: String,
+    origin: Origin,
+    #[serde(default)]
+    executables: Vec<ExecutableApproval>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Origin {
+    Registry {
+        checksum: String,
+    },
+    Git {
+        revision: String,
+        checkout: PathBuf,
+        tree_sha256: String,
+    },
+}
+
+#[derive(Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+enum ExecutableKind {
+    CustomBuild,
+    ProcMacro,
+}
+
+impl ExecutableKind {
+    fn cargo_kind(&self) -> &'static str {
+        match self {
+            Self::CustomBuild => "custom-build",
+            Self::ProcMacro => "proc-macro",
+        }
+    }
+}
+
+#[derive(Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+struct ExecutableTarget {
+    name: String,
+    kind: ExecutableKind,
+    source: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutableApproval {
+    target: ExecutableTarget,
+    review_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReviewedBehavior {
+    MetadataOnlyBuildScript,
+    SealedInputsTokenTransform,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecutableReview {
+    schema: u32,
+    profile: ProfileBinding,
+    invocation: String,
+    recipe: Recipe,
+    package_id: String,
+    inventory_sha256: String,
+    git_checkout_sha256: Option<String>,
+    source_sha256: String,
+    target: ExecutableTarget,
+    behavior: ReviewedBehavior,
+}
+
+struct DependencyReviewScope<'a> {
+    profile: &'a PoolProfile,
+    invocation: &'a str,
+    recipe: Recipe,
+    home: &'a Path,
+    checkout: &'a Path,
+}
+
+impl MaterializedGraph {
+    fn valid(&self, workspace_packages: usize) -> bool {
+        slots::hex(&self.resolve_sha256, 64)
+            && !self.packages.is_empty()
+            && workspace_packages.saturating_add(self.packages.len()) <= PACKAGE_LIMIT
+            && unique(self.packages.iter().map(|entry| entry.id.as_str()))
+            && self.packages.iter().all(MaterializedPackage::valid)
+            && self
+                .packages
+                .iter()
+                .map(|entry| entry.executables.len())
+                .sum::<usize>()
+                <= ENTRY_LIMIT
+            && self.packages.iter().enumerate().all(|(index, entry)| {
+                self.packages[..index].iter().all(|other| {
+                    !entry.root.starts_with(&other.root) && !other.root.starts_with(&entry.root)
+                })
+            })
+    }
+
+    fn verify_material(&self, scope: &DependencyReviewScope<'_>) -> Result<String, Refusal> {
+        let home = scope.home;
+        let checkout = scope.checkout;
+        let unproved = dependency_refusal;
+        if home.canonicalize().as_deref().ok() != Some(home)
+            || home.starts_with(checkout)
+            || checkout.starts_with(home)
+        {
+            return Err(unproved());
+        }
+        let bytes = read_input_bounded(&checkout.join("Cargo.lock"), slots::MAX_BYTES as usize)?
+            .ok_or_else(unproved)?;
+        let lock = lock_sources(&bytes)?;
+        if lock.len() != self.packages.len() {
+            return Err(unproved());
+        }
+        let fs = host_fs();
+        let mut budget = InventoryBudget {
+            entries: DEPENDENCY_ENTRY_LIMIT,
+            bytes: DEPENDENCY_BYTES_LIMIT,
+        };
+        let mut witnesses = BTreeMap::new();
+        let mut git_checkouts = BTreeMap::<_, GitInventory>::new();
+        for package in &self.packages {
+            super::check_cancelled()?;
+            let path = home.join(&package.root);
+            let tuple = (
+                package.name.as_str(),
+                package.version.as_str(),
+                package.source.as_str(),
+            );
+            let checksum = lock.get(&tuple).ok_or_else(unproved)?;
+            let (inventory, runtime, origin_witness) = match &package.origin {
+                Origin::Registry { checksum: reviewed } if *checksum == Some(reviewed.as_str()) => {
+                    check_registry_marker(&path)?;
+                    let index = package
+                        .root
+                        .parent()
+                        .and_then(Path::file_name)
+                        .ok_or_else(unproved)?;
+                    let archive = home
+                        .join("registry/cache")
+                        .join(index)
+                        .join(format!("{}-{}.crate", package.name, package.version));
+                    let (hash, stamp) =
+                        dependency_file(fs.as_ref(), &archive, &mut budget, FILE_LIMIT)?;
+                    if &hash != reviewed {
+                        return Err(unproved());
+                    }
+                    let tree = scan_inventory(fs.as_ref(), &path, &mut budget, false)?;
+                    (
+                        tree.content(Path::new(""))?,
+                        tree.runtime,
+                        digest(&serde_json::to_vec(&stamp).map_err(|_| unproved())?)?,
+                    )
+                }
+                Origin::Git {
+                    revision,
+                    checkout,
+                    tree_sha256,
+                } if checksum.is_none() => {
+                    let root = home.join(checkout);
+                    let git = match git_checkouts.entry(root) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            let inventory = GitInventory::read(
+                                fs.as_ref(),
+                                entry.key(),
+                                revision,
+                                tree_sha256,
+                                &package.source,
+                                &mut budget,
+                            )?;
+                            entry.insert(inventory)
+                        }
+                        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                    };
+                    if git.revision != revision
+                        || git.reviewed != tree_sha256
+                        || git.source != package.source
+                    {
+                        return Err(unproved());
+                    }
+                    let subdirectory = package
+                        .root
+                        .strip_prefix(checkout)
+                        .map_err(|_| unproved())?;
+                    (
+                        git.tree.content(subdirectory)?,
+                        git.tree.runtime.clone(),
+                        git.admin.clone(),
+                    )
+                }
+                _ => return Err(unproved()),
+            };
+            if inventory != package.inventory_sha256 {
+                return Err(unproved());
+            }
+            package.verify_reviews(&path, scope)?;
+            witnesses.insert(&package.id, (runtime, origin_witness));
+        }
+        digest(&serde_json::to_vec(&witnesses).map_err(|_| unproved())?)
+    }
+}
+
+impl MaterializedPackage {
+    pub fn matches_executables<'a>(
+        &self,
+        targets: impl Iterator<Item = (&'a str, &'a [String], &'a Path)>,
+    ) -> bool {
+        let mut matched = BTreeSet::new();
+        targets
+            .filter(|(_, kinds, _)| {
+                kinds
+                    .iter()
+                    .any(|kind| matches!(kind.as_str(), "custom-build" | "proc-macro"))
+            })
+            .all(|(name, kinds, source)| {
+                let [kind] = kinds else {
+                    return false;
+                };
+                self.executables
+                    .iter()
+                    .find(|item| {
+                        item.target.name == name
+                            && item.target.kind.cargo_kind() == kind
+                            && item.target.source == source
+                    })
+                    .is_some_and(|item| matched.insert(&item.target))
+            })
+            && matched.len() == self.executables.len()
+    }
+
+    fn verify_reviews(
+        &self,
+        root: &Path,
+        scope: &DependencyReviewScope<'_>,
+    ) -> Result<(), Refusal> {
+        let unproved =
+            || refused("A materialized executable is missing its exact sealed behavior review.");
+        let git_checkout_sha256 = match &self.origin {
+            Origin::Registry { .. } => None,
+            Origin::Git { tree_sha256, .. } => Some(tree_sha256.as_str()),
+        };
+        for approval in &self.executables {
+            super::check_cancelled()?;
+            let mut references = scope.profile.graph_inputs.iter().filter_map(|input| {
+                match (&input.locator, &input.expectation) {
+                    (
+                        Locator::External { path },
+                        GraphExpectation::Present {
+                            identity: InputIdentity::ReviewedBytes { sha256 },
+                        },
+                    ) if sha256 == &approval.review_sha256 => Some(path),
+                    _ => None,
+                }
+            });
+            let path = references.next().ok_or_else(unproved)?;
+            if references.next().is_some()
+                || path.starts_with(scope.home)
+                || path.starts_with(scope.checkout)
+            {
+                return Err(unproved());
+            }
+            let bytes = read_input_bounded(path, 64 * 1024)?.ok_or_else(unproved)?;
+            if digest(&bytes)? != approval.review_sha256 {
+                return Err(unproved());
+            }
+            let review: ExecutableReview =
+                serde_json::from_slice(&bytes).map_err(|_| unproved())?;
+            let source = read_input_bounded(
+                &root.join(&approval.target.source),
+                SOURCE_FILE_LIMIT as usize,
+            )?
+            .ok_or_else(unproved)?;
+            if review.schema != 1
+                || review.profile.id != scope.profile.id
+                || review.profile.revision != scope.profile.revision
+                || review.invocation != scope.invocation
+                || review.recipe != scope.recipe
+                || review.package_id != self.id
+                || review.inventory_sha256 != self.inventory_sha256
+                || review.git_checkout_sha256.as_deref() != git_checkout_sha256
+                || review.target != approval.target
+                || review.source_sha256 != digest(&source)?
+                || !matches!(
+                    (&review.target.kind, review.behavior),
+                    (
+                        ExecutableKind::CustomBuild,
+                        ReviewedBehavior::MetadataOnlyBuildScript
+                    ) | (
+                        ExecutableKind::ProcMacro,
+                        ReviewedBehavior::SealedInputsTokenTransform
+                    )
+                )
+            {
+                return Err(unproved());
+            }
+        }
+        Ok(())
+    }
+
+    fn valid(&self) -> bool {
+        if !relative(&self.root)
+            || !slots::hex(&self.inventory_sha256, 64)
+            || !portable_leaf(&self.name)
+            || !portable_leaf(&self.version)
+            || self.id.is_empty()
+            || self.id.len() > 2048
+            || self.source.len() > 1024
+        {
+            return false;
+        }
+        if self.executables.len() > 16
+            || self.executables.iter().any(|item| {
+                !portable_leaf(&item.target.name)
+                    || !relative(&item.target.source)
+                    || !slots::hex(&item.review_sha256, 64)
+            })
+            || self
+                .executables
+                .iter()
+                .map(|item| &item.target)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != self.executables.len()
+        {
+            return false;
+        }
+        let components: Vec<_> = self.root.iter().collect();
+        match (&self.origin, components.as_slice()) {
+            (Origin::Registry { checksum }, [registry, src, index, leaf]) => {
+                self.source == CRATES_IO
+                    && *registry == "registry"
+                    && *src == "src"
+                    && index
+                        .to_str()
+                        .and_then(|index| index.strip_prefix("index.crates.io-"))
+                        .is_some_and(|hash| slots::hex(hash, 16))
+                    && *leaf == format!("{}-{}", self.name, self.version).as_str()
+                    && slots::hex(checksum, 64)
+            }
+            (
+                Origin::Git {
+                    revision,
+                    checkout,
+                    tree_sha256,
+                },
+                [git, checkouts, key, short, ..],
+            ) => {
+                slots::hex(tree_sha256, 64)
+                    && (*git == "git" && *checkouts == "checkouts")
+                    && (self.source.starts_with("git+https://")
+                        || self.source.starts_with("git+file://"))
+                    && key.to_str().is_some_and(portable_leaf)
+                    && short
+                        .to_str()
+                        .is_some_and(|short| short.len() >= 7 && revision.starts_with(short))
+                    && checkout.as_path() == Path::new(git).join(checkouts).join(key).join(short)
+                    && self.root.starts_with(checkout)
+                    && relative(checkout)
+                    && slots::object_id(revision)
+                    && self
+                        .source
+                        .rsplit_once('#')
+                        .is_some_and(|(_, commit)| commit == revision)
+            }
+            _ => false,
+        }
+    }
+}
+
+fn portable_leaf(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && !matches!(value, "." | "..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-.+".contains(&byte))
+}
+
+fn dependency_refusal() -> Refusal {
+    refused(
+        "The selected registry or Git dependency material differs from the sealed inventory or its bounds.",
+    )
+}
+
+type LockSources<'a> = BTreeMap<(&'a str, &'a str, &'a str), Option<&'a str>>;
+
+fn lock_sources(bytes: &[u8]) -> Result<LockSources<'_>, Refusal> {
+    let unproved = dependency_refusal;
+    let text = std::str::from_utf8(bytes).map_err(|_| unproved())?;
+    let mut packages = text.split("\n[[package]]\n");
+    let header = packages.next().ok_or_else(unproved)?;
+    if !header
+        .lines()
+        .any(|row| matches!(row, "version = 3" | "version = 4"))
+    {
+        return Err(unproved());
+    }
+    let mut sources = BTreeMap::new();
+    for package in packages {
+        let mut fields = BTreeMap::new();
+        for line in package.lines() {
+            let Some((name, value)) = line.split_once(" = ") else {
+                continue;
+            };
+            if matches!(name, "name" | "version" | "source" | "checksum") {
+                let value = value
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+                    .ok_or_else(unproved)?;
+                if value.contains(['"', '\\']) || fields.insert(name, value).is_some() {
+                    return Err(unproved());
+                }
+            }
+        }
+        if let Some(source) = fields.get("source") {
+            let name = *fields.get("name").ok_or_else(unproved)?;
+            let version = *fields.get("version").ok_or_else(unproved)?;
+            if sources
+                .insert((name, version, *source), fields.get("checksum").copied())
+                .is_some()
+            {
+                return Err(unproved());
+            }
+        }
+    }
+    Ok(sources)
+}
+
+struct InventoryBudget {
+    entries: usize,
+    bytes: u64,
+}
+
+type SourceStamp = ((slots::FileIdentity, i64, i64, i64, i64), u64, u32);
+
+fn dependency_file(
+    fs: &dyn cargo_hive_platform::Fs,
+    path: &Path,
+    budget: &mut InventoryBudget,
+    limit: u64,
+) -> Result<(String, SourceStamp), Refusal> {
+    let unproved = dependency_refusal;
+    if path.canonicalize().as_deref().ok() != Some(path) {
+        return Err(unproved());
+    }
+    let mut file = fs.open_regular(path).map_err(|_| unproved())?;
+    let metadata = file.metadata().map_err(|_| unproved())?;
+    if metadata.len() > limit
+        || metadata.mode() & 0o7022 != 0
+        || metadata.uid() != cargo_hive_platform::slot::effective_uid()
+        || metadata.nlink() != 1
+    {
+        return Err(unproved());
+    }
+    budget.bytes = budget
+        .bytes
+        .checked_sub(metadata.len())
+        .ok_or_else(unproved)?;
+    let stamp = |meta: &std::fs::Metadata| (directory_stamp(meta), meta.len(), meta.mode());
+    let before = stamp(&metadata);
+    let hash = sha256_reader(&mut file, metadata.len(), cancelled).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::Interrupted && cancelled() {
+            cargo_hive_state::StateError::Cancelled.into()
+        } else {
+            unproved()
+        }
+    })?;
+    let after = std::fs::symlink_metadata(path).map_err(|_| unproved())?;
+    if !after.is_file()
+        || before != stamp(&after)
+        || before != stamp(&file.metadata().map_err(|_| unproved())?)
+    {
+        return Err(unproved());
+    }
+    Ok((
+        hash.iter().map(|byte| format!("{byte:02x}")).collect(),
+        before,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegistryMarker {
+    v: u32,
+}
+
+fn check_registry_marker(root: &Path) -> Result<(), Refusal> {
+    let unproved =
+        || refused("The sealed registry archive has no verified completed extraction marker.");
+    let bytes = read_input_bounded(&root.join(".cargo-ok"), 4096)?.ok_or_else(unproved)?;
+    let marker: RegistryMarker = serde_json::from_slice(&bytes).map_err(|_| unproved())?;
+    if marker.v != 1 {
+        return Err(unproved());
+    }
+    Ok(())
+}
+
+struct SourceInventory {
+    rows: Vec<(PathBuf, u64, Option<String>)>,
+    runtime: String,
+}
+
+impl SourceInventory {
+    fn content(&self, subdirectory: &Path) -> Result<String, Refusal> {
+        let unproved = dependency_refusal;
+        if !subdirectory.as_os_str().is_empty()
+            && !self
+                .rows
+                .iter()
+                .any(|(path, _, hash)| path == subdirectory && hash.is_none())
+        {
+            return Err(unproved());
+        }
+        let rows: Vec<_> = self
+            .rows
+            .iter()
+            .filter_map(|(path, length, hash)| {
+                let relative = path.strip_prefix(subdirectory).ok()?;
+                (!relative.as_os_str().is_empty()).then_some((relative, length, hash))
+            })
+            .collect();
+        digest(&serde_json::to_vec(&rows).map_err(|_| unproved())?)
+    }
+}
+
+struct GitInventory<'a> {
+    revision: &'a str,
+    reviewed: &'a str,
+    source: &'a str,
+    tree: SourceInventory,
+    admin: String,
+}
+
+impl<'a> GitInventory<'a> {
+    fn read(
+        fs: &dyn cargo_hive_platform::Fs,
+        root: &Path,
+        revision: &'a str,
+        reviewed: &'a str,
+        source: &'a str,
+        budget: &mut InventoryBudget,
+    ) -> Result<Self, Refusal> {
+        let unproved = dependency_refusal;
+        if root.canonicalize().as_deref().ok() != Some(root) {
+            return Err(unproved());
+        }
+        let admin = root.join(".git");
+        let stamp = || {
+            slots::owner_directory(&admin)
+                .map(|metadata| directory_stamp(&metadata))
+                .map_err(|_| unproved())
+        };
+        let before = stamp()?;
+        let head = || -> Result<(), Refusal> {
+            let bytes = super::prepare::git_write_scope(
+                root,
+                &["rev-parse", "--verify", "HEAD^{commit}"],
+                128,
+            )?;
+            if bytes.strip_suffix(b"\n") != Some(revision.as_bytes()) {
+                return Err(unproved());
+            }
+            Ok(())
+        };
+        head()?;
+        let tree = scan_inventory(fs, root, budget, true)?;
+        if tree.content(Path::new(""))? != reviewed || stamp()? != before {
+            return Err(unproved());
+        }
+        head()?;
+        let admin = digest(&serde_json::to_vec(&(root, before)).map_err(|_| unproved())?)?;
+        Ok(Self {
+            revision,
+            reviewed,
+            source,
+            tree,
+            admin,
+        })
+    }
+}
+
+fn scan_inventory(
+    fs: &dyn cargo_hive_platform::Fs,
+    root: &Path,
+    budget: &mut InventoryBudget,
+    exclude_git: bool,
+) -> Result<SourceInventory, Refusal> {
+    let unproved = dependency_refusal;
+    let mut rows = Vec::new();
+    let mut snapshots = BTreeMap::new();
+    let mut stack = vec![(root.to_path_buf(), 0)];
+    let mut left = ROOT_ENTRY_LIMIT;
+    while let Some((directory, depth)) = stack.pop() {
+        super::check_cancelled()?;
+        if depth > SOURCE_DEPTH_LIMIT || directory.canonicalize().as_ref().ok() != Some(&directory)
+        {
+            return Err(unproved());
+        }
+        let before = slots::owner_directory(&directory).map_err(|_| unproved())?;
+        let entries = fs
+            .read_dir_bounded(&directory, left.min(budget.entries))
+            .map_err(|_| unproved())?;
+        left = left.checked_sub(entries.len()).ok_or_else(unproved)?;
+        budget.entries = budget
+            .entries
+            .checked_sub(entries.len())
+            .ok_or_else(unproved)?;
+        for (name, kind) in entries {
+            if name.is_empty() || matches!(name.as_str(), "." | "..") || name.contains('/') {
+                return Err(unproved());
+            }
+            let path = directory.join(&name);
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| unproved())?
+                .to_path_buf();
+            if name == ".git" {
+                if exclude_git && depth == 0 && kind == EntryKind::Dir {
+                    continue;
+                }
+                return Err(unproved());
+            }
+            match kind {
+                EntryKind::Dir => {
+                    rows.push((relative, 0, None));
+                    stack.push((path, depth + 1));
+                }
+                EntryKind::File => {
+                    let (hash, stamp) = dependency_file(fs, &path, budget, SOURCE_FILE_LIMIT)?;
+                    rows.push((relative.clone(), stamp.1, Some(hash)));
+                    snapshots.insert(relative, stamp);
+                }
+                _ => return Err(unproved()),
+            }
+        }
+        let after = slots::owner_directory(&directory).map_err(|_| unproved())?;
+        if directory_stamp(&before) != directory_stamp(&after) {
+            return Err(unproved());
+        }
+        snapshots.insert(
+            directory
+                .strip_prefix(root)
+                .map_err(|_| unproved())?
+                .to_path_buf(),
+            (directory_stamp(&after), 0, after.mode()),
+        );
+    }
+    for (relative, expected) in &snapshots {
+        super::check_cancelled()?;
+        let path = root.join(relative);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| unproved())?;
+        if !metadata.is_file() && !metadata.is_dir()
+            || (
+                directory_stamp(&metadata),
+                if metadata.is_dir() { 0 } else { metadata.len() },
+                metadata.mode(),
+            ) != *expected
+        {
+            return Err(unproved());
+        }
+    }
+    rows.sort();
+    Ok(SourceInventory {
+        rows,
+        runtime: digest(&serde_json::to_vec(&snapshots).map_err(|_| unproved())?)?,
+    })
 }
 
 #[derive(Deserialize)]
@@ -237,6 +931,10 @@ impl NativeBuild {
                     .map(|endpoint| endpoint.commit.as_str()),
             )
             || !bounded_unique(seal.packages.iter().map(|item| item.name.as_str()))
+            || seal
+                .materialized
+                .as_ref()
+                .is_some_and(|graph| !graph.valid(seal.packages.len()))
             || !seal.packages.iter().all(valid_package)
             || !bounded_unique(seal.data.iter().map(|item| item.id.as_str()))
             || !seal.data.iter().all(|item| {
@@ -288,6 +986,28 @@ impl NativeBuild {
             seal_digest: hash.to_owned(),
             seal,
         }))
+    }
+
+    pub fn verify_dependency_material(
+        &self,
+        profile: &PoolProfile,
+        home: &Path,
+        checkout: &Path,
+    ) -> Result<Option<String>, Refusal> {
+        let scope = DependencyReviewScope {
+            profile,
+            invocation: &self.seal.invocation,
+            recipe: self.seal.recipe,
+            home,
+            checkout,
+        };
+        self.materialized()
+            .map(|material| material.verify_material(&scope))
+            .transpose()
+    }
+
+    pub fn materialized(&self) -> Option<&MaterializedGraph> {
+        self.seal.materialized.as_ref()
     }
 
     pub fn packages(&self) -> &[NativePackage] {

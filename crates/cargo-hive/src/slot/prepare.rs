@@ -244,8 +244,17 @@ fn mtime(metadata: &Metadata) -> (i64, i64) {
     (metadata.mtime(), metadata.mtime_nsec())
 }
 
-fn role(kind: UnitKind, role: &str) -> bool {
-    kind.as_str() == role || (kind == UnitKind::Lib && role == "library")
+fn library_test_name(unit: &Unit) -> Option<&str> {
+    (unit.kind == UnitKind::Test)
+        .then(|| unit.stem.strip_prefix("test-lib-"))
+        .flatten()
+}
+
+fn role(unit: &Unit, role: &str) -> bool {
+    if library_test_name(unit).is_some() {
+        return matches!(role, "lib" | "library");
+    }
+    unit.kind.as_str() == role || (unit.kind == UnitKind::Lib && role == "library")
 }
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize)]
@@ -352,10 +361,12 @@ fn unit_names_anchor(
     checkout: &Path,
     anchor: &Path,
 ) -> Result<Option<(FileWitness, String)>, Refusal> {
-    let crate_name = unit
-        .stem
-        .strip_prefix(unit.kind.as_str())
-        .and_then(|name| name.strip_prefix('-'))
+    let crate_name = library_test_name(unit)
+        .or_else(|| {
+            unit.stem
+                .strip_prefix(unit.kind.as_str())
+                .and_then(|name| name.strip_prefix('-'))
+        })
         .ok_or_else(unproved)?;
     if crate_name.is_empty()
         || !crate_name
@@ -455,7 +466,7 @@ fn cargo_units(
             };
             for consumer in consumers
                 .iter()
-                .filter(|consumer| role(unit.kind, &consumer.role))
+                .filter(|consumer| role(&unit, &consumer.role))
             {
                 let Some((dep_info, source_digest)) = unit_names_anchor(
                     fs.as_ref(),
@@ -481,11 +492,13 @@ fn cargo_units(
                 }
                 let stamp_path = unit_path::stamp(&directory, &unit.loc, unit.kind);
                 let stamp = FileWitness::read(&stamp_path)?;
-                if !stamp_path.starts_with(&roots.build.path)
-                    || stamp.mtime.0 <= 0
-                    || stamp.mtime > now()?
-                {
+                if !stamp_path.starts_with(&roots.build.path) || stamp.mtime.0 <= 0 {
                     return Err(unproved());
+                }
+                if stamp.mtime > now()? {
+                    return Err(Refusal::ReturnUncertain(
+                        "A reviewed prior Cargo unit has a future timestamp.",
+                    ));
                 }
                 proved.insert(&consumer.id);
                 let witnesses = witnessed.get_mut(&consumer.anchor).ok_or_else(unproved)?;
