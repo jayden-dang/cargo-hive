@@ -113,7 +113,7 @@ _Requirements: SLOTS-5.4_
 - Consumes: registered repo identity, existing `State`/`Tx` file I/O and receipt representation, and Task 1 platform identity/randomness.
 - Produces (proposed): `SlotsFile`, `PoolProfile` and typed records in `state::slots`. `Tx::read_slots() -> Result<Option<SlotsFile>, StateError>` and `Tx::commit_slots(previous: Option<u64>, next: &SlotsFile) -> Result<(), StateError>` supply bounded read and durable checked publish.
 - Produces (proposed): `Command::Slot { command: SlotCommand }` and `slot::run(state: &State, command: SlotCommand) -> i32` via private crate-root `mod slot`. `SlotResult::audit_receipt(&self) -> Receipt` provides a sanitized existing-format audit event separately from slot stdout.
-- Scope: layout 2, profile schema 1, max file size 1,048,576 bytes. Define the final additive command parser tree here. An operation whose later task has not wired a validated dispatch remains non-mutating and unavailable.
+- Scope: layout 2, profile schema 1, max file size 1,048,576 bytes. Define the final additive parser tree here. Public help exposes init/status/recover; take and return use the guide's hidden commands. Verify old help remains intact and private checkpoints are absent from public help. Until a later task wires a validated dispatch it stays non-mutating and unavailable.
 
 **Depends-on:** Task 1.
 
@@ -140,8 +140,8 @@ _Requirements: SLOTS-1.1, SLOTS-4.6, SLOTS-4.7, SLOTS-4.8, SLOTS-4.9_
 
 **Interfaces:**
 - Consumes: Task 2 private pool state, normalized pool/slot/generation key, typed prior outcomes; Task 1 private OS entropy.
-- Produces (proposed): `SlotRequestKey` (pool, slot, generation, optional attempt, kind and operation ID), `SlotOperationInput` (private credential channel), and typed `SlotOutcome` (current or historical).
-- Produces: `slot key`, `reserve`, `outcome` and `ack` on Task 2's parser. Ready dispatch stays unavailable pending the Task 7 proof.
+- Produces (proposed): `SlotRequestKey` (pool, slot, generation, optional attempt, kind and operation ID), `SlotOperationInput` (private credential channel), and typed `SlotOutcome` (current or an exact unresolved prior outcome).
+- Produces: Task 2's private `slot key`, `reserve`, `outcome` and `ack` protocol. Replay remains exact for unresolved original requests, without a public history or manual ack workflow. Ready dispatch stays unavailable pending the Task 7 proof.
 
 **Depends-on:** Task 2.
 
@@ -267,7 +267,7 @@ _Requirements: SLOTS-3.6, SLOTS-3.7, SLOTS-3.10_
 - [ ] Test handoff against the independent clean reference. Require the affected consumer to rebuild or rerun and an unrelated workspace unit to stay fresh. Separately change one crate at the next commit and check the stable absolute path and unrelated unit reuse. Treat unsupported or noncausal controls as failures for that profile.
 - [ ] Add the next-commit, lost permit, lost ready reply and post-rename ready fault cases. Include prior HEAD mismatch, wrong runner, concurrent ready, late inventory/GC skips and interrupted effects. Show actual scoped deletion completes before good ready. A zero standalone exit with an advisory skip must still give incomplete slot handoff.
 - [ ] Run `cargo test -p cargo-hive --test slots --test slot_inputs --test skill` under installed `RUSTUP_TOOLCHAIN=1.97.1` (flat) and `RUSTUP_TOOLCHAIN=1.100.0` (unit-dir). Use existing `tests/common` scratch helpers. Capture independent fixture values and build events; do not enable a profile without causal lock and Cargo proofs.
-- [ ] Implement fenced stages, non-forcing Git/mtime, initial seed/empty verification, typed GC and durable ready. Add the precise helper inventory to the existing skill package guard in this same task. Re-run both layouts, the CLI skill test, the clean/stale/restored controls and state re-read in a new process; verify identical ready replay without a second effect.
+- [ ] Implement fenced stages, non-forcing Git/mtime, initial seed/empty verification, typed GC and durable ready, including the machine-readable guide-only use policy. Add the precise helper inventory to the existing skill package guard in this same task. Re-run both layouts, the CLI skill test, the clean/stale/restored controls and state re-read in a new process; verify identical ready replay without a second effect.
 - [ ] Commit as `feat(slot): deliver verified warm handoffs`.
 
 _Requirements: SLOTS-1.2, SLOTS-1.6, SLOTS-1.7, SLOTS-2.4, SLOTS-3.1, SLOTS-3.4, SLOTS-3.5, SLOTS-3.6, SLOTS-3.7, SLOTS-3.8, SLOTS-3.9, SLOTS-3.11, SLOTS-4.3, SLOTS-5.4_
@@ -290,8 +290,8 @@ _Requirements: SLOTS-1.2, SLOTS-1.6, SLOTS-1.7, SLOTS-2.4, SLOTS-3.1, SLOTS-3.4,
 **Depends-on:** Task 7.
 
 - [ ] Write tests for occupied locks and a live/paused/surviving prior writer, lost key, old process identity, wrong pool and stale generation. Refuse actionable discovery while uncertainty remains.
-- [ ] Test a lost ready response followed by clean return and a later lease. Historical lookup cannot return an actionable path or permit. Exercise explicit ack, replay after compaction, prepare/ready reconciliation with malformed or unreadable state and authoritative re-read by a new process.
-- [ ] Interrupt a GC run after a partial effect and before ready persists. Require a new valid fence and fresh scoped GC proof. Exercise proven foreground completion or a verified later boot after lost custody, plus a positive abandoned-slot recovery through ordinary ready. A state rollback or orphan record lacking the exact epoch must preserve work and producer evidence while refusing.
+- [ ] Test a lost ready response followed by clean return and a later lease. The private unresolved retry cannot return an actionable path or permit for an older lease. Exercise the guide's confirmation, replay after compaction, prepare/ready reconciliation with malformed or unreadable state and authoritative re-read by a new process.
+- [ ] Interrupt a GC run after a partial effect and before ready persists. Require a new valid fence and fresh scoped GC proof. Exercise proven foreground completion or a verified later boot after lost custody, plus a positive abandoned-slot recovery through ordinary ready. A rollback or orphan record lacking the exact epoch must preserve work and producer evidence while refusing. Test that a tainted slot, or both slots held without provenance, does not regain capacity through recover or same-repo init. Report the separate seed path.
 - [ ] Run `cargo test -p cargo-hive --test slots` for the new red cases.
 - [ ] Implement quiescence-qualified recovery and the state-preserving unknown/tainted hold. The operator resolves work outside the command, and the command never forces, deletes, archives or stashes it.
 - [ ] Re-run tests and inspect held/ready/status under faults. Pass one known slot key through normal, refused and interrupted begin/producer/ready/return/recovery calls. Check argv, environment, public stdout/status, stderr and existing-schema on-disk audit for no disclosure, keeping private file-descriptor delivery separate. Commit as `feat(slot): recover held slots through a new fence`.
@@ -314,11 +314,11 @@ _Requirements: SLOTS-4.1, SLOTS-4.2, SLOTS-4.3, SLOTS-4.4, SLOTS-4.5, SLOTS-4.6,
 
 **Interfaces:**
 - Consumes: Task 7 guide and slot results and Task 8 retry/recovery actions, plus the existing `seed` command.
-- Produces: installed take/use/return guidance, one independent seeded fallback and guard tests for old and new examples.
+- Produces: installed take/use/return guidance, before-use guarded Cargo notice, one independent seeded fallback and guard tests for old and new examples.
 
 **Depends-on:** Task 8.
 
-- [ ] Write the guide/CLI parser checks and run a real full-pool and rejected-profile journey, including an attempted fallback alias of a tainted slot. Prove the actual eligible fallback is a distinct independently seeded secondary with separate roots and only registry units, with no copied workspace-unit output.
+- [ ] Assert every actionable take carries the pre-build use policy and warning. Keep private checkpoints out of public operator help/examples. Write the guide/CLI parser checks and run a real full-pool and rejected-profile journey, including an attempted fallback alias of a tainted slot. Prove the actual eligible fallback is a distinct independently seeded secondary with separate roots and only registry units, with no copied workspace-unit output.
 - [ ] Run `cargo test -p cargo-hive --test skill --test slots` to observe the absent guide and fallback behavior.
 - [ ] Document setup and the ordinary reserve/ready/return path, handling of lost acknowledgements, held and unsupported results, and human resolution of unfinished work. Keep internal checkpoint flags out of the usual examples. A seed refusal is explicit.
 - [ ] Re-run the tests and walk an actual normal, full and refused journey in scratch using the installed guide. Preserve ordinary seed and checkout GC examples.
@@ -336,13 +336,13 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 **Reuse:** rung 2 — extend `plugin/skills/hive/SKILL.md` and reuse the scorecard's matched controls and existing guide/CLI cross-checks.
 
 **Interfaces:**
-- Consumes: Task 9 normal guide and seed paths, the release build's real scoped GC, and an operator-supplied read-only workspace/commit source and approved profile, replicated into an isolated proof area with no default source path.
+- Consumes: Task 9 normal guide and seed paths, the release build's real scoped GC, and an operator-supplied read-only klynt workspace/commit source and reviewed profile, replicated into an isolated proof area with no default source path.
 - Produces: reproducible runbook and future dated raw paired results, receipt paths, environment details and explicit pass/fail for the two Draft performance thresholds. Reuse the guide as a caller without modifying it here.
 
 **Depends-on:** Task 9.
 
 - [ ] Write the manual acceptance steps in the runbook. Require five valid matched pairs, alternating arm order, a fixed first command and edit, and successive warm handoffs. Define missing actual GC, non-eligible seed, mismatched fixtures and failed/void samples before measuring.
-- [ ] Drive the shipped entry points on a supported real-workspace fixture copy. Use release-mode hive and include distinct fresh worktree plus seed in the baseline. Time every warm reservation and handoff step, not just Cargo. Preserve sample receipts and integer milliseconds outside the hive receipt under the future runbook's gitignored dated proof directory. The real source checkout stays read-only.
+- [ ] Drive the installed entry points on the scratch klynt copy for the owner-supplied actual workspace lint, compile-only test build and package-scoped `gateways` commands. Record their exact flags. Cross a routine tracked Rust edit with dependency inputs fixed and verify the subsequent clean ready and unrelated reuse. A synthetic fixture alone cannot meet this acceptance. Use release-mode hive and include distinct fresh worktree plus seed in the baseline. Time every warm reservation and handoff step, not just Cargo. Preserve sample receipts and integer milliseconds outside the hive receipt under the future runbook's gitignored dated proof directory. The real source checkout stays read-only.
 - [ ] Verify at least four warm end-to-end wins, the warm edit median at most 110% of fresh seeded median, and actual unaffected-unit reuse. Report spread, environment and voids. If a required case fails, keep the profile unsupported and reopen the proposed acceptance instead of advertising proven speed.
 - [ ] At authorized implementation close, run the documented gate under installed `RUSTUP_TOOLCHAIN=1.97.1` and `RUSTUP_TOOLCHAIN=1.100.0` with the Global Constraints scratch isolation and retain the outputs. Do not extend testing outside the repository's scratch/supported proof rules.
 - [ ] Commit the reproducible runbook and evidence reference as `docs(slot): record warm handoff acceptance procedure`.

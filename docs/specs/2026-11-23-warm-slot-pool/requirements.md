@@ -15,7 +15,10 @@ A **lease** is the current agent's exclusive use of that slot. A **ready** resul
 authorizes use after handoff, whereas a reservation temporarily holds an assigned
 slot for preparation. A **reviewed build profile** binds a repository and bounded
 Cargo invocation shapes to the producer and consumer evidence in story 3. It
-applies to cooperating agents on the repository owner's macOS account.
+applies to cooperating agents on the repository owner's macOS account. Each
+supported Cargo invocation uses the installed guide's guarded procedure. A
+known bypass leaves the affected output outside supported reuse, and this
+contract does not promise detection of every unreported side build.
 
 ## 1. Take a warm worktree
 
@@ -28,7 +31,7 @@ applies to cooperating agents on the repository owner's macOS account.
 - **SLOTS-1.5** (agent-decided positive identity check) IF a candidate is main, an owner's existing lane, an unclassified path, or a path with unverified pool or Git identity THEN THE SYSTEM SHALL refuse it before slot-level Git or target changes.
 - **SLOTS-1.6** (agent-decided) IF a supported warm handoff cannot be completed THEN THE SYSTEM SHALL withhold a ready warm result and point to a distinct fresh checkout when one can continue independently.
 - **SLOTS-1.7** (guard) WHEN the existing seed command receives an otherwise eligible fresh secondary checkout THE SYSTEM SHALL CONTINUE TO operate under the shipped seed contract, including registry-unit-only seeding.
-- **SLOTS-1.8** WHEN an agent follows the installed hive guide to take a slot THE SYSTEM SHALL document how to distinguish reservation, ready, full/unsupported fallback, and scoped refusal using the machine-readable result.
+- **SLOTS-1.8** (agent-decided take notice) WHEN an agent takes a slot through the installed hive guide THE SYSTEM SHALL present the supported use contract before the first build. The notice distinguishes reservation, ready, fallback and refusal, tells the holder to run Cargo through the guide, and says an unrecorded build may hold that slot indefinitely.
 - **SLOTS-1.9** (guard) WHEN the existing Git discovery and classification path runs for a checkout THE SYSTEM SHALL CONTINUE TO apply the current main, linked secondary, configured-root secondary, and protected fallback rules.
 
 ## 2. Return a worktree without losing unfinished work
@@ -74,11 +77,11 @@ receipt alone does not verify either build outcome.
 - **SLOTS-4.2** (agent-decided) IF a request uses a stale generation or attempt THEN THE SYSTEM SHALL refuse it without mutating a current checkout or lease.
 - **SLOTS-4.3** (agent-decided) IF an acknowledgement is missing after a committed transition THEN THE SYSTEM SHALL allow the original credentialed caller to recover the transition's outcome without assigning or applying the work twice.
 - **SLOTS-4.4** (agent-decided) IF a slot's previous process can still write, its work remains unresolved, or scope/producer provenance cannot be established THEN THE SYSTEM SHALL prevent the recovery command from making that slot ready.
-- **SLOTS-4.5** (agent-decided) WHEN the repository operator confirms quiescence and resolves work on an abandoned slot THE SYSTEM SHALL permit explicit recovery through the same identity, preparation and readiness checks as a normal handoff.
+- **SLOTS-4.5** (agent-decided) WHEN the repository operator confirms quiescence and resolves work on an abandoned slot with provable output provenance THE SYSTEM SHALL permit explicit recovery through the same identity, preparation and readiness checks as a normal handoff.
 - **SLOTS-4.6** (agent-decided) IF the pool record is unreadable, malformed or newer than supported THEN THE SYSTEM SHALL refuse slot mutations and name the file and recovery action.
 - **SLOTS-4.7** (guard) WHEN an existing consumer reads an artifact from a pre-slot hive state root THE SYSTEM SHALL CONTINUE TO read it or report a refusal naming the file under the artifact's established layout rules.
 - **SLOTS-4.8** (guard) WHEN a pre-existing CLI command emits a receipt THE SYSTEM SHALL CONTINUE TO honor its existing JSON schema, findings, exit and data-logging contract.
-- **SLOTS-4.9** (agent-decided) WHEN the current slot status is requested THE SYSTEM SHALL report held or unavailable states and next steps without revealing another caller's credential.
+- **SLOTS-4.9** (agent-decided) WHEN the current slot status is requested THE SYSTEM SHALL report held or unavailable states and next steps without revealing another caller's credential. If output provenance cannot be restored for a retained epoch, report that this slot does not regain warm capacity in this version and give the separate seeded fallback.
 
 ## 5. Quality attributes
 
@@ -95,7 +98,12 @@ receipt alone does not verify either build outcome.
 Product metrics, operational reliability, security threat model, personas and
 accessibility policy files were absent during the NFR consultation. The scorecard
 and ARCH-10 ground the proposed measurement method. The two thresholds above
-are Draft values, not owner-set scorecard targets or measured results.
+are Draft acceptance values. The initial real-workspace admission (agent-decided
+proof scope) uses the operator's read-only klynt source and reviewed commands
+on a scratch copy. Exercise the actual workspace lint, compile-only test
+build and package-scoped `gateways` workflow, with a routine tracked Rust
+edit that leaves dependency inputs fixed. Capture exact invocation and feature
+flags supplied for the fixture. A synthetic fixture alone cannot admit klynt.
 
 ## Guard surfaces
 
@@ -113,7 +121,7 @@ are Draft values, not owner-set scorecard targets or measured results.
 
 - Linux, harness integration ROAD-18, compiler wrappers, Cargo config and global build hooks.
 - Automatic discard, stash, backup or recovery archive of uncommitted work. The operator's separate approval remains required for extra tracked content edits and removing `node_modules`.
-- Unbounded reuse of arbitrary undeclared inputs, same-account process isolation, changing standalone seed or GC behavior, and a new telemetry service.
+- Unbounded reuse of arbitrary undeclared inputs, same-account process isolation, replacement of an existing held pool's capacity, changes to standalone seed or GC behavior, and a new telemetry service.
 - Shipping, implementation, building, or migration as part of Draft shaping.
 
 ## Open Questions

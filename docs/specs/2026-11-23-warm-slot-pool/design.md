@@ -147,7 +147,9 @@ revision, slot generations, attempts and replay/ack state, plus revalidated
 identity and quiescence. An older copy, matching paths or successful reboot
 cannot by itself rule out superseding operations. Where the last epoch cannot
 be proved, explicitly quarantine the orphaned namespace while preserving its
-files. Initialize only a non-overlapping root and previously unused pool ID. An unresolved or unreadable
+files. An explicit fresh initialization after orphan quarantine requires a
+non-overlapping root and previously unused pool ID. This lost-record route
+does not replace a valid existing pool record. An unresolved or unreadable
 namespace prevents initializing there. Malformed, unreadable or newer metadata
 names `slots.json` and instructs inspection or use of a compatible reader; it
 never proposes deleting the file. Old binaries
@@ -222,14 +224,16 @@ still leased to that credential in that generation and identity/HEAD match.
 For a newer generation, or the old generation already returned or recovered,
 lookup returns historical completion and `current: false`, without path for use
 or a renewed permit. This includes ready-reply loss followed by return and
-re-lease. An ack compacts only an already received result. After compaction,
+re-lease, and applies only to an unresolved original operation. The installed
+guide's private confirmation compacts only an already received result. After compaction,
 the declared replay window ends and an old exact request is stale, not a new
 operation. Bind every mutation to pool/slot/generation and attempt where
 applicable, even if its old operation ID is no longer tracked. A new reserve
 names exactly one currently vacant slot, pool ID and observed generation, so an
 old request cannot choose another slot or match a new pool for the same repo
-with identical slot number and generation. Do not claim a perpetual global archive
-of operation IDs. Duplicate `begin`, `ready` or producer start for an already
+with identical slot number and generation. There is no public historical archive or caller-managed acknowledgement
+workflow. The exact unresolved operation remains queryable by its current
+credential or original replay input through the guide's private channel. Duplicate `begin`, `ready` or producer start for an already
 active operation must report current status without replaying effects. Generation/revision exhaustion
 refuses without wrapping. A caller with a lost key asks the operator for
 manual recovery, never an automatic free.
@@ -267,7 +271,12 @@ Locality: Extend `plugin/skills/hive/SKILL.md` with the fenced guide procedure a
 **Agent-decided support.** Start with one reviewed repo profile per pool. Use
 the klynt-like fixture with a known `persistence` consumer of `.sqlx` and
 `.env`, and a demonstrably independent workspace unit. The approved Draft
-intent is to certify the real klynt profile before advertising that workflow.
+intent is to certify the actual klynt profile before advertising that workflow.
+Use an operator-supplied read-only klynt source and profile, with no default
+path, and make a scratch copy. Exercise the actual workspace lint, compile-only
+test build and package-scoped `gateways` workflow with the operator-reviewed
+flags and a routine tracked Rust edit that leaves dependency inputs fixed.
+Check the next commit and unrelated unit on the real admitted flow.
 Do not bake guesses about the private checkout or its command layout into the
 binary. A short fixed-shape profile submitted at pool initialization records
 a revision, exact registered identity, admitted graph and toolchain/layout
@@ -294,7 +303,12 @@ write, and record its completion. A known off-profile start marks tainted. A mis
 or interrupted start/completion record marks unknown for warm readiness,
 including after a reboot. Multiple completed invocations carry one generation
 and accumulate only allowed command shapes and root identities. This uses
-explicit guide checkpoints and ordinary Cargo commands, with no installed build wrapper, hook or override.
+explicit guide checkpoints and ordinary foreground Cargo commands, with no
+installed build wrapper, hook or override. Before first use the ready result
+sets `use_policy: "guide_guarded_cargo_only"`, which the guide explains in
+plain language. The holder must report any bypass rather than present its
+output as supported. A detected or reported bypass can leave the slot held
+indefinitely. No observation of arbitrary same-account processes is promised.
 A missing/incomplete invocation, possible background writer, untracked
 profile change, known out-of-profile run or skipped producer evidence marks
 the output unproved. The final status or file hash is not a substitute.
@@ -335,8 +349,13 @@ provisioned checkout and can never be inferred from arbitrary existing output.
 Later successful builds, removal of temporary files, and quiescence after a
 reboot do not clear tainted or unknown provenance. The guide keeps that slot
 held, preserves its files, and offers a separate checkout with independently
-proven new output roots. This Draft defines no in-place output reset or
-automatic deletion/replacement/archival to restore eligibility.
+proven new output roots. The current slot remains unavailable for the life
+of those retained outputs. Status identifies the blocked capacity. If both
+paths are held this way, only the separate fresh seeded flow continues work.
+A valid existing pool cannot be reinitialized to clear holds or replace one
+of its paths in this Draft. A capacity replacement flow would need separate
+lifecycle and ownership design. This avoids moving, deleting, replacing or
+archiving held work or target contents.
 
 Under the attempt fence, recheck old cleanliness, use non-forcing detached
 switch if needed, and recheck the requested commit, worktree and both resolved
@@ -411,14 +430,19 @@ Interface: `cargo hive slot` or direct binary form returns one sanitized JSON re
 Depth: n/a — extends CLI dispatch and uses a different projection only for new slot commands.
 Locality: Extend `crates/cargo-hive/src/cli.rs` dispatch and add `crates/cargo-hive/src/slot/result.rs`. Keep `emit` and `crates/core/src/receipt.rs` frozen.
 
-**Agent-decided command surface.** The guide composes the small operations
-below. Repository, pool ID, slot, expected generation, requested commit and
-operation ID are explicit where applicable. No state or checkout scope comes from the current directory.
+**Agent-decided command surface.** Public hive help documents `slot init`,
+`slot status` and `slot recover`. The installed guide exposes take, guarded
+Cargo use and return. It uses the private protocol operations in the table
+for cross-process validation. Hide the private operations from public CLI
+help and examples. They are not a supported standalone API. Exact unresolved
+requests and their automatic confirmation remain available to the guide,
+without a public historical query or ack workflow. Repository, pool ID, slot,
+expected generation, commit and operation ID are explicit where applicable.
 
 | Command | Scope and output |
 |---|---|
 | `slot init --repo MAIN --root ROOT --profile FILE --json` | Record the two unused paths and reviewed profile for an existing registered repo. The profile file is read only. |
-| `slot status --repo MAIN --json` | Return the current pool ID, slot numbers, generations, available/held stages, and actionable next steps. No key or prior caller's secret. |
+| `slot status --repo MAIN --json` | Return the current pool ID, slot numbers, generations, available/held stages and next steps, including capacity that cannot be recovered in this version. No key or prior caller's secret. |
 | `slot key --out-fd N --json` | Generate the credential with the platform OS entropy primitive; send it only to the caller's private descriptor, with redacted success on stdout. |
 | `slot reserve --repo MAIN --pool POOL --slot N --expect GEN --commit OID --op ID --json` | Credential on stdin. Reserve the candidate explicitly or report full/unavailable. A retry of the same request returns its existing outcome. |
 | `slot begin --repo MAIN --pool POOL --slot N --generation GEN --op ID --lock-fd N --json` | Credential and unique runner nonce on stdin. Only the current reservation's dedicated parent can receive a first preparation permit under the guide-held lock. Later steps verify the same runner and attempt. |
@@ -426,7 +450,7 @@ operation ID are explicit where applicable. No state or checkout scope comes fro
 | `slot producer --repo MAIN --pool POOL --slot N --generation GEN --op ID --lock-fd N --json` | Credential, runner nonce, invocation ID and current shape on stdin. Only the ready holder records scoped start and completion under the guide-held lock. |
 | `slot ready --repo MAIN --pool POOL --slot N --generation GEN --attempt ID --op ID --lock-fd N --json` | Credential, runner nonce and confined preparation evidence on stdin. Run scoped GC and return ready only for the verified path and commit. |
 | `slot return --repo MAIN --pool POOL --slot N --generation GEN --op ID --json` | Credential on stdin. Refuse dirty/uncertain state or return the slot cleanly. |
-| `slot outcome/ack --repo MAIN --pool POOL --slot N --generation GEN --op ID [--attempt ID] --json` | Separate `outcome` and `ack` commands for credentialed replay and compaction. Include the recorded attempt when one applies. No repeat of effects. |
+| `slot outcome/ack --repo MAIN --pool POOL --slot N --generation GEN --op ID [--attempt ID] --json` | Private guide-only protocol commands for credentialed exact unresolved replay and confirmation of delivered results. Include the recorded attempt when one applies. No repeated effects or general history lookup. |
 | `slot recover --repo MAIN --pool POOL --slot N --generation GEN --op ID --json` | Operator verifies old processes cannot write and deliberately resolves work. The command acquires the slot lock and revalidates the scope and state. No force/data cleanup flag. A current holder can resume an authenticated interrupted attempt under the same quiescence checks. Abandoned work, a lost key or a lost runner needs explicit repository-operator confirmation and evidence. |
 
 Use fresh operation IDs as public random 128-bit values. Slot keys are 256-bit
@@ -461,9 +485,11 @@ Locality: Extend the hive guide and `README.md`. Add a focused runbook in the SL
 Keep the agent journey short: choose warm for the reviewed profile, reserve,
 prepare, use only after ready, resolve work, return. Document held remedies,
 credential recovery, prohibited tracked edits and full-pool fallback.
-Document `key`, `begin`, `step-check` and `producer` as internal guide
-checkpoints and explain `outcome`, `ack` and `recover` only for retry,
-receipt confirmation and operator inspection. The operator can stop requesting slots and keep the existing checkout flow. No
+The take result and guide both state the guarded Cargo procedure before use,
+including the lost-capacity effect of unrecorded work. Keep the checkpoints
+and receipt confirmation private to the guide. Public operator inspection and
+recovery explain when held warm capacity cannot be restored. The operator
+can stop requesting slots and keep the existing checkout flow. No
 auto retirement changes a worktree. Use current skill version checks.
 
 Use five valid matched pairs as agent-decided Draft acceptance. Compare
