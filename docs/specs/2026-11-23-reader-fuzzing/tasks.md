@@ -7,6 +7,7 @@ Execution-mode: continuous
 Max-concurrency: 3
 Requirements: ./requirements.md
 Design: ./design.md
+Delivered-by: 8c7f918a7dcfb53e5c8d2ded64134b2595560de8
 
 **Goal:** Exercise each interpreted Cargo/rustc reader with bounded, replayable fuzzing and independent semantic checks.
 
@@ -156,9 +157,9 @@ _Requirements: FUZZ-3.1, FUZZ-3.4, FUZZ-4.1, FUZZ-4.2, FUZZ-4.3, FUZZ-4.4, FUZZ-
 **Interfaces:** Consumes all target artifacts and regression evidence. Produces a revision-bound acceptance report, full-range Standards/Spec review and final branch disposition. Newly discovered corrections must first be explicitly mapped into the relevant earlier task's reader file list.
 **Depends-on:** Task 4
 
-- [ ] Run each registered target for 600 seconds after replay, with at most three concurrent single-target runners, retaining source/tree/tool identity and complete results; a failed or incomplete target prevents acceptance.
-- [ ] Verify ordinary regressions and reversal evidence for every correction; resolve all discovered failures with regression-first changes before rerunning affected campaigns.
-- [ ] Run both toolchain gates, docs-only trace audit and package verification; independently review the whole branch and apply required polish before final acceptance.
-- [ ] Report finite campaign coverage and any limitations accurately; finish through the repository's branch integration workflow only after the complete reviewed result is ready.
+- [x] Run each registered target for 600 seconds after replay, with at most three concurrent single-target runners, retaining source/tree/tool identity and complete results; a failed or incomplete target prevents acceptance.
+- [x] Verify ordinary regressions and reversal evidence for every correction; resolve all discovered failures with regression-first changes before rerunning affected campaigns.
+- [x] Run both toolchain gates, docs-only trace audit and package verification; independently review the whole branch and apply required polish before final acceptance.
+- [x] Report finite campaign coverage and any limitations accurately; finish through the repository's branch integration workflow only after the complete reviewed result is ready.
 
 _Requirements: FUZZ-3.2, FUZZ-3.3, FUZZ-4.5, FUZZ-5.3_
