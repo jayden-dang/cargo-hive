@@ -204,3 +204,16 @@ _Avoid_: warm sample, cached build
 **Prime**:
 The one fill bench runs before its first sample, reported apart and kept out of every median, so the store's first fill is measured once.
 _Avoid_: warm-up
+
+**Scorecard**:
+The one file, `docs/scorecard.md`, that records what an agent worktree costs on the measured repo, cold and seeded, one row per cost, each beside the target the owner set for it. A rerun replaces a row's numbers in place.
+_Avoid_: dashboard, benchmark report, metrics doc
+
+**Scorecard row**:
+One cost on the scorecard (R1–R10), with a value per arm, its source (a bench or hive receipt count, or "by hand (outside bench)"), its sample count and median, and its target slots.
+In a row's note, "vacuous" means gc deleted nothing for that sample. Such a sample is valid and counted, unlike the liveness-window sense of Vacuous above, which is never counted as a pass.
+_Avoid_: metric, line item
+
+**Arm**:
+One of the two groups of samples of a scorecard row: cold or seeded.
+_Avoid_: mode, variant
