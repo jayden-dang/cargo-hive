@@ -547,13 +547,13 @@ pub(super) fn verify_anchor_descriptor(
     descriptor: &std::fs::File,
 ) -> Result<(), Refusal> {
     let (named, object) = anchor(checkout, &witness.path)?;
-    let inherited = descriptor.metadata().map_err(|_| unproved())?;
-    if !inherited.is_file()
-        || FileIdentity::of(&inherited) != witness.identity
-        || super::directory_stamp(&named) != super::directory_stamp(&inherited)
+    let opened = descriptor.metadata().map_err(|_| unproved())?;
+    if !opened.is_file()
+        || FileIdentity::of(&opened) != witness.identity
+        || super::directory_stamp(&named) != super::directory_stamp(&opened)
         || object != witness.object
-        || inherited.mode() != witness.mode
-        || mtime(&inherited) > witness.floor
+        || opened.mode() != witness.mode
+        || mtime(&opened) > witness.floor
     {
         return Err(unproved());
     }

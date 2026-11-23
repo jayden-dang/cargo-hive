@@ -251,7 +251,7 @@ pub fn run_bounded(
     capture: Capture,
     cancel: impl FnMut() -> bool,
 ) -> Result<Ran, ChildOutputError> {
-    run_bounded_with(spec, deadline, capture, cancel, false)
+    run_bounded_with(spec, deadline, capture, cancel, false, Stdio::null())
 }
 
 /// Runs with the same capped capture as `run_bounded`, requiring EOF on every
@@ -262,7 +262,18 @@ pub fn run_bounded_complete(
     capture: Capture,
     cancel: impl FnMut() -> bool,
 ) -> Result<Ran, ChildOutputError> {
-    run_bounded_with(spec, deadline, capture, cancel, true)
+    run_bounded_with(spec, deadline, capture, cancel, true, Stdio::null())
+}
+
+/// Runs with capped, complete capture and an open file as the child's stdin.
+pub fn run_bounded_complete_with_file_stdin(
+    spec: &Spec,
+    stdin: std::fs::File,
+    deadline: Duration,
+    capture: Capture,
+    cancel: impl FnMut() -> bool,
+) -> Result<Ran, ChildOutputError> {
+    run_bounded_with(spec, deadline, capture, cancel, true, Stdio::from(stdin))
 }
 
 fn run_bounded_with(
@@ -271,6 +282,7 @@ fn run_bounded_with(
     capture: Capture,
     mut cancel: impl FnMut() -> bool,
     require_eof: bool,
+    stdin: Stdio,
 ) -> Result<Ran, ChildOutputError> {
     let stdout_stdio = if capture.stdout_cap == 0 {
         Stdio::null()
@@ -284,7 +296,7 @@ fn run_bounded_with(
     };
     let start = Instant::now();
     let mut child = command(spec)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(stdout_stdio)
         .stderr(stderr_stdio)
         .process_group(0)

@@ -47,7 +47,7 @@ take_slot() {
     local hive_root=${HIVE_HOME:-$HOME/.hive} credential nonce extra request step_request
     local lock generation permit attempt checkout witnessed_commit prefix suffix digit
     local scratch
-    local prior anchor index anchor_path parent
+    local prior anchor index
     local -a scope anchors
 
     check_slot_version "$binary" || return 1
@@ -116,15 +116,10 @@ take_slot() {
         "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \
             --lock-fd 9 --json <<< "$step_request" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
         for index in "${!anchors[@]}"; do
-            anchor_path="$checkout/${anchors[$index]}"
-            parent=${anchor_path%/*}
-            [[ -f $anchor_path && ! -L $anchor_path && $(cd -P -- "$parent" && pwd -P) == "$parent" ]] || return 1
-            exec 8< "$anchor_path" || return 1
-            printf -v step_request '{"auth":%s,"step":{"anchor_descriptor":{"index":%s,"fd":8}}}' "$request" "$index"
+            # The verifier opens and checks the anchor before lending it as stdin.
+            printf -v step_request '{"auth":%s,"step":{"anchor_touch":{"index":%s,"action":"exec /usr/bin/touch -m -c -- /dev/fd/0"}}}' "$request" "$index"
             "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \
                 --lock-fd 9 --json <<< "$step_request" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
-            /usr/bin/touch -m -c -- /dev/fd/8 || return 1
-            exec 8<&-
         done
         printf -v step_request '{"auth":%s,"step":"anchors_done"}' "$request"
         "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \

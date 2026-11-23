@@ -12,7 +12,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Output, Stdio};
@@ -4589,6 +4589,15 @@ fn a_fully_removed_consumer_unit_allows_retained_ready() {
 
 #[test]
 fn a_swapped_anchor_parent_receives_no_mtime_effect() {
+    assert_replaced_anchor_is_refused(false);
+}
+
+#[test]
+fn a_fifo_in_place_of_the_anchor_refuses_without_waiting_for_a_writer() {
+    assert_replaced_anchor_is_refused(true);
+}
+
+fn assert_replaced_anchor_is_refused(fifo: bool) {
     let (slot, key, _) = first_completed_workspace();
     return_workspace(&slot, 1);
     let outside = slot.fixture._repo_dir.path.join("outside-anchor-parent");
@@ -4596,12 +4605,14 @@ fn a_swapped_anchor_parent_receives_no_mtime_effect() {
     let sentinel = outside.join("lib.rs");
     fs::write(&sentinel, b"outside content").unwrap();
     let before_outside = fs::metadata(&sentinel).unwrap().modified().unwrap();
-    let source = slot.path.join("src");
-    let before_anchor = fs::metadata(source.join("lib.rs"))
-        .unwrap()
-        .modified()
-        .unwrap();
+    let source = slot.path.join(if fifo { "src/lib.rs" } else { "src" });
     let displaced = slot.path.join("src-displaced");
+    let (anchor, displaced_anchor) = if fifo {
+        (source.clone(), displaced.clone())
+    } else {
+        (source.join("lib.rs"), displaced.join("lib.rs"))
+    };
+    let before_anchor = fs::metadata(anchor).unwrap().modified().unwrap();
     let wrapper = slot.fixture._repo_dir.path.join("swap-anchor-parent");
     let counter = slot.fixture._repo_dir.path.join("anchor-fd-checkpoint");
     fs::write(
@@ -4614,7 +4625,11 @@ if [ "$1" = slot ] && [ "$2" = step-check ]; then
     printf '%s\n' "$count" > "$HIVE_TEST_COUNTER"
     if [ "$count" = 4 ]; then
         /bin/mv "$HIVE_TEST_SOURCE" "$HIVE_TEST_DISPLACED" || exit 20
-        /bin/ln -s "$HIVE_TEST_OUTSIDE" "$HIVE_TEST_SOURCE" || exit 21
+        case "$HIVE_TEST_REPLACEMENT" in
+            fifo) /usr/bin/mkfifo "$HIVE_TEST_SOURCE" || exit 21 ;;
+            parent) /bin/ln -s "$HIVE_TEST_OUTSIDE" "$HIVE_TEST_SOURCE" || exit 21 ;;
+            *) exit 22 ;;
+        esac
     fi
 fi
 exec "$HIVE_TEST_BINARY" "$@"
@@ -4636,6 +4651,10 @@ exec "$HIVE_TEST_BINARY" "$@"
     .env("HIVE_TEST_SOURCE", &source)
     .env("HIVE_TEST_DISPLACED", &displaced)
     .env("HIVE_TEST_OUTSIDE", &outside)
+    .env(
+        "HIVE_TEST_REPLACEMENT",
+        if fifo { "fifo" } else { "parent" },
+    )
     .spawn()
     .unwrap();
     let out = common::wait_within(child, Duration::from_secs(30));
@@ -4648,16 +4667,21 @@ exec "$HIVE_TEST_BINARY" "$@"
     );
     assert_eq!(fs::read(&sentinel).unwrap(), b"outside content");
     assert_eq!(
-        fs::metadata(displaced.join("lib.rs"))
-            .unwrap()
-            .modified()
-            .unwrap(),
+        fs::metadata(displaced_anchor).unwrap().modified().unwrap(),
         before_anchor
     );
+    if fifo {
+        assert!(fs::symlink_metadata(source).unwrap().file_type().is_fifo());
+    }
     let saved = slot.fixture.record();
     assert_eq!(
         saved["pools"][0]["slots"][0]["phase"]["attempt"]["stage"],
         "anchors_in_progress"
+    );
+    assert!(
+        saved["pools"][0]["slots"][0]["phase"]["attempt"]["anchor_cursor"]
+            .as_u64()
+            .is_none_or(|cursor| cursor == 0)
     );
 }
 

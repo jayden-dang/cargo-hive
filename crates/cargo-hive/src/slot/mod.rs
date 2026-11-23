@@ -15,7 +15,7 @@ use cargo_hive_platform::flock::{
     InheritedLock, LockFileIdentity, duplicate_inherited_fd, private_file_metadata, try_exclusive,
     try_lock_inherited,
 };
-use cargo_hive_platform::proc::read_stdin_complete;
+use cargo_hive_platform::proc::{self, read_stdin_complete};
 use cargo_hive_platform::signals::{self, cancelled};
 use cargo_hive_platform::slot::{
     ForegroundExec, ForegroundWatch, ProcessInstance, descriptor_writable, parent_instance,
@@ -54,6 +54,7 @@ const MAX_ROOT_ENTRIES: usize = 4096;
 const MAX_ROOT_DEPTH: usize = 32;
 const KEY_HEX_LEN: usize = 64;
 const CREDENTIAL_DEADLINE: Duration = Duration::from_secs(2);
+const GUIDE_ANCHOR_ACTION: &str = "exec /usr/bin/touch -m -c -- /dev/fd/0";
 const PRODUCER_GATE_PROGRAM: &str = "/bin/bash";
 const PRODUCER_ENV_PROGRAM: &str = "/usr/bin/env";
 const PRODUCER_GATE_ARGS: [&str; 5] = [
@@ -1679,12 +1680,12 @@ struct StepRequest {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum PreparationStep {
     Checkout,
     CheckoutDone,
     Anchors,
-    AnchorDescriptor { index: usize, fd: u32 },
+    AnchorTouch { index: usize, action: String },
     AnchorsDone,
     Seed,
 }
@@ -1841,6 +1842,41 @@ fn prepare_stage(slot: &mut Slot, stage: AttemptStage) -> Result<(), Refusal> {
     Ok(())
 }
 
+fn run_guide_anchor_action(descriptor: File, action: String) -> Result<(), Refusal> {
+    if cancelled() {
+        return Err(StateError::Cancelled.into());
+    }
+    // Transport the checked file to the guide's fixed action. The action
+    // receives an open descriptor and has no checkout pathname argument.
+    let mut guide = proc::Spec::new("/bin/bash");
+    guide.args = vec![
+        "--noprofile".into(),
+        "--norc".into(),
+        "-c".into(),
+        action.into(),
+    ];
+    guide.cwd = Some(PathBuf::from("/"));
+    guide.env_clear = true;
+    let ran = proc::run_bounded_complete_with_file_stdin(
+        &guide,
+        descriptor,
+        Duration::from_secs(5),
+        proc::Capture {
+            stdout_cap: 0,
+            stderr_cap: 0,
+        },
+        cancelled,
+    )
+    .map_err(|error| match error {
+        proc::ChildOutputError::Cancelled => Refusal::State(StateError::Cancelled),
+        _ => producer_fence_refusal(),
+    })?;
+    if !ran.status.success() {
+        return Err(producer_fence_refusal());
+    }
+    Ok(())
+}
+
 fn step_check(
     state: &State,
     scope: &SlotScopeArgs,
@@ -1970,23 +2006,17 @@ fn step_check(
             })?;
             "anchor_touch_permitted"
         }
-        PreparationStep::AnchorDescriptor { index, fd } => {
+        PreparationStep::AnchorTouch { index, action } => {
             let snapshot = fence.snapshot(AttemptStage::AnchorsInProgress)?;
             let slot = &snapshot.pool.slots[fence.index()];
             let (lease, attempt) = fence.check(slot)?;
-            if index != attempt.anchor_cursor {
+            if index != attempt.anchor_cursor || action != GUIDE_ANCHOR_ACTION {
                 return Err(producer_fence_refusal());
             }
             let witness = attempt
                 .anchors
                 .get(index)
                 .ok_or_else(producer_fence_refusal)?;
-            let fd = i32::try_from(fd)
-                .ok()
-                .filter(|fd| *fd > 2 && *fd != fence.fd)
-                .ok_or_else(producer_fence_refusal)?;
-            let descriptor =
-                File::from(duplicate_inherited_fd(fd).map_err(|_| producer_fence_refusal())?);
             let checkout = slot
                 .checkout_id
                 .as_ref()
@@ -2004,24 +2034,19 @@ fn step_check(
                 },
             )?;
             check_producer_inventory(&proof)?;
-            prepare::verify_anchor_descriptor(&proof, witness, &descriptor)?;
-            let lock = LockFileIdentity {
-                dev: witness.identity.dev,
-                ino: witness.identity.ino,
-            };
-            let runner = runner_instance(&fence.runner);
-            let offset = verify_guide_lock(&runner, fd, lock, descriptor.as_fd(), None)
+            let descriptor = cargo_hive_platform::host_fs()
+                .open_regular(&proof.path.join(&witness.path))
                 .map_err(|_| producer_fence_refusal())?;
+            prepare::verify_anchor_descriptor(&proof, witness, &descriptor)?;
             fence.update(&snapshot, |slot| {
                 let Phase::Preparing { attempt, .. } = &mut slot.phase else {
                     return Err(producer_fence_refusal());
                 };
-                verify_guide_lock(&runner, fd, lock, descriptor.as_fd(), Some(offset))
-                    .map_err(|_| producer_fence_refusal())?;
                 attempt.anchor_cursor += 1;
                 Ok(())
             })?;
-            "anchor_descriptor_permitted"
+            run_guide_anchor_action(descriptor, action)?;
+            "anchor_touch_complete"
         }
         PreparationStep::AnchorsDone => {
             let snapshot = fence.snapshot(AttemptStage::AnchorsInProgress)?;
