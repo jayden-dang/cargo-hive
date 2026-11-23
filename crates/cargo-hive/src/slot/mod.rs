@@ -8,7 +8,7 @@ use cargo_hive_cargo::{
     registry::{self, Registry},
 };
 use cargo_hive_platform::proc::{self, Capture, Spec};
-use cargo_hive_platform::signals::cancelled;
+use cargo_hive_platform::signals::{self, cancelled};
 use cargo_hive_state::slots::{
     self, CHECKOUT_NAMESPACE, FileIdentity, GitIdentity, LOCK_NAMESPACE, MAX_POOLS, Phase, Pool,
     PoolProfile, Slot, SlotsFile,
@@ -87,6 +87,14 @@ pub(super) fn dispatch(command: SlotCommand) -> i32 {
             );
         }
     };
+    if let Err(err) = signals::install() {
+        return refusal(
+            name,
+            repo,
+            Refusal::Scope(format!("Could not install signal handlers: {err}")),
+        )
+        .emit(json);
+    }
     match State::open_slot_state() {
         Ok(state) => run(&state, name, repo, json, init),
         Err(err) => refusal(name, repo, err.into()).emit(json),
@@ -183,8 +191,12 @@ fn inspect_or_init(
     let existing = pools.iter().find(|pool| pool.main == main);
     let Some((root, profile)) = init else {
         if let Some(pool) = existing {
-            let scope_verified = registered_main(main, &registry)
-                .is_ok_and(|identity| pool.common_git_id == identity)
+            let git_verified = match registered_main(main, &registry) {
+                Ok(identity) => pool.common_git_id == identity,
+                Err(err @ Refusal::State(StateError::Cancelled)) => return Err(err),
+                Err(_) => false,
+            };
+            let scope_verified = git_verified
                 && accepted_root(&pool.root, &config.secondary_roots)
                 && slots::owner_directory(&pool.root).is_ok()
                 && pool_directories_present(state.root(), pool);
@@ -364,7 +376,6 @@ fn verify_root(
     configured: &[PathBuf],
     registry: &Registry,
 ) -> Result<(), Refusal> {
-    slots::owner_directory(root).map_err(|err| path_refusal(root, err))?;
     if !accepted_root(root, configured) || overlaps(root, state) {
         return Err(Refusal::Scope(format!(
             "{} must be an independent owner-controlled path in a configured secondary root.",

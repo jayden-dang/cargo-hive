@@ -2,10 +2,10 @@
 
 use crate::{StateError, Tx, check_layout, encode, io_err};
 use cargo_hive_platform::flock::{
-    LockFileIdentity, checked_owner_directory, open_owner_state_file, open_owner_state_lock,
-    open_private_file,
+    LockFileIdentity, checked_owner_directory, checked_stable_ancestor, open_owner_state_file,
+    open_owner_state_lock, open_private_file,
 };
-use cargo_hive_platform::slot::{effective_uid, random_slot_bytes};
+use cargo_hive_platform::slot::random_slot_bytes;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -1185,25 +1185,17 @@ impl PoolProfile {
     pub fn read(path: &Path) -> Result<Self, StateError> {
         owner_directory(parent(path).map_err(|err| io_err(path, err))?)
             .map_err(|err| io_err(path, err))?;
-        let metadata = fs::symlink_metadata(path).map_err(|err| io_err(path, err))?;
-        if !metadata.is_file()
-            || metadata.uid() != effective_uid()
-            || metadata.mode() & 0o7022 != 0
-            || path
-                .canonicalize()
-                .map_err(|err| io_err(path, err))?
-                .as_os_str()
-                != path.as_os_str()
+        let file = open_owner_state_file(path).map_err(|err| io_err(path, err))?;
+        if path
+            .canonicalize()
+            .map_err(|err| io_err(path, err))?
+            .as_os_str()
+            != path.as_os_str()
         {
             return Err(format_error(
                 path,
                 "profile must be a canonical regular file",
             ));
-        }
-        let file = File::open(path).map_err(|err| io_err(path, err))?;
-        let opened = file.metadata().map_err(|err| io_err(path, err))?;
-        if FileIdentity::of(&metadata) != FileIdentity::of(&opened) {
-            return Err(format_error(path, "profile identity changed while opening"));
         }
         let bytes = read_bounded(path, file)?;
         let profile: Self = parse_exact(path, &bytes)?;
@@ -1493,13 +1485,25 @@ fn valid_components(path: &Path) -> bool {
 }
 
 pub fn owner_directory(path: &Path) -> io::Result<fs::Metadata> {
-    if !absolute(path) || path.canonicalize()?.as_os_str() != path.as_os_str() {
-        return Err(io::Error::new(
+    let noncanonical = || {
+        io::Error::new(
             io::ErrorKind::PermissionDenied,
             "expected a canonical owner-controlled directory",
-        ));
+        )
+    };
+    if !absolute(path) {
+        return Err(noncanonical());
     }
-    checked_owner_directory(path)
+    let ancestors = path.ancestors().skip(1).collect::<Vec<_>>();
+    for ancestor in ancestors.into_iter().rev() {
+        checked_stable_ancestor(ancestor)
+            .map_err(|err| io::Error::new(err.kind(), format!("{}: {err}", ancestor.display())))?;
+    }
+    let metadata = checked_owner_directory(path)?;
+    if path.canonicalize()?.as_os_str() != path.as_os_str() {
+        return Err(noncanonical());
+    }
+    Ok(metadata)
 }
 
 pub fn make_private_directory(path: &Path) -> io::Result<()> {
@@ -1795,9 +1799,12 @@ impl crate::State {
             if FileIdentity::of(&root) != FileIdentity::of(&current_root)
                 || FileIdentity::of(&identity) != FileIdentity::of(&current)
             {
-                return Err(format_error(
+                return Err(io_err(
                     &path,
-                    "state lock scope changed while acquiring it",
+                    io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "state lock scope changed while acquiring it. Preserve the lock files and ask the state owner to inspect them.",
+                    ),
                 ));
             }
             body(tx)
@@ -1864,6 +1871,7 @@ impl Tx<'_> {
 mod tests {
     use super::*;
     use crate::State;
+    use cargo_hive_platform::slot::effective_uid;
 
     struct Scratch(PathBuf);
 
@@ -1913,10 +1921,13 @@ mod tests {
     fn a_slot_waiter_refuses_a_legacy_lock_replaced_while_waiting() {
         let scratch = Scratch::new();
         let state = State::open_at(scratch.0.clone()).unwrap();
+        let lock = state.root().join(".lock");
+        let previous = state.root().join("previous-lock");
         let (waiting, observed) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
-            let waiter = state
+            let (waiter, original) = state
                 .locked(|_| {
+                    let original = fs::metadata(&lock).unwrap().ino();
                     let waiter = scope.spawn(|| {
                         let mut first_poll = true;
                         state.slot_locked_or_cancelled::<()>(
@@ -1932,17 +1943,18 @@ mod tests {
                     observed
                         .recv_timeout(std::time::Duration::from_secs(5))
                         .unwrap();
-                    let lock = state.root().join(".lock");
-                    fs::rename(&lock, state.root().join("previous-lock")).unwrap();
+                    fs::rename(&lock, &previous).unwrap();
                     fs::write(&lock, []).unwrap();
-                    Ok(waiter)
+                    Ok((waiter, original))
                 })
                 .unwrap();
             let error = waiter.join().unwrap().unwrap_err();
-            assert!(
-                error.to_string().contains("state lock scope changed"),
-                "{error}"
-            );
+            let detail = error.to_string();
+            assert!(detail.contains("state lock scope changed"), "{detail}");
+            assert!(detail.contains("Preserve the lock files"), "{detail}");
+            assert!(!detail.contains("remove"), "{detail}");
+            assert_eq!(fs::metadata(&previous).unwrap().ino(), original);
+            assert_ne!(fs::metadata(&lock).unwrap().ino(), original);
         });
     }
 

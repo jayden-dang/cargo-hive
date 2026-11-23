@@ -142,13 +142,35 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
 
 /// Checks the owner, mode and ACL on a descriptor for the named directory.
 pub fn checked_owner_directory(path: &Path) -> io::Result<Metadata> {
+    let (expected, file) = open_named_directory(path)?;
+    check_owned_inode(&file, &expected, Metadata::is_dir)
+}
+
+/// Checks that a directory above a private inode cannot be replaced or modified by another user.
+pub fn checked_stable_ancestor(path: &Path) -> io::Result<()> {
+    let (expected, file) = open_named_directory(path)?;
+    let uid = effective_uid();
+    check_named_inode(&file, &expected, |meta| {
+        let mode = meta.mode();
+        meta.is_dir()
+            && (meta.uid() == 0 || meta.uid() == uid)
+            && (mode & 0o7022 == 0 || meta.uid() == 0 && mode & 0o7000 == 0o1000)
+    })?;
+    #[cfg(target_os = "macos")]
+    check_extended_acl(&file, true)?;
+    Ok(())
+}
+
+fn open_named_directory(path: &Path) -> io::Result<(Metadata, File)> {
     let expected = symlink_metadata(path)?;
+    if !expected.is_dir() {
+        return Err(unsafe_owner_inode());
+    }
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
-    let actual = check_owned_inode(&file, &expected, Metadata::is_dir)?;
-    Ok(actual)
+    Ok((expected, file))
 }
 
 /// Opens an independent descriptor for the legacy state lock, keeping its existing mode.
@@ -187,17 +209,28 @@ fn check_owned_inode(
     expected: &Metadata,
     valid: impl Fn(&Metadata) -> bool,
 ) -> io::Result<Metadata> {
+    let uid = effective_uid();
+    let actual = check_named_inode(file, expected, |meta| {
+        valid(meta) && meta.uid() == uid && meta.mode() & 0o7022 == 0
+    })?;
+    #[cfg(target_os = "macos")]
+    check_extended_acl(file, false)?;
+    Ok(actual)
+}
+
+fn check_named_inode(
+    file: &File,
+    expected: &Metadata,
+    valid: impl Fn(&Metadata) -> bool,
+) -> io::Result<Metadata> {
     let actual = file.metadata()?;
-    if [expected, &actual]
-        .iter()
-        .any(|meta| !valid(meta) || meta.uid() != effective_uid() || meta.mode() & 0o7022 != 0)
+    if !valid(expected)
+        || !valid(&actual)
         || actual.dev() != expected.dev()
         || actual.ino() != expected.ino()
     {
         return Err(unsafe_owner_inode());
     }
-    #[cfg(target_os = "macos")]
-    refuse_extended_acl(file)?;
     Ok(actual)
 }
 
@@ -261,12 +294,12 @@ fn check_identity(file: &File, expected: LockFileIdentity) -> io::Result<()> {
         ));
     }
     #[cfg(target_os = "macos")]
-    refuse_extended_acl(file)?;
+    check_extended_acl(file, false)?;
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn refuse_extended_acl(file: &File) -> io::Result<()> {
+fn check_extended_acl(file: &File, deny_only: bool) -> io::Result<()> {
     use libc::{c_int, c_void};
 
     unsafe extern "C" {
@@ -285,12 +318,58 @@ fn refuse_extended_acl(file: &File) -> io::Result<()> {
             Err(err)
         };
     }
+    let accepted = deny_only && acl_is_deny_only(acl);
     // SAFETY: acl_get_fd returned this allocated ACL and acl_free disposes of it once.
     unsafe { acl_free(acl) };
-    Err(io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        "owner-controlled inode must not have an extended ACL",
-    ))
+    if accepted {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "extended ACL is not permitted on this owner-controlled inode",
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn acl_is_deny_only(acl: *mut libc::c_void) -> bool {
+    use libc::{c_int, c_void};
+
+    const ACL_FIRST_ENTRY: c_int = 0;
+    const ACL_NEXT_ENTRY: c_int = -1;
+    const ACL_EXTENDED_DENY: c_int = 2;
+    const ACL_MAX_ENTRIES: usize = 128;
+
+    unsafe extern "C" {
+        fn acl_valid(acl: *mut c_void) -> c_int;
+        fn acl_get_entry(acl: *mut c_void, id: c_int, entry: *mut *mut c_void) -> c_int;
+        fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
+    }
+
+    // SAFETY: the caller holds an ACL returned by acl_get_fd for the whole call.
+    if unsafe { acl_valid(acl) } != 0 {
+        return false;
+    }
+    let mut id = ACL_FIRST_ENTRY;
+    for count in 0..=ACL_MAX_ENTRIES {
+        let mut entry = std::ptr::null_mut();
+        // SAFETY: the ACL is valid and entry points to a writable entry pointer.
+        if unsafe { acl_get_entry(acl, id, &mut entry) } != 0 {
+            // On Darwin, EINVAL after traversing a valid ACL marks the end of its entries.
+            return id == ACL_NEXT_ENTRY
+                && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL);
+        }
+        let mut tag = 0;
+        // SAFETY: success above yields an entry from the still-live ACL and tag is writable.
+        if count == ACL_MAX_ENTRIES
+            || unsafe { acl_get_tag_type(entry, &mut tag) } != 0
+            || tag != ACL_EXTENDED_DENY
+        {
+            return false;
+        }
+        id = ACL_NEXT_ENTRY;
+    }
+    false
 }
 
 #[cfg(test)]

@@ -418,23 +418,128 @@ fn unsafe_existing_inodes_and_repository_paths_are_never_adopted() {
     assert_eq!(out.status.code(), Some(1), "{status}");
 }
 
+fn check_home_ancestor(change: impl FnOnce(&Path)) {
+    let fixture = PoolFixture::new();
+    let parent = Scratch::new("shared-slot-state");
+    let home = parent.path.join("owner-home");
+    fs::create_dir(&home).unwrap();
+    for file in [".lock", "registry.json", "config.json"] {
+        fs::copy(fixture.hive.home.path.join(file), home.join(file)).unwrap();
+    }
+    let lock = home.join(".lock");
+    let identity = fs::metadata(&lock).unwrap().ino();
+    let status = || {
+        let out = fixture
+            .hive
+            .command(&[
+                "slot",
+                "status",
+                "--repo",
+                fixture.repo.to_str().unwrap(),
+                "--json",
+            ])
+            .env("HIVE_HOME", &home)
+            .output()
+            .unwrap();
+        let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+        (out.status.code(), result)
+    };
+    change(&parent.path);
+    let (code, result) = status();
+    assert_eq!(code, Some(1), "{result}");
+    assert_eq!(result["kind"], "refused");
+    assert_eq!(fs::metadata(&lock).unwrap().ino(), identity);
+    assert!(!home.join("slots.json").exists());
+
+    fs::set_permissions(&parent.path, fs::Permissions::from_mode(0o755)).unwrap();
+    chmod_acl(&["-N"], &parent.path);
+    chmod_acl(&["+a", "everyone deny delete"], &parent.path);
+    let (code, result) = status();
+    assert_eq!(code, Some(0), "{result}");
+    assert_eq!(result["kind"], "unconfigured");
+}
+
+#[test]
+fn slot_state_refuses_a_home_beneath_a_shared_writable_parent() {
+    check_home_ancestor(|parent| {
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o777)).unwrap();
+    });
+}
+
+#[test]
+fn slot_state_refuses_a_home_beneath_a_parent_with_write_acl() {
+    check_home_ancestor(|parent| {
+        chmod_acl(&["+a", "everyone deny delete"], parent);
+        chmod_acl(&["+a#", "1", "everyone allow delete_child"], parent);
+    });
+}
+
+#[test]
+fn slot_init_refuses_a_selected_root_beneath_a_shared_writable_parent() {
+    let fixture = PoolFixture::new();
+    let parent = &fixture.hive.secondary_root.path;
+    let root = parent.join("selected");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o777)).unwrap();
+    let (out, result) = fixture.init_at(&root);
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    assert!(!fixture.file().exists());
+    assert!(!fixture.hive.home.path.join("slot-locks").exists());
+
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
+    let (out, result) = fixture.init_at(&root);
+    assert!(out.status.success(), "{result}");
+}
+
+fn chmod_acl(args: &[&str], path: &Path) {
+    let mut spec = cargo_hive_platform::proc::Spec::new("/bin/chmod");
+    spec.args.extend(args.iter().map(|arg| (*arg).into()));
+    spec.args.push(path.into());
+    let out = cargo_hive_platform::proc::output_with_deadline(
+        &spec,
+        std::time::Duration::from_secs(5),
+        || false,
+    )
+    .unwrap();
+    assert!(out.status.success(), "{:?}", out.stderr);
+}
+
+#[test]
+fn slot_init_refuses_a_reviewed_profile_with_a_write_acl() {
+    let fixture = PoolFixture::new();
+    fs::set_permissions(&fixture.profile, fs::Permissions::from_mode(0o600)).unwrap();
+    let bytes = fs::read(&fixture.profile).unwrap();
+    chmod_acl(&["+a", "everyone allow write,delete"], &fixture.profile);
+    assert_eq!(
+        fs::metadata(&fixture.profile).unwrap().mode() & 0o7777,
+        0o600
+    );
+    let (out, result) = fixture.init();
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert_eq!(result["kind"], "refused");
+    assert!(result["detail"].as_str().unwrap().contains("reviewed.json"));
+    assert!(!fixture.file().exists());
+    assert!(!fixture.hive.home.path.join("slot-locks").exists());
+    assert_eq!(
+        fs::read_dir(&fixture.hive.secondary_root.path)
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(fs::read(&fixture.profile).unwrap(), bytes);
+
+    chmod_acl(&["-N"], &fixture.profile);
+    let (out, result) = fixture.init();
+    assert!(out.status.success(), "{result}");
+}
+
 #[test]
 fn slot_scope_refuses_write_acls_and_unsafe_legacy_lock_paths() {
     let fixture = PoolFixture::new();
     let root = &fixture.hive.secondary_root.path;
     fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
-    let chmod_acl = |args: &[&str], path: &Path| {
-        let mut spec = cargo_hive_platform::proc::Spec::new("/bin/chmod");
-        spec.args.extend(args.iter().map(|arg| (*arg).into()));
-        spec.args.push(path.into());
-        let out = cargo_hive_platform::proc::output_with_deadline(
-            &spec,
-            std::time::Duration::from_secs(5),
-            || false,
-        )
-        .unwrap();
-        assert!(out.status.success(), "{:?}", out.stderr);
-    };
     chmod_acl(
         &[
             "+a",
@@ -590,6 +695,61 @@ fn status_holds_an_unrecorded_checkout_and_a_replaced_lock() {
     );
     assert_eq!(fs::read(fixture.file()).unwrap(), saved);
     assert_eq!(fs::read(path.join("unfinished")).unwrap(), b"preserve this");
+}
+
+#[test]
+fn cancelling_the_git_probe_in_existing_pool_status_exits_130() {
+    let fixture = PoolFixture::new();
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let saved = fs::read(fixture.file()).unwrap();
+    let shim = fixture._repo_dir.path.join("git");
+    let probe = fixture._repo_dir.path.join("cancelled-probe");
+    fs::write(
+        &shim,
+        r#"#!/bin/sh
+printf '%s\n' "$*" > "$SLOT_TEST_GIT_PROBE"
+kill -INT "$PPID"
+exec /bin/sleep 8
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(shim, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(fixture._repo_dir.path.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let child = fixture
+        .hive
+        .command(&[
+            "slot",
+            "status",
+            "--repo",
+            fixture.repo.to_str().unwrap(),
+            "--json",
+        ])
+        .env("PATH", path)
+        .env("SLOT_TEST_GIT_PROBE", &probe)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = common::wait_within(child, std::time::Duration::from_secs(5));
+    assert!(fs::read_to_string(probe).unwrap().contains("rev-parse"));
+    let result: Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|err| panic!("{err}: {out:?}"));
+    assert_eq!(out.status.code(), Some(130), "{result}");
+    assert_eq!(result["kind"], "cancelled");
+    assert_eq!(result["schema"], 1);
+    assert_eq!(fs::read(fixture.file()).unwrap(), saved);
+
+    fs::rename(fixture.repo.join(".git"), fixture.repo.join("old-git")).unwrap();
+    let (out, status) = fixture.status();
+    assert!(out.status.success(), "{status}");
+    assert_eq!(status["slots"][0]["phase"], "held");
+    assert_eq!(status["slots"][1]["phase"], "held");
+    assert_eq!(fs::read(fixture.file()).unwrap(), saved);
 }
 
 #[test]
