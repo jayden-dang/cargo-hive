@@ -35,7 +35,8 @@ Design: ./design.md
 | `crates/state/src/slots.rs` | New strict layout 2 record, checked revisions, transition/outcome I/O with fault tests. |
 | `crates/platform/src/flock.rs` | Check inherited writer and credential descriptors and owner-controlled paths for slot state. |
 | `crates/platform/src/lib.rs` | Export slot-only platform support. |
-| `crates/platform/src/proc.rs` | Confirm both pipes finish for bounded slot Git probes. |
+| `crates/platform/src/proc.rs` | Confirm complete slot Git pipe capture and bound private CLI input. |
+| `crates/platform/src/testing.rs` | Inspect pipe readiness and inherited flags for the native CLI cancellation fixture. |
 | `crates/platform/src/slot.rs` | New local process instance, boot session and entropy helpers. |
 | `crates/platform/tests/slot_fence.rs` | New real macOS multi-process fence and child-lifetime proof. |
 | `crates/cargo/src/git.rs` | Slot-only bounded complete read-only Git identity, worktree and cleanliness facts. |
@@ -57,7 +58,7 @@ Design: ./design.md
 | `crates/cargo-hive/tests/skill/names.rs` | Add checked slot command and result identifiers to existing guide assertions. |
 | `plugin/skills/hive/SKILL.md` | Document slot use, refused return, held recovery and scoped seeded fallback. |
 | `plugin/skills/hive/scripts/slot-handoff.sh` | New guide-owned fenced Git/mtime/foreground Cargo procedure. |
-| `README.md` | Document optional pool use beside the existing workflow. |
+| `README.md` | Clarify the current slot result format and availability. Task 9 documents the full pool workflow. |
 | `docs/specs/2026-11-23-warm-slot-pool/verification.md` | New implementation-time runbook and proof procedure for real pair measurements. |
 | `docs/roadmap/roads/ROAD-17.md` | Approved roadmap card recording the dirty-return decision. |
 | `docs/roadmap/roads/ROAD-17.notes.md` | Approved shaping notes that record the decision and its evidence. |
