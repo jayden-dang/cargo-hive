@@ -144,6 +144,8 @@ finish() {
 }
 
 # Monitor mode gives each owned job its own process group on macOS Bash 3.2.
+cancelled=0
+trap 'cancelled=1' INT TERM
 set -m
 (set +m; run_campaigns) &
 campaign_pid=$!
@@ -156,6 +158,7 @@ campaign_pid=$!
 watchdog_pid=$!
 set +m
 trap 'finish 130' INT TERM
+if [[ $cancelled -eq 1 ]]; then finish 130; fi
 status=0
 wait "$campaign_pid" || status=$?
 if [[ -f $out/run-timeout ]]; then
