@@ -201,6 +201,8 @@ mod foreground {
     const PROC_PIDFDVNODEINFO: i32 = 1;
     const PROC_FP_CLEXEC: u32 = 2;
     const PIDS_LIMIT: usize = 8192;
+    const FDS_PER_PROCESS: usize = 4096;
+    const FD_TOTAL_LIMIT: usize = 100_000;
     const ARGUMENT_LIMIT: usize = 256 * 1024;
 
     #[repr(C)]
@@ -386,7 +388,7 @@ mod foreground {
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
-            if other_lock_holder(self.parent.pid, self.lock_fd, self.lock)? {
+            if other_lock_holder(&self.parent, self.lock)? {
                 return Err(invalid(
                     "another process can still write with the inherited slot lock",
                 ));
@@ -543,8 +545,8 @@ mod foreground {
         }
         // SAFETY: proc_pidfdinfo returned the full vnode_fdinfo structure.
         let info = unsafe { info.assume_init() };
-        Ok(info.status & PROC_FP_CLEXEC == 0
-            && offset.is_none_or(|expected| expected == info.offset)
+        Ok(offset
+            .is_none_or(|expected| info.status & PROC_FP_CLEXEC == 0 && expected == info.offset)
             && u64::from(info.vnode.vi_stat.vst_dev) == lock.dev
             && info.vnode.vi_stat.vst_ino == lock.ino)
     }
@@ -663,6 +665,13 @@ mod foreground {
         let mut keys = std::collections::BTreeSet::new();
         let mut parts = parts.peekable();
         let delimited = parts.peek().is_some_and(|field| field.is_empty());
+        if !delimited
+            && !parts
+                .peek()
+                .is_some_and(|field| field.starts_with(b"executable_file="))
+        {
+            return Err(invalid("ambiguous foreground environment boundary"));
+        }
         let mut terminated = false;
         for field in parts {
             terminated = field.is_empty();
@@ -710,7 +719,7 @@ mod foreground {
         Ok(())
     }
 
-    fn other_lock_holder(parent: u32, fd: i32, lock: LockFileIdentity) -> io::Result<bool> {
+    fn other_lock_holder(guide: &ProcessInstance, lock: LockFileIdentity) -> io::Result<bool> {
         let mut pids = vec![0i32; PIDS_LIMIT];
         // SAFETY: pids is writable for the supplied array size, in bytes.
         let count = unsafe {
@@ -724,20 +733,163 @@ mod foreground {
         if count <= 0 || count as usize >= pids.len() * size_of::<i32>() {
             return Err(invalid("could not verify complete slot custody"));
         }
+        if !(count as usize).is_multiple_of(size_of::<i32>()) {
+            return Err(invalid("incomplete slot process inventory"));
+        }
+        let mut descriptors = vec![
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0
+            };
+            FDS_PER_PROCESS + 1
+        ];
+        let mut remaining = FD_TOTAL_LIMIT;
+        let until = Instant::now() + Duration::from_secs(5);
         for &pid in &pids[..count as usize / size_of::<i32>()] {
-            if pid > 0
-                && pid as u32 != parent
-                && pid as u32 != std::process::id()
-                && owns_lock(pid, fd, lock, None)?
-            {
-                return Ok(true);
+            if pid <= 0 || pid as u32 == guide.pid || pid as u32 == std::process::id() {
+                continue;
+            }
+            let fds = match descriptors_for(pid, &mut descriptors) {
+                Ok(fds) => fds,
+                Err(error) if inaccessible_preexisting(pid, guide, &error) => continue,
+                Err(error) => return Err(error),
+            };
+            remaining = remaining
+                .checked_sub(fds.len())
+                .filter(|_| Instant::now() < until)
+                .ok_or_else(|| invalid("slot custody scan exceeded its bound"))?;
+            for fd in fds {
+                if fd.proc_fdtype != libc::PROX_FDTYPE_VNODE as u32 {
+                    continue;
+                }
+                match owns_lock(pid, fd.proc_fd, lock, None) {
+                    Ok(true) => return Ok(true),
+                    Ok(false) => (),
+                    Err(error) if inaccessible_preexisting(pid, guide, &error) => (),
+                    Err(error) => return Err(error),
+                }
             }
         }
         Ok(false)
     }
+
+    fn inaccessible_preexisting(pid: i32, guide: &ProcessInstance, error: &io::Error) -> bool {
+        // Protected same-UID services may expose their fd table but not vnode details.
+        // An instance already alive before this guide cannot inherit its guard at fork.
+        error.kind() == io::ErrorKind::PermissionDenied
+            && process(pid).is_ok_and(|info| {
+                info.pbi_pid as i32 == pid
+                    && info.pbi_uid == effective_uid()
+                    && info.pbi_start_tvsec != 0
+                    && (info.pbi_start_tvsec, info.pbi_start_tvusec)
+                        < (guide.start_secs, guide.start_micros)
+            })
+    }
+
+    fn descriptors_for(
+        pid: i32,
+        buffer: &mut [libc::proc_fdinfo],
+    ) -> io::Result<&[libc::proc_fdinfo]> {
+        let capacity = size_of_val(buffer);
+        // SAFETY: the PROC_PIDLISTFDS flavor writes proc_fdinfo records into buffer.
+        let count = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDLISTFDS,
+                0,
+                buffer.as_mut_ptr().cast(),
+                capacity as i32,
+            )
+        };
+        if count <= 0 {
+            let error = io::Error::last_os_error();
+            return if matches!(error.raw_os_error(), Some(libc::ESRCH | libc::ENOENT))
+                || process(pid)
+                    .is_ok_and(|info| info.pbi_status == libc::SZOMB || info.pbi_nfiles == 0)
+            {
+                Ok(&[])
+            } else {
+                Err(invalid(
+                    "could not verify all descriptors of a local process",
+                ))
+            };
+        }
+        if count as usize >= capacity
+            || !(count as usize).is_multiple_of(size_of::<libc::proc_fdinfo>())
+        {
+            return Err(invalid("incomplete slot descriptor inventory"));
+        }
+        Ok(&buffer[..count as usize / size_of::<libc::proc_fdinfo>()])
+    }
     #[cfg(test)]
     mod tests {
         use super::parse_environment;
+
+        #[test]
+        fn a_detached_child_with_a_renumbered_close_on_exec_guard_is_still_a_holder() {
+            use super::{LockFileIdentity, other_lock_holder};
+            use std::fs;
+            use std::os::fd::AsRawFd;
+            use std::os::unix::fs::MetadataExt;
+            use std::os::unix::process::CommandExt;
+            use std::process::{Command, Stdio};
+            use std::time::{Duration, Instant};
+
+            const FD: i32 = 198;
+            const MARKER: &str = "HIVE_TEST_DETACHED_SLOT_GUARD_MARKER";
+            if let Some(marker) = std::env::var_os(MARKER) {
+                // SAFETY: FD is the live descriptor supplied by this test's parent.
+                let moved = unsafe { libc::fcntl(FD, libc::F_DUPFD_CLOEXEC, 231) };
+                assert!(moved >= 231);
+                // SAFETY: close only the original descriptor owned by this subprocess.
+                assert_eq!(unsafe { libc::close(FD) }, 0);
+                fs::write(marker, b"ready").unwrap();
+                std::thread::sleep(Duration::from_secs(10));
+                return;
+            }
+            let nonce = super::random_slot_bytes().unwrap();
+            let name: String = nonce[..8].iter().map(|b| format!("{b:02x}")).collect();
+            let path = std::env::temp_dir().join(format!("hive-detached-slot-fd-{name}"));
+            fs::create_dir(&path).unwrap();
+            let scratch = crate::TempDir::adopt(path);
+            let lock = fs::File::create(scratch.path().join("operation.lock")).unwrap();
+            let meta = lock.metadata().unwrap();
+            let identity = LockFileIdentity {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            };
+            let marker = scratch.path().join("ready");
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "slot::foreground::tests::a_detached_child_with_a_renumbered_close_on_exec_guard_is_still_a_holder"])
+                .env(MARKER, &marker)
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            let source = lock.as_raw_fd();
+            // SAFETY: setsid and dup2 are async-signal-safe and source is open through spawn.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::setsid() < 0 || libc::dup2(source, FD) != FD {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let mut child = command.spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(4);
+            while !marker.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let found = other_lock_holder(&super::parent_instance().unwrap(), identity);
+            let _ = child.kill();
+            child.wait().unwrap();
+            assert!(
+                marker.exists(),
+                "detached child did not retain its renumbered guard"
+            );
+            assert!(
+                found.unwrap(),
+                "closing on the next exec does not release a held guard"
+            );
+        }
 
         #[test]
         fn exact_environment_does_not_hide_a_trailing_variable() {
@@ -754,6 +906,21 @@ mod foreground {
                 b"",
             ];
             assert!(parse_environment(separated.into_iter(), Some(1)).is_err());
+        }
+
+        #[test]
+        fn an_optional_apple_key_cannot_open_an_undelimited_bootstrap_tail() {
+            let parts = [
+                b"HOME=/private/tmp".as_slice(),
+                b"executable_boothash=unreviewed",
+                b"executable_file=test",
+                b"dyld_file=test",
+                b"main_stack=test",
+                b"stack_guard=test",
+                b"malloc_entropy=test",
+                b"",
+            ];
+            assert!(parse_environment(parts.into_iter(), Some(1)).is_err());
         }
 
         #[test]

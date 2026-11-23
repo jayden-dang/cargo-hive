@@ -1,7 +1,7 @@
 //! Admits only the actual command and graph covered by the pool's reviewed profile.
 
 use super::{CheckoutProof, Refusal, canonical_worktree_path, check_cancelled, exists, git_scope};
-use cargo_hive_cargo::{metadata, toolchain};
+use cargo_hive_cargo::metadata;
 use cargo_hive_platform::{
     flock::open_owner_state_file,
     proc::{self, Capture, Spec},
@@ -150,7 +150,7 @@ fn supported_args(args: &[String]) -> bool {
     let Some((command, options)) = args.split_first() else {
         return false;
     };
-    if !matches!(command.as_str(), "check" | "build" | "test" | "clippy")
+    if !matches!(command.as_str(), "check" | "build" | "test")
         || !options.iter().any(|arg| arg == "--locked")
         || (command == "test" && !options.iter().any(|arg| arg == "--no-run"))
     {
@@ -180,16 +180,18 @@ fn supported_args(args: &[String]) -> bool {
                 if !options.next().is_some_and(|value| {
                     !value.starts_with('-')
                         && !value.is_empty()
-                        && value
-                            .bytes()
-                            .all(|ch| ch.is_ascii_alphanumeric() || b" _.-,/+:".contains(&ch))
+                        && if arg == "--target" {
+                            value
+                                .bytes()
+                                .all(|ch| ch.is_ascii_alphanumeric() || b"-_".contains(&ch))
+                        } else {
+                            value
+                                .bytes()
+                                .all(|ch| ch.is_ascii_alphanumeric() || b" _.-,/+:".contains(&ch))
+                        }
                 }) {
                     return false;
                 }
-            }
-            "--" if command == "clippy" => {
-                return options
-                    .all(|flag| matches!(flag.as_str(), "-D" | "warnings" | "-Dwarnings"));
             }
             _ => return false,
         }
@@ -214,7 +216,7 @@ pub(super) fn check_invocation(
         .map_err(|_| refused("Could not verify the reviewed working directory."))?;
 
     let environment: BTreeMap<_, _> = std::env::vars_os().collect();
-    let (environment_digest, environment) = check_environment(profile, invocation, &environment)?;
+    let mut environment = check_environment(profile, invocation, &environment)?;
     let cargo_home = environment
         .get(std::ffi::OsStr::new("CARGO_HOME"))
         .map(PathBuf::from)
@@ -230,10 +232,26 @@ pub(super) fn check_invocation(
 
     let inputs = fixed_inputs(profile, checkout)?;
     verify_cargo_configuration(&inputs, checkout, &cwd, &cargo_home)?;
-    let toolchain = toolchain::resolve_toolchain(&cwd)
-        .map_err(|_| refused("Could not establish the reviewed Cargo and rustc identity."))?;
-    let cargo = verify_tools(invocation, &cwd, &toolchain, &environment)?;
+    let (cargo, rustc) = verified_executables(invocation, &environment)?;
+    environment.insert("RUSTC".into(), rustc.as_os_str().to_owned());
+    environment.insert("RUSTUP_AUTO_INSTALL".into(), "0".into());
+    let environment_digest = digest(
+        &serde_json::to_vec(
+            &environment
+                .iter()
+                .map(|(name, value)| (name.as_encoded_bytes(), value.as_encoded_bytes()))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|_| refused("Could not bind the producer environment evidence."))?,
+    )?;
+    let tools_before = tool_identities(&cargo, &rustc)?;
+    verify_tools(invocation, &cwd, &cargo, &rustc, &environment)?;
     let discovered = discover(&cargo, &cwd, &environment)?;
+    if tools_before != tool_identities(&cargo, &rustc)? {
+        return Err(refused(
+            "The verified Cargo or rustc executable changed during discovery.",
+        ));
+    }
     let matches_root = |actual: &Path, relative: &Path, expected: &RootExpectation| {
         let checked = checkout.path.join(relative);
         let saved = match expected {
@@ -264,7 +282,7 @@ pub(super) fn check_invocation(
     check_graph_members(&inputs, &discovered, checkout, profile, invocation)?;
     let mutable_facts = mutable_facts(profile, invocation, checkout)?;
     let graph_digest = digest(
-        &serde_json::to_vec(&(&inputs, mutable_facts, &cargo, &toolchain.rustc))
+        &serde_json::to_vec(&(&inputs, mutable_facts, &cargo, &rustc, tools_before))
             .map_err(|_| refused("Could not bind the producer graph evidence."))?,
     )?;
 
@@ -284,7 +302,7 @@ fn check_environment(
     profile: &PoolProfile,
     invocation: &Invocation,
     environment: &BTreeMap<std::ffi::OsString, std::ffi::OsString>,
-) -> Result<(String, BTreeMap<std::ffi::OsString, std::ffi::OsString>), Refusal> {
+) -> Result<BTreeMap<std::ffi::OsString, std::ffi::OsString>, Refusal> {
     let denied = || refused("The effective environment differs from the reviewed invocation.");
     for name in environment.keys() {
         let name = name.to_str().ok_or_else(denied)?;
@@ -294,7 +312,8 @@ fn check_environment(
         ) || matches!(
             name,
             "BASH_ENV" | "ENV" | "CDPATH" | "BASHOPTS" | "SHELLOPTS"
-        ) || name.starts_with("BASH_FUNC_")
+        ) || compiler_override(name)
+            || name.starts_with("BASH_FUNC_")
             || name.starts_with("DYLD_")
             || name.starts_with("LD_")
             || metadata::TARGET_VARS.contains(&name)
@@ -316,6 +335,15 @@ fn check_environment(
     }
     let mut facts = BTreeMap::new();
     for variable in &invocation.environment {
+        if variable.name.starts_with("GIT_")
+            || compiler_override(&variable.name)
+            || matches!(
+                variable.name.as_str(),
+                "RUSTC" | "RUSTDOC" | "RUSTUP_AUTO_INSTALL"
+            )
+        {
+            return Err(denied());
+        }
         let value = environment
             .get(std::ffi::OsStr::new(&variable.name))
             .map(|value| value.to_str().ok_or_else(denied))
@@ -349,12 +377,23 @@ fn check_environment(
             .transpose()?;
         facts.insert(name, value);
     }
-    let digest = digest(&serde_json::to_vec(&facts).map_err(|_| denied())?)?;
-    let effective = facts
+    Ok(facts
         .into_iter()
         .filter_map(|(name, value)| value.map(|value| (name.into(), value.into())))
-        .collect();
-    Ok((digest, effective))
+        .collect())
+}
+
+fn compiler_override(name: &str) -> bool {
+    matches!(
+        name,
+        "RUSTFLAGS"
+            | "RUSTDOCFLAGS"
+            | "CARGO_ENCODED_RUSTFLAGS"
+            | "CARGO_ENCODED_RUSTDOCFLAGS"
+            | "CARGO_BUILD_TARGET"
+    ) || name.starts_with("CARGO_BUILD_RUST")
+        || name.starts_with("CARGO_ALIAS_")
+        || name.starts_with("CARGO_TARGET_")
 }
 
 fn fixed_inputs(
@@ -477,68 +516,188 @@ fn verify_cargo_configuration(
             "Cargo is probing a manifest or configuration path outside the reviewed graph inventory.",
         )
     };
-    let check = |path: PathBuf| -> Result<(), Refusal> {
-        if !inputs.contains_key(&path) && read_input(&path)?.is_some() {
+    let check = |path: PathBuf, cargo_config: bool| -> Result<(), Refusal> {
+        let bytes = read_input(&path)?;
+        let observed = bytes.as_deref().map(digest).transpose()?;
+        if inputs.get(&path).and_then(Option::as_ref) != observed.as_ref() {
             return Err(omitted());
+        }
+        if cargo_config
+            && bytes
+                .as_deref()
+                .is_some_and(|bytes| !supported_config(bytes))
+        {
+            return Err(refused(
+                "Reviewed Cargo config contains unsupported keys or tool overrides.",
+            ));
         }
         Ok(())
     };
     for ancestor in cwd.ancestors() {
-        for name in [
-            ".cargo/config",
-            ".cargo/config.toml",
-            "rust-toolchain",
-            "rust-toolchain.toml",
-        ] {
-            check(ancestor.join(name))?;
+        for name in [".cargo/config", ".cargo/config.toml"] {
+            check(ancestor.join(name), true)?;
+        }
+        for name in ["rust-toolchain", "rust-toolchain.toml"] {
+            check(ancestor.join(name), false)?;
         }
         if ancestor != checkout.path {
-            check(ancestor.join("Cargo.toml"))?;
+            check(ancestor.join("Cargo.toml"), false)?;
         }
     }
     for name in ["config", "config.toml"] {
-        check(cargo_home.join(name))?;
+        check(cargo_home.join(name), true)?;
     }
     Ok(())
+}
+
+fn supported_config(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let mut section = "";
+    let mut keys = BTreeSet::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if matches!(line, "[build]" | "[net]") {
+            section = line;
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if !keys.insert((section, key)) {
+            return false;
+        }
+        match (section, key) {
+            ("[net]", "offline") if matches!(value, "true" | "false") => (),
+            ("[build]", "jobs")
+                if value
+                    .parse::<u16>()
+                    .is_ok_and(|jobs| (1..=256).contains(&jobs)) => {}
+            ("[build]", "target-dir" | "build-dir") if simple_output_path(value) => (),
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn simple_output_path(value: &str) -> bool {
+    let Some(path) = value
+        .strip_prefix('"')
+        .and_then(|path| path.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|path| path.strip_suffix('\''))
+        })
+    else {
+        return false;
+    };
+    !path.is_empty()
+        && path.split('/').all(|part| {
+            !matches!(part, "" | "." | "..")
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-. ".contains(&byte))
+        })
+}
+
+fn release_for(layout: CargoLayout) -> &'static str {
+    match layout {
+        CargoLayout::Flat => "1.97.1",
+        CargoLayout::UnitDir => "1.100.0",
+    }
+}
+
+fn verified_executables(
+    invocation: &Invocation,
+    environment: &BTreeMap<std::ffi::OsString, std::ffi::OsString>,
+) -> Result<(PathBuf, PathBuf), Refusal> {
+    use std::ffi::OsStr;
+    let uncertain =
+        || refused("Could not establish the exact reviewed Cargo and rustc executables or layout.");
+    let release = release_for(invocation.layout);
+    let toolchain = format!("{release}-{}-apple-darwin", std::env::consts::ARCH);
+    let get = |name| environment.get(OsStr::new(name));
+    if get("RUSTUP_TOOLCHAIN")
+        .is_some_and(|actual| actual != release && actual != toolchain.as_str())
+        || get("RUSTUP_AUTO_INSTALL").is_some_and(|actual| actual != "0")
+    {
+        return Err(uncertain());
+    }
+    let rustup_home = get("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| get("HOME").map(|home| Path::new(home).join(".rustup")))
+        .ok_or_else(uncertain)?;
+    slots::owner_directory(&rustup_home).map_err(|_| uncertain())?;
+    let bin = rustup_home.join("toolchains").join(toolchain).join("bin");
+    slots::owner_directory(&bin).map_err(|_| uncertain())?;
+    let cargo = bin.join("cargo");
+    let rustc = bin.join("rustc");
+    let path = get("PATH").ok_or_else(uncertain)?;
+    let locate = |tool| {
+        std::env::split_paths(path).find_map(|directory| {
+            use std::os::unix::fs::PermissionsExt as _;
+            let file = directory.join(tool);
+            let metadata = fs::metadata(&file).ok()?;
+            (metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+                .then(|| file.canonicalize().ok())
+                .flatten()
+        })
+    };
+    let rustc_from_path = locate("rustc").ok_or_else(uncertain)?;
+    if rustc_from_path != rustc && locate("rustup").as_ref() != Some(&rustc_from_path) {
+        return Err(uncertain());
+    }
+    Ok((cargo, rustc))
+}
+
+fn tool_identities(cargo: &Path, rustc: &Path) -> Result<String, Refusal> {
+    let unproved =
+        || refused("A reviewed tool executable is not a canonical owner-controlled file.");
+    let identity = |path: &Path| {
+        let metadata = open_owner_state_file(path)
+            .and_then(|file| file.metadata())
+            .map_err(|_| unproved())?;
+        Ok::<_, Refusal>((super::directory_stamp(&metadata), metadata.len()))
+    };
+    let bytes =
+        serde_json::to_vec(&[identity(cargo)?, identity(rustc)?]).map_err(|_| unproved())?;
+    digest(&bytes)
 }
 
 fn verify_tools(
     invocation: &Invocation,
     cwd: &Path,
-    toolchain: &toolchain::Toolchain,
+    cargo: &Path,
+    rustc: &Path,
     environment: &BTreeMap<std::ffi::OsString, std::ffi::OsString>,
-) -> Result<PathBuf, Refusal> {
+) -> Result<(), Refusal> {
     let incorrect = || {
         refused("Actual Cargo or rustc identity and layout differs from the reviewed invocation.")
     };
-    let cargo = toolchain.cargo.canonicalize().map_err(|_| incorrect())?;
-    let rustc = toolchain.rustc.canonicalize().map_err(|_| incorrect())?;
-    let layout = match toolchain.release.as_str() {
-        "1.97.1" => CargoLayout::Flat,
-        "1.100.0" => CargoLayout::UnitDir,
-        _ => return Err(incorrect()),
-    };
-    if !toolchain.cargo.is_absolute()
-        || !toolchain.rustc.is_absolute()
-        || cargo.parent() != rustc.parent()
-        || layout != invocation.layout
-        || !version_matches(
-            &invocation.rustc,
-            toolchain.version_text.lines().next().unwrap_or(""),
-        )
-    {
-        return Err(incorrect());
-    }
-    let output = cargo_output(&cargo, cwd, &["-V"], 1024, environment)?;
-    let version = std::str::from_utf8(&output)
+    let output = cargo_output(cargo, cwd, &["-V"], 1024, environment)?;
+    let cargo_version = std::str::from_utf8(&output)
         .map_err(|_| incorrect())?
         .trim_end();
-    if !version_matches(&invocation.cargo, version)
-        || !version_matches(&format!("cargo {}", toolchain.release), version)
+    let output = cargo_output(rustc, cwd, &["-vV"], 4096, environment)?;
+    let rustc_info = std::str::from_utf8(&output).map_err(|_| incorrect())?;
+    let rustc_version = rustc_info.lines().next().ok_or_else(incorrect)?;
+    let release = release_for(invocation.layout);
+    if !version_matches(&invocation.cargo, cargo_version)
+        || !version_matches(&format!("cargo {release}"), cargo_version)
+        || !version_matches(&invocation.rustc, rustc_version)
+        || !rustc_info
+            .lines()
+            .any(|line| line.strip_prefix("release: ") == Some(release))
     {
         return Err(incorrect());
     }
-    Ok(cargo)
+    Ok(())
 }
 
 fn version_matches(expected: &str, actual: &str) -> bool {
@@ -596,6 +755,7 @@ struct Package {
 #[derive(Deserialize)]
 struct PackageTarget {
     kind: Vec<String>,
+    src_path: PathBuf,
 }
 
 struct Discovered {
@@ -660,14 +820,23 @@ fn check_graph_members(
         || !fixed(&checkout.path.join("Cargo.lock"))
         || graph.packages.iter().any(|package| {
             package.source.is_none()
-                && (!fixed(&package.manifest_path)
-                    || package
-                        .targets
-                        .iter()
-                        .any(|target| target.kind.iter().any(|kind| kind == "custom-build")))
+                && (!package.manifest_path.starts_with(&checkout.path)
+                    || !fixed(&package.manifest_path))
         })
     {
         return Err(unproved());
+    }
+    if graph.packages.iter().any(|package| {
+        package.targets.iter().any(|target| {
+            target
+                .kind
+                .iter()
+                .any(|kind| matches!(kind.as_str(), "custom-build" | "proc-macro"))
+        })
+    }) {
+        return Err(refused(
+            "The reviewed graph contains an executable build target without foreground custody proof.",
+        ));
     }
     for proof in profile
         .proofs
@@ -695,20 +864,25 @@ fn check_graph_members(
             package.source.is_none()
                 && package.name == consumer.package
                 && package.targets.iter().any(|target| {
-                    target.kind.iter().any(|kind| {
-                        kind == &consumer.role || (consumer.role == "library" && kind == "lib")
-                    })
+                    target.src_path == anchor
+                        && target.kind.iter().any(|kind| {
+                            kind == &consumer.role || (consumer.role == "library" && kind == "lib")
+                        })
                 })
-                && package
-                    .manifest_path
-                    .parent()
-                    .is_some_and(|dir| anchor.starts_with(dir))
         });
-        let object = tracked_object(checkout, &consumer.anchor)?;
-        if !covered || (object != consumer.prior_object && object != consumer.requested_object) {
+        let head = tracked_object(checkout, &consumer.anchor)?;
+        if !covered || (head != consumer.prior_object && head != consumer.requested_object) {
+            return Err(unproved());
+        }
+        let actual = read_input(&anchor)?.ok_or_else(unproved)?;
+        let approved = blob(checkout, &consumer.prior_object)? == actual
+            || (consumer.prior_object != consumer.requested_object
+                && blob(checkout, &consumer.requested_object)? == actual);
+        if !approved {
             return Err(unproved());
         }
     }
+
     Ok(())
 }
 
@@ -738,6 +912,18 @@ fn mutable_facts(
             Locator::Environment { .. } => continue,
         };
         for path in paths {
+            if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
+                && !profile.consumers.iter().any(|consumer| {
+                    consumer.invocation == invocation.id
+                        && checkout.path.join(&consumer.anchor) == path
+                })
+            {
+                return Err(refused(
+                    "A mutable Rust source does not have a reviewed consumer anchor.",
+                ));
+            }
             let fact = read_input(&path)?.map(|bytes| digest(&bytes)).transpose()?;
             if fact.is_none() && input.presence == slots::MutablePresence::Present {
                 return Err(refused("A required mutable input is missing."));

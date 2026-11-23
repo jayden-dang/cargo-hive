@@ -402,7 +402,7 @@ fn reserve(
             return Err(Refusal::OutcomeLimit);
         }
         if !matches!(slot.phase, Phase::Vacant)
-            || slot.producer.lost()
+            || !slot_producer_is_eligible(slot)
             || !slot_identity_present(state.root(), pool, slot)
         {
             return Err(Refusal::Capacity(
@@ -463,21 +463,45 @@ struct ReturnScope {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProducerInput {
-    action: ProducerAction,
-    credential: String,
-    nonce: String,
-    shape: InvocationInput,
-    child_pid: Option<u32>,
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum ProducerInput {
+    Start {
+        credential: String,
+        nonce: String,
+        shape: InvocationInput,
+    },
+    Watch {
+        credential: String,
+        nonce: String,
+        shape: InvocationInput,
+        child_pid: u32,
+    },
+    ReportBypass {
+        credential: String,
+        nonce: String,
+        profile: slots::ProfileBinding,
+    },
 }
 
-#[derive(Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ProducerAction {
-    Start,
-    Watch,
-    ReportBypass,
+impl ProducerInput {
+    fn authentication(&self) -> (&str, &str) {
+        match self {
+            Self::Start {
+                credential, nonce, ..
+            }
+            | Self::Watch {
+                credential, nonce, ..
+            }
+            | Self::ReportBypass {
+                credential, nonce, ..
+            } => (credential, nonce),
+        }
+    }
+}
+
+struct ProducerInvocation {
+    credential: String,
+    shape: InvocationInput,
 }
 
 fn producer(state: &State, request: &SlotLockedOperation) -> Result<SlotResult, Refusal> {
@@ -497,10 +521,11 @@ fn producer(state: &State, request: &SlotLockedOperation) -> Result<SlotResult, 
         }
     })?;
     let input: ProducerInput = serde_json::from_slice(&input).map_err(|_| credential_refusal())?;
-    if !slots::hex(&input.credential, KEY_HEX_LEN) || !slots::hex(&input.nonce, KEY_HEX_LEN) {
+    let (credential, nonce) = input.authentication();
+    if !slots::hex(credential, KEY_HEX_LEN) || !slots::hex(nonce, KEY_HEX_LEN) {
         return Err(credential_refusal());
     }
-    let runner = producer_runner(&input.nonce)?;
+    let runner = producer_runner(nonce)?;
     let registered = verify_operation_repo(state, &op.scope.repo)?;
     let lock_path = state
         .root()
@@ -538,14 +563,28 @@ fn producer(state: &State, request: &SlotLockedOperation) -> Result<SlotResult, 
         runner,
         lock_id,
     };
-    let snapshot = command.snapshot(&input.credential)?;
-    match (input.action, input.child_pid) {
-        (ProducerAction::Start, None) => command.start(&snapshot, input),
-        (ProducerAction::Watch, Some(pid)) => {
-            command.watch(snapshot, input, pid, fd, inherited.as_fd())
-        }
-        (ProducerAction::ReportBypass, None) => command.report_bypass(&snapshot, &input),
-        _ => Err(producer_fence_refusal()),
+    let snapshot = command.snapshot(credential)?;
+    match input {
+        ProducerInput::Start {
+            credential, shape, ..
+        } => command.start(&snapshot, ProducerInvocation { credential, shape }),
+        ProducerInput::Watch {
+            credential,
+            shape,
+            child_pid,
+            ..
+        } => command.watch(
+            snapshot,
+            ProducerInvocation { credential, shape },
+            child_pid,
+            fd,
+            inherited.as_fd(),
+        ),
+        ProducerInput::ReportBypass {
+            credential,
+            profile,
+            ..
+        } => command.report_bypass(&snapshot, &credential, &profile),
     }
 }
 
@@ -592,24 +631,39 @@ impl ProducerCommand<'_> {
                 checked_pool(tx, self.state, &self.op.scope, &self.registered)?;
             let current = &saved.pools[index];
             let slot_index = self.slot_index();
-            if current.slots[slot_index] != snapshot.pool.slots[slot_index]
-                || current.profile != snapshot.pool.profile
-                || tx.read_slot_registry::<Registry>()? != snapshot.registry
-                || self.state.slot_config()?.secondary_roots != snapshot.secondary_roots
-                || producer_runner(&self.runner.nonce)? != self.runner
-                || !slot_identity_present(self.state.root(), current, &current.slots[slot_index])
-            {
-                return Err(producer_fence_refusal());
-            }
+            self.verify_snapshot(tx, snapshot, current)?;
             write(&mut saved.pools[index].slots[slot_index])?;
             commit_slot_update(tx, &mut saved)
         })
     }
 
-    fn start(&self, snapshot: &ReturnScope, input: ProducerInput) -> Result<SlotResult, Refusal> {
+    fn verify_snapshot(
+        &self,
+        tx: &Tx<'_>,
+        snapshot: &ReturnScope,
+        current: &Pool,
+    ) -> Result<(), Refusal> {
+        let slot_index = self.slot_index();
+        if current.slots[slot_index] != snapshot.pool.slots[slot_index]
+            || current.profile != snapshot.pool.profile
+            || tx.read_slot_registry::<Registry>()? != snapshot.registry
+            || self.state.slot_config()?.secondary_roots != snapshot.secondary_roots
+            || producer_runner(&self.runner.nonce)? != self.runner
+            || !slot_identity_present(self.state.root(), current, &current.slots[slot_index])
+        {
+            return Err(producer_fence_refusal());
+        }
+        Ok(())
+    }
+
+    fn start(
+        &self,
+        snapshot: &ReturnScope,
+        input: ProducerInvocation,
+    ) -> Result<SlotResult, Refusal> {
         let pool = &snapshot.pool;
         let slot = &pool.slots[self.slot_index()];
-        let (checkout, _) = producer_lease(slot, &self.key, &input.credential)?;
+        let (checkout, ready_commit) = producer_lease(slot, &self.key, &input.credential)?;
         if slot
             .outcomes
             .iter()
@@ -663,6 +717,7 @@ impl ProducerCommand<'_> {
             request: OutcomeRequest::Producer {
                 runner: self.runner.clone(),
                 invocation: checked.evidence,
+                ready_commit: Some(ready_commit.to_owned()),
             },
             credential: input.credential,
             result: TransitionResult::ProducerPending,
@@ -679,14 +734,13 @@ impl ProducerCommand<'_> {
     fn report_bypass(
         &self,
         snapshot: &ReturnScope,
-        input: &ProducerInput,
+        credential: &str,
+        binding: &slots::ProfileBinding,
     ) -> Result<SlotResult, Refusal> {
         let pool = &snapshot.pool;
         let slot = &pool.slots[self.slot_index()];
-        let (checkout, ready_commit) = producer_lease(slot, &self.key, &input.credential)?;
-        if input.shape.profile.id != pool.profile.id
-            || input.shape.profile.revision != pool.profile.revision
-        {
+        let (checkout, ready_commit) = producer_lease(slot, &self.key, credential)?;
+        if binding.id != pool.profile.id || binding.revision != pool.profile.revision {
             return Err(Refusal::ReturnUncertain(
                 "The producer report does not name the current reviewed profile.",
             ));
@@ -710,21 +764,26 @@ impl ProducerCommand<'_> {
             current: false,
         });
         result.next_action = Some(LOST_PROVENANCE);
-        if let Producer::Tainted {
-            generation,
-            report: Some(previous),
-            ..
-        } = &slot.producer
-            && generation == &slot.generation
-            && previous == &report
-        {
-            return Ok(result);
+        if slot.producer.lost() {
+            let confirmed = with_slot_state(self.state, |tx| {
+                let (saved, index) =
+                    checked_pool(tx, self.state, &self.op.scope, &self.registered)?;
+                let pool = &saved.pools[index];
+                self.verify_snapshot(tx, snapshot, pool)?;
+                let slot = &pool.slots[self.slot_index()];
+                producer_lease(slot, &self.key, credential)?;
+                replay_reported_bypass(slot, &report, || Ok(tx.sync_slots(&saved)?))
+            })?;
+            return if confirmed {
+                Ok(result)
+            } else {
+                Err(watch_refusal())
+            };
         }
-        if slot.producer.lost()
-            || slot
-                .outcomes
-                .iter()
-                .any(|outcome| self.key.matches_identity(outcome))
+        if slot
+            .outcomes
+            .iter()
+            .any(|outcome| self.key.matches_identity(outcome))
         {
             return Err(watch_refusal());
         }
@@ -786,7 +845,7 @@ impl ProducerCommand<'_> {
     fn inspect(
         &self,
         snapshot: &ReturnScope,
-        input: &ProducerInput,
+        input: &ProducerInvocation,
         roots: &OutputRoots<RootExpectation>,
         initial_empty: Option<&slots::EmptyEpoch>,
     ) -> Result<CheckoutProof, Refusal> {
@@ -820,7 +879,7 @@ impl ProducerCommand<'_> {
     fn watch(
         &self,
         mut snapshot: ReturnScope,
-        input: ProducerInput,
+        input: ProducerInvocation,
         pid: u32,
         fd: i32,
         inherited: BorrowedFd<'_>,
@@ -955,7 +1014,7 @@ impl ProducerCommand<'_> {
     fn finish(
         &self,
         snapshot: &ReturnScope,
-        input: &ProducerInput,
+        input: &ProducerInvocation,
         pending: &PendingProducer,
         child: ForegroundInstance,
     ) -> Result<SlotResult, Refusal> {
@@ -1017,6 +1076,19 @@ impl ProducerCommand<'_> {
             "producer_complete",
         ))
     }
+}
+
+fn replay_reported_bypass(
+    slot: &Slot,
+    report: &BypassReport,
+    confirm: impl FnOnce() -> Result<(), Refusal>,
+) -> Result<bool, Refusal> {
+    let matched = matches!(&slot.producer, Producer::Tainted { generation, report: Some(previous), .. }
+        if generation == &slot.generation && previous == report);
+    if matched {
+        confirm()?;
+    }
+    Ok(matched)
 }
 
 fn empty_proof(prior: &EligibleProducer) -> Option<&slots::EmptyEpoch> {
@@ -1319,6 +1391,7 @@ fn replay_outcome(
     if key.attempt_id.is_some() {
         return Err(missing());
     }
+    let acknowledging = matches!(action, ReplayAction::Acknowledge);
     let input = SlotOperationInput::read()?;
     let registered = verify_operation_repo(state, &scope.repo)?;
     with_slot_state(state, |tx| {
@@ -1332,11 +1405,16 @@ fn replay_outcome(
             .enumerate()
             .find(|(_, outcome)| {
                 key.matches_identity(outcome)
-                    && matches!(outcome.kind, OperationKind::Reserve | OperationKind::Return)
+                    && (matches!(
+                        outcome.kind,
+                        OperationKind::Reserve
+                            | OperationKind::Return
+                            | OperationKind::ProducerComplete
+                    ) || (!acknowledging && outcome.kind == OperationKind::ProducerStart))
                     && outcome.credential == input.credential
             })
             .ok_or_else(missing)?;
-        let acknowledgement = matches!(action, ReplayAction::Acknowledge).then_some("acknowledged");
+        let acknowledgement = acknowledging.then_some("acknowledged");
         let result = match outcome.kind {
             OperationKind::Reserve => reservation_result(
                 command,
@@ -1352,11 +1430,14 @@ fn replay_outcome(
                 pool,
                 outcome,
             ),
+            OperationKind::ProducerStart | OperationKind::ProducerComplete => {
+                producer_outcome_result(command, acknowledgement, pool, outcome)
+            }
             _ => return Err(missing()),
         };
         let result = result?;
         tx.sync_slots(&saved)?;
-        if matches!(action, ReplayAction::Acknowledge) {
+        if acknowledging {
             check_cancelled()?;
             saved.pools[pool_index].slots[slot_index]
                 .outcomes
@@ -1365,6 +1446,37 @@ fn replay_outcome(
         }
         Ok(result)
     })
+}
+
+fn producer_outcome_result(
+    command: &'static str,
+    acknowledgement: Option<&'static str>,
+    pool: &Pool,
+    outcome: &Outcome,
+) -> Result<SlotResult, Refusal> {
+    let (label, phase) = match outcome.result {
+        TransitionResult::ProducerPending => ("producer_pending", "pending"),
+        TransitionResult::ProducerComplete => ("producer_complete", "complete"),
+        _ => return Err(watch_refusal()),
+    };
+    let OutcomeRequest::Producer { ready_commit, .. } = &outcome.request else {
+        return Err(watch_refusal());
+    };
+    let mut result = SlotResult::new(
+        command,
+        acknowledgement.unwrap_or(label),
+        Some(pool.main.clone()),
+        0,
+    );
+    result.pool_id = Some(pool.pool_id.clone());
+    result.transition = ready_commit.as_ref().map(|commit| SlotTransition {
+        slot: outcome.slot,
+        generation: outcome.generation,
+        phase,
+        commit: commit.clone(),
+        current: false,
+    });
+    Ok(result)
 }
 
 fn commit_slot_update(tx: &Tx<'_>, saved: &mut SlotsFile) -> Result<(), Refusal> {
@@ -1450,7 +1562,7 @@ fn reservation_result(
     let current = slot.generation == outcome.generation
         && matches!(&slot.phase, Phase::Reserved { lease }
             if lease.reservation_op == outcome.operation && lease.credential == outcome.credential)
-        && !slot.producer.lost()
+        && slot_producer_is_eligible(slot)
         && slot_identity_present(state_root, pool, slot);
     result.transition = Some(SlotTransition {
         slot: outcome.slot,
@@ -2003,6 +2115,13 @@ fn slot_identity_present(state: &Path, pool: &Pool, slot: &Slot) -> bool {
         }
 }
 
+fn slot_producer_is_eligible(slot: &Slot) -> bool {
+    match slot.checkout_id {
+        None => matches!(slot.producer, Producer::NeverBuilt { evidence: None }),
+        Some(_) => slot.producer.has_eligible_evidence(slot.generation),
+    }
+}
+
 fn project_pool(
     command: &'static str,
     kind: &'static str,
@@ -2022,7 +2141,7 @@ fn project_pool(
                 ("held", Some(LOST_PROVENANCE))
             } else if held
                 || matches!(slot.phase, Phase::Held { .. })
-                || matches!(slot.producer, Producer::Pending(_))
+                || !slot_producer_is_eligible(slot)
             {
                 ("held", Some(HELD_ACTION))
             } else if matches!(slot.phase, Phase::Vacant) && slot.outcomes.len() >= MAX_OUTCOMES {
@@ -2052,4 +2171,61 @@ fn project_pool(
         result.next_action = Some(FRESH_FALLBACK);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bypass_replay_refuses_a_visible_report_until_publication_is_confirmed() {
+        let mut slot = Slot::unused(1, FileIdentity { dev: 1, ino: 7 });
+        slot.generation = 5;
+        let report = BypassReport {
+            operation: "b".repeat(32),
+            runner: Runner {
+                boot_session: "boot".into(),
+                pid: 3,
+                start_secs: 1,
+                start_micros: 0,
+                nonce: "c".repeat(64),
+            },
+        };
+        slot.producer = Producer::Tainted {
+            epoch: OutputEpoch {
+                pool_id: "a".repeat(32),
+                slot: 1,
+                checkout: slots::CheckoutIdentity {
+                    directory: FileIdentity { dev: 1, ino: 2 },
+                    admin: GitIdentity {
+                        path: "/scratch/owner/.git/worktrees/slot".into(),
+                        dev: 1,
+                        ino: 3,
+                    },
+                },
+            },
+            generation: 5,
+            roots: OutputRoots {
+                target: None,
+                build: None,
+            },
+            reason: ProvenanceLoss::OffProfile,
+            report: Some(report.clone()),
+        };
+        let result = replay_reported_bypass(&slot, &report, || {
+            Err(Refusal::ReturnUncertain(
+                "directory sync failed after visible rename",
+            ))
+        });
+        assert!(matches!(
+            result,
+            Err(Refusal::ReturnUncertain(
+                "directory sync failed after visible rename"
+            ))
+        ));
+        assert!(matches!(
+            replay_reported_bypass(&slot, &report, || Ok(())),
+            Ok(true)
+        ));
+    }
 }

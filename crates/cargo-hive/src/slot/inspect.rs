@@ -551,6 +551,13 @@ fn retained_root_records<'a>(
     scope: &SlotScope<'a>,
     checkout: &Path,
 ) -> Result<[OutputRoot<'a>; 2], Refusal> {
+    if !scope
+        .slot
+        .producer
+        .has_eligible_evidence(scope.slot.generation)
+    {
+        return Err(Refusal::ReturnUncertain(UNCERTAIN_PRODUCER));
+    }
     let profile = &scope.pool.profile;
     Ok(match &scope.slot.producer {
         Producer::NeverBuilt {
@@ -563,16 +570,8 @@ fn retained_root_records<'a>(
             [(&final_roots.target).into(), (&final_roots.build).into()]
         }
         Producer::Complete {
-            roots,
-            invocations,
-            generation,
-            ..
+            roots, invocations, ..
         } => {
-            if *generation != scope.slot.generation
-                && generation.checked_add(1) != Some(scope.slot.generation)
-            {
-                return Err(Refusal::ReturnUncertain(UNCERTAIN_PRODUCER));
-            }
             if !invocations.iter().all(|item| {
                 profile.invocations.iter().any(|invocation| {
                     invocation.id == item.evidence.invocation

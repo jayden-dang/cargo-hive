@@ -783,9 +783,29 @@ impl Producer {
         matches!(self, Self::Tainted { .. } | Self::Unknown { .. })
     }
 
-    pub fn eligible(&self, generation: u64) -> Option<EligibleProducer> {
+    pub fn has_eligible_evidence(&self, generation: u64) -> bool {
         let current_or_previous =
             |prior: u64| prior == generation || prior.checked_add(1) == Some(generation);
+        match self {
+            Self::NeverBuilt { evidence } => evidence.is_some(),
+            Self::SeedOnly { generation, .. } => current_or_previous(*generation),
+            Self::Complete {
+                generation,
+                invocations,
+                ..
+            } => {
+                current_or_previous(*generation)
+                    && !invocations.is_empty()
+                    && invocations.iter().all(|record| record.foreground.is_some())
+            }
+            _ => false,
+        }
+    }
+
+    pub fn eligible(&self, generation: u64) -> Option<EligibleProducer> {
+        if !self.has_eligible_evidence(generation) {
+            return None;
+        }
         match self {
             Self::NeverBuilt {
                 evidence: Some(evidence),
@@ -798,28 +818,22 @@ impl Producer {
                 final_roots,
                 registry_units,
                 ..
-            } if current_or_previous(*generation) => {
-                Some(EligibleProducer::SeedOnly(SeedEvidence {
-                    evidence: evidence.clone(),
-                    generation: *generation,
-                    final_roots: final_roots.clone(),
-                    registry_units: *registry_units,
-                }))
-            }
+            } => Some(EligibleProducer::SeedOnly(SeedEvidence {
+                evidence: evidence.clone(),
+                generation: *generation,
+                final_roots: final_roots.clone(),
+                registry_units: *registry_units,
+            })),
             Self::Complete {
                 generation,
                 roots,
                 invocations,
                 ..
-            } if current_or_previous(*generation)
-                && invocations.iter().all(|record| record.foreground.is_some()) =>
-            {
-                Some(EligibleProducer::Complete {
-                    generation: *generation,
-                    roots: roots.clone(),
-                    invocations: invocations.clone(),
-                })
-            }
+            } => Some(EligibleProducer::Complete {
+                generation: *generation,
+                roots: roots.clone(),
+                invocations: invocations.clone(),
+            }),
             _ => None,
         }
     }
@@ -1229,6 +1243,8 @@ pub enum OutcomeRequest {
     Producer {
         runner: Runner,
         invocation: InvocationEvidence,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ready_commit: Option<String>,
     },
     Recover,
 }
@@ -1322,16 +1338,33 @@ impl Outcome {
             }
             (
                 OperationKind::ProducerStart,
-                OutcomeRequest::Producer { runner, invocation },
+                OutcomeRequest::Producer {
+                    runner,
+                    invocation,
+                    ready_commit,
+                },
                 TransitionResult::ProducerPending,
             )
             | (
                 OperationKind::ProducerComplete,
-                OutcomeRequest::Producer { runner, invocation },
+                OutcomeRequest::Producer {
+                    runner,
+                    invocation,
+                    ready_commit,
+                },
                 TransitionResult::ProducerComplete,
             ) => {
                 require(
-                    self.attempt_id.is_none() && invocation.is_valid_for(&pool.profile),
+                    self.attempt_id.is_none()
+                        && invocation.is_valid_for(&pool.profile)
+                        && ready_commit.as_deref().is_none_or(|commit| {
+                            object_id(commit)
+                                && (self.generation != slot.generation
+                                    || slot
+                                        .phase
+                                        .active_lease()
+                                        .is_none_or(|lease| lease.requested_commit == commit))
+                        }),
                     "invalid producer outcome",
                 )?;
                 runner.validate()
