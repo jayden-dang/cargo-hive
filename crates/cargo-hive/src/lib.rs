@@ -3,3 +3,4 @@
 
 pub mod bench;
 pub mod cli;
+mod slot;

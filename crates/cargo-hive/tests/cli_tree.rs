@@ -1,4 +1,4 @@
-//! The installed command tree stays as 0.1.0 shipped it, except the gc checkout surface.
+//! The installed command tree keeps its shipped commands and adds the checkout and slot surfaces.
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 use cargo_hive::cli::Cli;
 use clap::CommandFactory;
@@ -56,8 +56,49 @@ fn the_command_tree_matches_the_current_fixture() {
 }
 
 #[test]
-fn the_tree_differs_from_0_1_0_only_in_gc() {
-    let current = tree();
+fn the_slot_help_lists_only_operator_commands() {
+    let cli = Cli::command();
+    let slot = cli.find_subcommand("slot").expect("slot command");
+    let visible: Vec<_> = slot
+        .get_subcommands()
+        .filter(|command| !command.is_hide_set())
+        .map(clap::Command::get_name)
+        .collect();
+    assert_eq!(visible, ["init", "status", "recover"]);
+    let help = slot.clone().render_long_help().to_string();
+    for private in [
+        "key",
+        "reserve",
+        "begin",
+        "step-check",
+        "producer",
+        "ready",
+        "return",
+        "outcome",
+        "ack",
+    ] {
+        assert!(slot.find_subcommand(private).unwrap().is_hide_set());
+        assert!(
+            !help
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(private))
+        );
+    }
+}
+
+#[test]
+fn the_tree_differs_from_0_1_0_only_in_gc_and_the_additive_slot_branch() {
+    let full = tree();
+    let mut inside_slot = false;
+    let current = full
+        .split_inclusive('\n')
+        .filter(|line| {
+            if let Some(command) = line.strip_prefix("  cmd ") {
+                inside_slot = command.starts_with("slot ");
+            }
+            !inside_slot && !line.starts_with("  slot ")
+        })
+        .collect::<String>();
     let old = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/v0.1.0/cli-tree.txt"

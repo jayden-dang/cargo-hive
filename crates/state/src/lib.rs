@@ -13,6 +13,8 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+pub mod slots;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layout(u32);
 
@@ -94,6 +96,9 @@ fn recovery(file_name: &str) -> &'static str {
         "registry.json" => {
             "remove it, then run `cargo hive repo add <main>` again for each repository"
         }
+        slots::FILE => {
+            "preserve the file and inspect it with the repository operator or use a compatible cargo-hive reader"
+        }
         _ => "fix or remove it by hand",
     }
 }
@@ -107,7 +112,9 @@ impl fmt::Display for StateError {
                 detail,
                 on_read,
             } => {
-                let tip = if *on_read {
+                let tip = if file.file_name().is_some_and(|name| name == slots::FILE) {
+                    recovery(slots::FILE)
+                } else if *on_read {
                     file.file_name()
                         .and_then(|n| n.to_str())
                         .map(recovery)
@@ -182,13 +189,16 @@ pub struct State {
 
 impl State {
     pub fn open() -> Result<State, StateError> {
-        let root = match std::env::var_os("HIVE_HOME") {
+        Self::open_at(Self::configured_root()?)
+    }
+
+    fn configured_root() -> Result<PathBuf, StateError> {
+        Ok(match std::env::var_os("HIVE_HOME") {
             Some(dir) => PathBuf::from(dir),
             None => {
                 PathBuf::from(std::env::var_os("HOME").ok_or(StateError::NoHome)?).join(".hive")
             }
-        };
-        State::open_at(root)
+        })
     }
 
     pub fn open_at(root: PathBuf) -> Result<State, StateError> {
@@ -345,36 +355,40 @@ pub fn window_days(raw: Option<u64>) -> Result<u64, WindowError> {
 impl State {
     pub fn config(&self) -> Result<Config, StateError> {
         let file: ConfigFile = read_json_no_peek(&state_file(&self.root, CONFIG_FILE)?)?;
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let normalize = |p: PathBuf| -> PathBuf {
-            let p = match (p.strip_prefix("~"), &home) {
-                (Ok(rest), Some(h)) => h.join(rest),
-                _ => p,
-            };
-            p.canonicalize().unwrap_or(p)
+        Ok(resolve_config(file))
+    }
+}
+
+fn resolve_config(file: ConfigFile) -> Config {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let normalize = |p: PathBuf| -> PathBuf {
+        let p = match (p.strip_prefix("~"), &home) {
+            (Ok(rest), Some(h)) => h.join(rest),
+            _ => p,
         };
-        let dedup = |v: Vec<PathBuf>| {
-            let mut out: Vec<PathBuf> = Vec::new();
-            for p in v.into_iter().map(normalize) {
-                if !out.contains(&p) {
-                    out.push(p);
-                }
+        p.canonicalize().unwrap_or(p)
+    };
+    let dedup = |v: Vec<PathBuf>| {
+        let mut out: Vec<PathBuf> = Vec::new();
+        for p in v.into_iter().map(normalize) {
+            if !out.contains(&p) {
+                out.push(p);
             }
-            out
-        };
-        let secondary = file.secondary_roots.unwrap_or_else(|| {
-            let mut v = vec![PathBuf::from("/private/tmp")];
-            v.extend(std::env::var_os("TMPDIR").map(PathBuf::from));
-            v
-        });
-        let cache = file
-            .cache_roots
-            .unwrap_or_else(|| home.iter().map(|h| h.join(".cache/cargo-target")).collect());
-        Ok(Config {
-            secondary_roots: dedup(secondary),
-            cache_roots: dedup(cache),
-            gc_window_days: file.gc_window_days,
-        })
+        }
+        out
+    };
+    let secondary = file.secondary_roots.unwrap_or_else(|| {
+        let mut v = vec![PathBuf::from("/private/tmp")];
+        v.extend(std::env::var_os("TMPDIR").map(PathBuf::from));
+        v
+    });
+    let cache = file
+        .cache_roots
+        .unwrap_or_else(|| home.iter().map(|h| h.join(".cache/cargo-target")).collect());
+    Config {
+        secondary_roots: dedup(secondary),
+        cache_roots: dedup(cache),
+        gc_window_days: file.gc_window_days,
     }
 }
 
@@ -419,19 +433,25 @@ impl Tx<'_> {
 
     /// Appends one line to today's receipts file by rewriting it whole.
     pub fn append_receipt_line(&self, line: &str) -> Result<PathBuf, StateError> {
-        let path = self
-            .root
+        self.append_receipt_line_at(&self.receipt_path(), line)
+    }
+
+    fn receipt_path(&self) -> PathBuf {
+        self.root
             .join("receipts")
-            .join(format!("{}.jsonl", utc_date(SystemTime::now())));
-        let mut bytes = match fs::read(&path) {
+            .join(format!("{}.jsonl", utc_date(SystemTime::now())))
+    }
+
+    fn append_receipt_line_at(&self, path: &Path, line: &str) -> Result<PathBuf, StateError> {
+        let mut bytes = match fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(io_err(&path, e)),
+            Err(e) => return Err(io_err(path, e)),
         };
         bytes.extend_from_slice(line.as_bytes());
         bytes.push(b'\n');
-        atomic_write(&path, &bytes)?;
-        Ok(path)
+        atomic_write(path, &bytes)?;
+        Ok(path.to_path_buf())
     }
 }
 
@@ -524,7 +544,7 @@ fn read_json_limited<T: DeserializeOwned + Default>(
     parse_json(path, &bytes)
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
+fn atomic_temp_path(path: &Path) -> PathBuf {
     let dir = path
         .parent()
         .expect("state files live inside the state root");
@@ -532,7 +552,11 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
         .file_name()
         .expect("state files have a name")
         .to_string_lossy();
-    let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
+    dir.join(format!(".{name}.tmp-{}", std::process::id()))
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
+    let tmp = atomic_temp_path(path);
     let result = (|| {
         let mut file = OpenOptions::new()
             .create(true)
@@ -543,7 +567,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
         file.sync_all()?;
         fs::rename(&tmp, path)?;
         // Bind the dir fd so its drop stays after locals under edition 2024.
-        let dir_file = fs::File::open(dir)?;
+        let dir_file = fs::File::open(
+            path.parent()
+                .expect("state files live inside the state root"),
+        )?;
         dir_file.sync_all()
     })();
     if result.is_err() {

@@ -7,6 +7,7 @@ use cargo_hive_platform::{self as platform, MACOS_ONLY_MESSAGE};
 use cargo_hive_state::{State, StateError};
 use clap::{Args, Parser, Subcommand};
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -96,6 +97,11 @@ pub enum Command {
         #[command(flatten)]
         out: OutputArgs,
     },
+    /// Manage a registered repository's warm worktree pool
+    Slot {
+        #[command(subcommand)]
+        command: SlotCommand,
+    },
     /// Hold a lock until killed (used by doctor's lock check)
     #[command(name = "__hold-lock", hide = true)]
     HoldLock {
@@ -108,6 +114,144 @@ pub enum Command {
         kind: String,
         path: std::path::PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+pub enum SlotCommand {
+    /// Establish two unused paths for a registered repository
+    Init {
+        /// Canonical path to the registered main checkout
+        #[arg(long, value_name = "MAIN")]
+        repo: PathBuf,
+        /// Durable, owner-controlled root within a configured secondary root
+        #[arg(long, value_name = "ROOT")]
+        root: PathBuf,
+        /// Read-only reviewed build profile
+        #[arg(long, value_name = "FILE")]
+        profile: PathBuf,
+        #[command(flatten)]
+        out: SlotOutputArgs,
+    },
+    /// Show current pool capacity, holds and next steps
+    Status {
+        /// Canonical path to the registered main checkout
+        #[arg(long, value_name = "MAIN")]
+        repo: PathBuf,
+        #[command(flatten)]
+        out: SlotOutputArgs,
+    },
+    /// Check a held slot after the operator confirms quiescence and resolves work
+    Recover(SlotOperation),
+    #[command(hide = true)]
+    Key {
+        /// Private output descriptor for the credential
+        #[arg(long, value_name = "N")]
+        out_fd: u32,
+        #[command(flatten)]
+        out: SlotOutputArgs,
+    },
+    #[command(hide = true)]
+    Reserve {
+        #[command(flatten)]
+        scope: SlotScopeArgs,
+        /// Observed vacant generation
+        #[arg(long, value_name = "GEN")]
+        expect: u64,
+        /// Full Git object ID requested for preparation
+        #[arg(long, value_name = "OID")]
+        commit: String,
+        /// Public operation ID
+        #[arg(long, value_name = "ID")]
+        op: String,
+        #[command(flatten)]
+        out: SlotOutputArgs,
+    },
+    #[command(hide = true)]
+    Begin(SlotLockedOperation),
+    #[command(hide = true)]
+    StepCheck {
+        #[command(flatten)]
+        scope: SlotScopeArgs,
+        /// Expected slot generation
+        #[arg(long, value_name = "GEN")]
+        generation: u64,
+        /// Current preparation attempt ID
+        #[arg(long, value_name = "ID")]
+        attempt: u64,
+        /// Inherited slot lock descriptor
+        #[arg(long, value_name = "N")]
+        lock_fd: u32,
+        #[command(flatten)]
+        out: SlotOutputArgs,
+    },
+    #[command(hide = true)]
+    Producer(SlotLockedOperation),
+    #[command(hide = true)]
+    Ready {
+        #[command(flatten)]
+        request: SlotLockedOperation,
+        /// Current preparation attempt ID
+        #[arg(long, value_name = "ID")]
+        attempt: u64,
+    },
+    #[command(hide = true)]
+    Return(SlotOperation),
+    #[command(hide = true)]
+    Outcome(SlotReplay),
+    #[command(hide = true)]
+    Ack(SlotReplay),
+}
+
+#[derive(Args)]
+pub struct SlotScopeArgs {
+    /// Canonical path to the registered main checkout
+    #[arg(long, value_name = "MAIN")]
+    pub repo: PathBuf,
+    /// Current public pool ID
+    #[arg(long, value_name = "POOL")]
+    pub pool: String,
+    /// Slot number within the pool
+    #[arg(long, value_name = "N")]
+    pub slot: u8,
+}
+
+#[derive(Args)]
+pub struct SlotOperation {
+    #[command(flatten)]
+    pub scope: SlotScopeArgs,
+    /// Expected slot generation
+    #[arg(long, value_name = "GEN")]
+    pub generation: u64,
+    /// Public operation ID
+    #[arg(long, value_name = "ID")]
+    pub op: String,
+    #[command(flatten)]
+    pub out: SlotOutputArgs,
+}
+
+#[derive(Args)]
+pub struct SlotLockedOperation {
+    #[command(flatten)]
+    pub operation: SlotOperation,
+    /// Inherited slot lock descriptor
+    #[arg(long, value_name = "N")]
+    pub lock_fd: u32,
+}
+
+#[derive(Args)]
+pub struct SlotReplay {
+    #[command(flatten)]
+    pub operation: SlotOperation,
+    /// Recorded preparation attempt ID, when the operation used one
+    #[arg(long, value_name = "ID")]
+    pub attempt: Option<u64>,
+}
+
+#[derive(Args)]
+pub struct SlotOutputArgs {
+    /// Print exactly one JSON slot result on stdout
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand)]
@@ -164,6 +308,9 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
     if let Command::TryLock { kind, path } = &cli.command {
         return try_lock(kind, path);
     }
+    if let Command::Slot { command } = cli.command {
+        return crate::slot::dispatch(command);
+    }
     let state = match State::open() {
         Ok(s) => s,
         Err(e) => {
@@ -216,6 +363,7 @@ pub fn main_with(args: Vec<OsString>) -> i32 {
             out,
         } => bench_cmd(&state, &cold, &seeded, build_cmd, out),
         Command::Explain { repos, top, out } => explain_cmd(&state, &repos, top, out),
+        Command::Slot { .. } => unreachable!("handled with slot-specific state checks"),
         Command::HoldLock { .. } => unreachable!("handled before the state root is opened"),
         Command::TryLock { .. } => unreachable!("handled before the state root is opened"),
     }

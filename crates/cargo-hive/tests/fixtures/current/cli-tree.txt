@@ -13,6 +13,7 @@ Commands:
   seed     Fill the store from one registered repository and clone registry units into a checkout
   bench    Time cold and seeded first builds of fresh checkouts
   explain  Report copies of one crate, feature splits, and units whose last compile failed
+  slot     Manage a registered repository's warm worktree pool
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -264,6 +265,404 @@ Arguments:
 Options:
       --json
           Print exactly one JSON receipt on stdout (prose goes to stderr)
+
+  -h, --help
+          Print help
+
+  cmd slot hidden=false about=Some("Manage a registered repository's warm worktree pool") long_about=None
+    long_help_render:
+Manage a registered repository's warm worktree pool
+
+Usage: slot <COMMAND>
+
+Commands:
+  init     Establish two unused paths for a registered repository
+  status   Show current pool capacity, holds and next steps
+  recover  Check a held slot after the operator confirms quiescence and resolves work
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help
+
+    cmd ack hidden=true about=None long_about=None
+      arg attempt long=Some("attempt") short=None hidden=false required=false defaults=[] help=Some("Recorded preparation attempt ID, when the operation used one") long_help=None
+      arg generation long=Some("generation") short=None hidden=false required=true defaults=[] help=Some("Expected slot generation") long_help=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg op long=Some("op") short=None hidden=false required=true defaults=[] help=Some("Public operation ID") long_help=None
+      arg pool long=Some("pool") short=None hidden=false required=true defaults=[] help=Some("Current public pool ID") long_help=None
+      arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
+      arg slot long=Some("slot") short=None hidden=false required=true defaults=[] help=Some("Slot number within the pool") long_help=None
+      long_help_render:
+Usage: ack [OPTIONS] --repo <MAIN> --pool <POOL> --slot <N> --generation <GEN> --op <ID>
+
+Options:
+      --repo <MAIN>
+          Canonical path to the registered main checkout
+
+      --pool <POOL>
+          Current public pool ID
+
+      --slot <N>
+          Slot number within the pool
+
+      --generation <GEN>
+          Expected slot generation
+
+      --op <ID>
+          Public operation ID
+
+      --json
+          Print exactly one JSON slot result on stdout
+
+      --attempt <ID>
+          Recorded preparation attempt ID, when the operation used one
+
+  -h, --help
+          Print help
+
+    cmd begin hidden=true about=None long_about=None
+      arg generation long=Some("generation") short=None hidden=false required=true defaults=[] help=Some("Expected slot generation") long_help=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg lock_fd long=Some("lock-fd") short=None hidden=false required=true defaults=[] help=Some("Inherited slot lock descriptor") long_help=None
+      arg op long=Some("op") short=None hidden=false required=true defaults=[] help=Some("Public operation ID") long_help=None
+      arg pool long=Some("pool") short=None hidden=false required=true defaults=[] help=Some("Current public pool ID") long_help=None
+      arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
+      arg slot long=Some("slot") short=None hidden=false required=true defaults=[] help=Some("Slot number within the pool") long_help=None
+      long_help_render:
+Usage: begin [OPTIONS] --repo <MAIN> --pool <POOL> --slot <N> --generation <GEN> --op <ID> --lock-fd <N>
+
+Options:
+      --repo <MAIN>
+          Canonical path to the registered main checkout
+
+      --pool <POOL>
+          Current public pool ID
+
+      --slot <N>
+          Slot number within the pool
+
+      --generation <GEN>
+          Expected slot generation
+
+      --op <ID>
+          Public operation ID
+
+      --json
+          Print exactly one JSON slot result on stdout
+
+      --lock-fd <N>
+          Inherited slot lock descriptor
+
+  -h, --help
+          Print help
+
+    cmd init hidden=false about=Some("Establish two unused paths for a registered repository") long_about=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg profile long=Some("profile") short=None hidden=false required=true defaults=[] help=Some("Read-only reviewed build profile") long_help=None
+      arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
+      arg root long=Some("root") short=None hidden=false required=true defaults=[] help=Some("Durable, owner-controlled root within a configured secondary root") long_help=None
+      long_help_render:
+Establish two unused paths for a registered repository
+
+Usage: init [OPTIONS] --repo <MAIN> --root <ROOT> --profile <FILE>
+
+Options:
+      --repo <MAIN>
+          Canonical path to the registered main checkout
+
+      --root <ROOT>
+          Durable, owner-controlled root within a configured secondary root
+
+      --profile <FILE>
+          Read-only reviewed build profile
+
+      --json
+          Print exactly one JSON slot result on stdout
+
+  -h, --help
+          Print help
+
+    cmd key hidden=true about=None long_about=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg out_fd long=Some("out-fd") short=None hidden=false required=true defaults=[] help=Some("Private output descriptor for the credential") long_help=None
+      long_help_render:
+Usage: key [OPTIONS] --out-fd <N>
+
+Options:
+      --out-fd <N>
+          Private output descriptor for the credential
+
+      --json
+          Print exactly one JSON slot result on stdout
+
+  -h, --help
+          Print help
+
+    cmd outcome hidden=true about=None long_about=None
+      arg attempt long=Some("attempt") short=None hidden=false required=false defaults=[] help=Some("Recorded preparation attempt ID, when the operation used one") long_help=None
+      arg generation long=Some("generation") short=None hidden=false required=true defaults=[] help=Some("Expected slot generation") long_help=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg op long=Some("op") short=None hidden=false required=true defaults=[] help=Some("Public operation ID") long_help=None
+      arg pool long=Some("pool") short=None hidden=false required=true defaults=[] help=Some("Current public pool ID") long_help=None
+      arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
+      arg slot long=Some("slot") short=None hidden=false required=true defaults=[] help=Some("Slot number within the pool") long_help=None
+      long_help_render:
+Usage: outcome [OPTIONS] --repo <MAIN> --pool <POOL> --slot <N> --generation <GEN> --op <ID>
+
+Options:
+      --repo <MAIN>
+          Canonical path to the registered main checkout
+
+      --pool <POOL>
+          Current public pool ID
+
+      --slot <N>
+          Slot number within the pool
+
+      --generation <GEN>
+          Expected slot generation
+
+      --op <ID>
+          Public operation ID
+
+      --json
+          Print exactly one JSON slot result on stdout
+
+      --attempt <ID>
+          Recorded preparation attempt ID, when the operation used one
+
+  -h, --help
+          Print help
+
+    cmd producer hidden=true about=None long_about=None
+      arg generation long=Some("generation") short=None hidden=false required=true defaults=[] help=Some("Expected slot generation") long_help=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg lock_fd long=Some("lock-fd") short=None hidden=false required=true defaults=[] help=Some("Inherited slot lock descriptor") long_help=None
+      arg op long=Some("op") short=None hidden=false required=true defaults=[] help=Some("Public operation ID") long_help=None
+      arg pool long=Some("pool") short=None hidden=false required=true defaults=[] help=Some("Current public pool ID") long_help=None
+      arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
+      arg slot long=Some("slot") short=None hidden=false required=true defaults=[] help=Some("Slot number within the pool") long_help=None
+      long_help_render:
+Usage: producer [OPTIONS] --repo <MAIN> --pool <POOL> --slot <N> --generation <GEN> --op <ID> --lock-fd <N>
+
+Options:
+      --repo <MAIN>
+          Canonical path to the registered main checkout
+
+      --pool <POOL>
+          Current public pool ID
+
+      --slot <N>
+          Slot number within the pool
+
+      --generation <GEN>
+          Expected slot generation
+
+      --op <ID>
+          Public operation ID
+
+      --json
+          Print exactly one JSON slot result on stdout
+
+      --lock-fd <N>
+          Inherited slot lock descriptor
+
+  -h, --help
+          Print help
+
+    cmd ready hidden=true about=None long_about=None
+      arg attempt long=Some("attempt") short=None hidden=false required=true defaults=[] help=Some("Current preparation attempt ID") long_help=None
+      arg generation long=Some("generation") short=None hidden=false required=true defaults=[] help=Some("Expected slot generation") long_help=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg lock_fd long=Some("lock-fd") short=None hidden=false required=true defaults=[] help=Some("Inherited slot lock descriptor") long_help=None
+      arg op long=Some("op") short=None hidden=false required=true defaults=[] help=Some("Public operation ID") long_help=None
+      arg pool long=Some("pool") short=None hidden=false required=true defaults=[] help=Some("Current public pool ID") long_help=None
+      arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
+      arg slot long=Some("slot") short=None hidden=false required=true defaults=[] help=Some("Slot number within the pool") long_help=None
+      long_help_render:
+Usage: ready [OPTIONS] --repo <MAIN> --pool <POOL> --slot <N> --generation <GEN> --op <ID> --lock-fd <N> --attempt <ID>
+
+Options:
+      --repo <MAIN>
+          Canonical path to the registered main checkout
+
+      --pool <POOL>
+          Current public pool ID
+
+      --slot <N>
+          Slot number within the pool
+
+      --generation <GEN>
+          Expected slot generation
+
+      --op <ID>
+          Public operation ID
+
+      --json
+          Print exactly one JSON slot result on stdout
+
+      --lock-fd <N>
+          Inherited slot lock descriptor
+
+      --attempt <ID>
+          Current preparation attempt ID
+
+  -h, --help
+          Print help
+
+    cmd recover hidden=false about=Some("Check a held slot after the operator confirms quiescence and resolves work") long_about=None
+      arg generation long=Some("generation") short=None hidden=false required=true defaults=[] help=Some("Expected slot generation") long_help=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg op long=Some("op") short=None hidden=false required=true defaults=[] help=Some("Public operation ID") long_help=None
+      arg pool long=Some("pool") short=None hidden=false required=true defaults=[] help=Some("Current public pool ID") long_help=None
+      arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
+      arg slot long=Some("slot") short=None hidden=false required=true defaults=[] help=Some("Slot number within the pool") long_help=None
+      long_help_render:
+Check a held slot after the operator confirms quiescence and resolves work
+
+Usage: recover [OPTIONS] --repo <MAIN> --pool <POOL> --slot <N> --generation <GEN> --op <ID>
+
+Options:
+      --repo <MAIN>
+          Canonical path to the registered main checkout
+
+      --pool <POOL>
+          Current public pool ID
+
+      --slot <N>
+          Slot number within the pool
+
+      --generation <GEN>
+          Expected slot generation
+
+      --op <ID>
+          Public operation ID
+
+      --json
+          Print exactly one JSON slot result on stdout
+
+  -h, --help
+          Print help
+
+    cmd reserve hidden=true about=None long_about=None
+      arg commit long=Some("commit") short=None hidden=false required=true defaults=[] help=Some("Full Git object ID requested for preparation") long_help=None
+      arg expect long=Some("expect") short=None hidden=false required=true defaults=[] help=Some("Observed vacant generation") long_help=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg op long=Some("op") short=None hidden=false required=true defaults=[] help=Some("Public operation ID") long_help=None
+      arg pool long=Some("pool") short=None hidden=false required=true defaults=[] help=Some("Current public pool ID") long_help=None
+      arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
+      arg slot long=Some("slot") short=None hidden=false required=true defaults=[] help=Some("Slot number within the pool") long_help=None
+      long_help_render:
+Usage: reserve [OPTIONS] --repo <MAIN> --pool <POOL> --slot <N> --expect <GEN> --commit <OID> --op <ID>
+
+Options:
+      --repo <MAIN>
+          Canonical path to the registered main checkout
+
+      --pool <POOL>
+          Current public pool ID
+
+      --slot <N>
+          Slot number within the pool
+
+      --expect <GEN>
+          Observed vacant generation
+
+      --commit <OID>
+          Full Git object ID requested for preparation
+
+      --op <ID>
+          Public operation ID
+
+      --json
+          Print exactly one JSON slot result on stdout
+
+  -h, --help
+          Print help
+
+    cmd return hidden=true about=None long_about=None
+      arg generation long=Some("generation") short=None hidden=false required=true defaults=[] help=Some("Expected slot generation") long_help=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg op long=Some("op") short=None hidden=false required=true defaults=[] help=Some("Public operation ID") long_help=None
+      arg pool long=Some("pool") short=None hidden=false required=true defaults=[] help=Some("Current public pool ID") long_help=None
+      arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
+      arg slot long=Some("slot") short=None hidden=false required=true defaults=[] help=Some("Slot number within the pool") long_help=None
+      long_help_render:
+Usage: return [OPTIONS] --repo <MAIN> --pool <POOL> --slot <N> --generation <GEN> --op <ID>
+
+Options:
+      --repo <MAIN>
+          Canonical path to the registered main checkout
+
+      --pool <POOL>
+          Current public pool ID
+
+      --slot <N>
+          Slot number within the pool
+
+      --generation <GEN>
+          Expected slot generation
+
+      --op <ID>
+          Public operation ID
+
+      --json
+          Print exactly one JSON slot result on stdout
+
+  -h, --help
+          Print help
+
+    cmd status hidden=false about=Some("Show current pool capacity, holds and next steps") long_about=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
+      long_help_render:
+Show current pool capacity, holds and next steps
+
+Usage: status [OPTIONS] --repo <MAIN>
+
+Options:
+      --repo <MAIN>
+          Canonical path to the registered main checkout
+
+      --json
+          Print exactly one JSON slot result on stdout
+
+  -h, --help
+          Print help
+
+    cmd step-check hidden=true about=None long_about=None
+      arg attempt long=Some("attempt") short=None hidden=false required=true defaults=[] help=Some("Current preparation attempt ID") long_help=None
+      arg generation long=Some("generation") short=None hidden=false required=true defaults=[] help=Some("Expected slot generation") long_help=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg lock_fd long=Some("lock-fd") short=None hidden=false required=true defaults=[] help=Some("Inherited slot lock descriptor") long_help=None
+      arg pool long=Some("pool") short=None hidden=false required=true defaults=[] help=Some("Current public pool ID") long_help=None
+      arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None
+      arg slot long=Some("slot") short=None hidden=false required=true defaults=[] help=Some("Slot number within the pool") long_help=None
+      long_help_render:
+Usage: step-check [OPTIONS] --repo <MAIN> --pool <POOL> --slot <N> --generation <GEN> --attempt <ID> --lock-fd <N>
+
+Options:
+      --repo <MAIN>
+          Canonical path to the registered main checkout
+
+      --pool <POOL>
+          Current public pool ID
+
+      --slot <N>
+          Slot number within the pool
+
+      --generation <GEN>
+          Expected slot generation
+
+      --attempt <ID>
+          Current preparation attempt ID
+
+      --lock-fd <N>
+          Inherited slot lock descriptor
+
+      --json
+          Print exactly one JSON slot result on stdout
 
   -h, --help
           Print help

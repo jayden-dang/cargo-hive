@@ -454,6 +454,7 @@ enum Parsed {
     Explain,
     Seed,
     Bench,
+    Slot,
 }
 
 fn parse(words: &[String]) -> Result<Parsed, String> {
@@ -491,6 +492,7 @@ fn parse(words: &[String]) -> Result<Parsed, String> {
         Command::Explain { .. } => Ok(Parsed::Explain),
         Command::Seed { .. } => Ok(Parsed::Seed),
         Command::Bench { .. } => Ok(Parsed::Bench),
+        Command::Slot { .. } => Ok(Parsed::Slot),
         Command::HoldLock { .. } | Command::TryLock { .. } => {
             Err("the internal lock subcommands are not part of the skill".to_string())
         }
