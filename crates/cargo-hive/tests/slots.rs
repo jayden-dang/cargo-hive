@@ -282,6 +282,16 @@ impl LeasedSlot {
         self.start_with(command, |_| ())
     }
 
+    fn lock_path(&self) -> PathBuf {
+        self.fixture
+            .hive
+            .home
+            .path
+            .join("slot-locks")
+            .join(&self.pool)
+            .join("slot-1.lock")
+    }
+
     #[allow(clippy::disallowed_types)]
     fn start_with(
         &self,
@@ -530,6 +540,7 @@ fn retained_output_identity_excludes_input_probes_symlinks_and_nested_checkouts(
     git(&slot.path, &["switch", "-qc", "kept-holder-branch"]);
     let main_branch = git(&slot.fixture.repo, &["symbolic-ref", "--short", "HEAD"]);
     git(&slot.path, &["branch", "--set-upstream-to", &main_branch]);
+    git(&slot.path, &["config", "status.branch", "true"]);
 
     let expected = snapshot_paths(&[&slot.path, &slot.fixture.repo]);
     let (out, returned) = finish_private(slot.start("return"));
@@ -545,14 +556,7 @@ fn retained_output_identity_excludes_input_probes_symlinks_and_nested_checkouts(
 #[test]
 fn a_live_writer_and_lost_writer_custody_each_preserve_the_lease() {
     let slot = LeasedSlot::new();
-    let lock_path = slot
-        .fixture
-        .hive
-        .home
-        .path
-        .join("slot-locks")
-        .join(&slot.pool)
-        .join("slot-1.lock");
+    let lock_path = slot.lock_path();
     let mut locking_writer =
         common::KillOnDrop(slot.fixture.hive.hold_lock_child("flock", &lock_path));
     slot.assert_refused("writer may still hold the slot operation lock");
@@ -667,19 +671,218 @@ fn a_lost_return_reply_can_be_replayed_after_the_next_reservation() {
     ));
     assert!(out.status.success(), "{next}");
     assert_eq!(next["generation"], 2);
-    let next_state = slot.fixture.record();
+    let mut next_holder = common::KillOnDrop(
+        slot.fixture
+            .hive
+            .hold_lock_child("flock", &slot.lock_path()),
+    );
+    let paths = [&*slot.path, &*slot.admin, &*slot.fixture.file()];
+    let next_state = snapshot_paths(&paths);
     for command in ["return", "outcome"] {
         let (out, previous) = finish_private(slot.start(command));
         assert!(out.status.success(), "{previous}");
         assert_eq!(previous, replay);
+        assert!(previous["path"].is_null(), "{previous}");
         assert_no_credential(&out, &slot.credential);
-        assert_eq!(slot.fixture.record(), next_state);
+        assert_eq!(snapshot_paths(&paths), next_state);
     }
+    let registry = slot.fixture.hive.home.path.join("registry.json");
+    let original_registry = fs::read(&registry).unwrap();
+    let mut unregistered: Value = serde_json::from_slice(&original_registry).unwrap();
+    unregistered["repos"] = json!([]);
+    fs::write(&registry, serde_json::to_vec(&unregistered).unwrap()).unwrap();
+    slot.assert_refused("exact registered main checkout");
+    fs::write(&registry, original_registry).unwrap();
+    next_holder.0.kill().unwrap();
+    next_holder.0.wait().unwrap();
     let (out, acknowledged) = finish_private(slot.start("ack"));
     assert!(out.status.success(), "{acknowledged}");
     assert_eq!(acknowledged["kind"], "acknowledged");
     let (out, stale) = finish_private(slot.start("return"));
     assert_eq!(out.status.code(), Some(1), "{stale}");
+}
+
+#[test]
+fn an_eof_confirmed_empty_tracked_tree_can_be_returned() {
+    let slot = LeasedSlot::new();
+    git(&slot.path, &["rm", "-rq", "."]);
+    git(&slot.path, &["commit", "-qm", "remove the fixture tree"]);
+    assert!(git(&slot.path, &["ls-files", "--stage", "-v", "-z"]).is_empty());
+    let head = git(&slot.path, &["rev-parse", "HEAD"]);
+    let before = snapshot_paths(&[&slot.path, &slot.admin]);
+    let (out, returned) = finish_private(slot.start("return"));
+    assert!(out.status.success(), "{returned}");
+    assert_eq!(returned["commit"], head);
+    assert_eq!(snapshot_paths(&[&slot.path, &slot.admin]), before);
+}
+
+#[allow(clippy::disallowed_types)]
+fn with_status_git_shim(
+    slot: &LeasedSlot,
+    script: &str,
+) -> impl FnOnce(&mut std::process::Command) + use<> {
+    let fixture = &slot.fixture;
+    let scratch = &fixture._repo_dir.path;
+    let real_git = fixture
+        .hive
+        .command_with(Path::new("/bin/sh"), &["-c", "command -v git"])
+        .output()
+        .unwrap();
+    assert!(real_git.status.success(), "{real_git:?}");
+    let real_git = String::from_utf8(real_git.stdout).unwrap();
+    let bin = scratch.join("bin");
+    let path = common::counting_git(&bin, &scratch.join("git.log"));
+    fs::write(
+        bin.join("git"),
+        format!(
+            "#!/bin/sh\nfor arg do\n    if [ \"$arg\" = status ]; then\n{script}\n    fi\ndone\nexec \"$REAL_GIT\" \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    move |command| {
+        command.env("PATH", path).env("REAL_GIT", real_git.trim());
+    }
+}
+
+#[test]
+fn return_refuses_a_successful_git_status_with_an_open_stderr_pipe() {
+    let slot = LeasedSlot::new();
+    let shim = with_status_git_shim(&slot, "sleep 4 >/dev/null &\nexec \"$REAL_GIT\" \"$@\"");
+    slot.assert_refused_with("complete checkout inventory", shim);
+}
+
+#[test]
+fn return_refuses_a_malformed_optional_git_status_header() {
+    let slot = LeasedSlot::new();
+    let shim = with_status_git_shim(
+        &slot,
+        &format!(
+            "printf '# branch.oid {}\\000# branch.head fixture\\000# branch.upstream main\\000# branch.ab +1 -\\000'\nexit 0",
+            slot.head
+        ),
+    );
+    slot.assert_refused_with("tracked or index changes", shim);
+}
+
+#[test]
+fn return_refuses_before_a_configured_git_clean_filter_can_write() {
+    fn configure_filter(checkout: &Path) -> &'static [u8] {
+        let source = checkout.join("src/lib.rs");
+        let edited = b"pub fn answer() -> u32 { 43 }\n";
+        assert_eq!(fs::metadata(&source).unwrap().len(), edited.len() as u64);
+        fs::write(
+            checkout.join(".gitattributes"),
+            "src/lib.rs filter=fixture\n",
+        )
+        .unwrap();
+        git(checkout, &["add", ".gitattributes"]);
+        git(
+            checkout,
+            &["commit", "-qm", "require a clean filter for source"],
+        );
+        git(
+            checkout,
+            &["config", "filter.fixture.clean", "tee clean-marker"],
+        );
+        fs::write(source, edited).unwrap();
+        edited
+    }
+
+    let isolated = Scratch::new("slot-filter-positive");
+    let control = init_repo(&isolated.path.join("control"), "");
+    let edited = configure_filter(&control);
+    assert!(!control.join("clean-marker").exists());
+    let raw = git(
+        &control,
+        &[
+            "--no-optional-locks",
+            "--no-replace-objects",
+            "-c",
+            "core.filemode=true",
+            "-c",
+            "core.trustctime=true",
+            "-c",
+            "core.checkStat=default",
+            "status",
+            "--porcelain=v2",
+            "-z",
+            "--no-branch",
+            "--no-show-stash",
+            "--untracked-files=no",
+            "--ignore-submodules=none",
+        ],
+    );
+    assert!(raw.contains("src/lib.rs"), "{raw:?}");
+    assert_eq!(fs::read(control.join("clean-marker")).unwrap(), edited);
+
+    let slot = LeasedSlot::new();
+    configure_filter(&slot.path);
+    assert!(!slot.path.join("clean-marker").exists());
+    // A linked checkout's admin directory is included through the main's common Git tree.
+    slot.assert_refused("configured Git clean filter");
+    assert!(!slot.path.join("clean-marker").exists());
+}
+
+#[test]
+fn return_accepts_an_exact_tracked_index_inventory_and_refuses_one_extra_byte() {
+    const LIMIT: usize = 4 * 1024 * 1024;
+    const RECORD_BYTES: usize = 752;
+    let slot = LeasedSlot::new();
+    let tracked_len = || git(&slot.path, &["ls-files", "--stage", "-v", "-z"]).len();
+    let remaining = LIMIT - tracked_len();
+    let records = remaining.div_ceil(RECORD_BYTES);
+    let overhead = format!("H 100644 {} 0\t\0", slot.head).len();
+    let component = "dir".repeat(60);
+    let directory = PathBuf::from(&component).join(&component).join(&component);
+    fs::create_dir_all(slot.path.join(&directory)).unwrap();
+    let mut last_entry = PathBuf::new();
+    for number in 0..records {
+        let bytes = remaining / records + usize::from(number < remaining % records);
+        let stem = format!("{number:05}-");
+        let padding = bytes - overhead - directory.as_os_str().len() - 1 - stem.len();
+        last_entry = slot.path.join(&directory).join(stem + &"x".repeat(padding));
+        fs::write(&last_entry, b"").unwrap();
+    }
+    let commit_all = || {
+        git(&slot.path, &["add", "-A"]);
+        git(
+            &slot.path,
+            &["commit", "-qm", "record the tracked inventory"],
+        );
+    };
+    let mut extra_entry = last_entry.clone().into_os_string();
+    extra_entry.push("x");
+    fs::rename(&last_entry, &extra_entry).unwrap();
+    commit_all();
+    assert_eq!(tracked_len(), LIMIT + 1);
+    slot.assert_refused("complete checkout inventory");
+    fs::rename(&extra_entry, &last_entry).unwrap();
+    commit_all();
+    assert_eq!(tracked_len(), LIMIT);
+    let (out, result) = finish_private(slot.start("return"));
+    assert!(out.status.success(), "{result}");
+    assert_eq!(result["kind"], "returned");
+}
+
+#[test]
+fn return_accepts_the_exact_checkout_entry_limit_and_refuses_one_more() {
+    const LIMIT: usize = 100_000;
+    let slot = LeasedSlot::new();
+    let target = slot.path.join("target");
+    fs::create_dir(&target).unwrap();
+    slot.retain(&target);
+    let existing = snapshot_paths(&[&slot.path]).len() - 1;
+    for number in 0..LIMIT - existing {
+        fs::File::create(target.join(number.to_string())).unwrap();
+    }
+    assert_eq!(fs::read_dir(&target).unwrap().count() + existing, LIMIT);
+    let extra = target.join("one-too-many");
+    fs::File::create(&extra).unwrap();
+    slot.assert_refused("complete checkout inventory");
+    fs::remove_file(&extra).unwrap();
+    let (out, result) = finish_private(slot.start("return"));
+    assert!(out.status.success(), "{result}");
+    assert_eq!(result["kind"], "returned");
 }
 
 #[test]

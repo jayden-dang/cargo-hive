@@ -447,6 +447,35 @@ fn return_slot(
     const COMMAND: &str = "slot return";
     let key = request_key(scope, generation, OperationKind::Return, operation, None)?;
     let input = SlotOperationInput::read()?;
+    let slot_index = usize::from(key.slot - 1);
+    let matches_request =
+        |outcome: &Outcome| outcome.kind == key.kind && outcome.credential == input.credential;
+    let replay = |tx: &Tx<'_>, saved: &SlotsFile, pool: &Pool, outcome: &Outcome| {
+        let result = return_result(COMMAND, "returned", pool, outcome)?;
+        tx.sync_slots(saved)?;
+        Ok(result)
+    };
+    // A prior result carries no checkout authority and can outlive the holder's flock.
+    let prior = with_slot_state(state, |tx| {
+        check_cancelled()?;
+        let Some(saved) = tx.read_slots()? else {
+            return Ok(None);
+        };
+        let Some(pool) = saved.pools.iter().find(|pool| {
+            pool.main.as_os_str() == scope.repo.as_os_str() && pool.pool_id == key.pool_id
+        }) else {
+            return Ok(None);
+        };
+        let registry: Registry = tx.read_slot_registry()?;
+        registered_repo(&scope.repo, &registry)?;
+        return_outcome(pool, &key)
+            .filter(|outcome| matches_request(outcome))
+            .map(|outcome| replay(tx, &saved, pool, outcome))
+            .transpose()
+    })?;
+    if let Some(result) = prior {
+        return Ok(result);
+    }
     let lock_dir = state.root().join(LOCK_NAMESPACE).join(key.pool_id);
     check_private_dir(&lock_dir).map_err(|err| path_refusal(&lock_dir, err))?;
     let lock_path = lock_dir.join(format!("slot-{}.lock", key.slot));
@@ -458,7 +487,6 @@ fn return_slot(
             "A writer may still hold the slot operation lock.",
         ))?;
     let registered = verify_operation_repo(state, &scope.repo)?;
-    let slot_index = usize::from(key.slot - 1);
     let plan = with_slot_state(state, |tx| {
         let (saved, index) = checked_pool(tx, state, scope, &registered)?;
         let pool = &saved.pools[index];
@@ -468,17 +496,11 @@ fn return_slot(
                 "The persisted slot lock identity could not be verified.",
             ));
         }
-        if let Some(outcome) = slot
-            .outcomes
-            .iter()
-            .find(|outcome| key.matches_identity(outcome))
-        {
-            if outcome.kind != key.kind || outcome.credential != input.credential {
+        if let Some(outcome) = return_outcome(pool, &key) {
+            if !matches_request(outcome) {
                 return Err(Refusal::Scope("The operation ID is already bound to a different request. Use the guide's exact original request.".into()));
             }
-            let result = return_result(COMMAND, "returned", pool, outcome)?;
-            tx.sync_slots(&saved)?;
-            return Ok(ReturnPlan::Replay(result));
+            return replay(tx, &saved, pool, outcome).map(ReturnPlan::Replay);
         }
         if slot.generation != key.generation
             || !matches!(&slot.phase, Phase::Leased { lease, .. }
@@ -559,6 +581,13 @@ fn return_slot(
         commit_slot_update(tx, &mut saved)?;
         Ok(result)
     })
+}
+
+fn return_outcome<'a>(pool: &'a Pool, key: &SlotRequestKey<'_>) -> Option<&'a Outcome> {
+    pool.slots[usize::from(key.slot - 1)]
+        .outcomes
+        .iter()
+        .find(|outcome| key.matches_identity(outcome))
 }
 
 fn return_result(

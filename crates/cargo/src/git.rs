@@ -268,7 +268,7 @@ impl Git {
         );
         spec.env_set
             .extend(controlled.map(|(key, value)| (key.into(), value.into())));
-        match proc::run_bounded(
+        match proc::run_bounded_complete(
             &spec,
             Duration::from_secs(10),
             Capture {

@@ -249,7 +249,28 @@ pub fn run_bounded(
     spec: &Spec,
     deadline: Duration,
     capture: Capture,
+    cancel: impl FnMut() -> bool,
+) -> Result<Ran, ChildOutputError> {
+    run_bounded_with(spec, deadline, capture, cancel, false)
+}
+
+/// Runs with the same capped capture as `run_bounded`, requiring EOF on every
+/// captured pipe. A failed or unfinished read makes the capture unusable.
+pub fn run_bounded_complete(
+    spec: &Spec,
+    deadline: Duration,
+    capture: Capture,
+    cancel: impl FnMut() -> bool,
+) -> Result<Ran, ChildOutputError> {
+    run_bounded_with(spec, deadline, capture, cancel, true)
+}
+
+fn run_bounded_with(
+    spec: &Spec,
+    deadline: Duration,
+    capture: Capture,
     mut cancel: impl FnMut() -> bool,
+    require_eof: bool,
 ) -> Result<Ran, ChildOutputError> {
     let stdout_stdio = if capture.stdout_cap == 0 {
         Stdio::null()
@@ -334,7 +355,15 @@ pub fn run_bounded(
         }
     };
 
-    let (stdout, stderr_tail) = finish_readers(stdout_rx, stderr_rx);
+    let (stdout, stderr_tail) = if require_eof {
+        let until = Instant::now() + PIPE_DRAIN_GRACE;
+        (
+            receive_complete(stdout_rx, until, "stdout")?,
+            receive_complete(stderr_rx, until, "stderr")?,
+        )
+    } else {
+        finish_readers(stdout_rx, stderr_rx)
+    };
     Ok(Ran {
         status,
         exited_after,
@@ -348,35 +377,37 @@ pub fn output(spec: &Spec) -> io::Result<Output> {
     command(spec).output()
 }
 
-fn read_stdout_prefix(pipe: &mut impl Read, cap: usize) -> Vec<u8> {
-    let mut kept = Vec::with_capacity(cap.min(8192));
-    let mut buf = [0u8; 8192];
-    loop {
-        match pipe.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                if kept.len() < cap {
-                    let take = (cap - kept.len()).min(n);
-                    kept.extend_from_slice(&buf[..take]);
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    kept
+struct CapturedPipe {
+    bytes: Vec<u8>,
+    end: io::Result<()>,
 }
 
-fn read_stderr_tail(pipe: &mut impl Read, cap: usize) -> Vec<u8> {
-    let mut ring = Vec::with_capacity(cap.min(8192));
+fn read_stdout_prefix(pipe: &mut impl Read, cap: usize) -> CapturedPipe {
+    read_capped(pipe, cap, |kept, data| {
+        let take = (cap - kept.len()).min(data.len());
+        kept.extend_from_slice(&data[..take]);
+    })
+}
+
+fn read_stderr_tail(pipe: &mut impl Read, cap: usize) -> CapturedPipe {
+    read_capped(pipe, cap, |kept, data| push_tail(kept, cap, data))
+}
+
+fn read_capped(
+    pipe: &mut impl Read,
+    cap: usize,
+    mut keep: impl FnMut(&mut Vec<u8>, &[u8]),
+) -> CapturedPipe {
+    let mut bytes = Vec::with_capacity(cap.min(8192));
     let mut buf = [0u8; 8192];
-    loop {
+    let end = loop {
         match pipe.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => push_tail(&mut ring, cap, &buf[..n]),
-            Err(_) => break,
+            Ok(0) => break Ok(()),
+            Ok(n) => keep(&mut bytes, &buf[..n]),
+            Err(err) => break Err(err),
         }
-    }
-    ring
+    };
+    CapturedPipe { bytes, end }
 }
 
 fn push_tail(ring: &mut Vec<u8>, cap: usize, data: &[u8]) {
@@ -396,25 +427,42 @@ fn push_tail(ring: &mut Vec<u8>, cap: usize, data: &[u8]) {
 }
 
 fn finish_readers(
-    stdout_rx: Option<mpsc::Receiver<Vec<u8>>>,
-    stderr_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    stdout_rx: Option<mpsc::Receiver<CapturedPipe>>,
+    stderr_rx: Option<mpsc::Receiver<CapturedPipe>>,
 ) -> (Vec<u8>, Vec<u8>) {
-    let grace = Duration::from_secs(1);
-    let stdout = match stdout_rx {
-        Some(rx) => rx.recv_timeout(grace).unwrap_or_default(),
-        None => Vec::new(),
+    let receive = |rx: Option<mpsc::Receiver<CapturedPipe>>| {
+        rx.and_then(|rx| rx.recv_timeout(PIPE_DRAIN_GRACE).ok())
+            .map_or_else(Vec::new, |pipe| pipe.bytes)
     };
-    let stderr = match stderr_rx {
-        Some(rx) => rx.recv_timeout(grace).unwrap_or_default(),
-        None => Vec::new(),
+    (receive(stdout_rx), receive(stderr_rx))
+}
+
+fn receive_complete(
+    rx: Option<mpsc::Receiver<CapturedPipe>>,
+    until: Instant,
+    name: &str,
+) -> Result<Vec<u8>, ChildOutputError> {
+    let Some(rx) = rx else {
+        return Ok(Vec::new());
     };
-    (stdout, stderr)
+    let capture = rx
+        .recv_timeout(until.saturating_duration_since(Instant::now()))
+        .map_err(|err| ChildOutputError::Failed(format!("{name} did not reach EOF: {err}")))?;
+    capture
+        .end
+        .map_err(|err| ChildOutputError::Failed(format!("could not read child {name}: {err}")))?;
+    Ok(capture.bytes)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Capture, ChildOutputError, Spec, output, output_with_deadline, run_bounded};
+    use super::{
+        Capture, ChildOutputError, Spec, output, output_with_deadline, read_stdout_prefix,
+        receive_complete, run_bounded, run_bounded_complete,
+    };
     use std::ffi::OsString;
+    use std::io::{self, Read};
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -627,6 +675,49 @@ mod tests {
             start.elapsed() < Duration::from_secs(5),
             "{:?}",
             start.elapsed()
+        );
+    }
+
+    #[test]
+    fn complete_capture_requires_eof_on_both_pipes() {
+        for (redirect, name) in [("2>/dev/null", "stdout"), (">/dev/null", "stderr")] {
+            let err = run_bounded_complete(
+                &sh(&format!(
+                    "printf out; printf err >&2; sleep 4 {redirect} & exit 0"
+                )),
+                Duration::from_secs(10),
+                Capture {
+                    stdout_cap: 3,
+                    stderr_cap: 3,
+                },
+                || false,
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("{name} did not reach EOF"))
+            );
+        }
+    }
+
+    #[test]
+    fn complete_capture_rejects_a_read_error_after_a_retained_prefix() {
+        struct FailingRead;
+        impl Read for FailingRead {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("controlled read failure"))
+            }
+        }
+
+        let mut pipe = b"valid".as_slice().chain(FailingRead);
+        let captured = read_stdout_prefix(&mut pipe, 5);
+        assert_eq!(captured.bytes, b"valid");
+        let (tx, rx) = mpsc::channel();
+        tx.send(captured).unwrap();
+        let err = receive_complete(Some(rx), Instant::now(), "stdout").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "could not read child stdout: controlled read failure"
         );
     }
 

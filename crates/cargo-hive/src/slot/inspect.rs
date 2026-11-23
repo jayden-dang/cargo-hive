@@ -1,3 +1,6 @@
+//! Verifies a slot's checkout identity and observed HEAD around a bounded, read-only
+//! inventory. A clean proof retains any verified output locks through publication.
+
 use super::{
     GIT_OUTPUT_LIMIT, MAX_ROOT_DEPTH, MAX_ROOT_ENTRIES, Refusal, accepted_root,
     canonical_worktree_path, check_cancelled, check_nested_checkouts, exists, git_scope, overlaps,
@@ -67,7 +70,7 @@ pub(super) fn inspect_checkout(
         return Err(checkout_refusal());
     }
     let head = verify_checkout_scope(scope, &path, expected)?;
-    let (inventory, output_locks) = match inventory(scope, &path, identity, &head) {
+    let (inventory, output_locks) = match inventory(scope, &path, identity, head.len()) {
         Ok(locks) => (CheckoutInventory::Clean, locks),
         Err(Refusal::ReturnWork(detail)) => (CheckoutInventory::Dirty(detail), Vec::new()),
         Err(Refusal::ReturnUncertain(detail)) => (CheckoutInventory::Uncertain(detail), Vec::new()),
@@ -219,10 +222,10 @@ fn inventory(
     scope: &SlotScope<'_>,
     checkout: &Path,
     identity: &CheckoutIdentity,
-    head: &str,
+    oid_len: usize,
 ) -> Result<Vec<HeldLock>, Refusal> {
     reject_incomplete_operations(&identity.admin.path)?;
-    let tracked = tracked_paths(checkout, head.len())?;
+    let tracked = tracked_paths(checkout, oid_len)?;
     let fs = host_fs();
     let retained = retained_roots(scope, checkout, &tracked, fs.as_ref())?;
     let mut directories = BTreeSet::new();
@@ -261,35 +264,14 @@ fn inventory(
             "status",
             "--porcelain=v2",
             "-z",
-            "--branch",
-            "--no-ahead-behind",
+            "--no-branch",
             "--no-show-stash",
             "--untracked-files=no",
             "--ignore-submodules=none",
         ],
         GIT_OUTPUT_LIMIT,
     )?;
-    let mut records = nul_records(&status)?.peekable();
-    let oid = records
-        .next()
-        .and_then(|record| record.strip_prefix(b"# branch.oid "));
-    let branch = records
-        .next()
-        .and_then(|record| record.strip_prefix(b"# branch.head "));
-    if oid != Some(head.as_bytes()) || branch.is_none_or(<[u8]>::is_empty) {
-        return Err(Refusal::ReturnUncertain(UNCERTAIN_INVENTORY));
-    }
-    if records
-        .next_if(|record| {
-            record
-                .strip_prefix(b"# branch.upstream ")
-                .is_some_and(|upstream| !upstream.is_empty())
-        })
-        .is_some()
-    {
-        records.next_if(|record| record.starts_with(b"# branch.ab "));
-    }
-    if records.next().is_some() {
+    if !status.is_empty() {
         return Err(Refusal::ReturnWork(UNFINISHED_GIT));
     }
     reject_incomplete_operations(&identity.admin.path)?;
@@ -347,6 +329,9 @@ fn tracked_paths(checkout: &Path, oid_len: usize) -> Result<BTreeSet<PathBuf>, R
         TRACKED_LIMIT,
     )?;
     let mut tracked = BTreeSet::new();
+    if bytes.is_empty() {
+        return Ok(tracked);
+    }
     for record in nul_records(&bytes)? {
         let record = std::str::from_utf8(record)
             .map_err(|_| Refusal::ReturnUncertain(UNCERTAIN_INVENTORY))?;
