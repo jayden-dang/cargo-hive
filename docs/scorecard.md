@@ -6,41 +6,41 @@ What an agent worktree costs, cold and seeded, on the measured repo. A cold chec
 
 | Row | Cost | Source | Cold n | Cold median | Seeded n | Seeded median | Target (cold) | Target (seeded) | Target set |
 |---|---|---|---|---|---|---|---|---|---|
-| R1 | First-command time for `build` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 90673 | 4 | 79340 | open — operator | open — operator |  |
-| R2 | First-command time for `check --all-targets` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 62946 | 4 | 46561 | open — operator | open — operator |  |
-| R3 | First-command time for `clippy --all-targets` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 60742 | 4 | 56694 | open — operator | open — operator |  |
-| R4 | First-command time for `test --no-run` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 97891 | 4 | 86345 | open — operator | open — operator |  |
-| R5 | First-command time for `check -p <package> --lib` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 42375 | 4 | 35282 | open — operator | open — operator |  |
-| R6 | Next build after a one-file edit in a workspace crate (ms) | by hand (outside bench) | 4 | 6631 | 4 | 6821 | open — operator | open — operator |  |
-| R7 | Private bytes each new worktree adds (bytes) | by hand (outside bench): free space | 4 | 5210083328 | 4 | 3475857408 | open — operator | open — operator |  |
+| R1 | First-command time for `build` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 91502 | 4 | 76053 | open — operator | open — operator |  |
+| R2 | First-command time for `check --all-targets` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 52001 | 4 | 41490 | open — operator | open — operator |  |
+| R3 | First-command time for `clippy --all-targets` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 56629 | 4 | 49679 | open — operator | open — operator |  |
+| R4 | First-command time for `test --no-run` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 95463 | 4 | 79857 | open — operator | open — operator |  |
+| R5 | First-command time for `check -p <package> --lib` (ms) | `cold_build_ms_median` / `seeded_total_ms_median` | 4 | 37232 | 4 | 29608 | open — operator | open — operator |  |
+| R6 | Next build after a one-file edit in a workspace crate (ms) | by hand (outside bench) | 4 | 6625 | 4 | 6702 | open — operator | open — operator |  |
+| R7 | Private bytes each new worktree adds (bytes) | by hand (outside bench): free space | 4 | 5197094912 | 4 | 3262543872 | open — operator | open — operator |  |
 | R8 | Units rebuilt because of a hive deletion | by hand (outside bench): cargo -v after gc --checkout | 4 | 0 rebuilt over 4 non-vacuous samples; 0 vacuous | 4 | 0 rebuilt over 4 non-vacuous samples; 0 vacuous | open — operator | open — operator |  |
 | R9 | Stale results on a probe that changes a file a proc macro reads without declaring it | by hand (outside bench): cargo -v after probe | 4 | 4 stale of 4 | 4 | 4 stale of 4 | open — operator | open — operator |  |
 | R10 | Setup footprint | listed | — | nothing | — | `cargo install cargo-hive`, `cargo hive doctor`, `cargo hive repo add <main>`; Cargo config files 0, environment variables 0, rustc wrappers 0, cargo shims 0; files outside the state root: 0, beyond clones into target dirs | open — operator | open — operator |  |
 
 R8 cells read `R rebuilt over k non-vacuous samples; m vacuous`, or `all vacuous`. R9 cells read `s stale of n`.
 
-R8 reads 0 rebuilt even when gc deleted only debug objects and no unit files; see the R8 note.
+R8 reads 0 rebuilt even when gc deleted only objects and no unit files; see the R8 note.
 
 ## Provenance
 
 | Row | Measured on | Hive commit | Toolchain | Machine | Evidence |
 |---|---|---|---|---|---|
-| R1 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
-| R2 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
-| R3 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
-| R4 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
-| R5 | 2026-11-23 | 79adee19822d | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-22-scorecard |
-| R6 | 2026-11-23 | 715cf4b5ade6 | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard |
-| R7 | 2026-11-23 | 715cf4b5ade6 | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard |
-| R8 | 2026-11-23 | 715cf4b5ade6 | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard |
-| R9 | 2026-11-23 | 715cf4b5ade6 | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard |
+| R1 | 2026-11-23 | d6acc56b379a | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard-release |
+| R2 | 2026-11-23 | d6acc56b379a | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard-release |
+| R3 | 2026-11-23 | d6acc56b379a | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard-release |
+| R4 | 2026-11-23 | d6acc56b379a | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard-release |
+| R5 | 2026-11-23 | d6acc56b379a | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard-release |
+| R6 | 2026-11-23 | d6acc56b379a | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard-release |
+| R7 | 2026-11-23 | d6acc56b379a | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard-release |
+| R8 | 2026-11-23 | d6acc56b379a | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard-release |
+| R9 | 2026-11-23 | d6acc56b379a | 1.97.1 | Mac17,9, Apple M5 Pro, 18 | .skills/verify/2026-11-23-scorecard-release |
 | R10 | listed | listed | listed | listed | listed |
 
 Run evidence is local to the measuring machine. The Evidence cells name a directory under `.skills/verify/`, which git ignores, so no clone can open it, and the committed values are copies of that run's `summary.txt`. The directory holds: the bench receipts `R1.json` to `R5.json` and any `<row>.refusal.json`; `pipe.jsonl`, one line per by-hand sample with its void reasons, and the per-sample receipts and build logs `pipe-<arm><i>-*`; `summary.txt` and `cells.tsv`, which `summarize` writes; `load-start.txt` and `load-end.txt`; `doctor.json` and `hive.txt` (the hive binary's path, its version and its build profile); and `preflight-fail.txt` when preflight stopped.
 
 Medians are only as quiet as the machine they were measured on. Preflight records the load average at the start (`load-start.txt`), `summarize` records it at the end (`load-end.txt`) and prints a warning when the start load was above half the logical core count, and `summary.txt` holds the min, max and spread per arm; read the medians together with them. "Measured on" is the date the summary was written, so a run that straddles midnight shows the later date.
 
-**Latest run** (rewritten by hand at each rerun; `record` never writes it). The hive used for both sessions was a debug build (`target/debug`), so the seed times inside the seeded values of R1 to R5 and R7 come from a debug-built seed; those seeded values are therefore not a release-build figure. The run was on a non-quiet machine. The 1-minute load average was 1.59 at the start and 10.95 at the end of the first session (R1 to R5), and 4.14 at the start and 6.85 at the end of the second (R6 to R9); the second session's start already had 5- and 15-minute averages of 7.79 and 8.81. Spread (max minus min) as a share of the median, cold arm and seeded arm: R1 9.9 and 11.7 percent, R2 32.5 and 16.0, R3 24.7 and 31.1, R4 38.9 and 16.4, R5 60.9 and 15.4; R6, from the second session, 5.6 and 40.5 (one slow seeded sample); R7, from the second session, 1.2 and 11.6. R1 to R5 and R6 to R9 come from two sessions on two nights, each with its own evidence directory, so they carry different hive commits and evidence paths; every row shows the same "Measured on" date because it is the date the summary was written. The two hive commits in the Provenance column differ only by documentation: the later one adds two docs-only commits on top of the first, and `git diff --stat <first>..<second> -- crates` shows nothing.
+**Latest run** (rewritten by hand at each rerun; `record` never writes it). One session, with one evidence directory, on one night. The hive used was a release build (`target/release`), built from the commit shown in the Provenance table; the earlier numbers, which came from a debug build of hive, were replaced by this run's. The machine was quiet at the start and busier later: the 1-minute load average was 0.85 at the start and 4.75 at the end, with 5- and 15-minute averages of 1.72 and 2.18 at the start and 5.62 and 5.80 at the end, and between phases it stayed between 3.93 and 5.84. The run took about 56 minutes. Spread (max minus min) as a share of the median, cold arm and seeded arm: R1 29.9 and 10.3 percent (one slow cold sample), R2 5.4 and 11.0, R3 4.2 and 12.7, R4 3.5 and 10.8, R5 5.1 and 7.7, R6 3.1 and 0.7, R7 0.7 and 0.4. R8 had 0 units rebuilt in all 8 samples and R9 read stale in all 8.
 
 ## Targets
 
