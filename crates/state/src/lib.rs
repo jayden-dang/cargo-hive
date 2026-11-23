@@ -225,6 +225,21 @@ impl State {
         read_json_limited(&state_file(&self.root, name)?, max)
     }
 
+    /// Reads a bounded, owner-controlled state file from a regular no-follow descriptor.
+    pub fn read_regular_bounded<T: DeserializeOwned + Default>(
+        &self,
+        name: &str,
+        max: u64,
+    ) -> Result<T, StateError> {
+        let path = state_file(&self.root, name)?;
+        let file = match flock::open_owner_state_file(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
+            Err(err) => return Err(io_err(&path, err)),
+        };
+        read_json_limited_file(&path, file, max)
+    }
+
     /// Runs `body` while holding the exclusive state lock (`$root/.lock`).
     pub fn locked<T>(
         &self,
@@ -547,8 +562,16 @@ fn read_json_limited<T: DeserializeOwned + Default>(
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
         Err(e) => return Err(io_err(path, e)),
     };
+    read_json_limited_file(path, file, max)
+}
+
+fn read_json_limited_file<T: DeserializeOwned>(
+    path: &Path,
+    file: fs::File,
+    max: u64,
+) -> Result<T, StateError> {
     let mut bytes = Vec::new();
-    file.take(max + 1)
+    file.take(max.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|e| io_err(path, e))?;
     if bytes.len() as u64 > max {
@@ -844,6 +867,42 @@ mod tests {
         );
         release.store(true, Ordering::SeqCst);
         thread.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bounded_regular_state_keeps_defaults_layout_and_exact_byte_limit() {
+        let root = scratch("regular-bounded");
+        let state = State::open_at(root.clone()).unwrap();
+        let name = "counter.json";
+        let path = root.join(name);
+        let cap = 32;
+        assert_eq!(
+            state.read_regular_bounded::<Counter>(name, cap).unwrap(),
+            Counter::default()
+        );
+
+        let mut bytes = br#"{"n":11}"#.to_vec();
+        bytes.resize(cap as usize, b' ');
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            state.read_regular_bounded::<Counter>(name, cap).unwrap(),
+            Counter { n: 11 }
+        );
+
+        bytes.push(b' ');
+        fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            state.read_regular_bounded::<Counter>(name, cap),
+            Err(StateError::Malformed { .. })
+        ));
+        assert_eq!(state.read::<Counter>(name).unwrap(), Counter { n: 11 });
+
+        fs::write(&path, br#"{"layout":999,"n":11}"#).unwrap();
+        assert!(matches!(
+            state.read_regular_bounded::<Counter>(name, cap),
+            Err(StateError::NewerLayout { found: 999, .. })
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 

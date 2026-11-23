@@ -1,7 +1,7 @@
 //! Checkouts of a registered repo and its Cargo target dirs. Every walk is
 //! depth-bounded and never enters `node_modules`, `target` or `.git`.
 
-use crate::git::Git;
+use crate::git::{Git, WorktreeRecord};
 use crate::metadata::{self, Resolved};
 use crate::object_store;
 use crate::registry::Repo;
@@ -118,19 +118,69 @@ pub fn git_checkouts_within(
     depth: usize,
     faults: &mut Vec<WalkFault>,
 ) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    if depth == 0 {
-        return found;
+    git_checkouts_within_budget(root, depth, faults, None)
+}
+
+struct WalkBudget<'a> {
+    remaining: usize,
+    exhausted: bool,
+    cancel: &'a dyn Fn() -> bool,
+}
+
+impl<'a> WalkBudget<'a> {
+    fn new(cancel: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            remaining: cargo_hive_core::caps::CRATE_DIR_CAP,
+            exhausted: false,
+            cancel,
+        }
+    }
+
+    fn active(&self) -> bool {
+        !self.exhausted && !(self.cancel)()
+    }
+
+    fn charge(&mut self, dir: &Path, faults: &mut Vec<WalkFault>) -> bool {
+        if !self.active() {
+            return false;
+        }
+        if let Some(left) = self.remaining.checked_sub(1) {
+            self.remaining = left;
+            true
+        } else {
+            self.exhausted = true;
+            faults.push(WalkFault {
+                path: dir.to_path_buf(),
+                detail: "strict checkout discovery entry limit exceeded".into(),
+                cannot_enter: false,
+            });
+            false
+        }
+    }
+}
+
+fn directory_children(
+    root: &Path,
+    faults: &mut Vec<WalkFault>,
+    mut budget: Option<&mut WalkBudget<'_>>,
+) -> Vec<PathBuf> {
+    if budget.as_ref().is_some_and(|budget| !budget.active()) {
+        return Vec::new();
     }
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(e) => {
             record_walk(faults, root, &e);
-            return found;
+            return Vec::new();
         }
     };
     let mut dirs = Vec::new();
     for entry in entries {
+        if let Some(budget) = &mut budget
+            && !budget.charge(root, faults)
+        {
+            break;
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
@@ -148,11 +198,33 @@ pub fn git_checkouts_within(
         }
     }
     dirs.sort();
+    dirs
+}
+
+fn git_checkouts_within_budget(
+    root: &Path,
+    depth: usize,
+    faults: &mut Vec<WalkFault>,
+    mut budget: Option<&mut WalkBudget<'_>>,
+) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if depth == 0 {
+        return found;
+    }
+    let dirs = directory_children(root, faults, budget.as_deref_mut());
     for dir in dirs {
+        if budget.as_ref().is_some_and(|budget| !budget.active()) {
+            break;
+        }
         match std::fs::symlink_metadata(dir.join(".git")) {
             Ok(_) => found.push(dir),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                found.extend(git_checkouts_within(&dir, depth - 1, faults));
+                found.extend(git_checkouts_within_budget(
+                    &dir,
+                    depth - 1,
+                    faults,
+                    budget.as_deref_mut(),
+                ));
             }
             // `dir` was listed, so a denied stat of a name inside it means `dir` cannot
             // be entered.
@@ -174,6 +246,64 @@ pub fn checkouts(
     registered_mains: &[PathBuf],
     cfg: &Config,
 ) -> (Vec<Checkout>, Vec<WalkFault>) {
+    let records = Git::at(&repo.main)
+        .worktrees()
+        .map_err(|err| err.to_string());
+    checkouts_from_inventory(repo, registered_mains, cfg, records, None)
+}
+
+const GIT_DISCOVERY_BYTES: usize = 64 * 1024;
+
+/// Uses one bounded, complete Git inventory as the source of all linked checkout rows.
+pub fn checkouts_complete(
+    repo: &Repo,
+    registered_mains: &[PathBuf],
+    cfg: &Config,
+    cancel: &dyn Fn() -> bool,
+) -> (Vec<Checkout>, Vec<WalkFault>) {
+    let records = Git::at(&repo.main)
+        .worktrees_complete_until(GIT_DISCOVERY_BYTES, cancel)
+        .map_err(|err| err.to_string())
+        .and_then(|records| {
+            if records.first().map(|record| &record.path) == Some(&repo.main) {
+                Ok(records)
+            } else {
+                Err("worktree inventory did not name the registered main".into())
+            }
+        });
+    match records {
+        Ok(records) => {
+            let (rows, mut faults) =
+                checkouts_from_inventory(repo, registered_mains, cfg, Ok(records), Some(cancel));
+            faults.extend(
+                rows.iter()
+                    .filter(|row| row.reason.starts_with("unclassifiable:"))
+                    .map(|row| WalkFault {
+                        path: row.path.clone(),
+                        detail: row.reason.clone(),
+                        cannot_enter: false,
+                    }),
+            );
+            (rows, faults)
+        }
+        Err(detail) => (
+            Vec::new(),
+            vec![WalkFault {
+                path: repo.main.clone(),
+                detail,
+                cannot_enter: false,
+            }],
+        ),
+    }
+}
+
+fn checkouts_from_inventory(
+    repo: &Repo,
+    registered_mains: &[PathBuf],
+    cfg: &Config,
+    records: Result<Vec<WorktreeRecord>, String>,
+    strict_cancel: Option<&dyn Fn() -> bool>,
+) -> (Vec<Checkout>, Vec<WalkFault>) {
     let mut out: Vec<Checkout> = Vec::new();
     let mut faults: Vec<WalkFault> = Vec::new();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
@@ -194,9 +324,12 @@ pub fn checkouts(
                 missing: false,
             });
         };
-    match Git::at(&repo.main).worktrees() {
+    match records {
         Ok(records) => {
             for rec in records.into_iter().filter(|r| !r.bare) {
+                if strict_cancel.is_some_and(|cancel| cancel()) {
+                    return (out, faults);
+                }
                 let is_main = rec.path.canonicalize().ok().as_ref() == Some(&repo.main)
                     || rec.path == repo.main;
                 let kind = if is_main {
@@ -221,6 +354,15 @@ pub fn checkouts(
                         push(&mut out, rec.path, kind, Err(e.to_string()));
                         continue;
                     }
+                    Ok(meta) if strict_cancel.is_some() && !meta.is_dir() => {
+                        push(
+                            &mut out,
+                            rec.path,
+                            kind,
+                            Err("worktree path is not a directory".into()),
+                        );
+                        continue;
+                    }
                     Ok(_) => {}
                 }
                 seen.insert(rec.path.canonicalize().unwrap_or(rec.path.clone()));
@@ -238,8 +380,15 @@ pub fn checkouts(
         }
     }
     let mut clones: Vec<PathBuf> = Vec::new();
+    let mut budget = strict_cancel.map(WalkBudget::new);
     for root in &cfg.secondary_roots {
-        for dir in git_checkouts_within(root, 2, &mut faults) {
+        if budget.as_ref().is_some_and(|budget| !budget.active()) {
+            break;
+        }
+        for dir in git_checkouts_within_budget(root, 2, &mut faults, budget.as_mut()) {
+            if budget.as_ref().is_some_and(|budget| !budget.active()) {
+                break;
+            }
             let real = match dir.canonicalize() {
                 Ok(path) => path,
                 Err(e) => {
@@ -250,39 +399,26 @@ pub fn checkouts(
             if seen.contains(&real) {
                 continue;
             }
-            if object_store::holds_none(&real.join(".git"), &repo.root_commits) {
+            if strict_cancel.is_none()
+                && object_store::holds_none(&real.join(".git"), &repo.root_commits)
+            {
                 continue;
             }
             let g = Git::at(&real);
-            let (git_dir, common) = match (g.git_dir(), g.common_dir()) {
-                (Ok(git_dir), Ok(common)) => (git_dir, common),
-                (Err(e), _) | (_, Err(e)) => {
-                    seen.insert(real.clone());
-                    push(&mut out, real, CheckoutKind::Clone, Err(e.to_string()));
-                    continue;
-                }
+            let related = if let Some(cancel) = strict_cancel {
+                related_clone_complete(&g, repo, cancel)
+            } else {
+                related_clone(&g, repo)
             };
-            if git_dir != common {
-                continue;
-            }
-            match g.superproject() {
-                Ok(None) => {}
-                Ok(Some(_)) => continue,
-                Err(e) => {
-                    seen.insert(real.clone());
-                    push(&mut out, real, CheckoutKind::Clone, Err(e.to_string()));
-                    continue;
-                }
-            }
-            match g.root_commits() {
-                Ok(roots) if !roots.is_disjoint(&repo.root_commits) => {
+            match related {
+                Ok(true) => {
                     seen.insert(real.clone());
                     clones.push(real);
                 }
-                Ok(_) => {}
-                Err(e) => {
+                Ok(false) => {}
+                Err(err) => {
                     seen.insert(real.clone());
-                    push(&mut out, real, CheckoutKind::Clone, Err(e.to_string()));
+                    push(&mut out, real, CheckoutKind::Clone, Err(err));
                 }
             }
         }
@@ -292,6 +428,65 @@ pub fn checkouts(
         push(&mut out, c, CheckoutKind::Clone, Ok(()));
     }
     (out, faults)
+}
+
+fn related_clone(git: &Git, repo: &Repo) -> Result<bool, String> {
+    let (dir, common) = match (git.git_dir(), git.common_dir()) {
+        (Ok(dir), Ok(common)) => (dir, common),
+        (Err(err), _) | (_, Err(err)) => return Err(err.to_string()),
+    };
+    if dir != common || git.superproject().map_err(|err| err.to_string())?.is_some() {
+        return Ok(false);
+    }
+    git.root_commits()
+        .map(|roots| !roots.is_disjoint(&repo.root_commits))
+        .map_err(|err| err.to_string())
+}
+
+fn related_clone_complete(
+    git: &Git,
+    repo: &Repo,
+    cancel: &dyn Fn() -> bool,
+) -> Result<bool, String> {
+    let read = |args: &[&str]| -> Result<String, String> {
+        let bytes = git
+            .slot_read_only_until(args, GIT_DISCOVERY_BYTES, cancel)
+            .map_err(|err| err.to_string())?;
+        String::from_utf8(bytes).map_err(|err| err.to_string())
+    };
+    let paths = read(&[
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-dir",
+        "--git-common-dir",
+        "--show-superproject-working-tree",
+    ])?;
+    let fields: Vec<_> = paths
+        .strip_suffix('\n')
+        .ok_or("unterminated Git path inventory")?
+        .split('\n')
+        .collect();
+    let [dir, common, remaining @ ..] = fields.as_slice() else {
+        return Err("incomplete Git path inventory".into());
+    };
+    if fields.iter().any(|path| !Path::new(path).is_absolute()) || remaining.len() > 1 {
+        return Err("invalid Git path inventory".into());
+    }
+    if dir != common || !remaining.is_empty() {
+        return Ok(false);
+    }
+    let roots = read(&["rev-list", "--max-parents=0", "HEAD"])?;
+    let roots = roots
+        .strip_suffix('\n')
+        .ok_or("unterminated Git root inventory")?;
+    let mut related = false;
+    for root in roots.split('\n') {
+        if !cargo_hive_state::slots::object_id(root) {
+            return Err("invalid Git root identity".into());
+        }
+        related |= repo.root_commits.contains(root);
+    }
+    Ok(related)
 }
 
 pub const SNAPSHOT_FILE: &str = "snapshot.json";
@@ -360,44 +555,49 @@ fn cached(snapshot: &Snapshot, dir: &Path) -> Option<Resolved> {
 
 /// Dirs at depth 0–2 of a checkout that hold a `Cargo.toml`, with their depth.
 pub fn workspace_dirs(checkout: &Path, faults: &mut Vec<WalkFault>) -> Vec<(usize, PathBuf)> {
+    workspace_dirs_with_budget(checkout, faults, None)
+}
+
+fn workspace_dirs_with_budget(
+    checkout: &Path,
+    faults: &mut Vec<WalkFault>,
+    mut budget: Option<&mut WalkBudget<'_>>,
+) -> Vec<(usize, PathBuf)> {
     let mut out = Vec::new();
     let mut level = vec![checkout.to_path_buf()];
     for depth in 0..=2 {
         let mut next = Vec::new();
         for dir in &level {
-            if dir.join("Cargo.toml").is_file() {
+            if budget.as_ref().is_some_and(|budget| !budget.active()) {
+                return out;
+            }
+            let manifest = dir.join("Cargo.toml");
+            let is_manifest = if budget.is_some() {
+                match manifest.symlink_metadata() {
+                    Ok(meta) if meta.is_file() => true,
+                    Ok(_) => {
+                        record_walk(
+                            faults,
+                            &manifest,
+                            &std::io::Error::other("Cargo manifest is not a regular file"),
+                        );
+                        false
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(err) => {
+                        record_walk(faults, &manifest, &err);
+                        false
+                    }
+                }
+            } else {
+                manifest.is_file()
+            };
+            if is_manifest {
                 out.push((depth, dir.clone()));
             }
-            if depth == 2 {
-                continue;
+            if depth < 2 {
+                next.extend(directory_children(dir, faults, budget.as_deref_mut()));
             }
-            let entries = match std::fs::read_dir(dir) {
-                Ok(entries) => entries,
-                Err(e) => {
-                    record_walk(faults, dir, &e);
-                    continue;
-                }
-            };
-            let mut kids = Vec::new();
-            for entry in entries {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(e) => {
-                        record_walk(faults, dir, &e);
-                        continue;
-                    }
-                };
-                if skipped(&entry.file_name()) {
-                    continue;
-                }
-                match entry.file_type() {
-                    Ok(kind) if kind.is_dir() => kids.push(entry.path()),
-                    Ok(_) => {}
-                    Err(e) => record_walk(faults, &entry.path(), &e),
-                }
-            }
-            kids.sort();
-            next.extend(kids);
         }
         level = next;
     }
@@ -463,14 +663,20 @@ fn resolve_workspaces(
     snapshot: &mut Snapshot,
     faults: &mut Vec<WalkFault>,
     cancel: &(impl Fn() -> bool + Sync),
+    group_workspaces: bool,
 ) -> Vec<Resolution> {
     let mut by_depth: BTreeMap<usize, BTreeSet<PathBuf>> = BTreeMap::new();
+    let mut budget = (!group_workspaces).then(|| WalkBudget::new(cancel));
     for checkout in checkouts {
-        for (depth, dir) in workspace_dirs(checkout, faults) {
+        if budget.as_ref().is_some_and(|budget| !budget.active()) {
+            break;
+        }
+        for (depth, dir) in workspace_dirs_with_budget(checkout, faults, budget.as_mut()) {
             by_depth.entry(depth).or_default().insert(dir);
         }
     }
     let mut roots: Vec<PathBuf> = Vec::new();
+    let mut seen = BTreeSet::new();
     let mut out = Vec::new();
     for dirs in by_depth.into_values() {
         let mut uncached = Vec::new();
@@ -478,10 +684,15 @@ fn resolve_workspaces(
         // cache or from cargo metadata, so a cache hit cannot hide a nested checkout.
         let mut found_here = Vec::new();
         for dir in dirs {
-            if roots.iter().any(|r| dir.starts_with(r)) {
+            let already_discovered = if group_workspaces {
+                roots.iter().any(|root| dir.starts_with(root))
+            } else {
+                !seen.insert(dir.clone())
+            };
+            if already_discovered {
                 continue;
             }
-            match cached(snapshot, &dir) {
+            match group_workspaces.then(|| cached(snapshot, &dir)).flatten() {
                 Some(r) => {
                     found_here.push(r.workspace_root.clone());
                     out.push(Resolution {
@@ -512,23 +723,25 @@ fn resolve_workspaces(
                     .collect()
             });
             for (dir, result) in chunk.iter().cloned().zip(results) {
-                match &result {
-                    Ok(r) => {
-                        roots.push(r.workspace_root.clone());
-                        let stamp = stamp_files(&dir, &r.workspace_root)
-                            .into_iter()
-                            .map(|f| (f.clone(), mtime_nanos(&f)))
-                            .collect();
-                        snapshot.metadata.insert(
-                            dir.clone(),
-                            CachedMetadata {
-                                stamp,
-                                resolved: r.clone(),
-                            },
-                        );
-                    }
-                    Err(_) => {
-                        snapshot.metadata.remove(&dir);
+                if group_workspaces {
+                    match &result {
+                        Ok(r) => {
+                            roots.push(r.workspace_root.clone());
+                            let stamp = stamp_files(&dir, &r.workspace_root)
+                                .into_iter()
+                                .map(|f| (f.clone(), mtime_nanos(&f)))
+                                .collect();
+                            snapshot.metadata.insert(
+                                dir.clone(),
+                                CachedMetadata {
+                                    stamp,
+                                    resolved: r.clone(),
+                                },
+                            );
+                        }
+                        Err(_) => {
+                            snapshot.metadata.remove(&dir);
+                        }
                     }
                 }
                 out.push(Resolution {
@@ -616,7 +829,7 @@ pub fn targets(
         .map(|c| c.path.clone())
         .collect();
     let mut walk_faults = Vec::new();
-    let resolutions = resolve_workspaces(&live, snapshot, &mut walk_faults, &cancel);
+    let resolutions = resolve_workspaces(&live, snapshot, &mut walk_faults, &cancel, true);
     let resolved: Vec<&Resolved> = resolutions
         .iter()
         .filter_map(|r| r.result.as_ref().ok())
@@ -740,6 +953,68 @@ pub fn targets(
         ignored_vars: overrides.into_iter().map(|(name, _)| name).collect(),
         walk_faults,
         cleared_profiles,
+        workspaces,
+    }
+}
+
+/// Resolves every admitted manifest independently and reports ownership only for requested paths.
+pub fn targets_for_checkout_gc(
+    checkouts: &[Checkout],
+    required_paths: &[PathBuf],
+    cancel: impl Fn() -> bool + Sync,
+) -> TargetScan {
+    let live: Vec<_> = checkouts
+        .iter()
+        .filter(|row| !row.missing)
+        .map(|row| row.path.clone())
+        .collect();
+    let mut walk_faults = Vec::new();
+    let resolutions = resolve_workspaces(
+        &live,
+        &mut Snapshot::default(),
+        &mut walk_faults,
+        &cancel,
+        false,
+    );
+    let targets = required_paths
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|path| {
+            let matching: Vec<_> = resolutions
+                .iter()
+                .filter_map(|resolution| resolution.result.as_ref().ok())
+                .filter(|resolved| {
+                    resolved.target_directory == *path || resolved.build_directory == *path
+                })
+                .collect();
+            (!matching.is_empty()).then(|| TargetDir {
+                path: path.clone(),
+                owner: Owner::Owned {
+                    checkout: protected_owner(&matching, &live, checkouts),
+                },
+                profiles: Vec::new(),
+                size: None,
+                unreadable: None,
+            })
+        })
+        .collect();
+    let metadata_calls = resolutions.len() as u64;
+    let workspaces = resolutions
+        .into_iter()
+        .map(|resolution| WorkspaceResolution {
+            checkout: owner_checkout(&resolution.dir, &live),
+            dir: resolution.dir,
+            result: resolution.result,
+        })
+        .collect();
+    TargetScan {
+        targets,
+        metadata_calls,
+        metadata_cache_hits: 0,
+        ignored_vars: Vec::new(),
+        walk_faults,
+        cleared_profiles: BTreeSet::new(),
         workspaces,
     }
 }
