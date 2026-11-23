@@ -221,12 +221,12 @@ _Requirements: SLOTS-1.5, SLOTS-1.9, SLOTS-2.1, SLOTS-2.2, SLOTS-2.3, SLOTS-2.4,
 
 **Depends-on:** Task 4.
 
-- [ ] Write table-driven CLI and state cases for wrong profile revision, uncovered input/consumer/anchor, unexpected actual root/layout/argv or env, missing graph input, and changed fixed manifests or configuration.
-- [ ] Reproduce pending start with lost completion, tainted/unknown roots followed by a successful admitted build, and an old generation trying to record a producer. None may regain eligible status.
-- [ ] Exercise producer start and finish through real CLI subprocesses. Denial must precede any writer. A covered foreground exit permits completion; losing a parent while its child can write does not. Exercise inherited and stripped descriptor custody. Only proof of empty roots or a typed registry-only result admits initial evidence.
-- [ ] Run `cargo test -p cargo-hive --test slots` and `cargo test -p cargo-hive-state` for the red state and command assertions.
-- [ ] Implement bounded profile coverage and producer transitions, bind completion to fenced foreground child exit, and keep taint sticky until output is isolated on a distinct checkout.
-- [ ] Re-run tests and commit as `feat(slot): bind retained output to verified producers`.
+- [x] Write table-driven CLI and state cases for wrong profile revision, uncovered input/consumer/anchor, unexpected actual root/layout/argv or env, missing graph input, and changed fixed manifests or configuration.
+- [x] Reproduce pending start with lost completion, tainted/unknown roots followed by a successful admitted build, and an old generation trying to record a producer. None may regain eligible status.
+- [x] Exercise producer start and finish through real CLI subprocesses. Denial must precede any writer. A covered foreground exit permits completion; losing a parent while its child can write does not. Exercise inherited and stripped descriptor custody. Only proof of empty roots or a typed registry-only result admits initial evidence.
+- [x] Run `cargo test -p cargo-hive --test slots` and `cargo test -p cargo-hive-state` for the red state and command assertions.
+- [x] Implement bounded profile coverage and producer transitions, bind completion to fenced foreground child exit, and keep taint sticky until output is isolated on a distinct checkout.
+- [x] Re-run tests and commit as `feat(slot): bind retained output to verified producers`.
 
 _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.11, SLOTS-5.4_
 
