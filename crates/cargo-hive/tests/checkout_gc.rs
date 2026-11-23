@@ -1256,6 +1256,124 @@ fn checkout_gc_refuses_root_exchange(timing: RootExchange) {
 }
 
 #[test]
+fn checkout_gc_cannot_clean_a_replacement_profile_under_displaced_locks() {
+    use cargo_hive_platform::testing::Hooked;
+    use cargo_hive_platform::{Fs, TryLock};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let debug = target.join("debug");
+    let original = repo.scratch.path.join("original-profile");
+    let replacement = repo.scratch.path.join("replacement-profile");
+    assert!(
+        Command::new("cp")
+            .args(["-c", "-R"])
+            .arg(&debug)
+            .arg(&replacement)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut holder = hive.hold_lock_child("flock", &replacement.join(".cargo-build-lock"));
+    let before: std::collections::BTreeMap<_, _> = tree(&replacement)
+        .into_iter()
+        .map(|(path, entry)| (debug.join(path.strip_prefix(&replacement).unwrap()), entry))
+        .collect();
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let selected = target.clone();
+    let did_swap = Arc::new(AtomicBool::new(false));
+    let swapped = did_swap.clone();
+    let real = cargo_hive_platform::apfs::Apfs::new(std::env::current_exe().unwrap());
+    let hooked = Hooked {
+        inner: fs,
+        compress: None,
+        volume: None,
+        sharing: None,
+        entry_stat: Some(Box::new(move |path| {
+            if path == selected
+                && !swapped.load(Ordering::Relaxed)
+                && matches!(
+                    real.try_lock_exclusive(&debug.join(".cargo-build-lock")),
+                    TryLock::Held
+                )
+            {
+                fs::rename(&debug, &original).unwrap();
+                fs::rename(&replacement, &debug).unwrap();
+                swapped.store(true, Ordering::Relaxed);
+            }
+            real.entry_stat(path)
+        })),
+    };
+    let (report, completed) =
+        checkout_with_evidence(&hooked, &scan, &checkout, &nested, &required, &|| false);
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(
+        did_swap.load(Ordering::Relaxed),
+        "exchange must occur after the Cargo lock is acquired"
+    );
+    assert!(completed.is_empty(), "{report:?}");
+    assert!(
+        tree(&target.join("debug")) == before,
+        "replacement changed: {report:?}"
+    );
+}
+
+#[test]
+fn checkout_gc_refuses_an_oversized_tag_before_removing_files() {
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let mut tag = fs::read(target.join("CACHEDIR.TAG")).unwrap();
+    tag.resize(64 * 1024 + 1, b' ');
+    fs::write(target.join("CACHEDIR.TAG"), tag).unwrap();
+    let before = tree(&target);
+    let (report, completed) =
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+    assert!(completed.is_empty(), "{report:?}");
+    assert!(tree(&target) == before, "files changed: {report:?}");
+}
+
+#[test]
+fn checkout_gc_refuses_symbolic_links_in_fingerprint_inputs() {
+    for use_json in [false, true] {
+        let hive = hive_for_checkout_evidence();
+        let repo = aged_binaries(&hive);
+        let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+        let target = checkout.join("target");
+        let required = provided_roots(fs.as_ref(), &target, &target);
+        let dir = fingerprint_dir_for(&target, &newest_fingerprint_unit(&target));
+        let json = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let input = if use_json {
+            json
+        } else {
+            dir.join(json.file_stem().unwrap())
+        };
+        let original = repo.scratch.path.join("original-fingerprint-input");
+        fs::rename(&input, &original).unwrap();
+        std::os::unix::fs::symlink(&original, &input).unwrap();
+        let before = tree(&target);
+        let (report, completed) =
+            checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+        assert!(completed.is_empty(), "{report:?}");
+        assert!(
+            tree(&target) == before,
+            "files changed for {}: {report:?}",
+            input.display()
+        );
+    }
+}
+
+#[test]
 fn checkout_gc_retains_measured_file_effects_when_a_later_removal_fails() {
     let hive = hive_for_checkout_evidence();
     let repo = aged_binaries(&hive);
@@ -1372,6 +1490,7 @@ fn checkout_with_evidence(
         account_bytes: true,
     };
     let evidence = cargo_hive_gc::checkout::run_with_evidence(&input, required, cancel);
+    assert_eq!(evidence.expected(), required);
     let completed = evidence.completed().to_vec();
     (evidence.report, completed)
 }

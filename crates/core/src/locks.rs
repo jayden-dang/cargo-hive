@@ -6,7 +6,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::target;
-use cargo_hive_platform::{Fs, HeldLock, TryLock};
+use cargo_hive_platform::{EntryKind, Fs, HeldLock, TryLock};
+use std::io;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
@@ -92,6 +93,126 @@ pub fn acquire_capped(fs: &dyn Fs, target: &Path, lists_examples: bool, cap: usi
         profiles: profile_paths,
         held,
     })
+}
+
+const CARGO_LOCKS: [&str; 3] = [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"];
+
+pub struct VerifiedLocks {
+    profiles: Vec<VerifiedProfile>,
+}
+
+struct VerifiedProfile {
+    path: PathBuf,
+    layout: target::Layout,
+    identity: (u64, u64),
+    locks: [Option<HeldLock>; CARGO_LOCKS.len()],
+}
+
+pub enum VerifyAcquireError {
+    Skipped(Reason),
+    Failed(String),
+}
+
+fn named_identity(fs: &dyn Fs, path: &Path, kind: EntryKind) -> Result<Option<(u64, u64)>, String> {
+    match fs.entry_stat(path) {
+        Ok(stat) if stat.kind == kind => Ok(Some((stat.dev, stat.ino))),
+        Ok(_) => Err(format!("{} has an unexpected entry type", path.display())),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!("{}: {err}", path.display())),
+    }
+}
+
+impl VerifiedLocks {
+    /// Verifies that the current profile and lock paths still name the acquired inodes.
+    pub fn verify_current(&self, fs: &dyn Fs) -> Result<(), String> {
+        for profile in &self.profiles {
+            if named_identity(fs, &profile.path, EntryKind::Dir)? != Some(profile.identity) {
+                return Err(format!(
+                    "Cargo profile identity changed: {}",
+                    profile.path.display()
+                ));
+            }
+            for (name, held) in CARGO_LOCKS.iter().zip(&profile.locks) {
+                let path = profile.path.join(name);
+                if named_identity(fs, &path, EntryKind::File)?
+                    != held.as_ref().and_then(HeldLock::identity)
+                {
+                    return Err(format!("Cargo lock identity changed: {}", path.display()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Binds a newly discovered profile set and layouts to the locked namespace.
+    pub fn verify_profiles(
+        &self,
+        fs: &dyn Fs,
+        found: &[(PathBuf, target::Layout)],
+    ) -> Result<(), String> {
+        if found.len() != self.profiles.len()
+            || !found
+                .iter()
+                .zip(&self.profiles)
+                .all(|((path, layout), profile)| path == &profile.path && layout == &profile.layout)
+        {
+            return Err("the Cargo profile set changed while locked".into());
+        }
+        self.verify_current(fs)
+    }
+}
+
+/// Acquires every present Cargo lock and records the current profile and lock identities.
+pub fn acquire_verified(
+    fs: &dyn Fs,
+    target: &Path,
+    cancel: &dyn Fn() -> bool,
+) -> Result<VerifiedLocks, VerifyAcquireError> {
+    use VerifyAcquireError::{Failed, Skipped};
+
+    let profiles =
+        target::identify_strict(fs, target, crate::caps::CRATE_DIR_CAP, cancel).map_err(Failed)?;
+    let mut locked = VerifiedLocks {
+        profiles: Vec::with_capacity(profiles.len()),
+    };
+    for (path, layout) in profiles {
+        let identity = named_identity(fs, &path, EntryKind::Dir)
+            .map_err(Failed)?
+            .ok_or(Skipped(Reason::ProfileSet))?;
+        let mut locks = [None, None, None];
+        for (name, slot) in CARGO_LOCKS.iter().zip(&mut locks) {
+            if cancel() {
+                return Err(Failed("Cargo lock acquisition was cancelled".into()));
+            }
+            let lock_path = path.join(name);
+            let Some(expected) = named_identity(fs, &lock_path, EntryKind::File).map_err(Failed)?
+            else {
+                continue;
+            };
+            let held = match fs.try_lock_exclusive(&lock_path) {
+                TryLock::Held => return Err(Skipped(Reason::Held)),
+                TryLock::Unopenable(_) => return Err(Skipped(Reason::Unopenable)),
+                TryLock::Unlockable(_) => return Err(Skipped(Reason::Unlockable)),
+                TryLock::Gone => return Err(Skipped(Reason::Missing)),
+                TryLock::Acquired(held) => held,
+            };
+            if held.identity() != Some(expected) {
+                return Err(Skipped(Reason::Missing));
+            }
+            *slot = Some(held);
+        }
+        if locks.iter().all(Option::is_none) {
+            return Err(Skipped(Reason::Missing));
+        }
+        locked.profiles.push(VerifiedProfile {
+            path,
+            layout,
+            identity,
+            locks,
+        });
+    }
+    locked.verify_current(fs).map_err(Failed)?;
+    Ok(locked)
 }
 
 fn present_locks(fs: &dyn Fs, dir: &Path, lists_examples: bool) -> Vec<PathBuf> {

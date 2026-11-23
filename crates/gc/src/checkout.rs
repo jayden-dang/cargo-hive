@@ -61,10 +61,15 @@ pub struct RequiredRoot {
 #[derive(Debug)]
 pub struct EvidencedCheckoutReport {
     pub report: CheckoutReport,
+    expected: Vec<RequiredRoot>,
     completed: Vec<RequiredRoot>,
 }
 
 impl EvidencedCheckoutReport {
+    pub fn expected(&self) -> &[RequiredRoot] {
+        &self.expected
+    }
+
     pub fn completed(&self) -> &[RequiredRoot] {
         &self.completed
     }
@@ -231,6 +236,7 @@ pub fn run_with_evidence(
     let selected = select_targets(input.scan, input.checkout, input.nested);
     let mut result = EvidencedCheckoutReport {
         report: selection_report(input, &selected),
+        expected: expected.to_vec(),
         completed: Vec::new(),
     };
     let report = &mut result.report;
@@ -497,6 +503,29 @@ fn selection_report(input: &CheckoutInput<'_>, selected: &Selection) -> Checkout
     report
 }
 
+enum CheckoutLocks {
+    Standalone(locks::Locked),
+    Verified(locks::VerifiedLocks),
+}
+
+fn acquire_checkout_locks(
+    fs: &dyn Fs,
+    path: &Path,
+    strict: bool,
+    cancel: &dyn Fn() -> bool,
+) -> Result<CheckoutLocks, locks::VerifyAcquireError> {
+    use locks::VerifyAcquireError::{Failed, Skipped};
+
+    if strict {
+        return locks::acquire_verified(fs, path, cancel).map(CheckoutLocks::Verified);
+    }
+    match locks::acquire(fs, path, true) {
+        Acquired::Locked(locked) => Ok(CheckoutLocks::Standalone(locked)),
+        Acquired::Skipped(reason) => Err(Skipped(reason)),
+        Acquired::Failed(why) => Err(Failed(why)),
+    }
+}
+
 fn clean_target(
     input: &CheckoutInput,
     path: &Path,
@@ -505,13 +534,13 @@ fn clean_target(
     report: &mut CheckoutReport,
 ) -> (Counts, bool) {
     let mut counts = Counts::empty();
-    let locked = match locks::acquire(input.fs, path, true) {
-        Acquired::Locked(locked) => locked,
-        Acquired::Skipped(reason) => {
+    let locked = match acquire_checkout_locks(input.fs, path, required.is_some(), cancel) {
+        Ok(locked) => locked,
+        Err(locks::VerifyAcquireError::Skipped(reason)) => {
             skip_target(&mut counts, report, path, reason);
             return (counts, false);
         }
-        Acquired::Failed(why) => {
+        Err(locks::VerifyAcquireError::Failed(why)) => {
             report.failed = true;
             report.findings.push(Finding {
                 kind: "gc.target_failed".into(),
@@ -522,46 +551,75 @@ fn clean_target(
             return (counts, false);
         }
     };
-    if let Some(root) = required {
-        if locked.held.is_empty() {
-            skip_target(&mut counts, report, path, Reason::Missing);
-            return (counts, false);
-        }
-        if !check_root(input, root, report) {
-            return (counts, false);
-        }
-    }
-    let mut complete = true;
-    let found = match target::identify_bounded(input.fs, path, CRATE_DIR_CAP) {
-        Some(Ok(found)) => found,
-        Some(Err(why)) => {
-            report.failed = true;
-            report.findings.push(Finding {
-                kind: "gc.target_failed".into(),
-                path: Some(path.to_path_buf()),
-                detail: why,
-                measured: BTreeMap::new(),
-            });
-            return (counts, false);
-        }
-        None => {
-            skip_target(&mut counts, report, path, Reason::ProfileSet);
-            return (counts, false);
-        }
-    };
-    let first: BTreeSet<_> = locked.profiles.iter().cloned().collect();
-    let again: BTreeSet<_> = found.iter().map(|(p, _)| p.clone()).collect();
-    if first != again {
-        skip_target(&mut counts, report, path, Reason::ProfileSet);
-        return (counts, false);
-    }
     if required.is_some_and(|root| !check_root(input, root, report)) {
         return (counts, false);
     }
-    let reports: Vec<ProfileReport> = found
-        .iter()
-        .map(|(p, _)| fingerprint::read_profile(p))
-        .collect();
+    let mut complete = true;
+    let found = match &locked {
+        CheckoutLocks::Standalone(standalone) => {
+            let found = match target::identify_bounded(input.fs, path, CRATE_DIR_CAP) {
+                Some(Ok(found)) => found,
+                Some(Err(why)) => {
+                    report.failed = true;
+                    report.findings.push(Finding {
+                        kind: "gc.target_failed".into(),
+                        path: Some(path.to_path_buf()),
+                        detail: why,
+                        measured: BTreeMap::new(),
+                    });
+                    return (counts, false);
+                }
+                None => {
+                    skip_target(&mut counts, report, path, Reason::ProfileSet);
+                    return (counts, false);
+                }
+            };
+            let first: BTreeSet<_> = standalone.profiles.iter().cloned().collect();
+            let again: BTreeSet<_> = found.iter().map(|(p, _)| p.clone()).collect();
+            if first != again {
+                skip_target(&mut counts, report, path, Reason::ProfileSet);
+                return (counts, false);
+            }
+            found
+        }
+        CheckoutLocks::Verified(verified) => {
+            match target::identify_strict(input.fs, path, CRATE_DIR_CAP, cancel).and_then(|found| {
+                verified.verify_profiles(input.fs, &found)?;
+                Ok(found)
+            }) {
+                Ok(found) => found,
+                Err(why) => {
+                    incomplete_root(report, Some(path), &why);
+                    return (counts, false);
+                }
+            }
+        }
+    };
+    let verify_scope = || -> Result<(), String> {
+        if let (Some(root), CheckoutLocks::Verified(verified)) = (required, &locked) {
+            if cancel() {
+                return Err("checkout GC was cancelled".into());
+            }
+            if !matches_presence(input, root) {
+                return Err(ROOT_IDENTITY_CHANGED.into());
+            }
+            verified.verify_current(input.fs)?;
+        }
+        Ok(())
+    };
+    if let Err(why) = verify_scope() {
+        incomplete_root(report, Some(path), &why);
+        return (counts, false);
+    }
+    let reports: Vec<ProfileReport> = if required.is_some() {
+        let reader = fingerprint::StrictProfileReader::new(input.fs, cancel);
+        found.iter().map(|(p, _)| reader.read_profile(p)).collect()
+    } else {
+        found
+            .iter()
+            .map(|(p, _)| fingerprint::read_profile(p))
+            .collect()
+    };
     let owner = input
         .scan
         .targets
@@ -639,7 +697,7 @@ fn clean_target(
                         if required.is_some_and(|root| !check_root(input, root, report)) {
                             break 'remove false;
                         }
-                        let removed = if let Some(root) = required {
+                        let removed = if required.is_some() {
                             ledger::remove_counted_guarded(
                                 input.fs,
                                 &mut ledger,
@@ -656,7 +714,7 @@ fn clean_target(
                                             dev: stat.dev,
                                             ino: stat.ino,
                                         },
-                                        &|| matches_presence(input, root),
+                                        &verify_scope,
                                     )
                                 },
                             )
@@ -715,7 +773,7 @@ fn clean_target(
                 profile_report,
                 account_bytes: input.account_bytes,
                 cancel,
-                root_valid: required.map(|root| (input, root)),
+                scope_valid: required.map(|_| &verify_scope as &dyn Fn() -> Result<(), String>),
                 ledger: &mut ledger,
             });
             counts.binaries_read = counts.binaries_read.saturating_add(outcome.binaries_read);
@@ -746,9 +804,18 @@ fn clean_target(
     if input.account_bytes {
         counts.bytes = Some(tally.per_target.get(path).copied().unwrap_or(tally.total));
     }
-    if let Some(root) = required {
+    if let CheckoutLocks::Verified(verified) = &locked {
         report.cancelled |= cancel();
-        complete = complete && !report.cancelled && check_root(input, root, report);
+        if complete
+            && !report.cancelled
+            && let Err(why) = target::identify_strict(input.fs, path, CRATE_DIR_CAP, cancel)
+                .and_then(|profiles| verified.verify_profiles(input.fs, &profiles))
+                .and_then(|()| verify_scope())
+        {
+            incomplete_root(report, Some(path), &why);
+            complete = false;
+        }
+        complete &= !report.cancelled;
     }
     drop(locked);
     (counts, complete)
@@ -761,7 +828,7 @@ struct ObjectsClean<'a> {
     profile_report: &'a ProfileReport,
     account_bytes: bool,
     cancel: &'a dyn Fn() -> bool,
-    root_valid: Option<(&'a CheckoutInput<'a>, &'a RequiredRoot)>,
+    scope_valid: Option<&'a dyn Fn() -> Result<(), String>>,
     ledger: &'a mut Ledger,
 }
 
@@ -865,7 +932,7 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
             });
             return out;
         }
-        let removed = if let Some((input, root)) = ctx.root_valid {
+        let removed = if let Some(scope_valid) = ctx.scope_valid {
             ledger::remove_counted_guarded(
                 ctx.fs,
                 ctx.ledger,
@@ -882,7 +949,7 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
                             dev: *dev,
                             ino: *ino,
                         },
-                        &|| matches_presence(input, root),
+                        scope_valid,
                     )
                 },
             )
@@ -922,12 +989,10 @@ fn removal_identity(
     root: &Path,
     path: &Path,
     expect: Expect,
-    root_valid: &dyn Fn() -> bool,
+    scope_valid: &dyn Fn() -> Result<(), String>,
 ) -> Result<(), String> {
     let entry = guard::check_entry(fs, root, path, expect);
-    if !root_valid() {
-        return Err(ROOT_IDENTITY_CHANGED.into());
-    }
+    scope_valid()?;
     entry
         .map(|_| ())
         .map_err(|reason| format!("{} ({reason:?})", path.display()))

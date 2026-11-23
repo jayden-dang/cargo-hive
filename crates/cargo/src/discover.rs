@@ -118,19 +118,69 @@ pub fn git_checkouts_within(
     depth: usize,
     faults: &mut Vec<WalkFault>,
 ) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    if depth == 0 {
-        return found;
+    git_checkouts_within_budget(root, depth, faults, None)
+}
+
+struct WalkBudget<'a> {
+    remaining: usize,
+    exhausted: bool,
+    cancel: &'a dyn Fn() -> bool,
+}
+
+impl<'a> WalkBudget<'a> {
+    fn new(cancel: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            remaining: cargo_hive_core::caps::CRATE_DIR_CAP,
+            exhausted: false,
+            cancel,
+        }
+    }
+
+    fn active(&self) -> bool {
+        !self.exhausted && !(self.cancel)()
+    }
+
+    fn charge(&mut self, dir: &Path, faults: &mut Vec<WalkFault>) -> bool {
+        if !self.active() {
+            return false;
+        }
+        if let Some(left) = self.remaining.checked_sub(1) {
+            self.remaining = left;
+            true
+        } else {
+            self.exhausted = true;
+            faults.push(WalkFault {
+                path: dir.to_path_buf(),
+                detail: "strict checkout discovery entry limit exceeded".into(),
+                cannot_enter: false,
+            });
+            false
+        }
+    }
+}
+
+fn directory_children(
+    root: &Path,
+    faults: &mut Vec<WalkFault>,
+    mut budget: Option<&mut WalkBudget<'_>>,
+) -> Vec<PathBuf> {
+    if budget.as_ref().is_some_and(|budget| !budget.active()) {
+        return Vec::new();
     }
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(e) => {
             record_walk(faults, root, &e);
-            return found;
+            return Vec::new();
         }
     };
     let mut dirs = Vec::new();
     for entry in entries {
+        if let Some(budget) = &mut budget
+            && !budget.charge(root, faults)
+        {
+            break;
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
@@ -148,11 +198,33 @@ pub fn git_checkouts_within(
         }
     }
     dirs.sort();
+    dirs
+}
+
+fn git_checkouts_within_budget(
+    root: &Path,
+    depth: usize,
+    faults: &mut Vec<WalkFault>,
+    mut budget: Option<&mut WalkBudget<'_>>,
+) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    if depth == 0 {
+        return found;
+    }
+    let dirs = directory_children(root, faults, budget.as_deref_mut());
     for dir in dirs {
+        if budget.as_ref().is_some_and(|budget| !budget.active()) {
+            break;
+        }
         match std::fs::symlink_metadata(dir.join(".git")) {
             Ok(_) => found.push(dir),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                found.extend(git_checkouts_within(&dir, depth - 1, faults));
+                found.extend(git_checkouts_within_budget(
+                    &dir,
+                    depth - 1,
+                    faults,
+                    budget.as_deref_mut(),
+                ));
             }
             // `dir` was listed, so a denied stat of a name inside it means `dir` cannot
             // be entered.
@@ -177,7 +249,7 @@ pub fn checkouts(
     let records = Git::at(&repo.main)
         .worktrees()
         .map_err(|err| err.to_string());
-    checkouts_from_inventory(repo, registered_mains, cfg, records, false)
+    checkouts_from_inventory(repo, registered_mains, cfg, records, None)
 }
 
 const GIT_DISCOVERY_BYTES: usize = 64 * 1024;
@@ -187,9 +259,10 @@ pub fn checkouts_complete(
     repo: &Repo,
     registered_mains: &[PathBuf],
     cfg: &Config,
+    cancel: &dyn Fn() -> bool,
 ) -> (Vec<Checkout>, Vec<WalkFault>) {
     let records = Git::at(&repo.main)
-        .worktrees_complete(GIT_DISCOVERY_BYTES)
+        .worktrees_complete_until(GIT_DISCOVERY_BYTES, cancel)
         .map_err(|err| err.to_string())
         .and_then(|records| {
             if records.first().map(|record| &record.path) == Some(&repo.main) {
@@ -201,7 +274,7 @@ pub fn checkouts_complete(
     match records {
         Ok(records) => {
             let (rows, mut faults) =
-                checkouts_from_inventory(repo, registered_mains, cfg, Ok(records), true);
+                checkouts_from_inventory(repo, registered_mains, cfg, Ok(records), Some(cancel));
             faults.extend(
                 rows.iter()
                     .filter(|row| row.reason.starts_with("unclassifiable:"))
@@ -229,7 +302,7 @@ fn checkouts_from_inventory(
     registered_mains: &[PathBuf],
     cfg: &Config,
     records: Result<Vec<WorktreeRecord>, String>,
-    strict: bool,
+    strict_cancel: Option<&dyn Fn() -> bool>,
 ) -> (Vec<Checkout>, Vec<WalkFault>) {
     let mut out: Vec<Checkout> = Vec::new();
     let mut faults: Vec<WalkFault> = Vec::new();
@@ -254,6 +327,9 @@ fn checkouts_from_inventory(
     match records {
         Ok(records) => {
             for rec in records.into_iter().filter(|r| !r.bare) {
+                if strict_cancel.is_some_and(|cancel| cancel()) {
+                    return (out, faults);
+                }
                 let is_main = rec.path.canonicalize().ok().as_ref() == Some(&repo.main)
                     || rec.path == repo.main;
                 let kind = if is_main {
@@ -278,7 +354,7 @@ fn checkouts_from_inventory(
                         push(&mut out, rec.path, kind, Err(e.to_string()));
                         continue;
                     }
-                    Ok(meta) if strict && !meta.is_dir() => {
+                    Ok(meta) if strict_cancel.is_some() && !meta.is_dir() => {
                         push(
                             &mut out,
                             rec.path,
@@ -304,8 +380,15 @@ fn checkouts_from_inventory(
         }
     }
     let mut clones: Vec<PathBuf> = Vec::new();
+    let mut budget = strict_cancel.map(WalkBudget::new);
     for root in &cfg.secondary_roots {
-        for dir in git_checkouts_within(root, 2, &mut faults) {
+        if budget.as_ref().is_some_and(|budget| !budget.active()) {
+            break;
+        }
+        for dir in git_checkouts_within_budget(root, 2, &mut faults, budget.as_mut()) {
+            if budget.as_ref().is_some_and(|budget| !budget.active()) {
+                break;
+            }
             let real = match dir.canonicalize() {
                 Ok(path) => path,
                 Err(e) => {
@@ -316,12 +399,14 @@ fn checkouts_from_inventory(
             if seen.contains(&real) {
                 continue;
             }
-            if object_store::holds_none(&real.join(".git"), &repo.root_commits) {
+            if strict_cancel.is_none()
+                && object_store::holds_none(&real.join(".git"), &repo.root_commits)
+            {
                 continue;
             }
             let g = Git::at(&real);
-            let related = if strict {
-                related_clone_complete(&g, repo)
+            let related = if let Some(cancel) = strict_cancel {
+                related_clone_complete(&g, repo, cancel)
             } else {
                 related_clone(&g, repo)
             };
@@ -358,10 +443,14 @@ fn related_clone(git: &Git, repo: &Repo) -> Result<bool, String> {
         .map_err(|err| err.to_string())
 }
 
-fn related_clone_complete(git: &Git, repo: &Repo) -> Result<bool, String> {
+fn related_clone_complete(
+    git: &Git,
+    repo: &Repo,
+    cancel: &dyn Fn() -> bool,
+) -> Result<bool, String> {
     let read = |args: &[&str]| -> Result<String, String> {
         let bytes = git
-            .slot_read_only(args, GIT_DISCOVERY_BYTES)
+            .slot_read_only_until(args, GIT_DISCOVERY_BYTES, cancel)
             .map_err(|err| err.to_string())?;
         String::from_utf8(bytes).map_err(|err| err.to_string())
     };
@@ -466,44 +555,49 @@ fn cached(snapshot: &Snapshot, dir: &Path) -> Option<Resolved> {
 
 /// Dirs at depth 0–2 of a checkout that hold a `Cargo.toml`, with their depth.
 pub fn workspace_dirs(checkout: &Path, faults: &mut Vec<WalkFault>) -> Vec<(usize, PathBuf)> {
+    workspace_dirs_with_budget(checkout, faults, None)
+}
+
+fn workspace_dirs_with_budget(
+    checkout: &Path,
+    faults: &mut Vec<WalkFault>,
+    mut budget: Option<&mut WalkBudget<'_>>,
+) -> Vec<(usize, PathBuf)> {
     let mut out = Vec::new();
     let mut level = vec![checkout.to_path_buf()];
     for depth in 0..=2 {
         let mut next = Vec::new();
         for dir in &level {
-            if dir.join("Cargo.toml").is_file() {
+            if budget.as_ref().is_some_and(|budget| !budget.active()) {
+                return out;
+            }
+            let manifest = dir.join("Cargo.toml");
+            let is_manifest = if budget.is_some() {
+                match manifest.symlink_metadata() {
+                    Ok(meta) if meta.is_file() => true,
+                    Ok(_) => {
+                        record_walk(
+                            faults,
+                            &manifest,
+                            &std::io::Error::other("Cargo manifest is not a regular file"),
+                        );
+                        false
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(err) => {
+                        record_walk(faults, &manifest, &err);
+                        false
+                    }
+                }
+            } else {
+                manifest.is_file()
+            };
+            if is_manifest {
                 out.push((depth, dir.clone()));
             }
-            if depth == 2 {
-                continue;
+            if depth < 2 {
+                next.extend(directory_children(dir, faults, budget.as_deref_mut()));
             }
-            let entries = match std::fs::read_dir(dir) {
-                Ok(entries) => entries,
-                Err(e) => {
-                    record_walk(faults, dir, &e);
-                    continue;
-                }
-            };
-            let mut kids = Vec::new();
-            for entry in entries {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(e) => {
-                        record_walk(faults, dir, &e);
-                        continue;
-                    }
-                };
-                if skipped(&entry.file_name()) {
-                    continue;
-                }
-                match entry.file_type() {
-                    Ok(kind) if kind.is_dir() => kids.push(entry.path()),
-                    Ok(_) => {}
-                    Err(e) => record_walk(faults, &entry.path(), &e),
-                }
-            }
-            kids.sort();
-            next.extend(kids);
         }
         level = next;
     }
@@ -572,8 +666,12 @@ fn resolve_workspaces(
     group_workspaces: bool,
 ) -> Vec<Resolution> {
     let mut by_depth: BTreeMap<usize, BTreeSet<PathBuf>> = BTreeMap::new();
+    let mut budget = (!group_workspaces).then(|| WalkBudget::new(cancel));
     for checkout in checkouts {
-        for (depth, dir) in workspace_dirs(checkout, faults) {
+        if budget.as_ref().is_some_and(|budget| !budget.active()) {
+            break;
+        }
+        for (depth, dir) in workspace_dirs_with_budget(checkout, faults, budget.as_mut()) {
             by_depth.entry(depth).or_default().insert(dir);
         }
     }
@@ -594,7 +692,7 @@ fn resolve_workspaces(
             if already_discovered {
                 continue;
             }
-            match cached(snapshot, &dir) {
+            match group_workspaces.then(|| cached(snapshot, &dir)).flatten() {
                 Some(r) => {
                     found_here.push(r.workspace_root.clone());
                     out.push(Resolution {
@@ -625,23 +723,25 @@ fn resolve_workspaces(
                     .collect()
             });
             for (dir, result) in chunk.iter().cloned().zip(results) {
-                match &result {
-                    Ok(r) => {
-                        roots.push(r.workspace_root.clone());
-                        let stamp = stamp_files(&dir, &r.workspace_root)
-                            .into_iter()
-                            .map(|f| (f.clone(), mtime_nanos(&f)))
-                            .collect();
-                        snapshot.metadata.insert(
-                            dir.clone(),
-                            CachedMetadata {
-                                stamp,
-                                resolved: r.clone(),
-                            },
-                        );
-                    }
-                    Err(_) => {
-                        snapshot.metadata.remove(&dir);
+                if group_workspaces {
+                    match &result {
+                        Ok(r) => {
+                            roots.push(r.workspace_root.clone());
+                            let stamp = stamp_files(&dir, &r.workspace_root)
+                                .into_iter()
+                                .map(|f| (f.clone(), mtime_nanos(&f)))
+                                .collect();
+                            snapshot.metadata.insert(
+                                dir.clone(),
+                                CachedMetadata {
+                                    stamp,
+                                    resolved: r.clone(),
+                                },
+                            );
+                        }
+                        Err(_) => {
+                            snapshot.metadata.remove(&dir);
+                        }
                     }
                 }
                 out.push(Resolution {
@@ -723,41 +823,13 @@ pub fn targets(
     snapshot: &mut Snapshot,
     cancel: impl Fn() -> bool + Sync,
 ) -> TargetScan {
-    scan_targets(checkouts, cfg, all_repos, snapshot, cancel, true)
-}
-
-/// Resolves Cargo's configuration from every admitted manifest directory independently.
-pub fn targets_for_checkout_gc(
-    checkouts: &[Checkout],
-    cfg: &Config,
-    cancel: impl Fn() -> bool + Sync,
-) -> TargetScan {
-    scan_targets(
-        checkouts,
-        cfg,
-        false,
-        &mut Snapshot::default(),
-        cancel,
-        false,
-    )
-}
-
-fn scan_targets(
-    checkouts: &[Checkout],
-    cfg: &Config,
-    all_repos: bool,
-    snapshot: &mut Snapshot,
-    cancel: impl Fn() -> bool + Sync,
-    group_workspaces: bool,
-) -> TargetScan {
     let live: Vec<PathBuf> = checkouts
         .iter()
         .filter(|c| !c.missing)
         .map(|c| c.path.clone())
         .collect();
     let mut walk_faults = Vec::new();
-    let resolutions =
-        resolve_workspaces(&live, snapshot, &mut walk_faults, &cancel, group_workspaces);
+    let resolutions = resolve_workspaces(&live, snapshot, &mut walk_faults, &cancel, true);
     let resolved: Vec<&Resolved> = resolutions
         .iter()
         .filter_map(|r| r.result.as_ref().ok())
@@ -881,6 +953,68 @@ fn scan_targets(
         ignored_vars: overrides.into_iter().map(|(name, _)| name).collect(),
         walk_faults,
         cleared_profiles,
+        workspaces,
+    }
+}
+
+/// Resolves every admitted manifest independently and reports ownership only for requested paths.
+pub fn targets_for_checkout_gc(
+    checkouts: &[Checkout],
+    required_paths: &[PathBuf],
+    cancel: impl Fn() -> bool + Sync,
+) -> TargetScan {
+    let live: Vec<_> = checkouts
+        .iter()
+        .filter(|row| !row.missing)
+        .map(|row| row.path.clone())
+        .collect();
+    let mut walk_faults = Vec::new();
+    let resolutions = resolve_workspaces(
+        &live,
+        &mut Snapshot::default(),
+        &mut walk_faults,
+        &cancel,
+        false,
+    );
+    let targets = required_paths
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|path| {
+            let matching: Vec<_> = resolutions
+                .iter()
+                .filter_map(|resolution| resolution.result.as_ref().ok())
+                .filter(|resolved| {
+                    resolved.target_directory == *path || resolved.build_directory == *path
+                })
+                .collect();
+            (!matching.is_empty()).then(|| TargetDir {
+                path: path.clone(),
+                owner: Owner::Owned {
+                    checkout: protected_owner(&matching, &live, checkouts),
+                },
+                profiles: Vec::new(),
+                size: None,
+                unreadable: None,
+            })
+        })
+        .collect();
+    let metadata_calls = resolutions.len() as u64;
+    let workspaces = resolutions
+        .into_iter()
+        .map(|resolution| WorkspaceResolution {
+            checkout: owner_checkout(&resolution.dir, &live),
+            dir: resolution.dir,
+            result: resolution.result,
+        })
+        .collect();
+    TargetScan {
+        targets,
+        metadata_calls,
+        metadata_cache_hits: 0,
+        ignored_vars: Vec::new(),
+        walk_faults,
+        cleared_profiles: BTreeSet::new(),
         workspaces,
     }
 }

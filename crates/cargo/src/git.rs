@@ -265,6 +265,16 @@ impl Git {
 
     /// Reads Git evidence for a guarded slot with a strict byte limit.
     pub fn slot_read_only(&self, args: &[&str], max: usize) -> Result<Vec<u8>, SlotGitError> {
+        self.slot_read_only_until(args, max, &cancelled)
+    }
+
+    /// Reads complete bounded slot evidence with the caller's cancellation signal.
+    pub fn slot_read_only_until(
+        &self,
+        args: &[&str],
+        max: usize,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<Vec<u8>, SlotGitError> {
         let stdout_cap = max.checked_add(1).ok_or(SlotGitError::Incomplete)?;
         let mut spec = self.git_cmd(&["--no-optional-locks", "--no-replace-objects"]);
         spec.args.extend(args.iter().map(|arg| (*arg).into()));
@@ -282,7 +292,7 @@ impl Git {
                 stdout_cap,
                 stderr_cap: 1,
             },
-            cancelled,
+            cancel,
         ) {
             Ok(ran)
                 if ran.status.success()
@@ -298,7 +308,17 @@ impl Git {
 
     /// Requires complete NUL records from a non-bare repository's worktree inventory.
     pub fn worktrees_complete(&self, max: usize) -> Result<Vec<WorktreeRecord>, SlotGitError> {
-        let bytes = self.slot_read_only(&["worktree", "list", "--porcelain", "-z"], max)?;
+        self.worktrees_complete_until(max, &cancelled)
+    }
+
+    /// Requires complete worktree records and honors the caller's cancellation signal.
+    pub fn worktrees_complete_until(
+        &self,
+        max: usize,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<Vec<WorktreeRecord>, SlotGitError> {
+        let bytes =
+            self.slot_read_only_until(&["worktree", "list", "--porcelain", "-z"], max, cancel)?;
         complete_worktrees(&bytes).ok_or(SlotGitError::Incomplete)
     }
 }
