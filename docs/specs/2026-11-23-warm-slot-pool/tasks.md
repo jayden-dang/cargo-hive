@@ -286,6 +286,7 @@ _Requirements: SLOTS-3.6, SLOTS-3.7, SLOTS-3.10_
 ### Task 7: Deliver a ready slot at the requested commit
 
 **Files:**
+- Modify: `crates/platform/src/flock.rs`
 - Create: `crates/cargo-hive/src/slot/admission.rs`
 - Modify: `crates/seed/src/lib.rs`
 - Modify: `crates/seed/src/place.rs`

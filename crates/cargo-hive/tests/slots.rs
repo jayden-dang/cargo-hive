@@ -480,7 +480,7 @@ fn start_producer(
 
 #[allow(clippy::disallowed_types)]
 fn producer_environment(command: &mut std::process::Command) {
-    command.env("CARGO_NET_OFFLINE", "true");
+    command.env("CARGO_NET_OFFLINE", "true").env_remove("CARGO");
     for (key, _) in std::env::vars_os() {
         let name = key.to_string_lossy();
         if name.starts_with("DYLD_")
@@ -4806,6 +4806,332 @@ exec "$HIVE_TEST_BINARY" "$@"
         "packaged take failed: {}\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn external_fixture_seal(fixture: &PoolFixture, head: &str, recipe: &str, argv: &[&str]) {
+    let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+    let root_package = profile["consumers"][0]["package"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let effect = |path: &Path| {
+        let mut file = fs::File::open(path).unwrap();
+        let length = file.metadata().unwrap().len();
+        cargo_hive_platform::slot::sha256_reader(&mut file, length, || false)
+            .unwrap()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let material = |path: &Path| json!({"path": path, "sha256": effect(path)});
+    let find_tool = |args: &[&str]| {
+        let out = fixture
+            .hive
+            .command_with(Path::new("/usr/bin/xcrun"), args)
+            .env_clear()
+            .env("HOME", &fixture.hive.cargo_home.path)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        PathBuf::from(String::from_utf8(out.stdout).unwrap().trim())
+            .canonicalize()
+            .unwrap()
+    };
+    let release = std::env::var("RUSTUP_TOOLCHAIN").unwrap();
+    let release = release.split('-').next().unwrap();
+    let native = format!("{}-apple-darwin", std::env::consts::ARCH);
+    let layout = if release == "1.97.1" {
+        "flat"
+    } else {
+        "unit_dir"
+    };
+    let toolchain = PathBuf::from(std::env::var_os("RUSTUP_HOME").unwrap())
+        .join("toolchains")
+        .join(format!("{release}-{native}"));
+    let lib = toolchain.join("lib");
+    let bin = toolchain.join("bin");
+    let sysroot = lib.join("rustlib").join(&native).join("lib");
+    let inventory = |path: &Path, skip_rustlib: bool| {
+        let mut paths: Vec<_> = fs::read_dir(path)
+            .unwrap()
+            .map(|item| item.unwrap().path())
+            .filter(|entry| !skip_rustlib || entry.file_name().unwrap() != "rustlib")
+            .collect();
+        paths.sort();
+        paths
+            .iter()
+            .map(|entry| material(entry))
+            .collect::<Vec<_>>()
+    };
+    let sdk = find_tool(&["--no-cache", "--show-sdk-path"]);
+    let mut tools = json!({
+        "cargo": material(&bin.join("cargo")), "rustc":material(&bin.join("rustc")),
+        "otool":material(&find_tool(&["--no-cache","--find","otool"])),
+        "rust_runtime":inventory(&lib,true), "target_sysroot":inventory(&sysroot,false),
+        "clang":material(&find_tool(&["--no-cache","--find","clang"])),
+        "ld":material(&find_tool(&["--no-cache","--find","ld"])), "sdk":sdk,
+        "sdk_settings":material(&sdk.join("SDKSettings.json")),
+        "system_library":material(&sdk.join("usr/lib/libSystem.tbd").canonicalize().unwrap())
+    });
+    if recipe == "clippy" {
+        tools["cargo_clippy"] = material(&bin.join("cargo-clippy"));
+        tools["clippy_driver"] = material(&bin.join("clippy-driver"));
+    } else {
+        let source = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|dir| dir.join("cargo-nextest"))
+            .find(|path| path.is_file())
+            .expect("Task 7 fixture requires the already installed pinned nextest");
+        let cargo_bin = fixture.hive.cargo_home.path.join("bin");
+        fs::create_dir(&cargo_bin).unwrap();
+        let nextest = cargo_bin.join("cargo-nextest");
+        fs::copy(source, &nextest).unwrap();
+        tools["cargo_nextest"] = material(&nextest);
+    }
+    let seal = fixture._repo_dir.path.join("external-recipe.json");
+    fs::write(&seal, serde_json::to_vec(&json!({
+        "schema":1,"recipe":recipe,"profile":{"id":"fixture","revision":1},
+        "proof":"check-proof","invocation":"check","layout":layout,"native_target":native,
+        "endpoints":[{"commit":head,"tree":git(&fixture.repo,&["rev-parse","HEAD^{tree}"])}],
+        "tools":tools, "packages":[
+            {"name":root_package,"version":"0.1.0","manifest":"Cargo.toml","targets":[{"name":root_package,"kind":"lib","source":"src/lib.rs"}],"dependencies":[]},
+            {"name":"independent","version":"0.1.0","manifest":"independent/Cargo.toml","targets":[{"name":"independent","kind":"lib","source":"independent/src/lib.rs"}],"dependencies":[]}
+        ], "data":[{"id":"source","sha256":[effect(&fixture.repo.join("src/lib.rs"))],"absent":false}]
+    })).unwrap()).unwrap();
+    let graph = profile["graph_inputs"].as_array_mut().unwrap();
+    graph.push(json!({"locator":{"kind":"checkout","path":"independent/src/lib.rs"},"expectation":{"kind":"present","identity":{"kind":"git_object","oid":git(&fixture.repo,&["rev-parse","HEAD:independent/src/lib.rs"])}}}));
+    let hash = effect(&seal);
+    graph.push(json!({"locator":{"kind":"external","path":seal},"expectation":{"kind":"present","identity":{"kind":"reviewed_bytes","sha256":hash}}}));
+    profile["invocations"][0]["argv"] = json!(argv);
+    profile["proofs"][0]["evidence"] = json!(format!("closure-v1:sha256={hash}"));
+    fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+}
+
+const EXTERNAL_LIST_WITNESS: &str = r#"
+pub fn answer() -> u32 { 42 }
+
+#[cfg(test)]
+#[test]
+fn fail_if_run_instead_of_listed() { panic!("nextest executed a test body"); }
+
+#[cfg(test)]
+extern "C" fn listing_witness() {
+    use std::io::Seek;
+    use std::os::unix::fs::MetadataExt;
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let values: Vec<_> = args.iter().map(String::as_str).collect();
+    let leaf = match values.as_slice() {
+        ["--list", "--format", "terse"] => "list-witness",
+        ["--list", "--format", "terse", "--ignored"] => "ignored-list-witness",
+        _ => return,
+    };
+    let mut lock = std::fs::File::open("/dev/fd/9").unwrap();
+    let info = lock.metadata().unwrap();
+    let scope = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+    std::fs::write(scope.join(leaf), format!("{} {} {}", info.dev(), info.ino(), lock.stream_position().unwrap())).unwrap();
+}
+
+#[cfg(test)]
+#[used]
+#[unsafe(link_section = "__DATA,__mod_init_func")]
+static INIT_WITNESS: extern "C" fn() = listing_witness;
+"#;
+
+#[test]
+fn the_packaged_guide_attests_the_exact_native_external_producers() {
+    let recipes: [(&str, &[&str]); 2] = [
+        (
+            "clippy",
+            &[
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--all-features",
+                "--locked",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        ),
+        (
+            "nextest_workspace",
+            &[
+                "nextest",
+                "run",
+                "--workspace",
+                "--all-features",
+                "--no-run",
+                "--locked",
+                "--user-config-file",
+                "none",
+            ],
+        ),
+    ];
+    for (recipe, args) in recipes {
+        exercise_external_recipe(recipe, args, false, None);
+    }
+}
+
+fn exercise_external_recipe(
+    recipe: &str,
+    args: &[&str],
+    gateways: bool,
+    expected_refusal: Option<&str>,
+) {
+    let fixture = reviewed_pool_fixture(
+        recipe
+            .starts_with("nextest_")
+            .then_some(EXTERNAL_LIST_WITNESS),
+    );
+    if gateways {
+        for path in ["Cargo.toml", "Cargo.lock"] {
+            let file = fixture.repo.join(path);
+            let contents = fs::read_to_string(&file)
+                .unwrap()
+                .replace("name = \"fixture\"", "name = \"gateways\"");
+            fs::write(file, contents).unwrap();
+        }
+        git(
+            &fixture.repo,
+            &[
+                "commit",
+                "-qm",
+                "Name the selected workspace package",
+                "--",
+                "Cargo.toml",
+                "Cargo.lock",
+            ],
+        );
+        let mut profile: Value =
+            serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+        for item in profile["graph_inputs"].as_array_mut().unwrap() {
+            let path = item["locator"]["path"].as_str().unwrap();
+            item["expectation"]["identity"]["oid"] =
+                json!(git(&fixture.repo, &["rev-parse", &format!("HEAD:{path}")]));
+        }
+        profile["consumers"][0]["package"] = json!("gateways");
+        fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+    }
+    fixture.hive.write_ready_capabilities();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    external_fixture_seal(&fixture, &head, recipe, args);
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let key = fixture._repo_dir.path.join("external-recipe-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let out = run_packaged_take(&fixture, pool, &head, &key, "take");
+    if let Some(detail) = expected_refusal {
+        assert_eq!(out.status.code(), Some(1), "{recipe}: {out:?}");
+        let checkout = Path::new(initialized["slots"][0]["path"].as_str().unwrap());
+        assert!(!checkout.join("target").exists());
+        let refused: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(
+            refused["detail"]
+                .as_str()
+                .is_some_and(|observed| observed.contains(detail)),
+            "{refused}"
+        );
+        return;
+    }
+    assert!(out.status.success(), "{recipe}: {out:?}");
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
+    let mut command = fixture
+        .hive
+        .command_with(Path::new("/bin/bash"), &["--noprofile", "--norc"]);
+    producer_environment(&mut command);
+    let child = command
+        .arg(helper)
+        .args(["produce", env!("CARGO_BIN_EXE_cargo-hive")])
+        .arg(&fixture.repo)
+        .args([pool, "1", "1", &"5".repeat(32), "check"])
+        .stdin(fs::File::open(&key).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = common::wait_within(child, Duration::from_secs(45));
+    assert_no_credential(&out, &fs::read_to_string(&key).unwrap());
+    assert!(out.status.success(), "{recipe}: {out:?}");
+    let complete: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(complete["kind"], "producer_complete");
+    if recipe.starts_with("nextest_") {
+        let checkout = Path::new(initialized["slots"][0]["path"].as_str().unwrap());
+        if gateways {
+            let profile =
+                cargo_hive_core::fingerprint::read_profile(&checkout.join("target/debug"));
+            let graph = profile.graph.unwrap();
+            assert!(
+                graph
+                    .units
+                    .iter()
+                    .any(|unit| unit.loc.package() == "gateways")
+            );
+            assert!(
+                graph
+                    .units
+                    .iter()
+                    .all(|unit| unit.loc.package() != "independent")
+            );
+        }
+        let guard = fs::metadata(
+            fixture
+                .hive
+                .home
+                .path
+                .join("slot-locks")
+                .join(pool)
+                .join("slot-1.lock"),
+        )
+        .unwrap();
+        let mut offset = None;
+        for leaf in ["list-witness", "ignored-list-witness"] {
+            let evidence = fs::read_to_string(checkout.join("target").join(leaf)).unwrap();
+            let facts: Vec<_> = evidence
+                .split_ascii_whitespace()
+                .map(|value| value.parse::<u64>().unwrap())
+                .collect();
+            assert_eq!(facts.len(), 3);
+            assert_eq!((facts[0], facts[1]), (guard.dev(), guard.ino()));
+            assert!(facts[2] >= 1 << 32);
+            assert_eq!(*offset.get_or_insert(facts[2]), facts[2]);
+        }
+    }
+}
+
+#[test]
+fn the_gateways_nextest_recipe_lists_only_the_exact_selected_package() {
+    let args = [
+        "nextest",
+        "run",
+        "-p",
+        "gateways",
+        "--no-run",
+        "--locked",
+        "--user-config-file",
+        "none",
+    ];
+    exercise_external_recipe("nextest_gateways", &args, true, None);
+    let mut altered = args;
+    altered[3] = "independent";
+    exercise_external_recipe(
+        "nextest_gateways",
+        &altered,
+        true,
+        Some("native build closure"),
+    );
+    exercise_external_recipe(
+        "nextest_gateways",
+        &args,
+        false,
+        Some("native harness and package scope"),
     );
 }
 

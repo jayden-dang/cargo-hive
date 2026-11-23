@@ -1146,11 +1146,17 @@ impl ProducerCommand<'_> {
         snapshot.pool.slots[self.slot_index()].producer = Producer::Pending(pending.clone());
         proof.release_output_locks();
 
+        let mut writer_images = vec![(checked.cargo.as_path(), checked.environment.len())];
+        let terminal_environment = checked.terminal.as_ref().map(|terminal| {
+            let mut expected = checked.environment.clone();
+            expected.insert("CARGO".into(), checked.cargo.as_os_str().to_owned());
+            writer_images.push((terminal.as_path(), expected.len()));
+            expected
+        });
         let exited = watcher
             .wait(
                 Duration::from_secs(60 * 60),
-                &checked.cargo,
-                checked.environment.len(),
+                &writer_images,
                 |image| {
                     if image.cwd != checked.cwd {
                         return None;
@@ -1158,6 +1164,17 @@ impl ProducerCommand<'_> {
                     if image.program == checked.cargo
                         && image.argv.iter().eq(cargo_args())
                         && image.environment == checked.environment
+                    {
+                        Some(if checked.terminal.is_some() {
+                            ForegroundExec::Dispatcher
+                        } else {
+                            ForegroundExec::Writer
+                        })
+                    } else if let Some(terminal) = &checked.terminal
+                        && image.program == *terminal
+                        && image.argv.iter().eq(std::iter::once(terminal.as_os_str())
+                            .chain(invocation.argv.iter().map(std::ffi::OsStr::new)))
+                        && terminal_environment.as_ref() == Some(&image.environment)
                     {
                         Some(ForegroundExec::Writer)
                     } else if image.program == Path::new(PRODUCER_ENV_PROGRAM)

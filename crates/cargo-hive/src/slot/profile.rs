@@ -36,6 +36,7 @@ pub(super) struct InvocationInput {
 pub(super) struct CheckedInvocation {
     pub evidence: InvocationEvidence,
     pub cargo: PathBuf,
+    pub terminal: Option<PathBuf>,
     pub cwd: PathBuf,
     pub needs_guide: bool,
     pub environment: BTreeMap<std::ffi::OsString, std::ffi::OsString>,
@@ -379,6 +380,9 @@ pub(super) fn check_invocation(
             stable_digest: Some(stable_digest),
         },
         cargo,
+        terminal: native
+            .as_ref()
+            .and_then(|seal| seal.terminal().map(Path::to_path_buf)),
         cwd,
         environment,
         needs_guide: native.is_some(),

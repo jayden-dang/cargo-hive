@@ -27,6 +27,36 @@ const NATIVE_ARGV: [&str; 5] = [
     "--offline",
     "--message-format=json",
 ];
+const CLIPPY_ARGV: [&str; 8] = [
+    "clippy",
+    "--workspace",
+    "--all-targets",
+    "--all-features",
+    "--locked",
+    "--",
+    "-D",
+    "warnings",
+];
+const NEXTEST_WORKSPACE_ARGV: [&str; 8] = [
+    "nextest",
+    "run",
+    "--workspace",
+    "--all-features",
+    "--no-run",
+    "--locked",
+    "--user-config-file",
+    "none",
+];
+const NEXTEST_GATEWAYS_ARGV: [&str; 8] = [
+    "nextest",
+    "run",
+    "-p",
+    "gateways",
+    "--no-run",
+    "--locked",
+    "--user-config-file",
+    "none",
+];
 const FILE_LIMIT: u64 = 256 * 1024 * 1024;
 const TOTAL_MATERIAL_LIMIT: u64 = 1024 * 1024 * 1024;
 const ENTRY_LIMIT: usize = 256;
@@ -47,10 +77,28 @@ struct Seal {
     data: Vec<FiniteData>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Recipe {
     NativeBuild,
+    Clippy,
+    NextestWorkspace,
+    NextestGateways,
+}
+
+impl Recipe {
+    fn argv(self) -> &'static [&'static str] {
+        match self {
+            Self::NativeBuild => &NATIVE_ARGV,
+            Self::Clippy => &CLIPPY_ARGV,
+            Self::NextestWorkspace => &NEXTEST_WORKSPACE_ARGV,
+            Self::NextestGateways => &NEXTEST_GATEWAYS_ARGV,
+        }
+    }
+
+    fn is_nextest(self) -> bool {
+        matches!(self, Self::NextestWorkspace | Self::NextestGateways)
+    }
 }
 
 #[derive(Deserialize)]
@@ -73,6 +121,9 @@ struct Tools {
     sdk: PathBuf,
     sdk_settings: Material,
     system_library: Material,
+    cargo_clippy: Option<Material>,
+    clippy_driver: Option<Material>,
+    cargo_nextest: Option<Material>,
 }
 
 #[derive(Deserialize)]
@@ -169,8 +220,12 @@ impl NativeBuild {
             || seal.invocation != invocation.id
             || seal.layout != invocation.layout
             || seal.native_target != native
-            || !matches!(seal.recipe, Recipe::NativeBuild)
-            || invocation.argv.iter().map(String::as_str).ne(NATIVE_ARGV)
+            || invocation
+                .argv
+                .iter()
+                .map(String::as_str)
+                .ne(seal.recipe.argv().iter().copied())
+            || !seal.tools.valid_for(seal.recipe)
             || invocation.cwd != Path::new(".")
             || !(1..=2).contains(&seal.endpoints.len())
             || !seal.endpoints.iter().all(|endpoint| {
@@ -191,6 +246,16 @@ impl NativeBuild {
             || !valid_inventory(&seal.tools.rust_runtime)
             || !valid_inventory(&seal.tools.target_sysroot)
             || !native_environment(&invocation.environment)
+            || (!matches!(seal.recipe, Recipe::NativeBuild)
+                && seal.packages.iter().any(|package| {
+                    package
+                        .targets
+                        .iter()
+                        .any(|target| target.kind == "proc-macro")
+                }))
+            || (seal.recipe.is_nextest()
+                && (invocation.target_root != Path::new("target")
+                    || invocation.build_root != Path::new("target")))
         {
             return Err(malformed());
         }
@@ -250,6 +315,18 @@ impl NativeBuild {
         if tree.strip_suffix(b"\n") != Some(endpoint.tree.as_bytes()) {
             return Err(unproved());
         }
+        if self.seal.recipe.is_nextest()
+            && read_input_bounded(&checkout.path.join(".config/nextest.toml"), 64 * 1024)?.is_some()
+        {
+            return Err(unproved());
+        }
+        match self.seal.recipe {
+            Recipe::Clippy => self.verify_clippy_config(&checkout.path)?,
+            Recipe::NextestWorkspace | Recipe::NextestGateways => {
+                self.verify_default_harness(&checkout.path)?
+            }
+            Recipe::NativeBuild => (),
+        }
         let mut observed = BTreeMap::new();
         for field in &self.seal.data {
             let input = profile
@@ -294,6 +371,77 @@ impl NativeBuild {
             }
         }
         Ok(observed)
+    }
+
+    fn verify_clippy_config(&self, checkout: &Path) -> Result<(), Refusal> {
+        let unproved =
+            || refused("A Clippy configuration is outside the sealed default lint recipe.");
+        let mut checked = BTreeSet::new();
+        for package in &self.seal.packages {
+            let manifest = checkout.join(&package.manifest);
+            for ancestor in manifest.parent().ok_or_else(unproved)?.ancestors() {
+                if checked.insert(ancestor.to_path_buf()) {
+                    for name in ["clippy.toml", ".clippy.toml"] {
+                        if read_input_bounded(&ancestor.join(name), 64 * 1024)?.is_some() {
+                            return Err(unproved());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_default_harness(&self, checkout: &Path) -> Result<(), Refusal> {
+        let unproved = || {
+            refused(
+                "The sealed nextest recipe requires the reviewed default native harness and package scope.",
+            )
+        };
+        if matches!(self.seal.recipe, Recipe::NextestGateways)
+            && !self
+                .seal
+                .packages
+                .iter()
+                .any(|package| package.name == "gateways")
+        {
+            return Err(unproved());
+        }
+        for package in &self.seal.packages {
+            let bytes = read_input_bounded(&checkout.join(&package.manifest), 64 * 1024)?
+                .ok_or_else(unproved)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| unproved())?;
+            let mut table = "";
+            for line in text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            {
+                if matches!(line, "[package]" | "[workspace]" | "[dependencies]") {
+                    table = line;
+                    continue;
+                }
+                let (key, value) = line.split_once('=').ok_or_else(unproved)?;
+                let valid = match (table, key.trim(), value.trim()) {
+                    ("[package]", "name", value) => {
+                        serde_json::from_str::<String>(value).is_ok_and(|name| name == package.name)
+                    }
+                    ("[package]", "version", value) => serde_json::from_str::<String>(value)
+                        .is_ok_and(|version| version == package.version),
+                    ("[package]", "edition", "\"2021\"" | "\"2024\"") => true,
+                    ("[workspace]", "resolver", "\"2\"" | "\"3\"") => true,
+                    ("[workspace]", "members", value) => {
+                        serde_json::from_str::<Vec<PathBuf>>(value)
+                            .is_ok_and(|members| members.iter().all(|path| relative(path)))
+                    }
+                    _ => false,
+                };
+                if !valid {
+                    return Err(unproved());
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn bind_tools(
@@ -375,12 +523,116 @@ impl NativeBuild {
         );
         let mut linker_flags = OsString::from("-Clink-arg=--ld-path=");
         linker_flags.push(ld.as_os_str());
-        environment.insert("PATH".into(), "/usr/bin:/bin".into());
+        let path = self.bind_external(cargo, cwd, cargo_home, &mut remaining, &mut stamps)?;
+        environment.insert("PATH".into(), path);
+        if self.terminal().is_some() {
+            // Foundation can otherwise manufacture this extra environment entry between
+            // Cargo and its external subcommand. Seal the conventional native encoding.
+            environment.insert(
+                "__CF_USER_TEXT_ENCODING".into(),
+                format!("0x{:X}:0x0:0x0", cargo_hive_platform::slot::effective_uid()).into(),
+            );
+        }
         environment.insert("SDKROOT".into(), sdk.into_os_string());
         environment.insert(linker.into(), clang.into_os_string());
         environment.insert("CARGO_ENCODED_RUSTFLAGS".into(), linker_flags);
         digest(&serde_json::to_vec(&stamps).map_err(|_| unproved())?)
     }
+    pub fn terminal(&self) -> Option<&Path> {
+        match self.seal.recipe {
+            Recipe::NativeBuild => None,
+            Recipe::Clippy => self
+                .seal
+                .tools
+                .cargo_clippy
+                .as_ref()
+                .map(|tool| tool.path.as_path()),
+            Recipe::NextestWorkspace | Recipe::NextestGateways => self
+                .seal
+                .tools
+                .cargo_nextest
+                .as_ref()
+                .map(|tool| tool.path.as_path()),
+        }
+    }
+
+    fn bind_external(
+        &self,
+        cargo: &Path,
+        cwd: &Path,
+        cargo_home: &OsStr,
+        remaining: &mut u64,
+        stamps: &mut Vec<String>,
+    ) -> Result<OsString, Refusal> {
+        let Some(terminal) = self.terminal() else {
+            return Ok("/usr/bin:/bin".into());
+        };
+        let refused =
+            || refused("The sealed Cargo external command or executable lookup is unproved.");
+        if std::env::vars_os().any(|(name, _)| {
+            let name = name.to_string_lossy();
+            matches!(name.as_ref(), "CARGO" | "NEXTEST")
+                || name.starts_with("CLIPPY_")
+                || name.starts_with("NEXTEST_")
+        }) {
+            return Err(refused());
+        }
+        let toolchain_bin = cargo.parent().ok_or_else(refused)?;
+        let home_bin = Path::new(cargo_home).join("bin");
+        let (name, selected_dir) = if self.seal.recipe.is_nextest() {
+            ("cargo-nextest", home_bin.as_path())
+        } else {
+            ("cargo-clippy", toolchain_bin)
+        };
+        if selected_dir.join(name) != terminal {
+            return Err(refused());
+        }
+        for dir in [
+            home_bin.as_path(),
+            toolchain_bin,
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+        ] {
+            if dir != selected_dir
+                && !std::fs::symlink_metadata(dir.join(name))
+                    .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Err(refused());
+            }
+        }
+        let tools = &self.seal.tools;
+        if let Some(driver) = &tools.clippy_driver {
+            let launcher = tools.cargo_clippy.as_ref().ok_or_else(refused)?;
+            if driver.path != toolchain_bin.join("clippy-driver") {
+                return Err(refused());
+            }
+            for tool in [launcher, driver] {
+                stamps.push(tool.verify(remaining)?);
+                verify_rust_loader(
+                    &tools.otool.path,
+                    cwd,
+                    cargo_home,
+                    &tool.path,
+                    &tools.rust_runtime,
+                )?;
+            }
+            std::env::join_paths([toolchain_bin, Path::new("/usr/bin"), Path::new("/bin")])
+                .map_err(|_| refused())
+        } else {
+            let nextest = tools.cargo_nextest.as_ref().ok_or_else(refused)?;
+            stamps.push(nextest.verify(remaining)?);
+            verify_nextest_loader(&tools.otool.path, cwd, cargo_home, &nextest.path)?;
+            let observed =
+                native_output(terminal, [OsStr::new("--version")], cwd, cargo_home, 4096)?;
+            if observed.split(|byte| *byte == b'\n').next()
+                != Some(b"cargo-nextest 0.9.144 (9718c77af 2026-09-10)")
+            {
+                return Err(refused());
+            }
+            Ok("/usr/bin:/bin".into())
+        }
+    }
+
     pub fn target_libdir(&self) -> Option<PathBuf> {
         Some(
             self.seal
@@ -394,6 +646,51 @@ impl NativeBuild {
                 .join("lib"),
         )
     }
+}
+
+impl Tools {
+    fn valid_for(&self, recipe: Recipe) -> bool {
+        let clippy = self.cargo_clippy.is_some() && self.clippy_driver.is_some();
+        let no_clippy = self.cargo_clippy.is_none() && self.clippy_driver.is_none();
+        match recipe {
+            Recipe::NativeBuild => no_clippy && self.cargo_nextest.is_none(),
+            Recipe::Clippy => clippy && self.cargo_nextest.is_none(),
+            Recipe::NextestWorkspace | Recipe::NextestGateways => {
+                no_clippy && self.cargo_nextest.is_some()
+            }
+        }
+    }
+}
+
+fn verify_nextest_loader(
+    otool: &Path,
+    cwd: &Path,
+    home: &OsStr,
+    nextest: &Path,
+) -> Result<(), Refusal> {
+    let unproved =
+        || refused("The installed nextest loader differs from the sealed native runtime.");
+    let output = native_output(
+        otool,
+        [OsStr::new("-L"), nextest.as_os_str()],
+        cwd,
+        home,
+        128 * 1024,
+    )?;
+    let output = std::str::from_utf8(&output).map_err(|_| unproved())?;
+    let mut dependencies = output.lines().skip(1).peekable();
+    if dependencies.peek().is_none()
+        || !dependencies.all(|line| {
+            line.trim()
+                .split_once(" (compatibility version ")
+                .is_some_and(|(name, _)| {
+                    name.starts_with("/usr/lib/") || name.starts_with("/System/Library/")
+                })
+        })
+    {
+        return Err(unproved());
+    }
+    Ok(())
 }
 
 impl Material {
