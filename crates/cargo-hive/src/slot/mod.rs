@@ -1873,7 +1873,7 @@ fn step_check(
             proof.release_output_locks();
             let parent = runner_instance(&fence.runner);
             let cancel = || cancelled() || parent_instance().as_ref().ok() != Some(&parent);
-            let seed = crate::cli::initial_seed_for_slot(
+            let (seed, ownership) = crate::cli::initial_seed_for_slot(
                 state,
                 &proof,
                 evidence,
@@ -1901,6 +1901,9 @@ fn step_check(
             candidate.slots[index].producer = producer.clone();
             inspect_prepared_checkout(&candidate, &snapshot, index, &commit)?;
             fence.update(&snapshot, |slot| {
+                if !ownership.is_current(state) {
+                    return Err(producer_fence_refusal());
+                }
                 slot.producer = producer;
                 prepare_stage(slot, AttemptStage::CheckoutVerified)
             })?;

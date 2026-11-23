@@ -1351,6 +1351,7 @@ enum CheckoutGcError {
 }
 
 struct CheckoutGc {
+    registry: Registry,
     fs: Box<dyn platform::Fs>,
     cfg: Config,
     snapshot: Snapshot,
@@ -1519,6 +1520,7 @@ impl CheckoutGc {
             .filter(|p| p != &row.path && p.starts_with(&row.path))
             .collect();
         Ok(Self {
+            registry: reg,
             fs: platform.fs,
             cfg,
             snapshot,
@@ -1598,6 +1600,7 @@ impl SlotGcRefusal {
 #[derive(Debug)]
 pub(crate) enum SlotGcFailure {
     Setup,
+    RootScope,
     Discovery {
         checkout_faults: Vec<WalkFault>,
         target_faults: Vec<WalkFault>,
@@ -1606,12 +1609,12 @@ pub(crate) enum SlotGcFailure {
     Run(checkout::EvidencedCheckoutReport),
 }
 
-pub(crate) fn checkout_gc_for_slot(
+fn slot_output_inputs(
     state: &State,
     path: &Path,
     expected: &[checkout::RequiredRoot],
     cancel: &(dyn Fn() -> bool + Sync),
-) -> Result<SlotGcReport, SlotGcRefusal> {
+) -> Result<(CheckoutGc, TargetScan), SlotGcRefusal> {
     let refuse = |detail: &str, evidence| SlotGcRefusal {
         expected: expected.to_vec(),
         reason: Refusal {
@@ -1689,16 +1692,81 @@ pub(crate) fn checkout_gc_for_slot(
             )
         });
     }
+    Ok((operation, scan))
+}
+
+#[derive(Debug)]
+pub(crate) struct SlotOutputScope {
+    pub(crate) registry: Registry,
+    pub(crate) config: Config,
+}
+
+impl SlotOutputScope {
+    pub(crate) fn is_current(&self, state: &State) -> bool {
+        state
+            .read_regular_bounded::<Registry>(registry::FILE, cargo_hive_state::slots::MAX_BYTES)
+            .is_ok_and(|registry| registry == self.registry)
+            && state
+                .slot_config()
+                .is_ok_and(|config| config == self.config)
+    }
+}
+
+pub(crate) fn verify_slot_output_scope(
+    state: &State,
+    path: &Path,
+    expected: &[checkout::RequiredRoot],
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<SlotOutputScope, SlotGcRefusal> {
+    let (operation, scan) = slot_output_inputs(state, path, expected, cancel)?;
+    if !checkout::verify_root_scope(&operation.input(&scan), expected, cancel) {
+        let interrupted = cancel();
+        return Err(SlotGcRefusal {
+            expected: expected.to_vec(),
+            reason: Refusal {
+                kind: if interrupted { "error" } else { "refusal" },
+                path: None,
+                detail: "Could not prove exclusive ownership of both slot output roles.".into(),
+                code: if interrupted { 130 } else { 1 },
+            },
+            evidence: Box::new(SlotGcFailure::RootScope),
+        });
+    }
+    Ok(SlotOutputScope {
+        registry: operation.registry,
+        config: operation.cfg,
+    })
+}
+
+pub(crate) fn checkout_gc_for_slot(
+    state: &State,
+    path: &Path,
+    expected: &[checkout::RequiredRoot],
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<SlotGcReport, SlotGcRefusal> {
+    let (operation, scan) = slot_output_inputs(state, path, expected, cancel)?;
+    let refusal = |evidence, interrupted| SlotGcRefusal {
+        expected: expected.to_vec(),
+        reason: Refusal {
+            kind: if interrupted { "error" } else { "refusal" },
+            path: None,
+            detail: if interrupted {
+                "gc was cancelled"
+            } else {
+                "scoped cleanup could not prove completion for both Cargo output roots"
+            }
+            .into(),
+            code: if interrupted { 130 } else { 1 },
+        },
+        evidence: Box::new(SlotGcFailure::Run(evidence)),
+    };
     let mut evidence = checkout::run_with_evidence(&operation.input(&scan), expected, cancel);
     if evidence.report.cancelled || cancel() {
         evidence.report.cancelled = true;
-        return Err(cancelled(SlotGcFailure::Run(evidence)));
+        return Err(refusal(evidence, true));
     }
     let Some(completed) = evidence.complete_roots().cloned() else {
-        return Err(refuse(
-            "scoped cleanup could not prove completion for both Cargo output roots",
-            SlotGcFailure::Run(evidence),
-        ));
+        return Err(refusal(evidence, false));
     };
     Ok(SlotGcReport {
         expected: evidence.expected().to_vec(),
@@ -2475,7 +2543,7 @@ pub(crate) fn initial_seed_for_slot(
     evidence: cargo_hive_state::slots::EmptyEpoch,
     generation: u64,
     cancel: &(dyn Fn() -> bool + Sync),
-) -> Result<cargo_hive_state::slots::SeedEvidence, &'static str> {
+) -> Result<(cargo_hive_state::slots::SeedEvidence, SlotOutputScope), &'static str> {
     use cargo_hive_state::slots::{
         FileIdentity, OutputRoots, RootExpectation, RootProof, SeedEvidence, VerifiedRoot,
     };
@@ -2495,28 +2563,16 @@ pub(crate) fn initial_seed_for_slot(
             presence: checkout::RootPresence::InitiallyAbsent,
         }
     });
-    // These roots are positively absent. The scoped driver performs no deletion here,
-    // but independently confirms both exact roles and exclusive resolver ownership.
-    let scoped =
-        checkout_gc_for_slot(state, &proof.path, &expected, cancel).map_err(|_| refused)?;
-    if scoped.completed != expected
-        || scoped.expected != expected
-        || scoped.report.failed
-        || scoped.report.cancelled
-        || cancel()
-    {
-        return Err(refused);
-    }
+    let scope =
+        verify_slot_output_scope(state, &proof.path, &expected, cancel).map_err(|_| refused)?;
     let max_bytes = cargo_hive_state::slots::MAX_BYTES;
-    let reg = state
-        .read_regular_bounded(registry::FILE, max_bytes)
-        .map_err(|_| refused)?;
-    let cfg = state.slot_config().map_err(|_| refused)?;
+    let reg = &scope.registry;
+    let cfg = &scope.config;
     cargo_hive_state::window_days(cfg.gc_window_days).map_err(|_| refused)?;
     let caps = state
         .read_regular_bounded(cargo_hive_doctor::CAPABILITIES_FILE, max_bytes)
         .map_err(|_| refused)?;
-    let found = find_checkout_complete(&reg, &cfg, &proof.path, cancel).map_err(|_| refused)?;
+    let found = find_checkout_complete(reg, cfg, &proof.path, cancel).map_err(|_| refused)?;
     let toolchain = cargo_hive_cargo::toolchain::resolve_toolchain_until(&proof.path, cancel)
         .map_err(|_| refused)?;
     for cap in [
@@ -2533,11 +2589,13 @@ pub(crate) fn initial_seed_for_slot(
     let destination = cargo_hive_seed::place::SlotDestination {
         target: path,
         checkout_identity: evidence.epoch.checkout.directory,
+        registry: reg,
+        config: cfg,
     };
     let outcome = run_selected_seed(
         state,
-        &reg,
-        &cfg,
+        reg,
+        cfg,
         &caps,
         &selected,
         Some(&destination),
@@ -2573,26 +2631,36 @@ pub(crate) fn initial_seed_for_slot(
     {
         return Err(refused);
     }
-    initialize_seed_locks(state, path, identity, &outcome.placed, cancel)?;
+    if !scope.is_current(state) {
+        return Err(refused);
+    }
+    initialize_seed_locks(state, &scope, path, identity, &outcome.placed, cancel)?;
+    if !scope.is_current(state) {
+        return Err(refused);
+    }
     let root = RootExpectation::Present {
         root: VerifiedRoot {
             path: path.clone(),
             identity,
         },
     };
-    Ok(SeedEvidence {
-        evidence,
-        generation,
-        final_roots: OutputRoots {
-            target: root.clone(),
-            build: root,
+    Ok((
+        SeedEvidence {
+            evidence,
+            generation,
+            final_roots: OutputRoots {
+                target: root.clone(),
+                build: root,
+            },
+            registry_units: count,
         },
-        registry_units: count,
-    })
+        scope,
+    ))
 }
 
 fn initialize_seed_locks(
     state: &State,
+    scope: &SlotOutputScope,
     root: &Path,
     root_id: cargo_hive_state::slots::FileIdentity,
     placed: &[cargo_hive_seed::place::SeededUnit],
@@ -2660,6 +2728,7 @@ fn initialize_seed_locks(
             owner_directory(root).is_ok_and(|meta| FileIdentity::of(&meta) == root_id)
                 && owner_directory(&profile).is_ok_and(|meta| FileIdentity::of(&meta) == identity)
                 && profile.canonicalize().as_ref().ok() == Some(&profile)
+                && scope.is_current(state)
                 && !cancel()
         };
         if identity.dev != root_id.dev || !checked() {

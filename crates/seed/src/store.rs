@@ -211,9 +211,28 @@ fn remove_aged(path: &Path, is_dir: bool) -> Result<(), String> {
 }
 
 pub fn read(state: &State) -> Result<StoreFile, StateError> {
-    let mut file: StoreFile = state.read_bounded(STORE_FILE, MAX_STORE_BYTES)?;
+    let file = state.read_bounded(STORE_FILE, MAX_STORE_BYTES)?;
+    retain_present(state, file, &|| false)
+}
+
+pub(crate) fn read_for_slot(
+    state: &State,
+    cancel: &dyn Fn() -> bool,
+) -> Result<StoreFile, StateError> {
+    let file = state.read_regular_bounded(STORE_FILE, MAX_STORE_BYTES)?;
+    retain_present(state, file, cancel)
+}
+
+fn retain_present(
+    state: &State,
+    mut file: StoreFile,
+    cancel: &dyn Fn() -> bool,
+) -> Result<StoreFile, StateError> {
     let mut units = Vec::with_capacity(file.units.len());
     for row in file.units.drain(..) {
+        if cancel() {
+            return Err(StateError::Cancelled);
+        }
         if directory_present(&entry_dir(state, &row))? {
             units.push(row);
         }

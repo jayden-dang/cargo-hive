@@ -2199,6 +2199,25 @@ impl crate::State {
         Ok(Self { root })
     }
 
+    /// Shares the existing, positively identified store lock for a guarded seed.
+    pub fn slot_store_shared_or_cancelled(
+        &self,
+        cancel: impl FnMut() -> bool,
+    ) -> Result<crate::StoreLock, StateError> {
+        use cargo_hive_platform::flock::{FlockError, shared_or_cancelled};
+        let path = self.root.join("store.lock");
+        owner_directory(&self.root).map_err(|err| io_err(&path, err))?;
+        let file = open_owner_state_lock(&path).map_err(|err| io_err(&path, err))?;
+        let guard = shared_or_cancelled(&file, cancel).map_err(|err| match err {
+            FlockError::Cancelled => StateError::Cancelled,
+            FlockError::Io(err) => io_err(&path, err),
+        })?;
+        Ok(crate::StoreLock {
+            _guard: guard,
+            _file: file,
+        })
+    }
+
     /// Uses the ordinary state lock through checked independent opens.
     pub fn slot_locked_or_cancelled<T>(
         &self,

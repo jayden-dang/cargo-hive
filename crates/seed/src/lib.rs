@@ -290,7 +290,7 @@ pub fn run_prefilled_slot_seed(
         findings: Vec::new(),
         store_lock: ctx
             .state
-            .store_shared_or_cancelled(cancel)
+            .slot_store_shared_or_cancelled(cancel)
             .map_err(Error::State)?,
     };
     run_clone_selected(
@@ -347,7 +347,11 @@ fn run_clone_selected(
         findings.push(("store.tag".to_string(), Some(tag.clone()), detail));
         return Ok(from_fill(ctx, &filled, findings, false, 0));
     }
-    let stored = store::read(ctx.state).map_err(Error::State)?;
+    let stored = match slot {
+        Some(_) => store::read_for_slot(ctx.state, cancel),
+        None => store::read(ctx.state),
+    }
+    .map_err(Error::State)?;
     // A guarded seed only uses the existing store. It never reads donor checkouts.
     let lane_lock = slot
         .is_none()

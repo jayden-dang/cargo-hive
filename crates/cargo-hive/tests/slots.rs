@@ -4882,6 +4882,144 @@ fn slot_seed_refuses_a_foreign_resolver_without_creating_the_target() {
 }
 
 #[test]
+fn guarded_seed_refuses_a_fifo_store_without_opening_it() {
+    let (fixture, _registry, pool_root) = registry_seed_pool();
+    let (out, initialized) = fixture.init_at(&pool_root);
+    assert!(out.status.success());
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let target = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap()).join("target");
+    let store = fixture
+        .hive
+        .home
+        .path
+        .join(cargo_hive_seed::store::STORE_FILE);
+    fs::remove_file(&store).unwrap();
+    assert!(
+        fixture
+            .hive
+            .command_with(Path::new("/usr/bin/mkfifo"), &["-m", "600"])
+            .arg(&store)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let key = fixture._repo_dir.path.join("fifo-seed-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let mut guide = packaged_take_command(&fixture, pool, &head, &key, "take-seeded", "0")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let until = Instant::now() + Duration::from_secs(8);
+    while guide.try_wait().unwrap().is_none() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let promptly_refused = guide.try_wait().unwrap().is_some();
+    if !promptly_refused {
+        // SAFETY: this fixture created the dedicated local process group.
+        unsafe {
+            libc::kill(-(guide.id() as i32), libc::SIGKILL);
+        }
+    }
+    let out = common::wait_within(guide, Duration::from_secs(3));
+    assert!(
+        promptly_refused,
+        "the seeded guide blocked opening a nonregular store"
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!target.exists());
+}
+
+#[test]
+fn guarded_seed_rechecks_the_registry_after_waiting_for_the_store_lock() {
+    let (fixture, _registry, pool_root) = registry_seed_pool();
+    let (out, initialized) = fixture.init_at(&pool_root);
+    assert!(out.status.success());
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let target = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap()).join("target");
+    let foreign = init_repo(&fixture._repo_dir.path.join("late-registered-owner"), "");
+    fs::create_dir(foreign.join(".cargo")).unwrap();
+    fs::write(
+        foreign.join(".cargo/config.toml"),
+        format!("[build]\ntarget-dir = {:?}\n", target),
+    )
+    .unwrap();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let key = fixture._repo_dir.path.join("late-seed-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let wrapper = fixture._repo_dir.path.join("identify-seed-child");
+    let pid_file = fixture._repo_dir.path.join("seed-child-pid");
+    fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+if [ "$1" = slot ] && [ "$2" = step-check ]; then printf '%s\n' "$$" > "$HIVE_TEST_PID"; fi
+exec "$HIVE_TEST_BINARY" "$@"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    let state = cargo_hive_state::State::open_at(fixture.hive.home.path.clone()).unwrap();
+    let guard = state.try_store_exclusive().unwrap().unwrap();
+    let mut guide =
+        packaged_take_with_binary(&fixture, pool, &head, &key, "take-seeded", "0", &wrapper)
+            .env("HIVE_TEST_BINARY", env!("CARGO_BIN_EXE_cargo-hive"))
+            .env("HIVE_TEST_PID", &pid_file)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut waiting = false;
+    while guide.try_wait().unwrap().is_none() && Instant::now() < until {
+        if let Ok(pid) = fs::read_to_string(&pid_file) {
+            let probe = fixture
+                .hive
+                .command_with(
+                    Path::new("/usr/sbin/lsof"),
+                    &["-a", "-p", pid.trim(), "-Fn", "--"],
+                )
+                .arg(fixture.hive.home.path.join("store.lock"))
+                .output()
+                .unwrap();
+            if probe.status.success() {
+                waiting = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    if waiting {
+        register(&fixture.hive, &foreign);
+    }
+    drop(guard);
+    if !waiting {
+        // SAFETY: this fixture created the dedicated local process group.
+        unsafe {
+            libc::kill(-(guide.id() as i32), libc::SIGKILL);
+        }
+    }
+    let out = common::wait_within(guide, Duration::from_secs(10));
+    assert!(
+        waiting,
+        "did not witness the seed child holding the store-lock descriptor"
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        !target.exists(),
+        "the stale registry scope authorized a seed write"
+    );
+}
+
+#[test]
 fn the_packaged_guide_refuses_an_unfetched_tree_input_before_any_checkout() {
     let scratch = Scratch::new("slot-missing-blob");
     let origin = init_repo(&scratch.path.join("origin"), "");

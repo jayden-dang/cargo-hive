@@ -230,6 +230,20 @@ pub fn run(input: &CheckoutInput, cancel: &dyn Fn() -> bool) -> CheckoutReport {
 
 /// Proves both Cargo output roles against fresh discovery. A shared path is
 /// cleaned once and earns evidence for both roles only when their identities agree.
+/// Checks the exact output roles and exclusive resolver scope without cleanup effects.
+pub fn verify_root_scope(
+    input: &CheckoutInput<'_>,
+    expected: &[RequiredRoot],
+    cancel: &dyn Fn() -> bool,
+) -> bool {
+    if cancel() || input.scan.metadata_cache_hits != 0 || !input.scan.walk_faults.is_empty() {
+        return false;
+    }
+    let selected = select_targets(input.scan, input.checkout, input.nested);
+    let mut report = selection_report(input, &selected);
+    !report.failed && required_roots(input, &selected, expected, &mut report).is_some() && !cancel()
+}
+
 pub fn run_with_evidence(
     input: &CheckoutInput<'_>,
     expected: &[RequiredRoot],
