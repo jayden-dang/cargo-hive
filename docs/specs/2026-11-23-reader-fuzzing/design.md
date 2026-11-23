@@ -17,7 +17,7 @@ The implementation reuses production parsers, their current refusal types, and t
 2. Use format-specific truncation expectations; an empty hash remains NotCurrent and a complete JSONL record remains valid.
 3. Put fuzz-only adapters behind `cfg(fuzzing)`, with one shared production decoder per behavior. Do not bypass checks under that configuration.
 4. Include bounded hash/tag reads and declared Mach-O slice bounds as required input contracts, proven by failing regressions before implementation. Other discovered corrections require the same investigation and regression discipline.
-5. Run local campaigns serially and coordinate with ROAD-17 measurements. Keep production slot orchestration and shared Fs/process helpers outside the change.
+5. Run local acceptance with at most three concurrent single-target runners, each completing its full 600-second mutation budget after replay, and never overlap ROAD-17 timing measurements. The command without a selector still runs targets serially. Keep production slot orchestration and shared Fs/process helpers outside the change. Operator amendment: 2026-11-23, “Run three concurrently (recommended)”.
 
 ## Architecture
 
