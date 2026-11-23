@@ -258,6 +258,7 @@ pub struct ForegroundImage {
 #[derive(Clone, Copy)]
 pub enum ForegroundExec {
     Handoff,
+    Dispatcher,
     Writer,
 }
 
@@ -395,7 +396,7 @@ mod foreground {
 
         pub fn stopped_image(&self) -> io::Result<ForegroundImage> {
             self.current_child(libc::SSTOP)?;
-            let image = image(self.child.pid as i32, None)?;
+            let image = image(self.child.pid as i32, &[])?;
             self.current_child(libc::SSTOP)?;
             Ok(image)
         }
@@ -403,8 +404,7 @@ mod foreground {
         pub fn wait(
             self,
             limit: Duration,
-            writer_program: &std::path::Path,
-            environment_count: usize,
+            writer_images: &[(&std::path::Path, usize)],
             mut admit_exec: impl FnMut(ForegroundImage) -> Option<ForegroundExec>,
             mut cancelled: impl FnMut() -> bool,
         ) -> io::Result<ProcessInstance> {
@@ -416,7 +416,9 @@ mod foreground {
             }
             let deadline = Instant::now() + limit;
             let mut admitted = false;
-            let mut handoff = false;
+            let external = writer_images.len() == 2;
+            let mut last_stage = 0;
+            let mut observed = 0;
             loop {
                 self.check_guide(&mut cancelled, deadline)?;
                 let event = self.event()?;
@@ -426,25 +428,28 @@ mod foreground {
                             return Err(invalid("foreground executable observation was ambiguous"));
                         }
                         self.current_child(0)?;
-                        let image = image(pid, Some((writer_program, environment_count)))?;
+                        let image = image(pid, writer_images)?;
                         self.current_child(0)?;
-                        match admit_exec(image) {
-                            Some(ForegroundExec::Handoff) if !handoff && !admitted => {
-                                handoff = true;
-                            }
-                            Some(ForegroundExec::Writer) if !admitted => {
-                                admitted = true;
-                            }
-                            Some(ForegroundExec::Writer) if !handoff => {
-                                // The exec notification for env can be read after Cargo already exec'd.
-                                handoff = true;
-                            }
+                        let stage = match admit_exec(image) {
+                            Some(ForegroundExec::Handoff) => 0,
+                            Some(ForegroundExec::Dispatcher) if external => 1,
+                            Some(ForegroundExec::Writer) => 2,
                             _ => {
                                 return Err(invalid(
                                     "actual foreground exec differs from reviewed Cargo",
                                 ));
                             }
+                        };
+                        // A queued exec notification may expose a later image. Bound these
+                        // redundant observations by the fixed launcher → Cargo → writer chain.
+                        observed += 1;
+                        if stage < last_stage || observed > writer_images.len() + 1 {
+                            return Err(invalid(
+                                "foreground execution left its reviewed dispatch sequence",
+                            ));
                         }
+                        last_stage = stage;
+                        admitted = stage == 2;
                     }
                     if event.fflags & libc::NOTE_EXIT != 0 {
                         if !admitted || event.fflags & libc::NOTE_EXITSTATUS == 0 || event.data != 0
@@ -688,7 +693,7 @@ mod foreground {
 
     fn image(
         pid: i32,
-        writer_environment: Option<(&std::path::Path, usize)>,
+        writer_environments: &[(&std::path::Path, usize)],
     ) -> io::Result<ForegroundImage> {
         let cwd: libc::proc_vnodepathinfo = process_info(pid, libc::PROC_PIDVNODEPATHINFO)?;
         let cwd = cwd
@@ -750,7 +755,9 @@ mod foreground {
         }
         let environment = parse_environment(
             parts,
-            writer_environment.and_then(|(writer, count)| (writer == program).then_some(count)),
+            writer_environments
+                .iter()
+                .find_map(|(writer, count)| (*writer == program).then_some(*count)),
         )?;
         Ok(ForegroundImage {
             program,
@@ -1199,8 +1206,7 @@ impl ForegroundWatch {
     pub fn wait(
         self,
         _limit: std::time::Duration,
-        _writer_program: &std::path::Path,
-        _environment_count: usize,
+        _writer_images: &[(&std::path::Path, usize)],
         _admit_exec: impl FnMut(ForegroundImage) -> Option<ForegroundExec>,
         _cancelled: impl FnMut() -> bool,
     ) -> io::Result<ProcessInstance> {
