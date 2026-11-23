@@ -238,6 +238,7 @@ struct ExecutableReview {
     recipe: Recipe,
     package_id: String,
     inventory_sha256: String,
+    git_checkout_sha256: Option<String>,
     source_sha256: String,
     target: ExecutableTarget,
     behavior: ReviewedBehavior,
@@ -410,6 +411,10 @@ impl MaterializedPackage {
     ) -> Result<(), Refusal> {
         let unproved =
             || refused("A materialized executable is missing its exact sealed behavior review.");
+        let git_checkout_sha256 = match &self.origin {
+            Origin::Registry { .. } => None,
+            Origin::Git { tree_sha256, .. } => Some(tree_sha256.as_str()),
+        };
         for approval in &self.executables {
             super::check_cancelled()?;
             let mut references = scope.profile.graph_inputs.iter().filter_map(|input| {
@@ -448,6 +453,7 @@ impl MaterializedPackage {
                 || review.recipe != scope.recipe
                 || review.package_id != self.id
                 || review.inventory_sha256 != self.inventory_sha256
+                || review.git_checkout_sha256.as_deref() != git_checkout_sha256
                 || review.target != approval.target
                 || review.source_sha256 != digest(&source)?
                 || !matches!(

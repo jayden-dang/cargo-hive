@@ -5223,21 +5223,33 @@ fn the_guarded_producer_refuses_an_incomplete_registry_extraction_before_metadat
     exercise_materialized_dependency(DependencyFixture::IncompleteRegistry);
 }
 
+#[test]
+fn an_executable_review_of_the_old_git_tree_cannot_admit_a_changed_sibling() {
+    exercise_materialized_dependency(DependencyFixture::StaleBuildReview);
+}
+
 #[derive(Clone, Copy)]
 enum DependencyFixture {
     Registry,
     IncompleteRegistry,
     Git,
     ReviewedBuild,
+    StaleBuildReview,
 }
 
 fn exercise_materialized_dependency(scenario: DependencyFixture) {
     let git_dependency = matches!(
         scenario,
-        DependencyFixture::Git | DependencyFixture::ReviewedBuild
+        DependencyFixture::Git
+            | DependencyFixture::ReviewedBuild
+            | DependencyFixture::StaleBuildReview
     );
     let incomplete = matches!(scenario, DependencyFixture::IncompleteRegistry);
-    let reviewed_build = matches!(scenario, DependencyFixture::ReviewedBuild);
+    let reviewed_build = matches!(
+        scenario,
+        DependencyFixture::ReviewedBuild | DependencyFixture::StaleBuildReview
+    );
+    let stale_review = matches!(scenario, DependencyFixture::StaleBuildReview);
     let fixture = reviewed_pool_fixture(Some(if git_dependency {
         "pub fn answer() -> u32 { git_leaf::value() }\n"
     } else {
@@ -5257,7 +5269,7 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
         if reviewed_build {
             fs::write(
                 donor.join("build.rs"),
-                "fn main() { println!(\"cargo:rustc-env=ROAD17_REVIEWED_BUILD=ready\"); }\n",
+                "fn main() { println!(\"cargo:rustc-env=ROAD17_REVIEWED_BUILD={}\", include_str!(\"../shared.txt\")); }\n",
             )
             .unwrap();
             fs::write(
@@ -5267,7 +5279,7 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
             .unwrap();
             git(&donor, &["add", "build.rs"]);
         }
-        if matches!(scenario, DependencyFixture::Git) {
+        {
             let nested = donor.join("leaf");
             fs::create_dir(&nested).unwrap();
             fs::rename(donor.join("Cargo.toml"), nested.join("Cargo.toml")).unwrap();
@@ -5278,11 +5290,15 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
             )
             .unwrap();
             fs::write(donor.join("shared.txt"), "reviewed checkout-level data").unwrap();
-            fs::write(
-                nested.join("src/lib.rs"),
-                "pub fn value() -> u32 { include_str!(\"../../shared.txt\").len() as u32 }\n",
-            )
-            .unwrap();
+            if reviewed_build {
+                fs::rename(donor.join("build.rs"), nested.join("build.rs")).unwrap();
+            } else {
+                fs::write(
+                    nested.join("src/lib.rs"),
+                    "pub fn value() -> u32 { include_str!(\"../../shared.txt\").len() as u32 }\n",
+                )
+                .unwrap();
+            }
             git(&donor, &["add", "-A"]);
         }
         git(
@@ -5401,6 +5417,22 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
     let seal = fixture._repo_dir.path.join("external-recipe.json");
     let mut closure: Value = serde_json::from_slice(&fs::read(&seal).unwrap()).unwrap();
     let relative = root.strip_prefix(home).unwrap();
+    let reviewed_git_tree = git_revision.as_ref().map(|_| {
+        let git_checkout: PathBuf = relative.iter().take(4).collect();
+        fixture_inventory(&home.join(git_checkout), true)
+    });
+    if stale_review {
+        let checkout_root = root.parent().unwrap();
+        fs::write(
+            checkout_root.join("shared.txt"),
+            b"changed checkout-level data",
+        )
+        .unwrap();
+        assert_ne!(
+            Some(fixture_inventory(checkout_root, true)),
+            reviewed_git_tree
+        );
+    }
     let origin = if let Some(revision) = &git_revision {
         let git_checkout: PathBuf = relative.iter().take(4).collect();
         json!({"kind":"git", "revision":revision, "checkout":git_checkout, "tree_sha256":fixture_inventory(&home.join(&git_checkout), true)})
@@ -5423,6 +5455,7 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
         let bytes = serde_json::to_vec(&json!({
             "schema":1,"profile":{"id":"fixture","revision":1},"invocation":"check","recipe":"clippy",
             "package_id":package["id"],"inventory_sha256":fixture_inventory(root,true),
+            "git_checkout_sha256":reviewed_git_tree,
             "source_sha256":fixture_sha(&fs::read(root.join("build.rs")).unwrap()),
             "target":target,"behavior":"metadata_only_build_script"
         })).unwrap();
@@ -5465,6 +5498,18 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
         assert!(
             !marker.exists(),
             "Cargo metadata tried to re-extract a sealed package"
+        );
+        assert!(!checkout.join("target").exists());
+        return;
+    }
+    if stale_review {
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let refused: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(
+            refused["detail"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("exact sealed behavior review")),
+            "{refused}"
         );
         assert!(!checkout.join("target").exists());
         return;
