@@ -277,6 +277,52 @@ fn manifest(rel: &str) -> serde_json::Value {
     serde_json::from_str(&repo_file(rel)).unwrap_or_else(|e| panic!("{rel} is not JSON: {e}"))
 }
 
+#[cfg(unix)]
+#[test]
+fn slot_helper_requires_the_exact_installed_guide_version() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let helper = repo_root().join("plugin/skills/hive/scripts/slot-handoff.sh");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("hive-skill-{}-{nonce}", std::process::id()));
+    fs::create_dir(&path).unwrap();
+    let scratch = cargo_hive_platform::TempDir::adopt(path);
+    let binary = scratch.path().join("cargo-hive");
+    let version = env!("CARGO_PKG_VERSION");
+    let (family, patch) = version.rsplit_once('.').unwrap();
+    let other_patch = patch.parse::<u64>().unwrap() + 1;
+    for (body, accepted) in [
+        (format!("echo 'cargo-hive {version}'"), true),
+        (format!("echo 'cargo-hive {family}.{other_patch}'"), false),
+        (format!("echo 'cargo-hive {version} extra'"), false),
+        (format!("echo 'cargo-hive {version}'; echo"), false),
+        (format!("echo 'cargo-hive {version}'; exit 1"), false),
+    ] {
+        fs::write(
+            &binary,
+            format!("#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = --version ] || exit 2\n{body}\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let out = Command::new("bash")
+            .arg(&helper)
+            .arg("check-version")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.success(), accepted, "{body}");
+        assert!(out.stdout.is_empty());
+        if !accepted {
+            assert!(String::from_utf8_lossy(&out.stderr).contains("matching binary"));
+        }
+    }
+}
+
 #[test]
 fn manifest_versions_match_the_crate() {
     let crate_version = env!("CARGO_PKG_VERSION");
@@ -333,7 +379,8 @@ fn manifest_versions_match_the_crate() {
         ("plugin/.claude-plugin", &["plugin.json"][..]),
         ("plugin/.codex-plugin", &["plugin.json"][..]),
         ("plugin/skills", &["hive"][..]),
-        ("plugin/skills/hive", &["SKILL.md"][..]),
+        ("plugin/skills/hive", &["SKILL.md", "scripts"][..]),
+        ("plugin/skills/hive/scripts", &["slot-handoff.sh"][..]),
         (".claude-plugin", &["marketplace.json"][..]),
     ] {
         assert_eq!(entries_of(dir), want, "{dir}/ must hold exactly {want:?}");
