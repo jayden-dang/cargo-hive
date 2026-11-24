@@ -1,6 +1,6 @@
 //! Reviewed aggregate checkout tree evidence.
 
-use super::{Refusal, SourceStamp, digest, read_input_bounded, refused};
+use super::{Refusal, SourceStamp, digest, refused};
 use crate::slot::{canonical_worktree_path, check_cancelled, directory_stamp, git_error};
 use cargo_hive_cargo::git::Git;
 use cargo_hive_platform::{flock::open_owner_state_file, signals::cancelled, slot::sha256_reader};
@@ -101,6 +101,7 @@ fn checked_directories(
     path: &Path,
     device: u64,
     directories: &mut BTreeMap<PathBuf, SourceStamp>,
+    identities: &mut BTreeSet<slots::FileIdentity>,
 ) -> Result<(), Refusal> {
     for directory in path.ancestors() {
         if directories.contains_key(directory) {
@@ -113,25 +114,31 @@ fn checked_directories(
             return Err(tree_refusal());
         }
         let metadata = slots::owner_directory(directory).map_err(|_| tree_refusal())?;
-        if metadata.dev() != device {
+        let observation = stamp(&metadata);
+        if metadata.dev() != device || !identities.insert(identity(&observation)) {
             return Err(tree_refusal());
         }
-        directories.insert(directory.to_path_buf(), stamp(&metadata));
+        directories.insert(directory.to_path_buf(), observation);
     }
     Ok(())
 }
 
+fn identity(((identity, ..), ..): &SourceStamp) -> slots::FileIdentity {
+    *identity
+}
+
 fn verified_file(
     path: &Path,
-    executable: bool,
+    executable: Option<bool>,
     device: u64,
+    limit: u64,
     budget: &mut u64,
 ) -> Result<(String, SourceStamp), Refusal> {
     let mut file = open_owner_state_file(path).map_err(|_| tree_refusal())?;
     let metadata = file.metadata().map_err(|_| tree_refusal())?;
     if metadata.dev() != device
-        || metadata.len() > FILE_LIMIT
-        || executable != (metadata.mode() & 0o100 != 0)
+        || metadata.len() > limit
+        || executable.is_some_and(|mode| mode != (metadata.mode() & 0o100 != 0))
     {
         return Err(tree_refusal());
     }
@@ -173,6 +180,92 @@ fn check_absent(path: &Path) -> Result<PathBuf, Refusal> {
     Err(tree_refusal())
 }
 
+struct TreeSnapshot<'a> {
+    root: &'a Path,
+    device: u64,
+    directories: BTreeMap<PathBuf, SourceStamp>,
+    files: BTreeMap<PathBuf, SourceStamp>,
+    identities: BTreeSet<slots::FileIdentity>,
+    absences: Vec<PathBuf>,
+    remaining_bytes: u64,
+}
+
+impl<'a> TreeSnapshot<'a> {
+    fn open(root: &'a Path) -> Result<Self, Refusal> {
+        let metadata = slots::owner_directory(root).map_err(|_| tree_refusal())?;
+        if root.canonicalize().ok().as_deref() != Some(root) {
+            return Err(tree_refusal());
+        }
+        let observation = stamp(&metadata);
+        Ok(Self {
+            root,
+            device: metadata.dev(),
+            directories: BTreeMap::from([(root.to_path_buf(), observation)]),
+            files: BTreeMap::new(),
+            identities: BTreeSet::from([identity(&observation)]),
+            absences: Vec::new(),
+            remaining_bytes: CONTENT_LIMIT,
+        })
+    }
+
+    fn observe_parents(&mut self, parent: &Path) -> Result<(), Refusal> {
+        if !parent.starts_with(self.root) {
+            return Err(tree_refusal());
+        }
+        checked_directories(
+            parent,
+            self.device,
+            &mut self.directories,
+            &mut self.identities,
+        )
+    }
+
+    fn file(
+        &mut self,
+        path: PathBuf,
+        executable: Option<bool>,
+        limit: u64,
+    ) -> Result<String, Refusal> {
+        self.observe_parents(path.parent().ok_or_else(tree_refusal)?)?;
+        if path.canonicalize().ok().as_ref() != Some(&path) {
+            return Err(tree_refusal());
+        }
+        let (hash, observation) = verified_file(
+            &path,
+            executable,
+            self.device,
+            limit,
+            &mut self.remaining_bytes,
+        )?;
+        if !self.identities.insert(identity(&observation)) {
+            return Err(tree_refusal());
+        }
+        self.files.insert(path, observation);
+        Ok(hash)
+    }
+
+    fn absent(&mut self, path: PathBuf) -> Result<(), Refusal> {
+        self.observe_parents(&check_absent(&path)?)?;
+        self.absences.push(path);
+        Ok(())
+    }
+
+    fn verify(self) -> Result<(), Refusal> {
+        for (path, observation) in self.directories.iter().chain(&self.files) {
+            check_cancelled()?;
+            let metadata = fs::symlink_metadata(path).map_err(|_| tree_refusal())?;
+            if stamp(&metadata) != *observation {
+                return Err(tree_refusal());
+            }
+        }
+        for path in self.absences {
+            check_cancelled()?;
+            check_absent(&path)?;
+        }
+        Ok(())
+    }
+}
+
 pub(super) fn verify_whole_tree(
     root: &Path,
     commit: &str,
@@ -183,16 +276,8 @@ pub(super) fn verify_whole_tree(
         .slot_read_only(&["ls-tree", "-r", "-z", "--full-tree", commit], TREE_LIMIT)
         .map_err(|err| git_error(root, err))?;
     let entries = tree_entries(&listing, manifest.entries, commit.len())?;
-    let root_meta = slots::owner_directory(root).map_err(|_| tree_refusal())?;
-    let device = root_meta.dev();
-    if root.canonicalize().ok().as_deref() != Some(root) {
-        return Err(tree_refusal());
-    }
-    let mut directories = BTreeMap::from([(root.to_path_buf(), stamp(&root_meta))]);
-    let mut files = BTreeMap::new();
-    let mut absences = Vec::new();
+    let mut snapshot = TreeSnapshot::open(root)?;
     let mut untracked_variants = variants.clone();
-    let mut budget = CONTENT_LIMIT;
 
     // Reviewers build this independently from the Git blob bytes. A declared
     // mutable row keeps its exact committed path, mode and object ID, but leaves
@@ -203,55 +288,35 @@ pub(super) fn verify_whole_tree(
         let path = root.join(entry.path);
         evidence.extend_from_slice(entry.row);
         evidence.push(0);
-        let variant = untracked_variants.remove(entry.path);
-        if variant == Some(None) {
-            let parent = check_absent(&path)?;
-            if !parent.starts_with(root) {
-                return Err(tree_refusal());
+        match untracked_variants.remove(entry.path) {
+            Some(None) => snapshot.absent(path)?,
+            Some(Some(expected)) => {
+                if snapshot.file(path, Some(entry.executable), FILE_LIMIT)? != expected {
+                    return Err(tree_refusal());
+                }
             }
-            checked_directories(&parent, device, &mut directories)?;
-            absences.push(path);
-        } else {
-            checked_directories(
-                path.parent().ok_or_else(tree_refusal)?,
-                device,
-                &mut directories,
-            )?;
-            if path.canonicalize().ok().as_ref() != Some(&path) {
-                return Err(tree_refusal());
-            }
-            let (hash, snapshot) = verified_file(&path, entry.executable, device, &mut budget)?;
-            files.insert(path, snapshot);
-            match variant {
-                Some(Some(expected)) if expected == hash => {}
-                Some(_) => return Err(tree_refusal()),
-                None => evidence.extend_from_slice(hash.as_bytes()),
+            None => {
+                let hash = snapshot.file(path, Some(entry.executable), FILE_LIMIT)?;
+                evidence.extend_from_slice(hash.as_bytes());
             }
         }
         evidence.push(0);
     }
-
-    for (path, snapshot) in directories.iter().chain(&files) {
-        check_cancelled()?;
-        let metadata = fs::symlink_metadata(path).map_err(|_| tree_refusal())?;
-        if stamp(&metadata) != *snapshot {
-            return Err(tree_refusal());
-        }
-    }
-    for path in absences {
-        check_cancelled()?;
-        check_absent(&path)?;
-    }
     for (path, expected) in untracked_variants {
         check_cancelled()?;
-        let actual = read_input_bounded(&root.join(path), slots::MAX_BYTES as usize)?
-            .as_deref()
-            .map(digest)
-            .transpose()?;
-        if actual != expected {
+        if !super::relative(&path) {
             return Err(tree_refusal());
         }
+        let path = root.join(path);
+        if let Some(expected) = expected {
+            if snapshot.file(path, None, slots::MAX_BYTES)? != expected {
+                return Err(tree_refusal());
+            }
+        } else {
+            snapshot.absent(path)?;
+        }
     }
+    snapshot.verify()?;
     if digest(&evidence)? != manifest.sha256 {
         return Err(tree_refusal());
     }
@@ -261,8 +326,8 @@ pub(super) fn verify_whole_tree(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::{
-        ENTRY_LIMIT, FILE_LIMIT, TREE_LIMIT, TreeManifest, tree_entries, verified_file,
-        verify_whole_tree,
+        ENTRY_LIMIT, FILE_LIMIT, TREE_LIMIT, TreeManifest, TreeSnapshot, identity, stamp,
+        tree_entries, verified_file, verify_whole_tree,
     };
     use crate::slot::profile::digest;
     use cargo_hive_platform::host_fs;
@@ -468,14 +533,52 @@ mod tests {
         fs::write(&leaf, b"1234").unwrap();
         let device = fs::metadata(&leaf).unwrap().dev();
         let mut remaining = 4;
-        assert!(verified_file(&leaf, false, device, &mut remaining).is_ok());
+        assert!(verified_file(&leaf, Some(false), device, FILE_LIMIT, &mut remaining).is_ok());
         assert_eq!(remaining, 0);
-        assert!(verified_file(&leaf, false, device, &mut remaining).is_err());
+        assert!(verified_file(&leaf, Some(false), device, FILE_LIMIT, &mut remaining).is_err());
 
         let file = OpenOptions::new().write(true).open(&leaf).unwrap();
         file.set_len(FILE_LIMIT + 1).unwrap();
         let mut remaining = FILE_LIMIT + 1;
-        assert!(verified_file(&leaf, false, device, &mut remaining).is_err());
+        assert!(verified_file(&leaf, Some(false), device, FILE_LIMIT, &mut remaining).is_err());
         assert_eq!(remaining, FILE_LIMIT + 1);
+    }
+
+    #[test]
+    fn a_distinct_tree_name_cannot_reuse_an_observed_directory_identity() {
+        let scratch = host_fs()
+            .temp_dir(Path::new("/private/tmp"), "hive-it-slot-tree-alias-")
+            .unwrap();
+        let root = scratch.path();
+        let directory = root.join("Directory");
+        fs::create_dir(&directory).unwrap();
+        let mut snapshot = TreeSnapshot::open(root).unwrap_or_else(|_| panic!("fixture root"));
+        snapshot
+            .observe_parents(&directory)
+            .unwrap_or_else(|_| panic!("fixture directory"));
+        assert!(
+            snapshot.observe_parents(&directory).is_ok(),
+            "an observed spelling can be reused"
+        );
+
+        // Model the namespace observation where an alias retained a different spelling.
+        let observation = snapshot.directories.remove(&directory).unwrap();
+        snapshot
+            .directories
+            .insert(root.join("directory"), observation);
+        assert!(
+            snapshot.observe_parents(&directory).is_err(),
+            "a second name for the same physical directory must refuse"
+        );
+
+        let source = root.join("Source");
+        fs::write(&source, b"input").unwrap();
+        let observation = stamp(&fs::metadata(&source).unwrap());
+        snapshot.files.insert(root.join("source"), observation);
+        snapshot.identities.insert(identity(&observation));
+        assert!(
+            snapshot.file(source, Some(false), FILE_LIMIT).is_err(),
+            "a second name for the same physical file must refuse"
+        );
     }
 }
