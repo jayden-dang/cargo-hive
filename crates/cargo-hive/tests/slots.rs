@@ -3323,7 +3323,12 @@ fn locks_or_checkout_evidence_without_a_record_remain_held() {
             assert_eq!(result["kind"], "held");
             assert!(result.to_string().contains("slots.json"), "{result}");
             assert!(result.to_string().contains("quarantine"), "{result}");
-            assert!(result.to_string().contains("cargo hive seed"), "{result}");
+            assert!(
+                result["next_action"]
+                    .as_str()
+                    .is_some_and(|action| action.contains("verified seed fallback")),
+                "{result}"
+            );
         }
         assert!(!fixture.file().exists());
         assert_eq!(fs::read(bytes).unwrap(), b"prior work");
@@ -4526,7 +4531,7 @@ fn recovery_keeps_both_slots_held_when_their_output_provenance_is_lost() {
         status["next_action"]
             .as_str()
             .unwrap()
-            .contains("cargo hive seed")
+            .contains("verified seed fallback")
     );
     let (out, refused) = fixture.init();
     assert_eq!(out.status.code(), Some(1), "{refused}");
@@ -7760,7 +7765,7 @@ fn status_holds_an_unrecorded_checkout_and_a_replaced_lock() {
         status["next_action"]
             .as_str()
             .unwrap()
-            .contains("cargo hive seed")
+            .contains("verified seed fallback")
     );
     assert_eq!(fs::read(fixture.file()).unwrap(), saved);
     assert_eq!(fs::read(path.join("unfinished")).unwrap(), b"preserve this");
