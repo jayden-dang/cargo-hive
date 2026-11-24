@@ -56,6 +56,8 @@ Design: ./design.md
 | `crates/cargo-hive/src/slot/fallback.rs` | Verify a separate fresh checkout and both output roles before guarded registry-only seed placement. |
 | `crates/cargo-hive/src/slot/profile.rs` | New effective producer, certified graph/consumer and mtime evidence checks. |
 | `crates/cargo-hive/src/slot/admission.rs` | Validate bounded sealed profile closure evidence and approved data variants. |
+| `crates/cargo-hive/src/slot/admission/checkout.rs` | Verify complete bounded real-workspace tree identities, regular bytes and approved mutable variants. |
+| `crates/cargo-hive/src/slot/generated.rs` | Bind named Cargo-generated inputs to their reviewed producer, consumers and retained unit witnesses. |
 | `crates/cargo-hive/src/slot/result.rs` | New sanitized JSON projection and existing Receipt audit projection. |
 | `crates/gc/src/checkout.rs` | Expose positive root-lock/completion evidence beside the existing report. |
 | `crates/gc/src/debug_map.rs` | Read strict checkout GC candidates through a checked regular descriptor. |
@@ -401,23 +403,41 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 ### Task 10: Measure a real repeatable warm handoff against seeded work
 
 **Files:**
+- Create: `crates/cargo-hive/src/slot/admission/checkout.rs`
+- Create: `crates/cargo-hive/src/slot/generated.rs`
+- Modify: `crates/cargo-hive/src/slot/admission.rs`
+- Modify: `crates/cargo-hive/src/slot/profile.rs`
+- Modify: `crates/cargo-hive/src/slot/mod.rs`
+- Modify: `crates/cargo-hive/src/slot/prepare.rs`
+- Modify: `crates/state/src/slots.rs`
+- Modify: `crates/core/src/unit_path.rs`
+- Modify: `crates/gc/src/checkout.rs`
+- Modify: `crates/cargo-hive/src/cli.rs`
+- Modify: `crates/platform/src/slot.rs`
+- Modify: `crates/cargo-hive/tests/slots.rs`
+- Modify: `crates/cargo-hive/tests/slot_inputs.rs`
+- Modify: `crates/cargo-hive/tests/checkout_gc.rs`
 - Create: `docs/specs/2026-11-23-warm-slot-pool/verification.md`
 
-**Reuse:** rung 2 — extend `plugin/skills/hive/SKILL.md` and reuse the scorecard's matched controls and existing guide/CLI cross-checks.
+**Reuse:** rung 2 — reuse the sealed native profile, checked producer, Cargo unit paths and strict locked GC seams for qualification. Reuse the scorecard's matched controls and the packaged guide for measurement.
 
 **Interfaces:**
-- Consumes: Task 9 normal guide and seed paths, the release build's real scoped GC, and an operator-supplied read-only klynt workspace/commit source and reviewed profile, replicated into an isolated proof area with no default source path.
-- Produces: reproducible runbook and future dated raw paired results, receipt paths, environment details and explicit pass/fail for the two Draft performance thresholds. Reuse the guide as a caller without modifying it here.
+- Consumes: Task 7 sealed profile and output fences, Task 8 recovery and Task 9 normal guide and seed paths. The operator supplies the read-only Klynt workspace, exact endpoints and reviewed profile, replicated into an isolated proof area with no default source path.
+- Produces: bounded complete tree and exact recipe verification, durable named generated-input evidence and strict locked GC custody, followed by the reproducible runbook and dated results for the two Draft performance thresholds. Reuse the guide as a caller without modifying it here.
 
-**Depends-on:** Task 9.
+**Depends-on:** Task 7 for independent qualification components. Integrating generated-input evidence into the lease depends on Task 8. The real installed handoff and measurement depend on Task 9 and positive qualification.
 
+- [ ] Prove a bounded whole-tree source verifier on both Cargo layouts, including exact immutable bytes and admitted edits. Cover both real endpoint inventories without weakening profile validation for earlier callers.
+- [ ] Prove named generated Rust input and native archive custody through a real guard and strict GC, including wrong unit, same-mtime changes, identity replacement and overlapping cleanup refusals. Start with actual serde_core and one pinned native archive case. Account for every selected producer and consumer before enabling any real invocation.
+- [ ] Verify the exact workspace graph and selected target modes, project Nextest configuration and store paths, offline SQLx cache and dotenv probes, and side effects of every reviewed executable and required subprocess. Exercise both Nextest selections without running any test body. Refuse unproved behavior before the real profile can publish readiness.
+- [ ] Qualify the complete real installed path at the exact release-mode revision before timing. Demonstrate the ordinary handoff and independent fresh seeded baseline in scratch.
 - [ ] Write the manual acceptance steps in the runbook. Require five valid matched pairs, alternating arm order, a fixed first command and edit, and successive warm handoffs. Define missing actual GC, non-eligible seed, mismatched fixtures and failed/void samples before measuring.
 - [ ] Drive the installed entry points on the scratch klynt copy for the owner-supplied actual workspace lint, compile-only test build and package-scoped `gateways` commands. Record their exact flags. Cross a routine tracked Rust edit with dependency inputs fixed and verify the subsequent clean ready and unrelated reuse. A synthetic fixture alone cannot meet this acceptance. Use release-mode hive and include distinct fresh worktree plus seed in the baseline. Time every warm reservation and handoff step, not just Cargo. Preserve sample receipts and integer milliseconds outside the hive receipt under the future runbook's gitignored dated proof directory. The real source checkout stays read-only.
 - [ ] Verify at least four warm end-to-end wins, the warm edit median at most 110% of fresh seeded median, and actual unaffected-unit reuse. Report spread, environment and voids. If a required case fails, keep the profile unsupported and reopen the proposed acceptance instead of advertising proven speed.
 - [ ] At authorized implementation close, run the documented gate under installed `RUSTUP_TOOLCHAIN=1.97.1` and `RUSTUP_TOOLCHAIN=1.100.0` with the Global Constraints scratch isolation and retain the outputs. Do not extend testing outside the repository's scratch/supported proof rules.
 - [ ] Commit the reproducible runbook and evidence reference as `docs(slot): record warm handoff acceptance procedure`.
 
-_Requirements: SLOTS-5.1, SLOTS-5.2_
+_Requirements: SLOTS-1.6, SLOTS-2.2, SLOTS-3.4, SLOTS-3.5, SLOTS-3.7, SLOTS-3.8, SLOTS-3.9, SLOTS-5.1, SLOTS-5.2_
 
 ---
 
