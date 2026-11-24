@@ -524,8 +524,8 @@ impl MaterializedPackage {
                         None,
                         ExecutableKind::CustomBuild,
                         ReviewedBehavior::MetadataOnlyBuildScript,
-                    )
-                    | (
+                    ) => review.source_sha256 != SERDE_CORE_BUILD_SCRIPT,
+                    (
                         None,
                         ExecutableKind::ProcMacro,
                         ReviewedBehavior::SealedInputsTokenTransform,
@@ -1880,6 +1880,84 @@ fn unique<'a>(values: impl Iterator<Item = &'a str>) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the isolated pinned serde_core producer source"]
+    fn exact_serde_core_source_requires_its_generated_rust_behavior_review() {
+        use super::*;
+        use cargo_hive_state::slots::GitIdentity;
+        use serde_json::json;
+        use std::fs;
+
+        let fixture = host_fs()
+            .temp_dir(Path::new("/private/tmp"), "hive-it-serde-classification-")
+            .unwrap();
+        let root = fixture.path().join("package");
+        fs::create_dir(&root).unwrap();
+        let original =
+            fs::read(std::env::var_os("HIVE_SERDE_CORE_PRODUCER_SOURCE").unwrap()).unwrap();
+        assert!(digest(&original).is_ok_and(|hash| hash == SERDE_CORE_BUILD_SCRIPT));
+        let review = fixture.path().join("review.json");
+        let target =
+            json!({"name":"build-script-build", "kind":"custom_build", "source":"build.rs"});
+        let fixture_inventory = SERDE_CORE_INVENTORY;
+        let check = |source: &[u8], id: &str| {
+            fs::write(root.join("build.rs"), source).unwrap();
+            let bytes = serde_json::to_vec(&json!({
+                "schema": 1, "profile": {"id":"fixture", "revision":1}, "invocation":"build",
+                "recipe":"native_build", "package_id":id, "inventory_sha256":fixture_inventory,
+                "git_checkout_sha256":null, "source_sha256":digest(source).unwrap_or_else(|_| panic!("fixture source")),
+                "target":target, "behavior":"metadata_only_build_script",
+            })).unwrap();
+            fs::write(&review, &bytes).unwrap();
+            let hash = digest(&bytes).unwrap_or_else(|_| panic!("fixture review"));
+            let package: MaterializedPackage = serde_json::from_value(json!({
+                "id":id, "name":"serde_core", "version":"1.0.228",
+                "source":"registry+https://github.com/rust-lang/crates.io-index", "root":"package",
+                "inventory_sha256":fixture_inventory,
+                "origin":{"kind":"registry","checksum":SERDE_CORE_ARCHIVE},
+                "executables":[{"target":target,"review_sha256":hash}],
+            }))
+            .unwrap();
+            let profile = PoolProfile {
+                schema: 1,
+                id: "fixture".into(),
+                revision: 1,
+                common_git_id: GitIdentity { path: fixture.path().join("git"), dev: 1, ino: 2 },
+                graph_inputs: vec![serde_json::from_value(json!({
+                    "locator":{"kind":"external","path":review},
+                    "expectation":{"kind":"present","identity":{"kind":"reviewed_bytes","sha256":hash}},
+                })).unwrap()],
+                invocations: Vec::new(),
+                mutable_inputs: Vec::new(),
+                consumers: Vec::new(),
+                proofs: Vec::new(),
+            };
+            package.verify_reviews(
+                &root,
+                &DependencyReviewScope {
+                    profile: &profile,
+                    invocation: "build",
+                    recipe: Recipe::NativeBuild,
+                    home: &root,
+                    checkout: &fixture.path().join("checkout"),
+                    generated: None,
+                },
+            )
+        };
+        assert!(
+            check(
+                b"fn main() { println!(\"cargo:rerun-if-changed=build.rs\"); }",
+                "reviewed metadata only"
+            )
+            .is_ok()
+        );
+        assert!(
+            check(&original, SERDE_CORE_PACKAGE).is_err(),
+            "the exact script writes private.rs and cannot be reviewed as metadata-only"
+        );
+    }
     use super::{Endpoint, NativeBuild, NativePackage, Seal, valid_package};
     use serde_json::json;
 
