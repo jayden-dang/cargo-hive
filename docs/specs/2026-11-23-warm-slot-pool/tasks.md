@@ -433,7 +433,7 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 
 **Depends-on:** Task 7 for independent qualification components. Integrating generated-input evidence into the lease depends on Task 8. The real installed handoff and measurement depend on Task 9 and positive qualification.
 
-- [ ] Prove a bounded whole-tree source verifier on both Cargo layouts, including exact immutable bytes and admitted edits. Cover both real endpoint inventories without weakening profile validation for earlier callers.
+- [x] Prove a bounded whole-tree source verifier on both Cargo layouts, including exact immutable bytes and admitted edits. Cover both real endpoint inventories without weakening profile validation for earlier callers.
 - [ ] Prove named generated Rust input and native archive custody through a real guard and strict GC, including wrong unit, same-mtime changes, identity replacement and overlapping cleanup refusals. Start with actual serde_core and one pinned native archive case. Account for every selected producer and consumer before enabling any real invocation.
 - [ ] Verify the exact workspace graph and selected target modes, project Nextest configuration and store paths, offline SQLx cache and dotenv probes, and side effects of every reviewed executable and required subprocess. Exercise both Nextest selections without running any test body. Refuse unproved behavior before the real profile can publish readiness.
 - [ ] Qualify the complete real installed path at the exact release-mode revision before timing. Demonstrate the ordinary handoff and independent fresh seeded baseline in scratch.

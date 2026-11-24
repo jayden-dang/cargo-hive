@@ -112,23 +112,38 @@ endpoints. The second endpoint changes only
 tracked SQLx cache entries are identical at both endpoints. Both contain the
 same checked-in Nextest config.
 
-The verifier reviewed at `72b060bd9c23a92cccefc12722bb96f1f7f98b51`
-uses a 64 KiB Git inventory cap. Its fixed and mutable
-profile lists are each limited to 256 entries. Both endpoints exceed those
-bounds. The default-harness check also refuses the checked-in Nextest config.
-The actual workspace has local test and bench target kinds outside the admitted
-grammar, and the current recipe environment has no entry for the required
-`SQLX_OFFLINE=true`. The real dependency and tool closure still needs positive
-custody evidence. Saved build material includes Cargo-managed generated inputs
-such as `serde_core`'s included `OUT_DIR/private.rs` and unit-local native
-archives. The operator approved a narrow exception for named, verified
-unit-local files after this qualification run. The implementation and real
-proof of that exception are pending. [Retained-root design](design.md),
+The verifier at `72b060bd9c23a92cccefc12722bb96f1f7f98b51` capped its Git
+inventory at 64 KiB and fixed and mutable profile lists at 256 entries each.
+Both endpoints exceeded those bounds. That revision also refused the checked-in
+Nextest config, the local integration tests and benches, and the required
+`SQLX_OFFLINE=true` environment. The saved build material showed that the real
+workspace reads Cargo-managed generated inputs, including `serde_core`'s
+`OUT_DIR/private.rs` and unit-local native archives. The operator approved a
+narrow exception for named, verified unit-local files. [Retained-root design](design.md),
 [ADR-0006](../../adr/0006-seal-unit-local-generated-inputs.md).
 
-The qualification evidence is a source observation checked against the current
-verifier predicates. It includes no observed Hive admission receipt. The saved
-isolated 1.97.1 lint and compile-only runs used older flag sets and serve as
+The bounded whole-tree verifier can represent both exact trees. An independent
+Git-blob check matched every tracked path, regular mode and file hash in the
+disposable baseline checkout. The edit manifest was derived from Git blobs.
+The reviewed Nextest grammar accepted the same 2,872-byte project config on
+both pins. The PostgreSQL workspace cache held 1,531 files whose contents
+matched their recorded query hashes. The target catalog verifies the declared
+local targets and all-feature metadata graph. Both stable Cargo pins refused
+the separate unit-graph query.
+
+In disposable controls on both pins, the two exact Nextest recipes listed
+their selected integration binaries in normal and ignored discovery modes.
+Across eight runs, the test bodies and custom benchmark stayed unexecuted.
+The controls recorded exact child facts from the instrumented fixture
+executables. The stock Nextest output supplies no complete descendant record.
+The stock SQLx compile-only controls exercised workspace cache selection,
+shadowing and override precedence. The nested Cargo process lacked direct
+custody evidence. These checks qualify data and fixture behavior. The real
+Klynt profile still requires the exact selected units, harness startup,
+producer behavior and child custody for each recipe.
+
+The real qualification has no observed Hive admission receipt. The saved
+isolated 1.97.1 lint and compile-only runs used earlier flags and serve as
 baseline controls. There are zero valid matched pairs. Both performance
 thresholds remain unevaluated. The local evidence index is
 `.skills/SLOTS/task-10-real-qualification.md`.
