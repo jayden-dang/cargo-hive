@@ -5917,7 +5917,7 @@ fn external_fixture_seal(fixture: &PoolFixture, head: &str, recipe: &str, argv: 
     if recipe == "clippy" {
         tools["cargo_clippy"] = material(&bin.join("cargo-clippy"));
         tools["clippy_driver"] = material(&bin.join("clippy-driver"));
-    } else {
+    } else if recipe.starts_with("nextest_") {
         let source = std::env::split_paths(&std::env::var_os("PATH").unwrap())
             .map(|dir| dir.join("cargo-nextest"))
             .find(|path| path.is_file())
@@ -6703,6 +6703,338 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
                 .is_some_and(|ext| ext == "dylib")
         }));
     }
+}
+
+#[test]
+#[ignore = "requires the isolated pinned serde_core proof cache"]
+fn the_packaged_serde_core_producer_preserves_the_generated_input_through_gc() {
+    exercise_packaged_serde_core(false);
+}
+
+#[test]
+#[ignore = "requires the isolated pinned serde_core proof cache"]
+fn the_packaged_serde_core_producer_refuses_an_active_derive_dependency() {
+    exercise_packaged_serde_core(true);
+}
+
+fn exercise_packaged_serde_core(active_derive: bool) {
+    const GENERATED_SHA256: &str =
+        "27ad1b5fb4eebeb1da6419cbfad3ac1922ed1d817fcbab0a1dae1bdfd38d8307";
+    const PRODUCER_SHA256: &str =
+        "a5fdacb9913eeede5fc08f39acbd31b2508483fdc20c79d6bc274d74407a1816";
+    let cache = PathBuf::from(std::env::var_os("HIVE_SERDE_CORE_PROOF_ROOT").unwrap());
+    let fixture = reviewed_pool_fixture(Some(
+        "use serde_core::{Deserialize, de::value::{Error, U32Deserializer}};\n\
+         pub fn answer() -> u32 { u32::deserialize(U32Deserializer::<Error>::new(42)).unwrap() }\n",
+    ));
+    let home = &fixture.hive.cargo_home.path;
+    let index = "index.crates.io-1949cf8c6b5b557f";
+    let registry = cache.join("cargo/registry");
+    let index_config = PathBuf::from(format!("index/{index}/config.json"));
+    let copy_cache = |relative: &Path| {
+        let destination = home.join("registry").join(relative);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(registry.join(relative), destination).unwrap();
+    };
+    copy_cache(&index_config);
+    for (name, version, prefix) in [
+        ("proc-macro2", "1.0.107", "pr/oc"),
+        ("quote", "1.0.47", "qu/ot"),
+        ("serde_core", "1.0.228", "se/rd"),
+        ("serde_derive", "1.0.228", "se/rd"),
+        ("syn", "2.0.119", "3/s"),
+        ("unicode-ident", "1.0.27", "un/ic"),
+    ] {
+        copy_cache(Path::new(&format!("cache/{index}/{name}-{version}.crate")));
+        copy_cache(Path::new(&format!("index/{index}/.cache/{prefix}/{name}")));
+    }
+    let manifest = fixture.repo.join("Cargo.toml");
+    let manifest_bytes = fs::read_to_string(&manifest).unwrap();
+    let dependencies = if active_derive {
+        "[dependencies]\nserde_core = \"=1.0.228\"\nserde_derive = \"=1.0.228\"\n"
+    } else {
+        "[dependencies]\nserde_core = \"=1.0.228\"\n"
+    };
+    fs::write(
+        &manifest,
+        manifest_bytes.replace("[dependencies]\n", dependencies),
+    )
+    .unwrap();
+    let mut pinned = fs::read_to_string(cache.join("Cargo.lock")).unwrap()
+        .replace("named-generated-rust-proof", "fixture")
+        .replace("[[package]]\nname = \"proc-macro2\"", "[[package]]\nname = \"independent\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"proc-macro2\"");
+    if active_derive {
+        pinned = pinned.replacen(
+            " \"serde_core\",\n",
+            " \"serde_core\",\n \"serde_derive\",\n",
+            1,
+        );
+    }
+    fs::write(fixture.repo.join("Cargo.lock"), pinned).unwrap();
+    git(&fixture.repo, &["add", "-A"]);
+    git(
+        &fixture.repo,
+        &["commit", "-qm", "Pin the real generated Rust fixture"],
+    );
+    let metadata = fixture
+        .hive
+        .command_with(
+            Path::new("cargo"),
+            &[
+                "metadata",
+                "--format-version",
+                "1",
+                "--all-features",
+                "--locked",
+                "--offline",
+            ],
+        )
+        .current_dir(&fixture.repo)
+        .output()
+        .unwrap();
+    assert!(metadata.status.success(), "{metadata:?}");
+    let metadata: Value = serde_json::from_slice(&metadata.stdout).unwrap();
+    let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+    for fact in profile["graph_inputs"].as_array_mut().unwrap() {
+        let path = fact["locator"]["path"].as_str().unwrap();
+        fact["expectation"]["identity"]["oid"] =
+            json!(git(&fixture.repo, &["rev-parse", &format!("HEAD:{path}")]));
+    }
+    fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let argv = [
+        "build",
+        "--workspace",
+        "--locked",
+        "--offline",
+        "--message-format=json",
+    ];
+    external_fixture_seal(&fixture, &head, "native_build", &argv);
+    let seal = fixture._repo_dir.path.join("external-recipe.json");
+    let mut closure: Value = serde_json::from_slice(&fs::read(&seal).unwrap()).unwrap();
+    let review = fixture._repo_dir.path.join("reviewed-serde-core.json");
+    let mut generated = None;
+    let packages: Vec<_> = metadata["packages"].as_array().unwrap().iter()
+        .filter(|pkg| pkg["source"].is_string())
+        .map(|pkg| {
+            let name = pkg["name"].as_str().unwrap();
+            let version = pkg["version"].as_str().unwrap();
+            let root = Path::new(pkg["manifest_path"].as_str().unwrap()).parent().unwrap();
+            let relative = root.strip_prefix(home).unwrap();
+            let archive = home.join(format!("registry/cache/{index}/{name}-{version}.crate"));
+            let inventory = fixture_inventory(root, false);
+            let mut material = json!({
+                "id": pkg["id"], "name": name, "version": version, "source": pkg["source"],
+                "root": relative, "inventory_sha256": inventory,
+                "origin": {"kind": "registry", "checksum": fixture_sha(&fs::read(archive).unwrap())},
+            });
+            if name == "serde_core" {
+                assert_eq!(fixture_sha(&fs::read(root.join("build.rs")).unwrap()), PRODUCER_SHA256);
+                let target = json!({"name":"build-script-build", "kind":"custom_build", "source":"build.rs"});
+                let review_bytes = serde_json::to_vec(&json!({
+                    "schema": 1, "profile": {"id":"fixture", "revision":1}, "invocation":"check",
+                    "recipe":"native_build", "package_id":pkg["id"], "inventory_sha256":inventory,
+                    "git_checkout_sha256":null, "source_sha256":PRODUCER_SHA256,
+                    "target":target, "behavior":"serde_core_generated_rust",
+                })).unwrap();
+                fs::write(&review, &review_bytes).unwrap();
+                material["executables"] = json!([{"target":target, "review_sha256":fixture_sha(&review_bytes)}]);
+                generated = Some(json!({
+                    "producer":{"package_id":pkg["id"], "target":"build-script-build", "source":"build.rs",
+                        "role":"host_build_script", "profile":"dev", "triple":closure["native_target"],
+                        "features":["default","result","std"]},
+                    "consumers":[{"package_id":pkg["id"], "target":"serde_core", "source":"src/lib.rs",
+                        "role":"target_library", "profile":"dev", "triple":closure["native_target"],
+                        "features":["default","result","std"]}],
+                    "package_material_sha256":inventory, "leaf":"private.rs",
+                    "bytes":90, "sha256":GENERATED_SHA256,
+                }));
+            }
+            material
+        }).collect();
+    closure["packages"][0]["dependencies"] = if active_derive {
+        json!(["serde_core", "serde_derive"])
+    } else {
+        json!(["serde_core"])
+    };
+    closure["generated_inputs"] = json!([generated.unwrap()]);
+    closure["materialized"] = json!({
+        "resolve_sha256":fixture_resolve_digest(&metadata,&fixture.repo), "packages":packages
+    });
+    let bytes = serde_json::to_vec(&closure).unwrap();
+    fs::write(&seal, &bytes).unwrap();
+    let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+    profile["graph_inputs"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap()["expectation"]["identity"]["sha256"] = json!(fixture_sha(&bytes));
+    profile["proofs"][0]["evidence"] = json!(format!("closure-v1:sha256={}", fixture_sha(&bytes)));
+    profile["graph_inputs"].as_array_mut().unwrap().push(json!({
+        "locator":{"kind":"external","path":review}, "expectation":{"kind":"present","identity":{
+            "kind":"reviewed_bytes","sha256":fixture_sha(&fs::read(&review).unwrap())}}
+    }));
+    fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let key = fixture._repo_dir.path.join("serde-proof-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let credential = fs::read_to_string(&key).unwrap();
+    let out = run_packaged_take(&fixture, pool, &head, &key, "take");
+    assert_no_credential(&out, &credential);
+    if active_derive {
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let refusal: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(
+            refusal["detail"]
+                .as_str()
+                .unwrap()
+                .contains("sealed dependency graph"),
+            "{refusal}"
+        );
+        assert!(!checkout.join("target").exists());
+        return;
+    }
+    assert!(out.status.success(), "guarded first Ready: {out:?}");
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
+    let produce = |generation: &str, operation: &str| {
+        let mut command = fixture
+            .hive
+            .command_with(Path::new("/bin/bash"), &["--noprofile", "--norc"]);
+        producer_environment(&mut command);
+        let child = command
+            .arg(&helper)
+            .args(["produce", env!("CARGO_BIN_EXE_cargo-hive")])
+            .arg(&fixture.repo)
+            .args([pool, "1", generation, operation, "check"])
+            .stdin(fs::File::open(&key).unwrap())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        common::wait_within(child, Duration::from_secs(60))
+    };
+    let out = produce("1", &"7".repeat(32));
+    assert_no_credential(&out, &credential);
+    assert!(
+        out.status.success(),
+        "guarded checked Cargo completion: {out:?}"
+    );
+    let completed = fixture.record();
+    let witnesses =
+        completed["pools"][0]["slots"][0]["producer"]["invocations"][0]["generated_inputs"]
+            .as_array()
+            .unwrap();
+    assert_eq!(witnesses.len(), 1);
+    assert_eq!(witnesses[0]["sha256"], GENERATED_SHA256);
+    let generated = checkout
+        .join("target")
+        .join(witnesses[0]["relative_path"].as_str().unwrap());
+    assert_eq!(
+        fixture_sha(&fs::read(&generated).unwrap()),
+        GENERATED_SHA256
+    );
+    let identity = fs::metadata(&generated).unwrap().ino();
+    let unrelated_stamp = workspace_unit_stamp_path(&checkout, "independent");
+    fs::File::open(&unrelated_stamp)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000))
+        .unwrap();
+    let args = fixture.replay("return", pool, 1, 1, &"6".repeat(32));
+    let (out, returned) = finish_private(start_private(&fixture.hive, args, &credential));
+    assert!(out.status.success(), "{returned}");
+    let child = start_packaged_take_at(&fixture, pool, &head, &key, "take", "1");
+    let out = common::wait_within(child, Duration::from_secs(60));
+    let ready: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(out.status.success(), "{ready}");
+    assert_eq!(ready["generation"], 2);
+    assert!(
+        !unrelated_stamp.exists(),
+        "strict cleanup did not remove the stale independent unit"
+    );
+    assert_eq!(fs::metadata(&generated).unwrap().ino(), identity);
+    assert_eq!(
+        fixture_sha(&fs::read(&generated).unwrap()),
+        GENERATED_SHA256
+    );
+    let current = fixture.record();
+    let mut legacy = current.clone();
+    legacy["pools"][0]["slots"][0]["producer"]["invocations"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("generated_inputs")
+        .unwrap();
+    fixture.install_record(&legacy);
+    let out = produce("2", &"9".repeat(32));
+    assert_no_credential(&out, &credential);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let held: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        held["detail"]
+            .as_str()
+            .unwrap()
+            .contains("generated Rust input")
+    );
+    assert!(fixture.record() == legacy);
+    fixture.install_record(&current);
+    let before_guard_test = fs::read(fixture.file()).unwrap();
+    let debug = checkout.join("target/debug");
+    let release = checkout.join("target/release");
+    fs::create_dir(&release).unwrap();
+    fs::write(release.join(".cargo-lock"), b"").unwrap();
+    let displaced = fixture._repo_dir.path.join("displaced-debug-locks");
+    fs::create_dir(&displaced).unwrap();
+    let mut moved = Vec::new();
+    for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
+        let lock = debug.join(name);
+        if lock.exists() {
+            fs::rename(&lock, displaced.join(name)).unwrap();
+            moved.push(lock);
+        }
+    }
+    assert!(!moved.is_empty());
+    let args = fixture.replay("return", pool, 1, 2, &"a".repeat(32));
+    let (out, held) = finish_private(start_private(&fixture.hive, args, &credential));
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "an unrelated release lock cannot prove debug: {held}"
+    );
+    assert!(fs::read(fixture.file()).unwrap() == before_guard_test);
+    for lock in moved {
+        fs::rename(displaced.join(lock.file_name().unwrap()), lock).unwrap();
+    }
+    fs::remove_file(release.join(".cargo-lock")).unwrap();
+    fs::remove_dir(release).unwrap();
+    let prior = fs::read(fixture.file()).unwrap();
+    let mut bytes = fs::read(&generated).unwrap();
+    bytes[0] = b'!';
+    let mtime = fs::metadata(&generated).unwrap().modified().unwrap();
+    fs::write(&generated, &bytes).unwrap();
+    fs::File::open(&generated)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    let args = fixture.replay("return", pool, 1, 2, &"8".repeat(32));
+    let (out, held) = finish_private(start_private(&fixture.hive, args, &credential));
+    assert_eq!(out.status.code(), Some(1), "{held}");
+    assert!(
+        held["detail"]
+            .as_str()
+            .unwrap()
+            .contains("generated Rust input")
+    );
+    assert!(fs::read(fixture.file()).unwrap() == prior);
+    assert!(fs::read(&generated).unwrap() == bytes);
 }
 
 #[test]

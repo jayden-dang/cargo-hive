@@ -4,7 +4,10 @@ mod checkout;
 mod nextest;
 mod sqlx;
 
-use super::generated::GeneratedRust;
+use super::generated::{
+    GeneratedRust, SERDE_CORE_ARCHIVE, SERDE_CORE_BUILD_SCRIPT, SERDE_CORE_INVENTORY,
+    SERDE_CORE_PACKAGE,
+};
 use super::profile::{digest, read_input_bounded, refused};
 use super::{CheckoutProof, Refusal, directory_stamp, git_scope};
 use cargo_hive_platform::{
@@ -285,6 +288,7 @@ struct ExecutableApproval {
 enum ReviewedBehavior {
     MetadataOnlyBuildScript,
     SealedInputsTokenTransform,
+    SerdeCoreGeneratedRust,
 }
 
 #[derive(Deserialize)]
@@ -308,6 +312,7 @@ struct DependencyReviewScope<'a> {
     recipe: Recipe,
     home: &'a Path,
     checkout: &'a Path,
+    generated: Option<&'a GeneratedRust>,
 }
 
 impl MaterializedGraph {
@@ -514,16 +519,33 @@ impl MaterializedPackage {
                 || review.git_checkout_sha256.as_deref() != git_checkout_sha256
                 || review.target != approval.target
                 || review.source_sha256 != digest(&source)?
-                || !matches!(
-                    (&review.target.kind, review.behavior),
+                || !match (scope.generated, &review.target.kind, review.behavior) {
                     (
+                        None,
                         ExecutableKind::CustomBuild,
-                        ReviewedBehavior::MetadataOnlyBuildScript
-                    ) | (
-                        ExecutableKind::ProcMacro,
-                        ReviewedBehavior::SealedInputsTokenTransform
+                        ReviewedBehavior::MetadataOnlyBuildScript,
                     )
-                )
+                    | (
+                        None,
+                        ExecutableKind::ProcMacro,
+                        ReviewedBehavior::SealedInputsTokenTransform,
+                    ) => true,
+                    (
+                        Some(generated),
+                        ExecutableKind::CustomBuild,
+                        ReviewedBehavior::SerdeCoreGeneratedRust,
+                    ) => {
+                        scope.recipe == Recipe::NativeBuild
+                            && self.id == SERDE_CORE_PACKAGE
+                            && self.id == generated.producer.package_id
+                            && self.inventory_sha256 == SERDE_CORE_INVENTORY
+                            && matches!(&self.origin, Origin::Registry { checksum } if checksum == SERDE_CORE_ARCHIVE)
+                            && review.source_sha256 == SERDE_CORE_BUILD_SCRIPT
+                            && review.target.name == "build-script-build"
+                            && review.target.source.as_os_str() == "build.rs"
+                    }
+                    _ => false,
+                }
             {
                 return Err(unproved());
             }
@@ -1025,13 +1047,16 @@ impl NativeBuild {
                     || !project.valid()
                     || !project.fixed_in(&profile.graph_inputs)
             })
-            || seal.generated_inputs.len() > slots::MAX_GENERATED_INPUTS
+            || seal.generated_inputs.len() > 1
             || (!seal.generated_inputs.is_empty() && seal.recipe != Recipe::NativeBuild)
             || !seal.generated_inputs.iter().all(|declaration| {
                 seal.materialized.as_ref().is_some_and(|graph| {
                     graph.packages.iter().any(|package| {
                         package.id == declaration.producer.package_id
-                            && matches!(package.origin, Origin::Registry { .. })
+                        && package.id == SERDE_CORE_PACKAGE
+                        && package.inventory_sha256 == SERDE_CORE_INVENTORY
+                        && matches!(&package.origin, Origin::Registry { checksum } if checksum == SERDE_CORE_ARCHIVE)
+                        && declaration.consumers.len() == 1
                             && package.executables.iter().any(|approval| {
                                 approval.target.kind == ExecutableKind::CustomBuild
                                     && approval.target.name == declaration.producer.target
@@ -1068,7 +1093,7 @@ impl NativeBuild {
                         .iter()
                         .any(|endpoint| endpoint.whole_tree.is_none())
             })
-            || (!matches!(seal.recipe, Recipe::NativeBuild)
+            || ((!matches!(seal.recipe, Recipe::NativeBuild) || !seal.generated_inputs.is_empty())
                 && seal.packages.iter().any(|package| {
                     package
                         .targets
@@ -1124,6 +1149,7 @@ impl NativeBuild {
             recipe: self.seal.recipe,
             home,
             checkout,
+            generated: self.generated_input(),
         };
         self.materialized()
             .map(|material| material.verify_material(&scope))
@@ -1134,8 +1160,8 @@ impl NativeBuild {
         self.seal.materialized.as_ref()
     }
 
-    pub fn requires_generated_custody(&self) -> bool {
-        !self.seal.generated_inputs.is_empty()
+    pub fn generated_input(&self) -> Option<&GeneratedRust> {
+        self.seal.generated_inputs.first()
     }
 
     pub fn verify_generated_bindings(

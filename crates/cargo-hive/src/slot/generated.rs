@@ -1,5 +1,8 @@
 //! Physical revalidation of finite, previously witnessed generated inputs.
 
+mod serde_core;
+pub(super) use self::serde_core::GeneratedRustPlan;
+
 use super::{
     Refusal,
     admission::NativeBuild,
@@ -21,7 +24,16 @@ use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Deserialize, Serialize)]
+pub(super) const SERDE_CORE_PACKAGE: &str =
+    "registry+https://github.com/rust-lang/crates.io-index#serde_core@1.0.228";
+pub(super) const SERDE_CORE_ARCHIVE: &str =
+    "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad";
+pub(super) const SERDE_CORE_INVENTORY: &str =
+    "345846edd2645e728b5be002cee2c17400754079fc396a345f477d3059930bd0";
+pub(super) const SERDE_CORE_BUILD_SCRIPT: &str =
+    "a5fdacb9913eeede5fc08f39acbd31b2508483fdc20c79d6bc274d74407a1816";
+
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GeneratedRust {
     pub producer: ReviewedUnit,
@@ -32,7 +44,7 @@ pub(super) struct GeneratedRust {
     pub sha256: String,
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ReviewedUnit {
     pub package_id: String,
@@ -41,10 +53,10 @@ pub(super) struct ReviewedUnit {
     role: UnitRole,
     profile: String,
     triple: String,
-    features: Vec<String>,
+    pub features: Vec<String>,
 }
 
-#[derive(Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 enum UnitRole {
     HostBuildScript,
@@ -179,25 +191,21 @@ fn verify(root: &VerifiedRoot, witness: &GeneratedInputWitness) -> Result<(), Re
 pub(super) fn verify_retained(
     profile: &PoolProfile,
     producer: &Producer,
-    build_is_locked: impl Fn(&Path) -> bool,
+    profile_is_locked: impl Fn(&Path) -> bool,
 ) -> Result<(), Refusal> {
-    let Producer::Complete {
-        roots, invocations, ..
-    } = producer
-    else {
+    let Some((root, inputs)) = retained_gc_inputs(producer) else {
         return Ok(());
     };
-    if invocations
+    let profiles: BTreeSet<_> = inputs
         .iter()
-        .all(|invocation| invocation.generated_inputs.is_empty())
-    {
-        return Ok(());
-    }
-    if !build_is_locked(&roots.build.path) {
+        .map(|input| input.cargo_profile(root).ok_or_else(unproved))
+        .collect::<Result<_, _>>()?;
+    let locked = || profiles.iter().all(|path| profile_is_locked(path));
+    if !locked() {
         return Err(unproved());
     }
     verify_named_inputs(profile, producer)?;
-    if !build_is_locked(&roots.build.path) {
+    if !locked() {
         return Err(unproved());
     }
     Ok(())
@@ -243,6 +251,11 @@ pub(super) fn verify_named_inputs(
             NativeBuild::read(profile, invocation, &native_target())?.ok_or_else(unproved)?;
         seal.verify_generated_bindings(&record.generated_inputs)?;
         for input in &record.generated_inputs {
+            if input.cargo_profile(&roots.build).as_ref()
+                != Some(&GeneratedRustPlan::profile_directory(&roots.build))
+            {
+                return Err(unproved());
+            }
             verify(&roots.build, input)?;
         }
     }

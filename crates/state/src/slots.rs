@@ -1054,6 +1054,19 @@ pub struct GeneratedInputWitness {
 }
 
 impl GeneratedInputWitness {
+    pub fn cargo_profile(&self, root: &VerifiedRoot) -> Option<PathBuf> {
+        if !self.valid_for(root) {
+            return None;
+        }
+        let mut components = self.relative_path.components();
+        let (Some(Component::Normal(profile)), Some(Component::Normal(build))) =
+            (components.next(), components.next())
+        else {
+            return None;
+        };
+        (build == "build").then(|| root.path.join(profile))
+    }
+
     pub fn valid_for(&self, root: &VerifiedRoot) -> bool {
         let parent = self.relative_path.parent();
         let count = parent.map_or(0, |path| path.components().count());

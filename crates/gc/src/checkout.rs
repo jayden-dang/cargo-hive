@@ -471,6 +471,18 @@ impl LockedGeneratedInputs {
                 return Err(ROOT_IDENTITY_CHANGED.into());
             }
         }
+        let profiles = target::identify_strict(input.fs, &root.path, CRATE_DIR_CAP, cancel)?;
+        locks
+            .get(&root.path)
+            .ok_or(GENERATED_SCOPE)?
+            .verify_profiles(input.fs, &profiles)?;
+        if custody.inputs.iter().any(|witness| {
+            !witness
+                .cargo_profile(root)
+                .is_some_and(|path| profiles.iter().any(|(profile, _)| *profile == path))
+        }) {
+            return Err(GENERATED_SCOPE.into());
+        }
         let protection = Self {
             locks,
             entries,

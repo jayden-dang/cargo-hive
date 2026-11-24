@@ -22,6 +22,7 @@ use std::path::{Component, Path, PathBuf};
 
 const TRACKED_LIMIT: usize = 4 * 1024 * 1024;
 const CHECKOUT_ENTRIES: usize = 100_000;
+const OUTPUT_LOCK_NAMES: [&str; 3] = [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"];
 const UNFINISHED_GIT: &str =
     "The slot contains tracked or index changes or an unfinished Git operation.";
 const UNFINISHED_FILES: &str =
@@ -68,20 +69,29 @@ impl CheckoutProof {
         profile: &PoolProfile,
         producer: &Producer,
     ) -> Result<(), Refusal> {
-        super::generated::verify_retained(profile, producer, |build_root| {
-            let mut locks = self
-                .output_locks
-                .iter()
-                .filter(|held| held.path.starts_with(build_root))
-                .peekable();
-            locks.peek().is_some()
-                && locks.all(|held| {
-                    fs::symlink_metadata(&held.path).is_ok_and(|metadata| {
-                        metadata.is_file()
-                            && held.lock.identity() == Some((metadata.dev(), metadata.ino()))
-                    })
-                })
+        super::generated::verify_retained(profile, producer, |profile| {
+            self.holds_output_profile(profile)
         })
+    }
+
+    pub(super) fn holds_output_profile(&self, profile: &Path) -> bool {
+        self.output_locks
+            .iter()
+            .any(|held| held.path.parent() == Some(profile))
+            && OUTPUT_LOCK_NAMES.into_iter().all(|name| {
+                let path = profile.join(name);
+                let current = match fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.is_file() => Some((metadata.dev(), metadata.ino())),
+                    Err(err) if err.kind() == ErrorKind::NotFound => None,
+                    _ => return false,
+                };
+                let recorded = self
+                    .output_locks
+                    .iter()
+                    .find(|held| held.path == path)
+                    .and_then(|held| held.lock.identity());
+                current == recorded
+            })
     }
 }
 
@@ -809,7 +819,7 @@ impl CheckoutWalk<'_> {
             )
         };
         // Resolve the names Cargo opens so the filesystem determines equivalent spellings.
-        for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
+        for name in OUTPUT_LOCK_NAMES {
             let path = dir.join(name);
             let entry = match self.fs.entry_stat(&path) {
                 Ok(entry) if entry.kind == EntryKind::File && entry.dev == self.device => entry,

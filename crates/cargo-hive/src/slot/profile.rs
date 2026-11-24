@@ -3,6 +3,7 @@
 use super::admission::{
     MaterializedGraph, NativeBuild, NativePackage, NativeTarget, NativeTargetMetadata,
 };
+use super::generated::{GeneratedRustPlan, SERDE_CORE_PACKAGE};
 use super::{CheckoutProof, Refusal, canonical_worktree_path, check_cancelled, exists, git_scope};
 use cargo_hive_cargo::metadata;
 use cargo_hive_platform::{
@@ -42,6 +43,7 @@ pub(super) struct CheckedInvocation {
     pub cwd: PathBuf,
     pub needs_guide: bool,
     pub environment: BTreeMap<std::ffi::OsString, std::ffi::OsString>,
+    pub generated: Option<GeneratedRustPlan>,
 }
 
 pub(super) fn refused(detail: &'static str) -> Refusal {
@@ -227,14 +229,6 @@ pub(super) fn check_invocation(
     check_cancelled()?;
     let invocation = reviewed_shape(profile, input)?;
     let native = NativeBuild::read(profile, invocation, &native_target())?;
-    if native
-        .as_ref()
-        .is_some_and(NativeBuild::requires_generated_custody)
-    {
-        return Err(refused(
-            "The reviewed generated Rust input requires verified producer, consumer and scoped cleanup custody.",
-        ));
-    }
     let variants = native
         .as_ref()
         .map(|seal| seal.verify_checkout(profile, invocation, checkout))
@@ -347,7 +341,13 @@ pub(super) fn check_invocation(
             seal.metadata_resolution(),
         )?;
         let verified_dependency = if let Some(material) = material {
-            verify_materialized_graph(&discovered, &checkout.path, &cargo_home, material)?;
+            verify_materialized_graph(
+                &discovered,
+                &checkout.path,
+                &cargo_home,
+                material,
+                seal.generated_input().is_some(),
+            )?;
             let after = seal.verify_dependency_material(profile, &cargo_home, &checkout.path)?;
             if material_before != after {
                 return Err(refused(
@@ -360,6 +360,27 @@ pub(super) fn check_invocation(
         };
         seal.require_supported_target_mode()?;
         verified_dependency
+    } else {
+        None
+    };
+    let generated = if let Some(seal) = &native
+        && let Some(declaration) = seal.generated_input()
+    {
+        let package = seal
+            .materialized()
+            .and_then(|graph| {
+                graph
+                    .packages
+                    .iter()
+                    .find(|package| package.id == declaration.producer.package_id)
+            })
+            .ok_or_else(|| {
+                refused("The reviewed generated producer has no materialized package.")
+            })?;
+        Some(GeneratedRustPlan::new(
+            declaration,
+            cargo_home.join(&package.root),
+        ))
     } else {
         None
     };
@@ -438,6 +459,7 @@ pub(super) fn check_invocation(
             .and_then(|seal| seal.terminal().map(Path::to_path_buf)),
         cwd,
         environment,
+        generated,
         needs_guide: native.is_some(),
     })
 }
@@ -1145,6 +1167,7 @@ fn verify_materialized_graph(
     checkout: &Path,
     home: &Path,
     materialized: &MaterializedGraph,
+    generated: bool,
 ) -> Result<(), Refusal> {
     let unproved = || {
         refused(
@@ -1156,6 +1179,9 @@ fn verify_materialized_graph(
         .iter()
         .map(|pkg| (&pkg.id, pkg))
         .collect();
+    let active = generated
+        .then(|| generated_reachable(&graph.workspace_members, &graph.nodes).ok_or_else(unproved))
+        .transpose()?;
     for pkg in &graph.packages {
         if let Some(source) = &pkg.source {
             let expected = packages.get(&pkg.id).ok_or_else(unproved)?;
@@ -1171,11 +1197,23 @@ fn verify_materialized_graph(
                     Ok((target.name.as_str(), target.kind.as_slice(), source))
                 })
                 .collect::<Result<Vec<_>, Refusal>>()?;
+            let executable_scope = active
+                .as_ref()
+                .is_none_or(|active| active.contains(pkg.id.as_str()));
             if expected.name != pkg.name
                 || expected.version != pkg.version
                 || &expected.source != source
                 || pkg.manifest_path != root.join("Cargo.toml")
-                || !expected.matches_executables(targets.into_iter())
+                || !expected
+                    .matches_executables(targets.iter().copied().filter(|_| executable_scope))
+                || (generated
+                    && executable_scope
+                    && pkg.id != SERDE_CORE_PACKAGE
+                    && targets.iter().any(|(_, kinds, _)| {
+                        kinds
+                            .iter()
+                            .any(|kind| matches!(kind.as_str(), "custom-build" | "proc-macro"))
+                    }))
                 || root.canonicalize().as_ref().ok() != Some(&root)
                 || pkg.targets.iter().any(|target| {
                     !target.src_path.starts_with(&root)
@@ -1253,6 +1291,34 @@ fn metadata_resolution_digest(graph: &Discovered, checkout: &Path) -> Result<Str
         return Err(unproved());
     }
     digest(&serde_json::to_vec(&nodes).map_err(|_| unproved())?)
+}
+
+fn generated_reachable<'a>(
+    members: &'a [String],
+    nodes: &'a [ResolveNode],
+) -> Option<BTreeSet<&'a str>> {
+    let nodes: BTreeMap<_, _> = nodes.iter().map(|node| (node.id.as_str(), node)).collect();
+    let mut active = BTreeSet::new();
+    let mut pending: Vec<_> = members.iter().map(String::as_str).collect();
+    while let Some(id) = pending.pop() {
+        if !active.insert(id) {
+            continue;
+        }
+        let node = nodes.get(id)?;
+        for dependency in &node.deps {
+            // This recipe uses the complete workspace. Treat every edge as
+            // active unless Cargo names an exactly empty disjunction.
+            let disabled = !dependency.dep_kinds.is_empty()
+                && dependency
+                    .dep_kinds
+                    .iter()
+                    .all(|kind| kind.target.as_deref() == Some("cfg(any())"));
+            if !disabled {
+                pending.push(dependency.pkg.as_str());
+            }
+        }
+    }
+    Some(active)
 }
 
 fn reviewed_source_facts(

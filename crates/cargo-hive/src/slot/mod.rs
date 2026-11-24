@@ -825,6 +825,11 @@ impl ProducerCommand<'_> {
         let roots = prior.roots();
         let mut proof = self.inspect(snapshot, &input, &roots, empty_proof(&prior))?;
         let checked = profile::check_invocation(&pool.profile, &input.shape, &proof, &roots)?;
+        if let Some(generated) = &checked.generated {
+            generated.require_prior(&prior, &input.shape.invocation, |profile| {
+                proof.holds_output_profile(profile)
+            })?;
+        }
         if checked.needs_guide && control.is_none() {
             return Err(Refusal::ReturnUncertain(
                 "This reviewed producer requires the packaged guide's checked launch.",
@@ -1097,6 +1102,11 @@ impl ProducerCommand<'_> {
         if checked.evidence != pending.invocation {
             return Err(watch_refusal());
         }
+        if let Some(generated) = &checked.generated {
+            generated.require_prior(&pending.prior, &input.shape.invocation, |profile| {
+                proof.holds_output_profile(profile)
+            })?;
+        }
         let parent = runner_instance(&self.runner);
         let lock = LockFileIdentity {
             dev: self.lock_id.dev,
@@ -1253,11 +1263,24 @@ impl ProducerCommand<'_> {
         if checked.evidence != pending.invocation {
             return Err(watch_refusal());
         }
-        profile::verify_output_layout(
-            profile::reviewed_shape(&pool.profile, &input.shape)?,
-            &roots.build.path,
-        )?;
+        let invocation = profile::reviewed_shape(&pool.profile, &input.shape)?;
+        profile::verify_output_layout(invocation, &roots.build.path)?;
         self.prove_output_scope(snapshot, &proof.path, &roots_for_check, None)?;
+        let generated_inputs = if let Some(generated) = checked.generated {
+            let output_profile = generated::GeneratedRustPlan::profile_directory(&roots.build);
+            if !proof.holds_output_profile(&output_profile) {
+                return Err(watch_refusal());
+            }
+            let witness = generated.collect(&roots.build, invocation.layout)?;
+            if witness.cargo_profile(&roots.build).as_ref() != Some(&output_profile)
+                || !proof.holds_output_profile(&output_profile)
+            {
+                return Err(watch_refusal());
+            }
+            vec![witness]
+        } else {
+            Vec::new()
+        };
         let mut invocations = pending
             .prior
             .completed_in_generation(pending.generation)
@@ -1267,7 +1290,7 @@ impl ProducerCommand<'_> {
             operation: pending.operation.clone(),
             runner: pending.runner.clone(),
             foreground: Some(child),
-            generated_inputs: Vec::new(),
+            generated_inputs,
         });
         self.publish(snapshot, |slot| {
             let outcome = slot
@@ -2333,6 +2356,11 @@ fn inspect_prepared_checkout(
             cwd: invocation.cwd.clone(),
         };
         let checked = profile::check_invocation(&pool.profile, &shape, &proof, &roots)?;
+        if let Some(generated) = &checked.generated {
+            generated.require_prior(&eligible, &invocation.id, |profile| {
+                proof.holds_output_profile(profile)
+            })?;
+        }
         if let Producer::Complete { invocations, .. } = &slot.producer
             && invocations
                 .iter()
