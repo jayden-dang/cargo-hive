@@ -338,7 +338,7 @@ fn inspect_inventory(
     retained: BTreeMap<PathBuf, FileIdentity>,
     mutable: Option<&BTreeSet<PathBuf>>,
     fs: &dyn Fs,
-) -> Result<Vec<HeldLock>, Refusal> {
+) -> Result<Vec<HeldOutputLock>, Refusal> {
     let mut directories = BTreeSet::new();
     for path in tracked
         .keys()
