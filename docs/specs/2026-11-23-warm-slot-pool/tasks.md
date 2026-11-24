@@ -57,6 +57,8 @@ Design: ./design.md
 | `crates/cargo-hive/src/slot/profile.rs` | New effective producer, certified graph/consumer and mtime evidence checks. |
 | `crates/cargo-hive/src/slot/admission.rs` | Validate bounded sealed profile closure evidence and approved data variants. |
 | `crates/cargo-hive/src/slot/admission/checkout.rs` | Verify complete bounded real-workspace tree identities, regular bytes and approved mutable variants. |
+| `crates/cargo-hive/src/slot/admission/nextest.rs` | Verify reviewed project Nextest configuration and bound its effective default mode and store. |
+| `crates/cargo-hive/src/slot/admission/sqlx.rs` | Verify the reviewed SQLx offline configuration, ancestor probes and selected query-cache bytes. |
 | `crates/cargo-hive/src/slot/generated.rs` | Bind named Cargo-generated inputs to their reviewed producer, consumers and retained unit witnesses. |
 | `crates/cargo-hive/src/slot/result.rs` | New sanitized JSON projection and existing Receipt audit projection. |
 | `crates/gc/src/checkout.rs` | Expose positive root-lock/completion evidence beside the existing report. |
@@ -404,6 +406,8 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 
 **Files:**
 - Create: `crates/cargo-hive/src/slot/admission/checkout.rs`
+- Create: `crates/cargo-hive/src/slot/admission/nextest.rs`
+- Create: `crates/cargo-hive/src/slot/admission/sqlx.rs`
 - Create: `crates/cargo-hive/src/slot/generated.rs`
 - Modify: `crates/cargo-hive/src/slot/admission.rs`
 - Modify: `crates/cargo-hive/src/slot/profile.rs`
