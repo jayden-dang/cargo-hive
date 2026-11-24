@@ -40,7 +40,21 @@ jobs:
         with:
           key: gate-${{ matrix.toolchain }}
       - name: Merge gate
-        run: scripts/gate.sh
+        run: &merge-gate |
+          # Hosted Macs register LFS filters globally and system-wide. Scratch slot
+          # repositories use no LFS, and Hive refuses configured clean filters.
+          lfs_keys='^filter\.lfs\.'
+          if git config --global --name-only --get-regexp "$lfs_keys" >/dev/null; then
+            git config --global --remove-section filter.lfs
+          fi
+          if git config --system --name-only --get-regexp "$lfs_keys" >/dev/null; then
+            sudo -n "$(command -v git)" config --system --remove-section filter.lfs
+          fi
+          if git config --name-only --get-regexp "$lfs_keys"; then
+            echo "Runner Git LFS filters are still configured" >&2
+            exit 1
+          fi
+          scripts/gate.sh
 
   package:
     name: package
@@ -87,4 +101,4 @@ jobs:
           rustc --version
       - uses: Swatinem/rust-cache@v2
       - name: Merge gate
-        run: scripts/gate.sh
+        run: *merge-gate
