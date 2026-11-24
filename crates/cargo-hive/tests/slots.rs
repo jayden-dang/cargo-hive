@@ -5445,54 +5445,63 @@ fn fresh_gc_after_injected_later_boot(slot: &LeasedSlot, key: &Path, next: &str)
 
     let scratch = fixture._repo_dir.path.join("retry-guide");
     fs::create_dir(&scratch).unwrap();
-    for name in ["nonce", "permit", "result", "old-control"] {
+    for name in ["nonce", "result", "old-control"] {
         private_file(&scratch.join(name));
     }
-    let guide = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../plugin/skills/hive/scripts/slot-handoff.sh"),
-    )
-    .unwrap();
-    let tail = guide.split_once("    \"$binary\" slot begin ").unwrap().1;
-    let body = tail.split_once("\n}\n\nproduce_slot()").unwrap().0;
-    let script = format!(
-        r#"
+    let script = r#"
 set +x +a
-binary=$1 repo=$2 pool=$3 lock=$4 scratch=$5 commit=$6 begin_op=$7 old_op=$8
+binary=$1 repo=$2 pool=$3 lock=$4 scratch=$5 old_op=$6
 scope=(--repo "$repo" --pool "$pool" --slot 1)
-generation=2 mode=take ready_op=99999999999999999999999999999999
-count_pattern='^(0|[1-9][0-9]*)$'
-git_for_slot() {{ return 1; }}
 IFS= read -r credential || exit 20
 "$binary" slot key --out-fd 8 --json 8<> "$scratch/nonce" > "$scratch/result" || exit 21
 IFS= read -r nonce < "$scratch/nonce" || exit 22
-printf -v request '{{"credential":"%s","nonce":"%s"}}' "$credential" "$nonce"
+printf -v request '{"credential":"%s","nonce":"%s"}' "$credential" "$nonce"
 exec 9< "$lock" || exit 23
-if "$binary" slot begin "${{scope[@]}}" --generation "$generation" --op "$old_op" \
+if "$binary" slot begin "${scope[@]}" --generation 2 --op "$old_op" \
   --lock-fd 9 --control-fd 8 --json <<< "$request" 8<> "$scratch/old-control" > "$scratch/result"; then
     exit 24
 fi
 [[ ! -s "$scratch/old-control" ]] || exit 25
-retry_preparation() {{
-    "$binary" slot begin {body}
-}}
-retry_preparation
-"#
-    );
+"#;
     let mut command = fixture.hive.command_with(
         Path::new("/bin/bash"),
-        &["--noprofile", "--norc", "-c", &script, "retry-guide"],
+        &["--noprofile", "--norc", "-c", script, "retry-guide"],
+    );
+    producer_environment(&mut command);
+    let old = command
+        .arg(env!("CARGO_BIN_EXE_cargo-hive"))
+        .arg(&fixture.repo)
+        .arg(&slot.pool)
+        .arg(slot.lock_path())
+        .arg(scratch)
+        .arg(old_op)
+        .env_remove("BASH_ENV")
+        .stdin(fs::File::open(key).unwrap())
+        .output()
+        .unwrap();
+    assert_no_credential(&old, &slot.credential);
+    assert!(old.status.success(), "{old:?}");
+
+    let guide = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
+    let mut command = fixture.hive.command_with(
+        Path::new("/bin/bash"),
+        &[
+            "--noprofile",
+            "--norc",
+            guide.to_str().unwrap(),
+            "prepare-recovered",
+        ],
     );
     producer_environment(&mut command);
     let child = command
         .arg(env!("CARGO_BIN_EXE_cargo-hive"))
         .arg(&fixture.repo)
         .arg(&slot.pool)
-        .arg(slot.lock_path())
-        .arg(scratch)
+        .args(["1", "2"])
         .arg(next)
         .arg(begin_op)
-        .arg(old_op)
+        .arg("9".repeat(32))
         .env_remove("BASH_ENV")
         .stdin(fs::File::open(key).unwrap())
         .stdout(Stdio::piped())
@@ -7137,7 +7146,7 @@ fn full_pool_fallback_seeds_only_registry_units_in_a_distinct_checkout() {
     let output_alias = fixture._repo_dir.path.join("warm-output-alias");
     symlink(warm, &source_alias).unwrap();
     symlink(&warm_target, &output_alias).unwrap();
-    let fresh_parent = fixture.hive.secondary_root.path.join("fresh-scope");
+    let fresh_parent = pool_root.join("fresh-scope");
     fs::create_dir_all(fresh_parent.join(".cargo")).unwrap();
     let fresh = fresh_parent.join("fresh");
     git(

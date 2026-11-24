@@ -140,11 +140,12 @@ fn checked_scope(
         let pools = saved.as_ref().map_or(&[][..], |file| file.pools.as_slice());
         for pool in pools {
             check_cancelled()?;
-            if output_paths_may_overlap(checkout, &pool.root)
-                || target.is_some_and(|target| output_paths_may_overlap(target, &pool.root))
+            let namespace = pool.checkout_dir();
+            if output_paths_may_overlap(checkout, &namespace)
+                || target.is_some_and(|target| output_paths_may_overlap(target, &namespace))
             {
                 return Err(Refusal::SeedFallback(
-                    "The seed fallback overlaps a recorded slot pool. Choose a separate secondary checkout.",
+                    "The seed fallback overlaps recorded slot checkout paths. Choose a separate secondary checkout.",
                 ));
             }
             if slots::owner_directory(&pool.root).is_err()

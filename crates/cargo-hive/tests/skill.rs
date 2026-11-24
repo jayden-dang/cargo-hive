@@ -293,23 +293,32 @@ fn slot_helper_requires_the_exact_installed_guide_version() {
     fs::create_dir(&path).unwrap();
     let scratch = cargo_hive_platform::TempDir::adopt(path);
     let binary = scratch.path().join("cargo-hive");
+    let called = binary.with_extension("called");
+    let version_read = binary.with_extension("version-read");
+    let key = scratch.path().join("fixture-key");
+    fs::write(&key, format!("{}\n", "f".repeat(64))).unwrap();
+    fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
     let version = env!("CARGO_PKG_VERSION");
     let (family, patch) = version.rsplit_once('.').unwrap();
     let other_patch = patch.parse::<u64>().unwrap() + 1;
     for (body, accepted) in [
         (format!("echo 'cargo-hive {version}'"), true),
+        (format!("printf 'cargo-hive %s\\000\\n' '{version}'"), false),
         (format!("echo 'cargo-hive {family}.{other_patch}'"), false),
         (format!("echo 'cargo-hive {version} extra'"), false),
         (format!("echo 'cargo-hive {version}'; echo"), false),
+        (format!("printf 'cargo-hive %s' '{version}'"), false),
         (format!("echo 'cargo-hive {version}'; exit 1"), false),
     ] {
         fs::write(
             &binary,
-            format!("#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = --version ] || exit 2\n{body}\n"),
+            format!(
+                "#!/bin/sh\nif [ \"$#\" != 1 ] || [ \"$1\" != --version ]; then : > \"$0.called\"; exit 2; fi\nif IFS= read -r line; then : > \"$0.version-read\"; fi\n{body}\n"
+            ),
         )
         .unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
-        let out = Command::new("bash")
+        let out = Command::new("/bin/bash")
             .arg(&helper)
             .arg("check-version")
             .arg(&binary)
@@ -319,6 +328,83 @@ fn slot_helper_requires_the_exact_installed_guide_version() {
         assert!(out.stdout.is_empty());
         if !accepted {
             assert!(String::from_utf8_lossy(&out.stderr).contains("matching binary"));
+            let main = scratch.path().to_str().unwrap();
+            let checkout = scratch.path().join("other");
+            let pool = "a".repeat(32);
+            let commit = "b".repeat(40);
+            let reserve = "c".repeat(32);
+            let begin = "d".repeat(32);
+            let ready = "e".repeat(32);
+            let receipt = vec![main, &pool, "1", "1", &ready];
+            for (action, arguments) in [
+                ("key", vec![]),
+                (
+                    "take",
+                    vec![main, &pool, "1", "0", &commit, &reserve, &begin, &ready],
+                ),
+                (
+                    "prepare-recovered",
+                    vec![main, &pool, "1", "1", &commit, &begin, &ready],
+                ),
+                ("produce", vec![main, &pool, "1", "1", &ready, "check"]),
+                ("return", receipt.clone()),
+                ("resume", receipt.clone()),
+                ("confirm", receipt.clone()),
+                ("recover", receipt),
+                ("fallback", vec![main, checkout.to_str().unwrap(), &commit]),
+            ] {
+                let result = Command::new("/bin/bash")
+                    .arg(&helper)
+                    .arg(action)
+                    .arg(&binary)
+                    .args(arguments)
+                    .env("HIVE_HOME", scratch.path().join("isolated-hive"))
+                    .stdin(fs::File::open(&key).unwrap())
+                    .output()
+                    .unwrap();
+                assert_eq!(result.status.code(), Some(1), "{action} {body}: {result:?}");
+                assert!(result.stdout.is_empty());
+                assert!(!called.exists(), "{action} reached a child operation");
+                assert!(!version_read.exists(), "{action} gave stdin to --version");
+                assert!(
+                    String::from_utf8_lossy(&result.stderr).contains("matching binary"),
+                    "{action} omitted the update remedy: {result:?}"
+                );
+            }
+        }
+    }
+
+    let package = scratch.path().join("installed-guide");
+    let scripts = package.join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    let packaged_helper = scripts.join("slot-handoff.sh");
+    fs::copy(&helper, &packaged_helper).unwrap();
+    fs::write(&binary, format!("#!/bin/sh\necho 'cargo-hive {version}'\n")).unwrap();
+    let metadata = package.join("SKILL.md");
+    let original = repo_file(SKILL);
+    let exact_line = format!("  hive-version: \"{version}\"");
+    let malformed = original.replacen(&exact_line, &format!("{exact_line}\0"), 1);
+    assert_ne!(malformed, original);
+    for (metadata_text, accepted) in [
+        (Some(original), true),
+        (Some(malformed), false),
+        (None, false),
+    ] {
+        if let Some(content) = metadata_text {
+            fs::write(&metadata, content).unwrap();
+        } else {
+            fs::remove_file(&metadata).unwrap();
+        }
+        let result = Command::new("/bin/bash")
+            .arg(&packaged_helper)
+            .arg("check-version")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.success(), accepted, "{result:?}");
+        assert!(result.stdout.is_empty());
+        if !accepted {
+            assert!(String::from_utf8_lossy(&result.stderr).contains("matching binary"));
         }
     }
 }

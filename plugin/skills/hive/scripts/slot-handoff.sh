@@ -1,14 +1,30 @@
 #!/bin/bash
 # Private entry point used by the installed guide.
+#
+# BINARY is the absolute cargo-hive path. The guide supplies exact recorded scope
+# and fresh caller-held operation IDs for new requests.
+#   check-version BINARY
+#   key BINARY                          (fresh private file open on descriptor 8)
+#   take|take-seeded BINARY MAIN POOL SLOT OBSERVED_GENERATION COMMIT RESERVE BEGIN READY
+#   prepare-recovered BINARY MAIN POOL SLOT GENERATION COMMIT NEXT_BEGIN READY
+#   produce BINARY MAIN POOL SLOT GENERATION OPERATION INVOCATION
+#   return|recover BINARY MAIN POOL SLOT GENERATION OPERATION
+#   resume|confirm BINARY MAIN POOL SLOT GENERATION OPERATION [ATTEMPT]
+#   fallback BINARY MAIN CHECKOUT COMMIT
+# Send the lease credential on private stdin. Recovery uses the Rust command's
+# bounded request on stdin. Resume looks up the result. Confirm after observing it.
 set +x +a
 unset -v credential nonce request step_request producer_request extra
 export -n SHELLOPTS
 
 check_slot_version() {
-    local binary=$1 metadata version actual
+    local binary=$1 metadata version
     local version_pattern='^  hive-version: "([0-9]+\.[0-9]+\.[0-9]+)"$'
     local line in_metadata=0 closed=0
-    metadata=$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P) || return 1
+    metadata=$(cd -P -- "$(/usr/bin/dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P) || return 1
+    metadata=$metadata/SKILL.md
+    [[ -f $metadata && -r $metadata ]] || return 1
+    /usr/bin/cmp -s "$metadata" <(LC_ALL=C /usr/bin/tr -d '\000' < "$metadata") || return 1
     version=
     {
         IFS= read -r line && [[ $line == --- ]] || return 1
@@ -23,12 +39,18 @@ check_slot_version() {
                 [!\ ]*) in_metadata=0 ;;
             esac
         done
-    } < "$metadata/SKILL.md"
+    } < "$metadata"
     [[ $closed == 1 && -n $version && $binary == /* && -f $binary && -x $binary ]] || return 1
 
-    # Keep the trailing newline so extra output cannot be mistaken for the version.
-    actual=$("$binary" --version && printf '.') || return 1
-    [[ $actual == "cargo-hive $version"$'\n.' ]]
+    # Compare the full byte stream, including NULs, and require a successful probe.
+    ( set -o pipefail; "$binary" --version </dev/null 8>&- 9>&- 2>/dev/null |
+        /usr/bin/cmp -s - <(printf 'cargo-hive %s\n' "$version") )
+}
+
+require_slot_version() {
+    check_slot_version "$1" && return 0
+    printf '%s\n' 'Slot use requires the exact cargo-hive version bundled with this guide. Update the plugin or reinstall the matching binary.' >&2
+    return 1
 }
 
 git_for_slot() {
@@ -50,11 +72,15 @@ take_slot() {
     local prior anchor index
     local -a scope anchors
 
-    check_slot_version "$binary" || return 1
     [[ $repo == /* && ( $slot == 1 || $slot == 2 ) && $expect =~ $count_pattern && ${#expect} -le 20 &&
-        $pool =~ $id_pattern && $commit =~ $oid_pattern && $reserve_op =~ $id_pattern &&
+        $pool =~ $id_pattern && $commit =~ $oid_pattern &&
         $begin_op =~ $id_pattern && $ready_op =~ $id_pattern && $hive_root == /* &&
-        $reserve_op != "$begin_op" && $reserve_op != "$ready_op" && $begin_op != "$ready_op" ]] || return 1
+        $begin_op != "$ready_op" ]] || return 1
+    if [[ $mode == prepare-recovered ]]; then
+        [[ $expect != 0 && -z $reserve_op ]] || return 1
+    else
+        [[ $reserve_op =~ $id_pattern && $reserve_op != "$begin_op" && $reserve_op != "$ready_op" ]] || return 1
+    fi
     IFS= read -r credential && [[ $credential =~ $key_pattern ]] || return 1
     extra=
     if IFS= read -r extra || [[ -n $extra ]]; then return 1; fi
@@ -70,19 +96,22 @@ take_slot() {
     IFS= read -r nonce < "$scratch/nonce" && [[ $nonce =~ $key_pattern ]] || return 1
     printf -v request '{"credential":"%s","nonce":"%s"}' "$credential" "$nonce"
     scope=(--repo "$repo" --pool "$pool" --slot "$slot")
-    # The slot generation is unsigned. Increment decimal digits without shell overflow.
-    prefix=$expect suffix=
-    while [[ $prefix == *9 ]]; do prefix=${prefix%9}; suffix=0$suffix; done
-    if [[ -z $prefix ]]; then
-        generation=1$suffix
-    else
-        digit=${prefix:${#prefix}-1}
-        generation=${prefix%?}$((digit + 1))$suffix
+    generation=$expect
+    if [[ $mode != prepare-recovered ]]; then
+        # The slot generation is unsigned. Increment decimal digits without shell overflow.
+        prefix=$expect suffix=
+        while [[ $prefix == *9 ]]; do prefix=${prefix%9}; suffix=0$suffix; done
+        if [[ -z $prefix ]]; then
+            generation=1$suffix
+        else
+            digit=${prefix:${#prefix}-1}
+            generation=${prefix%?}$((digit + 1))$suffix
+        fi
+        "$binary" slot reserve "${scope[@]}" --expect "$expect" --commit "$commit" \
+            --op "$reserve_op" --json <<< "$credential" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+        "$binary" slot ack "${scope[@]}" --generation "$generation" --op "$reserve_op" \
+            --json <<< "$credential" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
     fi
-    "$binary" slot reserve "${scope[@]}" --expect "$expect" --commit "$commit" \
-        --op "$reserve_op" --json <<< "$credential" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
-    "$binary" slot ack "${scope[@]}" --generation "$generation" --op "$reserve_op" \
-        --json <<< "$credential" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
     lock="$hive_root/slot-locks/$pool/slot-$slot.lock"
     exec 9< "$lock" || return 1
     "$binary" slot begin "${scope[@]}" --generation "$generation" --op "$begin_op" --lock-fd 9 \
@@ -145,7 +174,6 @@ produce_slot() {
     local hive_root=${HIVE_HOME:-$HOME/.hive} credential nonce producer_request extra
     local scratch field cwd total i stopped writer cleanup stop_cleanup
     local -a scope assignments argv
-    check_slot_version "$binary" || return 1
     [[ $repo == /* && $hive_root == /* && ( $slot == 1 || $slot == 2 ) &&
         $pool =~ $id_pattern && $operation =~ $id_pattern &&
         $generation =~ ^[1-9][0-9]{0,19}$ && $invocation =~ $invocation_pattern ]] || return 1
@@ -203,15 +231,27 @@ produce_slot() {
     /bin/cat "$scratch/result"
 }
 
+slot_receipt() {
+    local action=$1 binary=$2 repo=$3 pool=$4 slot=$5 generation=$6 operation=$7
+    local -a attempt
+    attempt=()
+    if [[ $# == 8 ]]; then attempt=(--attempt "$8"); fi
+    exec "$binary" slot "$action" --repo "$repo" --pool "$pool" --slot "$slot" \
+        --generation "$generation" --op "$operation" "${attempt[@]}" --json
+}
+
 if [[ $# == 2 && $1 == check-version ]]; then
-    if check_slot_version "$2"; then
-        exit 0
-    fi
-    printf '%s\n' 'Slot use requires the exact cargo-hive version bundled with this guide. Update the plugin or reinstall the matching binary.' >&2
-    exit 1
+    require_slot_version "$2"
+    exit $?
+fi
+
+if [[ $# == 2 && $1 == key ]]; then
+    require_slot_version "$2" || exit 1
+    exec "$2" slot key --out-fd 8 --json
 fi
 
 if [[ $# == 10 && ( $1 == take || $1 == take-seeded ) ]]; then
+    require_slot_version "$2" || exit 1
     mode=$1
     shift
     take_slot "$@" "$mode" && exit 0
@@ -219,11 +259,37 @@ if [[ $# == 10 && ( $1 == take || $1 == take-seeded ) ]]; then
     exit 1
 fi
 
+if [[ $# == 9 && $1 == prepare-recovered ]]; then
+    require_slot_version "$2" || exit 1
+    take_slot "$2" "$3" "$4" "$5" "$6" "$7" '' "$8" "$9" prepare-recovered && exit 0
+    printf '%s\n' 'Recovered preparation could not be confirmed. Inspect the slot before retrying.' >&2
+    exit 1
+fi
+
 if [[ $# == 8 && $1 == produce ]]; then
+    require_slot_version "$2" || exit 1
     shift
     produce_slot "$@" && exit 0
     printf '%s\n' 'Slot producer could not be confirmed. Preserve its pending or held evidence.' >&2
     exit 1
+fi
+
+if [[ $# == 7 && ( $1 == return || $1 == recover ) ]]; then
+    require_slot_version "$2" || exit 1
+    slot_receipt "$@"
+fi
+
+if [[ ( $# == 7 || $# == 8 ) && ( $1 == resume || $1 == confirm ) ]]; then
+    require_slot_version "$2" || exit 1
+    action=outcome
+    if [[ $1 == confirm ]]; then action=ack; fi
+    shift
+    slot_receipt "$action" "$@"
+fi
+
+if [[ $# == 5 && $1 == fallback ]]; then
+    require_slot_version "$2" || exit 1
+    exec "$2" slot seed-fallback --repo "$3" --checkout "$4" --commit "$5" --json
 fi
 
 printf '%s\n' 'Expected check-version or a private slot request.' >&2

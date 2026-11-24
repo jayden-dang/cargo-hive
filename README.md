@@ -170,7 +170,19 @@ print a receipt. The slot commands print a scoped slot result.
 `cargo hive slot init --repo /path/to/main --root /path/to/secondary --profile /path/to/reviewed.json`
 records two unused paths for a registered repository.
 `cargo hive slot status --repo /path/to/main` reports the current pool and any holds.
-Slot recovery and the warm checkout workflow are unavailable in this version.
+
+Use the installed hive guide to take, use and return a warm slot on macOS with
+a reviewed profile. The guide and binary must match the exact bundled version.
+Run Cargo only through the guide's guarded producer once it reports a current
+ready lease. An unrecorded build can permanently hold a slot. Keep the original
+operation and lease details to look up a lost reply before confirming it.
+
+Resolve unfinished work in the held checkout before returning it. Run
+`cargo hive slot recover --help` for explicit operator recovery. If both slots
+are busy or the requested profile cannot use warm mode, the guide can verify and
+seed a separate fresh secondary checkout at the requested commit. A successful
+fallback places registry units only. The guide reports when it cannot verify or
+seed that checkout.
 
 ## Commands
 
