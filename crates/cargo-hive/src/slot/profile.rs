@@ -3,7 +3,7 @@
 use super::admission::{
     MaterializedGraph, NativeBuild, NativePackage, NativeTarget, NativeTargetMetadata,
 };
-use super::generated::{GeneratedRustPlan, SERDE_CORE_PACKAGE};
+use super::generated::GeneratedPlan;
 use super::{CheckoutProof, Refusal, canonical_worktree_path, check_cancelled, exists, git_scope};
 use cargo_hive_cargo::metadata;
 use cargo_hive_platform::{
@@ -43,7 +43,7 @@ pub(super) struct CheckedInvocation {
     pub cwd: PathBuf,
     pub needs_guide: bool,
     pub environment: BTreeMap<std::ffi::OsString, std::ffi::OsString>,
-    pub generated: Option<GeneratedRustPlan>,
+    pub generated: Option<GeneratedPlan>,
 }
 
 pub(super) fn refused(detail: &'static str) -> Refusal {
@@ -346,7 +346,7 @@ pub(super) fn check_invocation(
                 &checkout.path,
                 &cargo_home,
                 material,
-                seal.generated_input().is_some(),
+                seal.generated_package_id(),
             )?;
             let after = seal.verify_dependency_material(profile, &cargo_home, &checkout.path)?;
             if material_before != after {
@@ -363,27 +363,11 @@ pub(super) fn check_invocation(
     } else {
         None
     };
-    let generated = if let Some(seal) = &native
-        && let Some(declaration) = seal.generated_input()
-    {
-        let package = seal
-            .materialized()
-            .and_then(|graph| {
-                graph
-                    .packages
-                    .iter()
-                    .find(|package| package.id == declaration.producer.package_id)
-            })
-            .ok_or_else(|| {
-                refused("The reviewed generated producer has no materialized package.")
-            })?;
-        Some(GeneratedRustPlan::new(
-            declaration,
-            cargo_home.join(&package.root),
-        ))
-    } else {
-        None
-    };
+    let generated = native
+        .as_ref()
+        .map(|seal| seal.generated_plan(&cargo_home, &checkout.path))
+        .transpose()?
+        .flatten();
     let reviewed_sources = reviewed_source_facts(
         &inputs,
         &discovered,
@@ -1167,7 +1151,7 @@ fn verify_materialized_graph(
     checkout: &Path,
     home: &Path,
     materialized: &MaterializedGraph,
-    generated: bool,
+    generated_package: Option<&str>,
 ) -> Result<(), Refusal> {
     let unproved = || {
         refused(
@@ -1179,8 +1163,8 @@ fn verify_materialized_graph(
         .iter()
         .map(|pkg| (&pkg.id, pkg))
         .collect();
-    let active = generated
-        .then(|| generated_reachable(&graph.workspace_members, &graph.nodes).ok_or_else(unproved))
+    let active = generated_package
+        .map(|_| generated_reachable(&graph.workspace_members, &graph.nodes).ok_or_else(unproved))
         .transpose()?;
     for pkg in &graph.packages {
         if let Some(source) = &pkg.source {
@@ -1206,9 +1190,8 @@ fn verify_materialized_graph(
                 || pkg.manifest_path != root.join("Cargo.toml")
                 || !expected
                     .matches_executables(targets.iter().copied().filter(|_| executable_scope))
-                || (generated
+                || (generated_package.is_some_and(|name| pkg.id != name)
                     && executable_scope
-                    && pkg.id != SERDE_CORE_PACKAGE
                     && targets.iter().any(|(_, kinds, _)| {
                         kinds
                             .iter()

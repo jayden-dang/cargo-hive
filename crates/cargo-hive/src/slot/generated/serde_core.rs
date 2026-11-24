@@ -208,43 +208,57 @@ impl GeneratedRustPlan {
             &self.package_root.join(&consumer.source),
             Some(&input),
         )?;
-        let relative_path = input
-            .strip_prefix(&root.path)
-            .map_err(|_| unproved())?
-            .to_path_buf();
-        let (mut directory, metadata) = open_owner_directory(&root.path).map_err(|_| unproved())?;
-        if FileIdentity::of(&metadata) != root.identity {
-            return Err(unproved());
-        }
-        let mut parents = Vec::new();
-        for component in relative_path.parent().ok_or_else(unproved)?.components() {
-            let Component::Normal(name) = component else {
-                return Err(unproved());
-            };
-            let (child, metadata) =
-                open_owner_directory_at(&directory, name).map_err(|_| unproved())?;
-            parents.push(FileIdentity::of(&metadata));
-            directory = child;
-        }
-        let file = open_owner_file_at(&directory, relative_path.file_name().ok_or_else(unproved)?)
-            .map_err(|_| unproved())?;
-        let witness = GeneratedInputWitness {
-            declaration_sha256: digest(
-                &serde_json::to_vec(&self.declaration).map_err(|_| unproved())?,
-            )?,
-            build_root: root.identity,
-            relative_path,
-            parents,
-            file: FileIdentity::of(&file.metadata().map_err(|_| unproved())?),
-            bytes: self.declaration.bytes,
-            sha256: self.declaration.sha256.clone(),
-        };
-        verify(root, &witness)?;
-        Ok(witness)
+        capture_witness(
+            root,
+            &input,
+            digest(&serde_json::to_vec(&self.declaration).map_err(|_| unproved())?)?,
+            self.declaration.bytes,
+            self.declaration.sha256.clone(),
+        )
     }
 }
 
-fn artifact_bytes(path: &Path, cap: usize) -> Result<Vec<u8>, Refusal> {
+pub(super) fn capture_witness(
+    root: &VerifiedRoot,
+    input: &Path,
+    declaration_sha256: String,
+    bytes: u64,
+    sha256: String,
+) -> Result<GeneratedInputWitness, Refusal> {
+    let relative_path = input
+        .strip_prefix(&root.path)
+        .map_err(|_| unproved())?
+        .to_path_buf();
+    let (mut directory, metadata) = open_owner_directory(&root.path).map_err(|_| unproved())?;
+    if FileIdentity::of(&metadata) != root.identity {
+        return Err(unproved());
+    }
+    let mut parents = Vec::new();
+    for component in relative_path.parent().ok_or_else(unproved)?.components() {
+        let Component::Normal(name) = component else {
+            return Err(unproved());
+        };
+        let (child, metadata) =
+            open_owner_directory_at(&directory, name).map_err(|_| unproved())?;
+        parents.push(FileIdentity::of(&metadata));
+        directory = child;
+    }
+    let file = open_owner_file_at(&directory, relative_path.file_name().ok_or_else(unproved)?)
+        .map_err(|_| unproved())?;
+    let witness = GeneratedInputWitness {
+        declaration_sha256,
+        build_root: root.identity,
+        relative_path,
+        parents,
+        file: FileIdentity::of(&file.metadata().map_err(|_| unproved())?),
+        bytes,
+        sha256,
+    };
+    verify(root, &witness)?;
+    Ok(witness)
+}
+
+pub(super) fn artifact_bytes(path: &Path, cap: usize) -> Result<Vec<u8>, Refusal> {
     if path.canonicalize().as_deref().ok() != Some(path) {
         return Err(unproved());
     }

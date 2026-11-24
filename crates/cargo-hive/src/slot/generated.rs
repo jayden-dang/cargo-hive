@@ -1,6 +1,11 @@
 //! Physical revalidation of finite, previously witnessed generated inputs.
 
+mod archive;
 mod serde_core;
+pub(super) use self::archive::{
+    CONSUMER_SOURCE as ARCHIVE_CONSUMER, NativeArchive, NativeArchivePlan,
+    PACKAGE as ARCHIVE_PACKAGE, WORKSPACE_LIB as ARCHIVE_WORKSPACE_LIB,
+};
 pub(super) use self::serde_core::GeneratedRustPlan;
 
 use super::{
@@ -63,6 +68,36 @@ enum UnitRole {
     TargetLibrary,
 }
 
+pub(super) enum GeneratedPlan {
+    Rust(GeneratedRustPlan),
+    Archive(NativeArchivePlan),
+}
+
+impl GeneratedPlan {
+    pub fn require_prior(
+        &self,
+        prior: &slots::EligibleProducer,
+        invocation: &str,
+        locked: impl Fn(&Path) -> bool,
+    ) -> Result<(), Refusal> {
+        match self {
+            Self::Rust(plan) => plan.require_prior(prior, invocation, locked),
+            Self::Archive(plan) => plan.require_prior(prior, invocation, locked),
+        }
+    }
+
+    pub fn collect(
+        &self,
+        root: &VerifiedRoot,
+        layout: slots::CargoLayout,
+    ) -> Result<GeneratedInputWitness, Refusal> {
+        match self {
+            Self::Rust(plan) => plan.collect(root, layout),
+            Self::Archive(plan) => plan.collect(root, layout),
+        }
+    }
+}
+
 impl GeneratedRust {
     pub fn matches_witnesses(&self, witnesses: &[GeneratedInputWitness]) -> Result<bool, Refusal> {
         let reviewed = digest(&serde_json::to_vec(self).map_err(|_| unproved())?)?;
@@ -123,7 +158,7 @@ impl GeneratedRust {
 }
 
 fn unproved() -> Refusal {
-    refused("The retained generated Rust input could not be verified.")
+    refused("The retained generated input could not be verified.")
 }
 
 fn parent(root: &VerifiedRoot, witness: &GeneratedInputWitness) -> Result<File, Refusal> {

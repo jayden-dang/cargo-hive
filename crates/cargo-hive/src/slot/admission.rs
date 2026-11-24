@@ -5,8 +5,9 @@ mod nextest;
 mod sqlx;
 
 use super::generated::{
-    GeneratedRust, SERDE_CORE_ARCHIVE, SERDE_CORE_BUILD_SCRIPT, SERDE_CORE_INVENTORY,
-    SERDE_CORE_PACKAGE,
+    ARCHIVE_CONSUMER, ARCHIVE_PACKAGE, ARCHIVE_WORKSPACE_LIB, GeneratedPlan, GeneratedRust,
+    GeneratedRustPlan, NativeArchive, NativeArchivePlan, SERDE_CORE_ARCHIVE,
+    SERDE_CORE_BUILD_SCRIPT, SERDE_CORE_INVENTORY, SERDE_CORE_PACKAGE,
 };
 use super::profile::{digest, read_input_bounded, refused};
 use super::{CheckoutProof, Refusal, directory_stamp, git_scope};
@@ -92,6 +93,7 @@ struct Seal {
     sqlx_offline: Option<sqlx::OfflineInputs>,
     #[serde(default)]
     generated_inputs: Vec<GeneratedRust>,
+    native_archive: Option<NativeArchive>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -145,11 +147,11 @@ struct Tools {
     cargo_nextest: Option<Material>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct Material {
-    path: PathBuf,
-    sha256: String,
+pub(super) struct Material {
+    pub path: PathBuf,
+    pub sha256: String,
 }
 
 #[derive(Deserialize, PartialEq, Eq)]
@@ -289,6 +291,7 @@ enum ReviewedBehavior {
     MetadataOnlyBuildScript,
     SealedInputsTokenTransform,
     SerdeCoreGeneratedRust,
+    NamedNativeArchive,
 }
 
 #[derive(Deserialize)]
@@ -313,6 +316,8 @@ struct DependencyReviewScope<'a> {
     home: &'a Path,
     checkout: &'a Path,
     generated: Option<&'a GeneratedRust>,
+    archive: Option<&'a NativeArchive>,
+    clang: &'a Path,
 }
 
 impl MaterializedGraph {
@@ -519,19 +524,27 @@ impl MaterializedPackage {
                 || review.git_checkout_sha256.as_deref() != git_checkout_sha256
                 || review.target != approval.target
                 || review.source_sha256 != digest(&source)?
-                || !match (scope.generated, &review.target.kind, review.behavior) {
+                || !match (
+                    scope.generated,
+                    scope.archive,
+                    &review.target.kind,
+                    review.behavior,
+                ) {
                     (
+                        None,
                         None,
                         ExecutableKind::CustomBuild,
                         ReviewedBehavior::MetadataOnlyBuildScript,
                     ) => review.source_sha256 != SERDE_CORE_BUILD_SCRIPT,
                     (
                         None,
+                        None,
                         ExecutableKind::ProcMacro,
                         ReviewedBehavior::SealedInputsTokenTransform,
                     ) => true,
                     (
                         Some(generated),
+                        None,
                         ExecutableKind::CustomBuild,
                         ReviewedBehavior::SerdeCoreGeneratedRust,
                     ) => {
@@ -543,6 +556,21 @@ impl MaterializedPackage {
                             && review.source_sha256 == SERDE_CORE_BUILD_SCRIPT
                             && review.target.name == "build-script-build"
                             && review.target.source.as_os_str() == "build.rs"
+                    }
+                    (
+                        None,
+                        Some(archive),
+                        ExecutableKind::CustomBuild,
+                        ReviewedBehavior::NamedNativeArchive,
+                    ) => {
+                        scope.recipe == Recipe::NativeBuild
+                            && self.name == ARCHIVE_PACKAGE
+                            && self.id == archive.producer.package_id
+                            && archive.package_material_sha256 == self.inventory_sha256
+                            && matches!(&self.origin, Origin::Git { .. })
+                            && review.target.name == "build-script-build"
+                            && review.target.source.as_os_str() == "build.rs"
+                            && archive.verifies_source(root, scope.clang, &source)?
                     }
                     _ => false,
                 }
@@ -1049,6 +1077,25 @@ impl NativeBuild {
             })
             || seal.generated_inputs.len() > 1
             || (!seal.generated_inputs.is_empty() && seal.recipe != Recipe::NativeBuild)
+            || seal.native_archive.as_ref().is_some_and(|archive| {
+                seal.recipe != Recipe::NativeBuild || !seal.generated_inputs.is_empty()
+                    || !seal.materialized.as_ref().is_some_and(|graph| {
+                        matches!(graph.packages.as_slice(), [package]
+                            if package.id == archive.producer.package_id
+                            && matches!(package.origin, Origin::Git { .. })
+                            && archive.valid_for(&package.name, &package.version, &package.inventory_sha256, native)
+                            && matches!(package.executables.as_slice(), [approval]
+                                if approval.target.kind == ExecutableKind::CustomBuild
+                                && approval.target.name == archive.producer.target
+                                && approval.target.source == archive.producer.source))
+                    })
+                    || !seal.packages.iter().any(|package| {
+                        package.name == archive.consumer.package && package.targets.iter().any(|target| {
+                            target.name == archive.consumer.target && target.kind == "bin"
+                                && target.source == archive.consumer.source
+                        })
+                    })
+            })
             || !seal.generated_inputs.iter().all(|declaration| {
                 seal.materialized.as_ref().is_some_and(|graph| {
                     graph.packages.iter().any(|package| {
@@ -1093,7 +1140,9 @@ impl NativeBuild {
                         .iter()
                         .any(|endpoint| endpoint.whole_tree.is_none())
             })
-            || ((!matches!(seal.recipe, Recipe::NativeBuild) || !seal.generated_inputs.is_empty())
+            || ((!matches!(seal.recipe, Recipe::NativeBuild)
+                || !seal.generated_inputs.is_empty()
+                || seal.native_archive.is_some())
                 && seal.packages.iter().any(|package| {
                     package
                         .targets
@@ -1150,6 +1199,8 @@ impl NativeBuild {
             home,
             checkout,
             generated: self.generated_input(),
+            archive: self.seal.native_archive.as_ref(),
+            clang: &self.seal.tools.clang.path,
         };
         self.materialized()
             .map(|material| material.verify_material(&scope))
@@ -1164,6 +1215,49 @@ impl NativeBuild {
         self.seal.generated_inputs.first()
     }
 
+    pub fn generated_package_id(&self) -> Option<&str> {
+        self.generated_input()
+            .map(|input| input.producer.package_id.as_str())
+            .or_else(|| {
+                self.seal
+                    .native_archive
+                    .as_ref()
+                    .map(|input| input.producer.package_id.as_str())
+            })
+    }
+
+    pub fn generated_plan(
+        &self,
+        home: &Path,
+        checkout: &Path,
+    ) -> Result<Option<GeneratedPlan>, Refusal> {
+        let unproved = || refused("The reviewed generated producer has no materialized package.");
+        if let Some(input) = self.generated_input() {
+            let package = self
+                .materialized()
+                .and_then(|graph| {
+                    graph
+                        .packages
+                        .iter()
+                        .find(|package| package.id == input.producer.package_id)
+                })
+                .ok_or_else(unproved)?;
+            Ok(Some(GeneratedPlan::Rust(GeneratedRustPlan::new(
+                input,
+                home.join(&package.root),
+            ))))
+        } else if let Some(archive) = &self.seal.native_archive {
+            Ok(Some(GeneratedPlan::Archive(NativeArchivePlan::new(
+                archive,
+                self.seal.tools.otool.path.clone(),
+                checkout.to_path_buf(),
+                home.to_path_buf(),
+            ))))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn verify_generated_bindings(
         &self,
         inputs: &[GeneratedInputWitness],
@@ -1171,6 +1265,13 @@ impl NativeBuild {
         let unproved = || {
             refused("The retained generated input evidence differs from its reviewed declaration.")
         };
+        if let Some(archive) = &self.seal.native_archive {
+            return if archive.matches_witnesses(inputs)? {
+                Ok(())
+            } else {
+                Err(unproved())
+            };
+        }
         if inputs.len() != self.seal.generated_inputs.len() {
             return Err(unproved());
         }
@@ -1218,6 +1319,14 @@ impl NativeBuild {
                 "The sealed native build's checkout, source or mutable data bytes could not be verified.",
             )
         };
+        if let Some(archive) = &self.seal.native_archive
+            && (read_input_bounded(&checkout.path.join(&archive.consumer.source), 4096)?.as_deref()
+                != Some(ARCHIVE_CONSUMER)
+                || read_input_bounded(&checkout.path.join("src/lib.rs"), 4096)?.as_deref()
+                    != Some(ARCHIVE_WORKSPACE_LIB))
+        {
+            return Err(unproved());
+        }
         let endpoint = self
             .seal
             .endpoints
@@ -1402,6 +1511,12 @@ impl NativeBuild {
         }
         let mut remaining = TOTAL_MATERIAL_LIMIT;
         let mut stamps = Vec::new();
+        if let Some(archive) = &self.seal.native_archive {
+            if xcode_path(cwd, cargo_home, &["--find", "ar"])? != archive.archiver.path {
+                return Err(unproved());
+            }
+            stamps.push(archive.archiver.verify(&mut remaining)?);
+        }
         for material in [
             &tools.cargo,
             &tools.rustc,
@@ -1752,7 +1867,7 @@ fn verify_rust_loader(
     Ok(())
 }
 
-fn native_output<'a>(
+pub(super) fn native_output<'a>(
     program: &Path,
     args: impl IntoIterator<Item = &'a OsStr>,
     cwd: &Path,

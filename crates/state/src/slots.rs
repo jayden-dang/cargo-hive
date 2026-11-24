@@ -1085,7 +1085,7 @@ impl GeneratedInputWitness {
             && self
                 .relative_path
                 .extension()
-                .is_some_and(|extension| extension == "rs")
+                .is_some_and(|extension| extension == "rs" || extension == "a")
             && self.parents.iter().chain([&self.file]).all(|identity| {
                 identity.valid() && identity.dev == root.identity.dev && *identity != root.identity
             })

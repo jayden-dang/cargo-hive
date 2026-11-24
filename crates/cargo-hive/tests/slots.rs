@@ -6978,12 +6978,7 @@ fn exercise_packaged_serde_core(active_derive: bool) {
     assert_no_credential(&out, &credential);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     let held: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert!(
-        held["detail"]
-            .as_str()
-            .unwrap()
-            .contains("generated Rust input")
-    );
+    assert!(held["detail"].as_str().unwrap().contains("generated input"));
     assert!(fixture.record() == legacy);
     fixture.install_record(&current);
     let before_guard_test = fs::read(fixture.file()).unwrap();
@@ -7027,14 +7022,328 @@ fn exercise_packaged_serde_core(active_derive: bool) {
     let args = fixture.replay("return", pool, 1, 2, &"8".repeat(32));
     let (out, held) = finish_private(start_private(&fixture.hive, args, &credential));
     assert_eq!(out.status.code(), Some(1), "{held}");
-    assert!(
-        held["detail"]
-            .as_str()
-            .unwrap()
-            .contains("generated Rust input")
-    );
+    assert!(held["detail"].as_str().unwrap().contains("generated input"));
     assert!(fs::read(fixture.file()).unwrap() == prior);
     assert!(fs::read(&generated).unwrap() == bytes);
+}
+
+#[test]
+fn a_reviewed_native_archive_is_linked_and_retained_through_scoped_gc() {
+    exercise_named_native_archive(false);
+}
+
+#[test]
+fn a_named_native_archive_refuses_a_changed_child_command() {
+    exercise_named_native_archive(true);
+}
+
+fn exercise_named_native_archive(wrong_child: bool) {
+    let fixture = reviewed_pool_fixture(Some(
+        "pub fn answer() -> u32 { named_native_archive_leaf::value() as u32 }\n",
+    ));
+    let tool = |name: &str| {
+        let out = fixture
+            .hive
+            .command_with(Path::new("/usr/bin/xcrun"), &["--no-cache", "--find", name])
+            .env_clear()
+            .env("HOME", &fixture.hive.cargo_home.path)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        PathBuf::from(std::str::from_utf8(&out.stdout).unwrap().trim())
+            .canonicalize()
+            .unwrap()
+    };
+    let clang = tool("clang");
+    let ar = tool("ar");
+    let donor = init_repo(&fixture._repo_dir.path.join("archive-donor"), "");
+    let donor_manifest = fs::read_to_string(donor.join("Cargo.toml")).unwrap();
+    fs::write(
+        donor.join("Cargo.toml"),
+        donor_manifest.replace("name = \"fixture\"", "name = \"named-native-archive-leaf\""),
+    )
+    .unwrap();
+    fs::write(
+        donor.join("native.c"),
+        "int hive_archived_value(void) {\n    return 7;\n}\n",
+    )
+    .unwrap();
+    fs::write(donor.join("src/lib.rs"),
+        "unsafe extern \"C\" {\n    fn hive_archived_value() -> i32;\n}\n\npub fn value() -> i32 {\n    unsafe { hive_archived_value() }\n}\n").unwrap();
+    let archive_mode = if wrong_child { "qc" } else { "rcs" };
+    let source = format!(
+        r#"use std::{{env, path::PathBuf, process::Command}};
+
+fn main() {{
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let object = out.join("native.o");
+    let archive = out.join("libhive_named.a");
+    assert!(Command::new({clang:?})
+        .args(["-c", "-g0", "native.c", "-o"])
+        .arg(&object).status().unwrap().success());
+    assert!(Command::new({ar:?})
+        .arg("{archive_mode}").arg(&archive).arg(&object).status().unwrap().success());
+    println!("cargo:rerun-if-changed=native.c");
+    println!("cargo:rustc-link-search=native={{}}", out.display());
+    println!("cargo:rustc-link-lib=static=hive_named");
+}}
+"#
+    );
+    fs::write(donor.join("build.rs"), source).unwrap();
+    git(&donor, &["add", "-A"]);
+    git(
+        &donor,
+        &["commit", "-qm", "Pinned two-child native archive producer"],
+    );
+    let revision = git(&donor, &["rev-parse", "HEAD"]);
+
+    let manifest = fixture.repo.join("Cargo.toml");
+    let original = fs::read_to_string(&manifest).unwrap();
+    let dependency = format!(
+        "named-native-archive-leaf = {{ git = \"file://{}\", rev = \"{revision}\" }}",
+        donor.display()
+    );
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n[[bin]]\nname = \"link-proof\"\npath = \"src/main.rs\"\n",
+            original.replace(
+                "[dependencies]\n",
+                &format!("[dependencies]\n{dependency}\n")
+            )
+        ),
+    )
+    .unwrap();
+    fs::write(
+        fixture.repo.join("src/main.rs"),
+        "fn main() {\n    assert_eq!(fixture::answer(), 7);\n}\n",
+    )
+    .unwrap();
+    let out = fixture
+        .hive
+        .command_with(Path::new("cargo"), &["generate-lockfile"])
+        .current_dir(&fixture.repo)
+        .env("CARGO_NET_OFFLINE", "false")
+        .env("CARGO_NET_GIT_FETCH_WITH_CLI", "true")
+        .env("GIT_ALLOW_PROTOCOL", "file")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    git(&fixture.repo, &["add", "-A"]);
+    git(
+        &fixture.repo,
+        &["commit", "-qm", "Pin the native archive link consumer"],
+    );
+    let out = fixture
+        .hive
+        .command_with(
+            Path::new("cargo"),
+            &[
+                "metadata",
+                "--format-version",
+                "1",
+                "--locked",
+                "--offline",
+                "--all-features",
+            ],
+        )
+        .current_dir(&fixture.repo)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let metadata: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let pkg = metadata["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pkg| pkg["name"] == "named-native-archive-leaf")
+        .unwrap();
+    let root = Path::new(pkg["manifest_path"].as_str().unwrap())
+        .parent()
+        .unwrap();
+    let relative = root.strip_prefix(&fixture.hive.cargo_home.path).unwrap();
+    let inventory = fixture_inventory(root, true);
+    let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+    for fact in profile["graph_inputs"].as_array_mut().unwrap() {
+        let path = fact["locator"]["path"].as_str().unwrap();
+        fact["expectation"]["identity"]["oid"] =
+            json!(git(&fixture.repo, &["rev-parse", &format!("HEAD:{path}")]));
+    }
+    profile["graph_inputs"].as_array_mut().unwrap().push(json!({
+        "locator":{"kind":"checkout","path":"src/main.rs"},"expectation":{"kind":"present","identity":{
+            "kind":"git_object","oid":git(&fixture.repo,&["rev-parse","HEAD:src/main.rs"])}}}));
+    fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    external_fixture_seal(
+        &fixture,
+        &head,
+        "native_build",
+        &[
+            "build",
+            "--workspace",
+            "--locked",
+            "--offline",
+            "--message-format=json",
+        ],
+    );
+    let seal = fixture._repo_dir.path.join("external-recipe.json");
+    let review = fixture
+        ._repo_dir
+        .path
+        .join("reviewed-archive-executable.json");
+    let mut closure: Value = serde_json::from_slice(&fs::read(&seal).unwrap()).unwrap();
+    let target = json!({"name":"build-script-build","kind":"custom_build","source":"build.rs"});
+    let reviewed = serde_json::to_vec(&json!({
+        "schema":1,"profile":{"id":"fixture","revision":1},"invocation":"check","recipe":"native_build",
+        "package_id":pkg["id"],"inventory_sha256":inventory,"git_checkout_sha256":inventory,
+        "source_sha256":fixture_sha(&fs::read(root.join("build.rs")).unwrap()),
+        "target":target,"behavior":"named_native_archive",
+    })).unwrap();
+    fs::write(&review, &reviewed).unwrap();
+    closure["packages"][0]["dependencies"] = json!(["named-native-archive-leaf"]);
+    closure["packages"][0]["targets"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"link-proof","kind":"bin","source":"src/main.rs"}));
+    closure["materialized"] = json!({
+        "resolve_sha256":fixture_resolve_digest(&metadata,&fixture.repo),"packages":[{
+            "id":pkg["id"],"name":pkg["name"],"version":pkg["version"],"source":pkg["source"],
+            "root":relative, "inventory_sha256":inventory,
+            "origin":{"kind":"git","revision":revision,"checkout":relative,"tree_sha256":inventory},
+            "executables":[{"target":target,"review_sha256":fixture_sha(&reviewed)}]
+        }]
+    });
+    closure["native_archive"] = json!({
+        "producer":{"package_id":pkg["id"],"target":"build-script-build","source":"build.rs",
+            "role":"host_build_script","profile":"dev","triple":closure["native_target"],"features":[]},
+        "package_material_sha256":inventory,"consumer":{"package":"fixture","target":"link-proof","source":"src/main.rs"},
+        "native_source":"native.c","archiver":{"path":ar,"sha256":fixture_sha(&fs::read(&ar).unwrap())},
+        "leaf":"libhive_named.a"
+    });
+    let bytes = serde_json::to_vec(&closure).unwrap();
+    fs::write(&seal, &bytes).unwrap();
+    let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+    profile["graph_inputs"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap()["expectation"]["identity"]["sha256"] = json!(fixture_sha(&bytes));
+    profile["proofs"][0]["evidence"] = json!(format!("closure-v1:sha256={}", fixture_sha(&bytes)));
+    profile["graph_inputs"].as_array_mut().unwrap().push(json!({
+        "locator":{"kind":"external","path":review},"expectation":{"kind":"present","identity":{
+            "kind":"reviewed_bytes","sha256":fixture_sha(&reviewed)}}
+    }));
+    fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = PathBuf::from(initialized["slots"][0]["path"].as_str().unwrap());
+    let key = fixture._repo_dir.path.join("named-archive-key");
+    private_file(&key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+            .status
+            .success()
+    );
+    let credential = fs::read_to_string(&key).unwrap();
+    let out = run_packaged_take(&fixture, pool, &head, &key, "take");
+    assert_no_credential(&out, &credential);
+    if wrong_child {
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let refusal: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(
+            refusal["detail"]
+                .as_str()
+                .unwrap()
+                .contains("exact sealed behavior review"),
+            "{refusal}"
+        );
+        assert!(!checkout.join("target").exists());
+        return;
+    }
+    assert!(
+        out.status.success(),
+        "guarded first Ready for the archive: {out:?}"
+    );
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
+    let mut command = fixture
+        .hive
+        .command_with(Path::new("/bin/bash"), &["--noprofile", "--norc"]);
+    producer_environment(&mut command);
+    let child = command
+        .arg(helper)
+        .args(["produce", env!("CARGO_BIN_EXE_cargo-hive")])
+        .arg(&fixture.repo)
+        .args([pool, "1", "1", &"7".repeat(32), "check"])
+        .stdin(fs::File::open(&key).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = common::wait_within(child, Duration::from_secs(60));
+    assert_no_credential(&out, &credential);
+    assert!(
+        out.status.success(),
+        "guarded linked archive completion: {out:?}"
+    );
+    let saved = fixture.record();
+    let witnesses = saved["pools"][0]["slots"][0]["producer"]["invocations"][0]["generated_inputs"]
+        .as_array()
+        .unwrap();
+    assert_eq!(witnesses.len(), 1);
+    let archived = checkout
+        .join("target")
+        .join(witnesses[0]["relative_path"].as_str().unwrap());
+    assert_eq!(archived.file_name().unwrap(), "libhive_named.a");
+    let actual = fs::read(&archived).unwrap();
+    assert_eq!(fixture_sha(&actual), witnesses[0]["sha256"]);
+    let identity = fs::metadata(&archived).unwrap().ino();
+    let stale = workspace_unit_stamp_path(&checkout, "independent");
+    fs::File::open(&stale)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000))
+        .unwrap();
+    let args = fixture.replay("return", pool, 1, 1, &"6".repeat(32));
+    let (out, returned) = finish_private(start_private(&fixture.hive, args, &credential));
+    assert!(out.status.success(), "{returned}");
+    let out = common::wait_within(
+        start_packaged_take_at(&fixture, pool, &head, &key, "take", "1"),
+        Duration::from_secs(60),
+    );
+    let ready: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(out.status.success(), "{ready}");
+    assert_eq!(ready["generation"], 2);
+    assert!(!stale.exists());
+    assert_eq!(fs::metadata(&archived).unwrap().ino(), identity);
+    assert_eq!(fs::read(&archived).unwrap(), actual);
+    let before = fs::read(fixture.file()).unwrap();
+    let mut altered = actual.clone();
+    altered[0] = b'?';
+    let mtime = fs::metadata(&archived).unwrap().modified().unwrap();
+    fs::write(&archived, altered).unwrap();
+    fs::File::open(&archived)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    let args = fixture.replay("return", pool, 1, 2, &"9".repeat(32));
+    let (out, held) = finish_private(start_private(&fixture.hive, args, &credential));
+    assert_eq!(out.status.code(), Some(1), "{held}");
+    assert!(fs::read(fixture.file()).unwrap() == before);
+    fs::write(&archived, &actual).unwrap();
+    fs::File::open(&archived)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    let displaced = archived.with_file_name("prior.a");
+    fs::rename(&archived, &displaced).unwrap();
+    fs::write(&archived, actual).unwrap();
+    let args = fixture.replay("return", pool, 1, 2, &"8".repeat(32));
+    let (out, held) = finish_private(start_private(&fixture.hive, args, &credential));
+    assert_eq!(out.status.code(), Some(1), "{held}");
+    assert!(fs::read(fixture.file()).unwrap() == before);
 }
 
 #[test]
