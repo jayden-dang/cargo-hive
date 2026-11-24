@@ -6065,7 +6065,12 @@ fn exercise_external_recipe(
             .status
             .success()
     );
-    let out = run_packaged_take(&fixture, pool, &head, &key, "take");
+    // Sealed external recipes re-read the pinned native toolchain material at
+    // multiple preparation checkpoints. Allow that work under a loaded runner.
+    let out = common::wait_within(
+        start_packaged_take(&fixture, pool, &head, &key, "take"),
+        Duration::from_secs(75),
+    );
     if let Some(detail) = expected_refusal {
         assert_eq!(out.status.code(), Some(1), "{recipe}: {out:?}");
         let checkout = Path::new(initialized["slots"][0]["path"].as_str().unwrap());
