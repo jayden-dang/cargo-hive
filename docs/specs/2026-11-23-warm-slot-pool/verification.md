@@ -121,8 +121,10 @@ grammar, and the current recipe environment has no entry for the required
 `SQLX_OFFLINE=true`. The real dependency and tool closure still needs positive
 custody evidence. Saved build material includes Cargo-managed generated inputs
 such as `serde_core`'s included `OUT_DIR/private.rs` and unit-local native
-archives. Allowing such inputs would require revising the
-[design's retained-root boundary](design.md).
+archives. The operator approved a narrow exception for named, verified
+unit-local files after this qualification run. The implementation and real
+proof of that exception are pending. [Retained-root design](design.md),
+[ADR-0006](../../adr/0006-seal-unit-local-generated-inputs.md).
 
 The qualification evidence is a source observation checked against the current
 verifier predicates. It includes no observed Hive admission receipt. The saved

@@ -328,10 +328,24 @@ are read. Ordinary edits are admitted only where the profile bounds their
 possible inputs and consumer coverage. An admitted profile enumerates or
 proves exclusion of every direct and transitive consumer of allowed mutable
 inputs, including absent or ancestor probes, environment values, file creation,
-deletion, rename and edits restored with their mtimes. A build that can read a
-retained generated root as input makes that root ineligible for the exception.
-An undeclared or unreviewable producer or consumer leaves the slot unavailable
-for warm reuse.
+deletion, rename and edits restored with their mtimes. A retained generated root
+remains eligible when all reads from it are explicitly reviewed unit-local
+Cargo-generated inputs. An undeclared or unreviewable producer, file or consumer
+leaves the slot unavailable for warm reuse.
+
+**Operator-approved generated inputs.** Name each allowed regular file relative
+to the exact producing Cargo unit's verified output directory. Bind the producer
+and all consuming units to the reviewed invocation, toolchain and layout. A
+guarded invocation starting without the file must establish its reviewed producer
+and consumer sequence, then verify and record the file's canonical identity and
+contents before retention. A later invocation rechecks the recorded identity
+and contents under the current output fence before relying on the input.
+Scoped GC accounts for every dependent unit and rechecks the retained inputs
+before readiness. Missing, replaced, changed or ambiguously owned files leave
+the slot held unless the same scoped cleanup proves all dependent units removed
+and the reviewed next invocation regenerates the file before consuming it.
+The exception grants no general input scan or write access to retained roots.
+See [ADR-0006](../../adr/0006-seal-unit-local-generated-inputs.md).
 
 **Agent-decided profile record (schema 1).** One fixed, reviewed profile is
 submitted at initialization. Required fields use the strict shapes below.
