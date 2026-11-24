@@ -1,5 +1,7 @@
 //! Sealed admission for a bounded native Cargo build.
 
+mod checkout;
+
 use super::profile::{digest, read_input_bounded, refused};
 use super::{CheckoutProof, Refusal, directory_stamp, git_scope};
 use cargo_hive_platform::{
@@ -107,6 +109,8 @@ impl Recipe {
 struct Endpoint {
     commit: String,
     tree: String,
+    #[serde(default)]
+    whole_tree: Option<checkout::TreeManifest>,
 }
 
 #[derive(Deserialize)]
@@ -923,7 +927,12 @@ impl NativeBuild {
             || invocation.cwd != Path::new(".")
             || !(1..=2).contains(&seal.endpoints.len())
             || !seal.endpoints.iter().all(|endpoint| {
-                slots::object_id(&endpoint.commit) && slots::object_id(&endpoint.tree)
+                slots::object_id(&endpoint.commit)
+                    && slots::object_id(&endpoint.tree)
+                    && endpoint
+                        .whole_tree
+                        .as_ref()
+                        .is_none_or(checkout::TreeManifest::valid)
             })
             || !bounded_unique(
                 seal.endpoints
@@ -1068,6 +1077,10 @@ impl NativeBuild {
             {
                 return Err(unproved());
             }
+        }
+        if let Some(manifest) = &endpoint.whole_tree {
+            checkout::verify_whole_tree(&checkout.path, &checkout.head, manifest, &observed)?;
+            return Ok(observed);
         }
         let tracked = git_scope(
             &checkout.path,
@@ -1643,4 +1656,26 @@ fn unique<'a>(values: impl Iterator<Item = &'a str>) -> bool {
     values
         .into_iter()
         .all(|value| !value.is_empty() && seen.insert(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Endpoint;
+    use serde_json::json;
+
+    #[test]
+    fn a_sealed_endpoint_can_name_reviewed_whole_tree_contents() {
+        let endpoint = json!({
+            "commit": "a".repeat(40),
+            "tree": "b".repeat(40),
+            "whole_tree": {
+                "entries": 9222,
+                "sha256": "c".repeat(64),
+            },
+        });
+
+        if let Err(error) = serde_json::from_value::<Endpoint>(endpoint) {
+            panic!("the sealed endpoint refused its reviewed whole-tree inventory: {error}");
+        }
+    }
 }
