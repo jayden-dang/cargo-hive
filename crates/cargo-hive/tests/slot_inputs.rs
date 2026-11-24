@@ -459,7 +459,9 @@ fn start_packaged(fixture: &Fixture, args: &[&str], input: &str) -> std::process
 }
 
 fn finish_packaged(child: std::process::Child, input: &str) -> std::process::Output {
-    let out = wait_within(child, Duration::from_secs(60));
+    // The native guide re-resolves Xcode tools and rehashes the sealed toolchain
+    // at several checkpoints, including on each retained take.
+    let out = wait_within(child, Duration::from_secs(120));
     for stream in [&out.stdout, &out.stderr] {
         assert!(
             !String::from_utf8_lossy(stream).contains(input),
