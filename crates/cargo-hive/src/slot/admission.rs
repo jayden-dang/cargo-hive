@@ -4,6 +4,7 @@ mod checkout;
 mod nextest;
 mod sqlx;
 
+use super::generated::GeneratedRust;
 use super::profile::{digest, read_input_bounded, refused};
 use super::{CheckoutProof, Refusal, directory_stamp, git_scope};
 use cargo_hive_platform::{
@@ -13,8 +14,8 @@ use cargo_hive_platform::{
     slot::sha256_reader,
 };
 use cargo_hive_state::slots::{
-    self, CargoLayout, Coverage, EnvironmentExpectation, GraphExpectation, InputIdentity,
-    Invocation, Locator, MutablePresence, PoolProfile, ProfileBinding,
+    self, CargoLayout, Coverage, EnvironmentExpectation, GeneratedInputWitness, GraphExpectation,
+    InputIdentity, Invocation, Locator, MutablePresence, PoolProfile, ProfileBinding,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -86,6 +87,8 @@ struct Seal {
     materialized: Option<MaterializedGraph>,
     #[serde(default)]
     sqlx_offline: Option<sqlx::OfflineInputs>,
+    #[serde(default)]
+    generated_inputs: Vec<GeneratedRust>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -1022,6 +1025,34 @@ impl NativeBuild {
                     || !project.valid()
                     || !project.fixed_in(&profile.graph_inputs)
             })
+            || seal.generated_inputs.len() > slots::MAX_GENERATED_INPUTS
+            || (!seal.generated_inputs.is_empty() && seal.recipe != Recipe::NativeBuild)
+            || !seal.generated_inputs.iter().all(|declaration| {
+                seal.materialized.as_ref().is_some_and(|graph| {
+                    graph.packages.iter().any(|package| {
+                        package.id == declaration.producer.package_id
+                            && matches!(package.origin, Origin::Registry { .. })
+                            && package.executables.iter().any(|approval| {
+                                approval.target.kind == ExecutableKind::CustomBuild
+                                    && approval.target.name == declaration.producer.target
+                                    && approval.target.source == declaration.producer.source
+                            })
+                            && declaration.valid_for(
+                                &package.name,
+                                &package.version,
+                                &package.inventory_sha256,
+                                native,
+                            )
+                    })
+                })
+            })
+            || seal
+                .generated_inputs
+                .iter()
+                .map(|item| &item.producer)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != seal.generated_inputs.len()
             || !bounded_unique(seal.data.iter().map(|item| item.id.as_str()))
             || !seal.data.iter().all(|item| {
                 bounded_unique(item.sha256.iter().map(String::as_str))
@@ -1101,6 +1132,28 @@ impl NativeBuild {
 
     pub fn materialized(&self) -> Option<&MaterializedGraph> {
         self.seal.materialized.as_ref()
+    }
+
+    pub fn requires_generated_custody(&self) -> bool {
+        !self.seal.generated_inputs.is_empty()
+    }
+
+    pub fn verify_generated_bindings(
+        &self,
+        inputs: &[GeneratedInputWitness],
+    ) -> Result<(), Refusal> {
+        let unproved = || {
+            refused("The retained generated input evidence differs from its reviewed declaration.")
+        };
+        if inputs.len() != self.seal.generated_inputs.len() {
+            return Err(unproved());
+        }
+        for item in &self.seal.generated_inputs {
+            if !item.matches_witnesses(inputs)? {
+                return Err(unproved());
+            }
+        }
+        Ok(())
     }
 
     pub fn packages(&self) -> &[NativePackage] {

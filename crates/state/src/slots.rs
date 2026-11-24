@@ -20,6 +20,9 @@ pub const CHECKOUT_NAMESPACE: &str = "hive-slots";
 pub const MAX_BYTES: u64 = 1_048_576;
 pub const MAX_POOLS: usize = 128;
 pub const MAX_OUTCOMES: usize = 32;
+pub const MAX_GENERATED_INPUTS: usize = 8;
+pub const MAX_GENERATED_INPUT_BYTES: u64 = 1024 * 1024;
+const MAX_RETAINED_GENERATED_BYTES: u64 = 8 * MAX_GENERATED_INPUT_BYTES;
 const MAX_PROFILE_ENTRIES: usize = 256;
 const MAX_PATH_BYTES: usize = 4_096;
 
@@ -1033,6 +1036,51 @@ pub struct CompletedInvocation {
     pub runner: Runner,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground: Option<ForegroundInstance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_inputs: Vec<GeneratedInputWitness>,
+}
+
+/// A sealed generated Rust input beneath its observed Cargo build root.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratedInputWitness {
+    pub declaration_sha256: String,
+    pub build_root: FileIdentity,
+    pub relative_path: PathBuf,
+    pub parents: Vec<FileIdentity>,
+    pub file: FileIdentity,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+impl GeneratedInputWitness {
+    pub fn valid_for(&self, root: &VerifiedRoot) -> bool {
+        let parent = self.relative_path.parent();
+        let count = parent.map_or(0, |path| path.components().count());
+        self.build_root == root.identity
+            && root.identity.valid()
+            && (2..=16).contains(&count)
+            && self.parents.len() == count
+            && relative(&self.relative_path)
+            && self
+                .relative_path
+                .to_str()
+                .is_some_and(|path| path.split('/').all(identifier))
+            && parent
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "out")
+            && self
+                .relative_path
+                .extension()
+                .is_some_and(|extension| extension == "rs")
+            && self.parents.iter().chain([&self.file]).all(|identity| {
+                identity.valid() && identity.dev == root.identity.dev && *identity != root.identity
+            })
+            && unique(self.parents.iter().chain([&self.file]))
+            && (1..=MAX_GENERATED_INPUT_BYTES).contains(&self.bytes)
+            && hex(&self.declaration_sha256, 64)
+            && hex(&self.sha256, 64)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1251,25 +1299,65 @@ impl Producer {
                 "invalid invocation evidence",
             )
         };
-        let validate_completed = |invocations: &[CompletedInvocation]| {
-            require(
-                !invocations.is_empty() && invocations.len() <= MAX_PROFILE_ENTRIES,
-                "invalid completed invocation count",
-            )?;
-            let mut operations = BTreeSet::new();
-            for item in invocations {
+        let validate_completed =
+            |invocations: &[CompletedInvocation], roots: &OutputRoots<VerifiedRoot>| {
                 require(
-                    hex(&item.operation, 32) && operations.insert(&item.operation),
-                    "invalid completed invocation operation",
+                    !invocations.is_empty() && invocations.len() <= MAX_PROFILE_ENTRIES,
+                    "invalid completed invocation count",
                 )?;
-                validate_invocation(&item.evidence)?;
-                item.runner.validate()?;
-                if let Some(foreground) = &item.foreground {
-                    foreground.validate(&item.runner)?;
+                let mut operations = BTreeSet::new();
+                let mut generated_bytes = 0_u64;
+                for item in invocations {
+                    require(
+                        hex(&item.operation, 32) && operations.insert(&item.operation),
+                        "invalid completed invocation operation",
+                    )?;
+                    validate_invocation(&item.evidence)?;
+                    item.runner.validate()?;
+                    if let Some(foreground) = &item.foreground {
+                        foreground.validate(&item.runner)?;
+                    }
+                    require(
+                        item.generated_inputs.len() <= MAX_GENERATED_INPUTS
+                            && (item.generated_inputs.is_empty()
+                                || item.foreground.is_some()
+                                    && item.evidence.stable_digest.is_some()
+                                    && pool.profile.proofs.iter().any(|proof| {
+                                        proof.invocation == item.evidence.invocation
+                                            && proof
+                                                .evidence
+                                                .strip_prefix("closure-v1:sha256=")
+                                                .is_some_and(|digest| hex(digest, 64))
+                                    }))
+                            && item
+                                .generated_inputs
+                                .iter()
+                                .all(|input| input.valid_for(&roots.build))
+                            && unique(
+                                item.generated_inputs
+                                    .iter()
+                                    .map(|input| &input.declaration_sha256),
+                            )
+                            && unique(
+                                item.generated_inputs
+                                    .iter()
+                                    .map(|input| &input.relative_path),
+                            )
+                            && unique(item.generated_inputs.iter().map(|input| &input.file)),
+                        "invalid completed generated input witnesses",
+                    )?;
+                    generated_bytes = item
+                        .generated_inputs
+                        .iter()
+                        .fold(generated_bytes, |sum, witness| {
+                            sum.saturating_add(witness.bytes)
+                        });
                 }
-            }
-            Ok(())
-        };
+                require(
+                    generated_bytes <= MAX_RETAINED_GENERATED_BYTES,
+                    "generated input witnesses exceed their byte budget",
+                )
+            };
         match self {
             Self::NeverBuilt { evidence: None } => require(
                 slot.checkout_id.is_none(),
@@ -1354,7 +1442,7 @@ impl Producer {
                     } => {
                         validate_generation(*generation)?;
                         roots.validate(|root| root.validate(&slot_path))?;
-                        validate_completed(invocations)
+                        validate_completed(invocations, roots)
                     }
                 }
             }
@@ -1369,7 +1457,7 @@ impl Producer {
                 validate_generation(*generation)?;
                 validate_profile(profile)?;
                 roots.validate(|root| root.validate(&slot_path))?;
-                validate_completed(invocations)
+                validate_completed(invocations, roots)
             }
             Self::Tainted {
                 epoch,

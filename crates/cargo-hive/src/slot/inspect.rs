@@ -50,7 +50,12 @@ pub(crate) struct CheckoutProof {
     pub path: PathBuf,
     pub head: String,
     pub(super) inventory: CheckoutInventory,
-    output_locks: Vec<HeldLock>,
+    output_locks: Vec<HeldOutputLock>,
+}
+
+struct HeldOutputLock {
+    path: PathBuf,
+    lock: HeldLock,
 }
 
 impl CheckoutProof {
@@ -104,6 +109,25 @@ fn inspect_with_policy(
         Err(Refusal::ReturnUncertain(detail)) => (CheckoutInventory::Uncertain(detail), Vec::new()),
         Err(err) => return Err(err),
     };
+    if matches!(inventory, CheckoutInventory::Clean) {
+        super::generated::verify_retained(
+            &scope.pool.profile,
+            &scope.slot.producer,
+            |build_root| {
+                let mut locks = output_locks
+                    .iter()
+                    .filter(|held| held.path.starts_with(build_root))
+                    .peekable();
+                locks.peek().is_some()
+                    && locks.all(|held| {
+                        fs::symlink_metadata(&held.path).is_ok_and(|metadata| {
+                            metadata.is_file()
+                                && held.lock.identity() == Some((metadata.dev(), metadata.ino()))
+                        })
+                    })
+            },
+        )?;
+    }
     verify_linked_head(&path, identity, &pool.common_git_id.path, &head)?;
     Ok(CheckoutProof {
         path,
@@ -286,7 +310,7 @@ fn inventory(
     identity: &CheckoutIdentity,
     oid_len: usize,
     policy: Option<&ProducerInventory<'_>>,
-) -> Result<Vec<HeldLock>, Refusal> {
+) -> Result<Vec<HeldOutputLock>, Refusal> {
     reject_incomplete_operations(&identity.admin.path)?;
     let tracked = tracked_paths(checkout, oid_len)?;
     let fs = host_fs();
@@ -685,7 +709,7 @@ struct CheckoutWalk<'a> {
     retained: BTreeMap<PathBuf, FileIdentity>,
     remaining: usize,
     linked_outputs: BTreeMap<(u64, u64), (u64, u64)>,
-    output_locks: Vec<HeldLock>,
+    output_locks: Vec<HeldOutputLock>,
 }
 
 impl CheckoutWalk<'_> {
@@ -793,7 +817,7 @@ impl CheckoutWalk<'_> {
             if lock.identity() != Some((actual.dev, actual.ino)) || actual != entry {
                 return Err(refusal());
             }
-            self.output_locks.push(lock);
+            self.output_locks.push(HeldOutputLock { path, lock });
         }
         Ok(())
     }

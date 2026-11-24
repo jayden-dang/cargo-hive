@@ -182,11 +182,7 @@ fn open_named_directory(path: &Path) -> io::Result<(Metadata, File)> {
 
 /// Opens a single named child directory without following links or opening a pipe.
 pub fn open_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
-    let name = name.as_encoded_bytes();
-    if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') {
-        return Err(io::Error::from(io::ErrorKind::InvalidInput));
-    }
-    let name = CString::new(name).map_err(|_| io::ErrorKind::InvalidInput)?;
+    let name = child_name(name)?;
     // SAFETY: parent owns the open directory descriptor, and name is one NUL-terminated component.
     let fd = unsafe {
         libc::openat(
@@ -204,6 +200,75 @@ pub fn open_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
     }
     // SAFETY: openat returned a new owned descriptor.
     Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn child_name(name: &OsStr) -> io::Result<CString> {
+    let name = name.as_encoded_bytes();
+    if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    CString::new(name).map_err(|_| io::ErrorKind::InvalidInput.into())
+}
+
+/// Checks a child directory's owner and ACL on the descriptor returned by a no-follow open.
+pub fn open_owner_directory_at(parent: &File, name: &OsStr) -> io::Result<(File, Metadata)> {
+    let file = open_directory_at(parent, name)?;
+    let metadata = check_owned_inode(&file, &file.metadata()?, Metadata::is_dir)?;
+    Ok((file, metadata))
+}
+
+/// Opens an owner-controlled, singly linked regular leaf beneath an open directory.
+pub fn open_owner_file_at(parent: &File, name: &OsStr) -> io::Result<File> {
+    let name = child_name(name)?;
+    let mut expected = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the owned parent is open, name is one C string, and expected is writable.
+    if unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            expected.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fstatat succeeded and initialized the complete record.
+    let expected = unsafe { expected.assume_init() };
+    if expected.st_mode & libc::S_IFMT != libc::S_IFREG
+        || expected.st_nlink != 1
+        || expected.st_uid != effective_uid()
+        || expected.st_mode & 0o7022 != 0
+    {
+        return Err(unsafe_owner_inode());
+    }
+    // SAFETY: name is one NUL-terminated component beneath the open parent.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new owned descriptor.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let mut actual = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: fd is owned by file and actual is writable for a stat record.
+    if unsafe { libc::fstat(file.as_raw_fd(), actual.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fstat succeeded and initialized the complete record.
+    let actual = unsafe { actual.assume_init() };
+    if actual.st_dev != expected.st_dev || actual.st_ino != expected.st_ino {
+        return Err(unsafe_owner_inode());
+    }
+    check_owned_inode(&file, &file.metadata()?, |meta| {
+        meta.is_file() && meta.nlink() == 1
+    })?;
+    Ok(file)
 }
 
 /// Opens an independent descriptor for the legacy state lock, keeping its existing mode.

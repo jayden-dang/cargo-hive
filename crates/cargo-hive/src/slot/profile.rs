@@ -227,6 +227,14 @@ pub(super) fn check_invocation(
     check_cancelled()?;
     let invocation = reviewed_shape(profile, input)?;
     let native = NativeBuild::read(profile, invocation, &native_target())?;
+    if native
+        .as_ref()
+        .is_some_and(NativeBuild::requires_generated_custody)
+    {
+        return Err(refused(
+            "The reviewed generated Rust input requires verified producer, consumer and scoped cleanup custody.",
+        ));
+    }
     let variants = native
         .as_ref()
         .map(|seal| seal.verify_checkout(profile, invocation, checkout))
@@ -740,7 +748,7 @@ fn simple_output_path(value: &str) -> bool {
         })
 }
 
-fn native_target() -> String {
+pub(super) fn native_target() -> String {
     format!("{}-apple-darwin", std::env::consts::ARCH)
 }
 

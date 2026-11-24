@@ -2,6 +2,7 @@
 
 mod admission;
 mod fallback;
+mod generated;
 mod inspect;
 mod prepare;
 mod profile;
@@ -1266,6 +1267,7 @@ impl ProducerCommand<'_> {
             operation: pending.operation.clone(),
             runner: pending.runner.clone(),
             foreground: Some(child),
+            generated_inputs: Vec::new(),
         });
         self.publish(snapshot, |slot| {
             let outcome = slot
