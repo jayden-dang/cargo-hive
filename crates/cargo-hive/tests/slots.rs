@@ -4676,6 +4676,101 @@ fn take_workspace(
 }
 
 #[test]
+fn recovery_preserves_proven_cargo_outputs_until_a_fresh_ready_attempt() {
+    let (slot, key, next) = first_completed_workspace();
+    let fixture = &slot.fixture;
+    let saved = fixture.record();
+    let prior_slot = &saved["pools"][0]["slots"][0];
+    let producer = &prior_slot["producer"];
+    assert_eq!(producer["kind"], "complete");
+    assert!(producer["invocations"][0]["foreground"].is_object());
+    let outcomes = prior_slot["outcomes"].as_array().unwrap();
+    let begin = outcomes
+        .iter()
+        .find(|entry| entry["kind"] == "begin")
+        .unwrap();
+    let ready = outcomes
+        .iter()
+        .find(|entry| entry["kind"] == "ready")
+        .unwrap();
+    let attempt = begin["attempt_id"].as_u64().unwrap();
+    let begin_op = begin["operation"].as_str().unwrap();
+    for outcome in [begin, ready] {
+        let mut args = fixture.replay(
+            "ack",
+            &slot.pool,
+            1,
+            1,
+            outcome["operation"].as_str().unwrap(),
+        );
+        args.extend(["--attempt".into(), attempt.to_string()]);
+        let (out, ack) = finish_private(start_private(&fixture.hive, args, &slot.credential));
+        assert!(out.status.success(), "{ack}");
+    }
+    let revision = fixture.record()["revision"].as_u64().unwrap();
+    let request = json!({
+        "observed_revision": revision,
+        "attempt_id": attempt,
+        "begin_op": begin_op,
+        "authority": {
+            "kind": "operator",
+            "confirmation": "abandon_resolved_work",
+            "result_credential": "b".repeat(64)
+        },
+        "quiescence": { "kind": "foreground_completed" }
+    });
+    let recover = |input: &Value| {
+        let args = fixture.replay("recover", &slot.pool, 1, 1, &"9".repeat(32));
+        let (out, result) = finish_private(start_private(&fixture.hive, args, &input.to_string()));
+        assert_no_credential(&out, &slot.credential);
+        assert!(result.get("path").is_none());
+        (out, result)
+    };
+    let before = fs::read(fixture.file()).unwrap();
+    let mut same_boot = request.clone();
+    same_boot["quiescence"] = json!({"kind": "verified_later_boot"});
+    assert_eq!(recover(&same_boot).0.status.code(), Some(1));
+    assert!(fs::read(fixture.file()).unwrap() == before);
+
+    let output = slot.path.join("target/debug");
+    let cargo_lock = [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"]
+        .into_iter()
+        .find_map(|name| fs::File::open(output.join(name)).ok())
+        .expect("stock Cargo created a retained output lock");
+    let held = cargo_hive_platform::flock::try_exclusive(&cargo_lock)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recover(&request).0.status.code(), Some(1));
+    assert!(fs::read(fixture.file()).unwrap() == before);
+    drop(held);
+
+    let affected = workspace_unit_stamp(&slot.path, "fixture");
+    let unrelated = workspace_unit_stamp(&slot.path, "independent");
+    let (out, recovered) = recover(&request);
+    assert!(
+        out.status.success(),
+        "the finished native writers should recover: {recovered}"
+    );
+    assert_eq!(recovered["kind"], "recovered");
+    assert_eq!(recovered["current"], false);
+    let after = fixture.record();
+    let recovered_slot = &after["pools"][0]["slots"][0];
+    assert_eq!(after["revision"], revision + 1);
+    assert_eq!(recovered_slot["phase"]["kind"], "vacant");
+    assert_eq!(recovered_slot["generation"], 1);
+    assert!(recovered_slot["producer"] == *producer);
+    assert_eq!(workspace_unit_stamp(&slot.path, "fixture"), affected);
+    assert_eq!(workspace_unit_stamp(&slot.path, "independent"), unrelated);
+
+    let (out, next_ready) = take_workspace(&slot, &key, &next, "1");
+    assert!(out.status.success(), "{next_ready}");
+    assert_eq!(next_ready["generation"], 2);
+    assert_ne!(next_ready["attempt"], attempt);
+    assert_eq!(next_ready["path"], json!(slot.path));
+    assert_eq!(next_ready["commit"], next);
+}
+
+#[test]
 fn a_returned_slot_switches_to_the_next_commit_and_reuses_an_unrelated_unit() {
     let (slot, key, next) = first_completed_workspace();
     let before = fs::metadata(slot.path.join("target")).unwrap();

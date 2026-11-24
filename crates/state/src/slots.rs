@@ -357,6 +357,8 @@ pub enum Phase {
     Leased {
         lease: Lease,
         ready_commit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preparation: Option<CompletedPreparation>,
     },
     Held {
         reason: HoldReason,
@@ -368,9 +370,19 @@ pub enum Phase {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PriorPhase {
     Vacant,
-    Reserved { lease: Lease },
-    Preparing { lease: Lease, attempt: Attempt },
-    Leased { lease: Lease, ready_commit: String },
+    Reserved {
+        lease: Lease,
+    },
+    Preparing {
+        lease: Lease,
+        attempt: Attempt,
+    },
+    Leased {
+        lease: Lease,
+        ready_commit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preparation: Option<CompletedPreparation>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,25 +446,30 @@ impl Phase {
             Self::Leased {
                 lease,
                 ready_commit,
+                preparation,
             }
             | Self::Held {
                 prior:
                     PriorPhase::Leased {
                         lease,
                         ready_commit,
+                        preparation,
                     },
                 ..
-            } => (lease, None, Some(ready_commit)),
+            } => (lease, None, Some((ready_commit, preparation))),
         };
         lease.validate()?;
         if let Some(attempt) = attempt {
             attempt.validate()?;
         }
-        if let Some(commit) = ready {
+        if let Some((commit, preparation)) = ready {
             require(
                 commit == &lease.requested_commit && slot.last_head.as_ref() == Some(commit),
                 "invalid ready HEAD binding",
             )?;
+            if let Some(preparation) = preparation {
+                preparation.validate()?;
+            }
         }
         Ok(())
     }
@@ -531,6 +548,26 @@ pub enum AttemptStage {
     CheckoutVerified,
     SeedInProgress,
     GcInProgress,
+}
+
+/// The preparation whose verified effects reached durable readiness.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletedPreparation {
+    pub attempt_id: u64,
+    pub begin_op: String,
+    pub runner: Runner,
+    pub host_binding: [u8; 32],
+}
+
+impl CompletedPreparation {
+    fn validate(&self) -> FormatResult {
+        require(
+            self.attempt_id > 0 && hex(&self.begin_op, 32) && self.host_binding != [0; 32],
+            "invalid completed preparation binding",
+        )?;
+        self.runner.validate()
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1355,6 +1392,7 @@ pub enum RecoveryAuthorization {
 pub enum RecoveryQuiescence {
     NoPermitIssued,
     BeforeFirstEffect,
+    ForegroundCompleted,
     VerifiedLaterBoot,
 }
 
@@ -2816,6 +2854,7 @@ mod tests {
         slot.phase = Phase::Leased {
             lease,
             ready_commit: commit.clone(),
+            preparation: None,
         };
         slot.outcomes.push(Outcome {
             pool_id: pool.pool_id.clone(),
@@ -2860,6 +2899,7 @@ mod tests {
         slot.phase = Phase::Leased {
             lease: lease.clone(),
             ready_commit: lease.requested_commit.clone(),
+            preparation: None,
         };
         let evidence = EmptyEpoch {
             epoch: epoch.clone(),

@@ -1,13 +1,14 @@
 //! Retire explicitly confirmed slot authority under the existing physical fence.
 
 use super::{
-    AttemptStage, CREDENTIAL_DEADLINE, KEY_HEX_LEN, LOCK_NAMESPACE, MAX_OUTCOMES, MAX_ROOT_ENTRIES,
-    OperationKind, Outcome, OutcomeRequest, Phase, Pool, Refusal, Registry, ReturnScope, Slot,
-    SlotOperation, SlotResult, State, StateError, TransitionResult, cancelled, check_cancelled,
-    check_nested_checkouts, check_private_dir, checked_pool, commit_slot_update,
-    credential_refusal, inspect_detached_checkout, owner_worktree_inventory, path_refusal,
-    read_stdin_complete, request_key, slot_identity_present, slot_producer_is_eligible, slots,
-    try_exclusive, verify_no_checkout_ancestor, verify_operation_repo, with_slot_state,
+    Attempt, AttemptStage, CREDENTIAL_DEADLINE, CompletedPreparation, KEY_HEX_LEN, LOCK_NAMESPACE,
+    Lease, MAX_OUTCOMES, MAX_ROOT_ENTRIES, OperationKind, Outcome, OutcomeRequest, Phase, Pool,
+    Refusal, Registry, ReturnScope, Runner, Slot, SlotOperation, SlotResult, State, StateError,
+    TransitionResult, boot_witness, cancelled, check_cancelled, check_nested_checkouts,
+    check_private_dir, checked_pool, commit_slot_update, credential_refusal,
+    inspect_detached_checkout, owner_worktree_inventory, path_refusal, read_stdin_complete,
+    request_key, slot_identity_present, slot_producer_is_eligible, slots, try_exclusive,
+    verify_no_checkout_ancestor, verify_operation_repo, with_slot_state,
 };
 use cargo_hive_state::slots::{
     PriorPhase, RecoveryAuthorization, RecoveryQuiescence, RecoveryRequest,
@@ -170,23 +171,12 @@ pub(super) fn run(state: &State, operation: &SlotOperation) -> Result<SlotResult
         {
             return Err(stale());
         }
-        let (lease, attempt) = match &slot.phase {
-            Phase::Reserved { lease }
-            | Phase::Held {
-                prior: PriorPhase::Reserved { lease },
-                ..
-            } => (lease, None),
-            Phase::Preparing { attempt, lease }
-            | Phase::Held {
-                prior: PriorPhase::Preparing { attempt, lease },
-                ..
-            } => (lease, Some(attempt)),
-            _ => return Err(stale()),
-        };
+        let (lease, preparation) = prior_lease(&slot.phase).ok_or_else(stale)?;
         let authority_matches = match &original.authority {
             RecoveryAuthorization::Holder { nonce } => {
                 lease.credential == outcome.credential
-                    && attempt.map(|attempt| &attempt.runner.nonce) == nonce.as_ref()
+                    && preparation.map(|preparation| &preparation.identity().2.nonce)
+                        == nonce.as_ref()
             }
             RecoveryAuthorization::Operator => {
                 lease.credential != outcome.credential
@@ -197,26 +187,26 @@ pub(super) fn run(state: &State, operation: &SlotOperation) -> Result<SlotResult
             }
         };
         if !authority_matches
-            || attempt.map(|attempt| attempt.attempt_id) != key.attempt_id
-            || attempt.map(|attempt| &attempt.begin_op) != original.begin_op.as_ref()
+            || preparation.map(|preparation| preparation.identity().0) != key.attempt_id
+            || preparation.map(|preparation| preparation.identity().1)
+                != original.begin_op.as_deref()
         {
             return Err(stale());
         }
-        let no_writer = match (original.quiescence, attempt) {
+        let evidence_matches_phase = match (original.quiescence, preparation) {
             (RecoveryQuiescence::NoPermitIssued, None) => true,
-            (RecoveryQuiescence::BeforeFirstEffect, Some(attempt)) => {
+            (RecoveryQuiescence::BeforeFirstEffect, Some(PriorPreparation::Preparing(attempt))) => {
                 attempt.stage == AttemptStage::PermitIssued
                     && attempt.prior_head == slot.last_head
                     && attempt.lock_offset.is_some()
                     && attempt.anchors.is_empty()
                     && attempt.anchor_cursor == 0
             }
+            (RecoveryQuiescence::ForegroundCompleted, Some(PriorPreparation::Completed(_))) => true,
             _ => false,
         };
-        if !no_writer {
-            return Err(Refusal::ReturnUncertain(
-                "Recovery could not establish that the prior preparation authorized no writer.",
-            ));
+        if !evidence_matches_phase {
+            return Err(quiescence_unproved());
         }
         if slot.outcomes.len() >= MAX_OUTCOMES {
             return Err(Refusal::OutcomeLimit);
@@ -239,6 +229,19 @@ pub(super) fn run(state: &State, operation: &SlotOperation) -> Result<SlotResult
         return Err(Refusal::ReturnUncertain(
             "The retained outputs cannot be used by a new reservation. Create a separate seeded checkout.",
         ));
+    }
+    if original.quiescence == RecoveryQuiescence::ForegroundCompleted {
+        let (_, Some(PriorPreparation::Completed(preparation))) =
+            prior_lease(&slot.phase).ok_or_else(stale)?
+        else {
+            return Err(quiescence_unproved());
+        };
+        let observed = boot_witness(key.pool_id).map_err(|_| quiescence_unproved())?;
+        if observed.boot_session != preparation.runner.boot_session
+            || observed.host_binding != preparation.host_binding
+        {
+            return Err(quiescence_unproved());
+        }
     }
     let proof = if let Some(head) = &slot.last_head {
         Some(inspect_detached_checkout(
@@ -281,6 +284,57 @@ fn stale() -> Refusal {
         "Recovery requires the exact current slot revision, authority and preparation attempt."
             .into(),
     )
+}
+
+fn quiescence_unproved() -> Refusal {
+    Refusal::ReturnUncertain(
+        "The prior slot writers could not be proved quiescent for the requested recovery.",
+    )
+}
+
+#[derive(Clone, Copy)]
+enum PriorPreparation<'a> {
+    Preparing(&'a Attempt),
+    Completed(&'a CompletedPreparation),
+}
+
+impl<'a> PriorPreparation<'a> {
+    fn identity(self) -> (u64, &'a str, &'a Runner) {
+        match self {
+            Self::Preparing(attempt) => (attempt.attempt_id, &attempt.begin_op, &attempt.runner),
+            Self::Completed(attempt) => (attempt.attempt_id, &attempt.begin_op, &attempt.runner),
+        }
+    }
+}
+
+fn prior_lease(phase: &Phase) -> Option<(&Lease, Option<PriorPreparation<'_>>)> {
+    match phase {
+        Phase::Reserved { lease }
+        | Phase::Held {
+            prior: PriorPhase::Reserved { lease },
+            ..
+        } => Some((lease, None)),
+        Phase::Preparing { attempt, lease }
+        | Phase::Held {
+            prior: PriorPhase::Preparing { attempt, lease },
+            ..
+        } => Some((lease, Some(PriorPreparation::Preparing(attempt)))),
+        Phase::Leased {
+            preparation: Some(preparation),
+            lease,
+            ..
+        }
+        | Phase::Held {
+            prior:
+                PriorPhase::Leased {
+                    preparation: Some(preparation),
+                    lease,
+                    ..
+                },
+            ..
+        } => Some((lease, Some(PriorPreparation::Completed(preparation)))),
+        _ => None,
+    }
 }
 
 pub(super) fn recorded_result(

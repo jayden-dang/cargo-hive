@@ -24,10 +24,10 @@ use cargo_hive_platform::slot::{
 };
 use cargo_hive_state::slots::{
     self, Attempt, AttemptStage, BypassReport, CHECKOUT_NAMESPACE, CompletedInvocation,
-    EligibleProducer, FileIdentity, ForegroundInstance, GitIdentity, LOCK_NAMESPACE, Lease,
-    MAX_OUTCOMES, MAX_POOLS, OperationKind, Outcome, OutcomeRequest, OutputEpoch, OutputRoots,
-    PendingProducer, Phase, Pool, PoolProfile, Producer, ProvenanceLoss, RootExpectation, Runner,
-    Slot, SlotRequestKey, SlotsFile, TransitionResult,
+    CompletedPreparation, EligibleProducer, FileIdentity, ForegroundInstance, GitIdentity,
+    LOCK_NAMESPACE, Lease, MAX_OUTCOMES, MAX_POOLS, OperationKind, Outcome, OutcomeRequest,
+    OutputEpoch, OutputRoots, PendingProducer, Phase, Pool, PoolProfile, Producer, ProvenanceLoss,
+    RootExpectation, Runner, Slot, SlotRequestKey, SlotsFile, TransitionResult,
 };
 use cargo_hive_state::{Config, State, StateError, Tx};
 pub(crate) use inspect::CheckoutProof;
@@ -1381,6 +1381,7 @@ fn producer_lease<'a>(
     if let Phase::Leased {
         lease,
         ready_commit,
+        ..
     } = &slot.phase
         && slot.generation == key.generation
         && lease.credential == credential
@@ -2277,10 +2278,9 @@ fn inspect_detached_checkout(
     )?;
     check_producer_inventory(&proof)?;
     let records = owner_worktree_inventory(&pool.root, &scope.registry, Some(pool))?;
-    if !records
-        .iter()
-        .any(|record| record.path == proof.path && record.detached)
-    {
+    if !records.iter().any(|record| {
+        record.path == proof.path && record.detached && record.head.as_ref() == Some(&proof.head)
+    }) {
         return Err(Refusal::ReturnUncertain(
             "The prepared checkout is not detached at the requested commit.",
         ));
@@ -2411,6 +2411,14 @@ fn ready(
     let slot = &snapshot.pool.slots[index];
     let (lease, attempt) = fence.check(slot)?;
     let anchors = attempt.anchors.clone();
+    let preparation = attempt
+        .host_binding
+        .map(|host_binding| CompletedPreparation {
+            attempt_id: attempt.attempt_id,
+            begin_op: attempt.begin_op.clone(),
+            runner: attempt.runner.clone(),
+            host_binding,
+        });
     let lease = lease.clone();
     let expected = match &slot.producer {
         Producer::NeverBuilt {
@@ -2493,6 +2501,7 @@ fn ready(
         slot.phase = Phase::Leased {
             ready_commit: lease.requested_commit.clone(),
             lease,
+            preparation,
         };
         slot.last_head = Some(final_proof.head);
         slot.outcomes.push(outcome);
@@ -2586,6 +2595,7 @@ fn replay_ready(
         && let Phase::Leased {
             lease,
             ready_commit,
+            ..
         } = &slot.phase
         && lease.credential == auth.credential
         && outcome.result
