@@ -352,12 +352,12 @@ _Requirements: SLOTS-1.2, SLOTS-1.6, SLOTS-1.7, SLOTS-1.8, SLOTS-2.4, SLOTS-3.1,
 
 **Depends-on:** Task 7.
 
-- [ ] Write tests for occupied locks and a live/paused/surviving prior writer, lost key, old process identity, wrong pool and stale generation. Refuse actionable discovery while uncertainty remains.
-- [ ] Test a lost ready response followed by clean return and a later lease. The private unresolved retry cannot return an actionable path or permit for an older lease. Exercise the guide's confirmation, replay after compaction, prepare/ready reconciliation with malformed or unreadable state and authoritative re-read by a new process.
-- [ ] Interrupt a GC run after a partial effect and before ready persists. Require a new valid fence and fresh scoped GC proof. Exercise proven foreground completion or a verified later boot after lost custody, plus a positive abandoned-slot recovery through ordinary ready. A rollback or orphan record lacking the exact epoch must preserve work and producer evidence while refusing. Test that a tainted slot, or both slots held without provenance, does not regain capacity through recover or same-repo init. Report the separate seed path.
-- [ ] Run `cargo test -p cargo-hive --test slots` for the new red cases.
-- [ ] Implement quiescence-qualified recovery and the state-preserving unknown/tainted hold. The operator resolves work outside the command, and the command never forces, deletes, archives or stashes it.
-- [ ] Re-run tests and inspect held/ready/status under faults. Pass one known slot key through normal, refused and interrupted begin/producer/ready/return/recovery calls. Check argv, environment, public stdout/status, stderr and existing-schema on-disk audit for no disclosure, keeping private file-descriptor delivery separate. Commit as `feat(slot): recover held slots through a new fence`.
+- [x] Write tests for occupied locks and a live/paused/surviving prior writer, lost key, old process identity, wrong pool and stale generation. Refuse actionable discovery while uncertainty remains.
+- [x] Test a lost ready response followed by clean return and a later lease. The private unresolved retry cannot return an actionable path or permit for an older lease. Exercise the guide's confirmation, replay after compaction, prepare/ready reconciliation with malformed or unreadable state and authoritative re-read by a new process.
+- [x] Interrupt a GC run after a partial effect and before ready persists. Require a new valid fence and fresh scoped GC proof. Exercise proven foreground completion or a verified later boot after lost custody, plus a positive abandoned-slot recovery through ordinary ready. A rollback or orphan record lacking the exact epoch must preserve work and producer evidence while refusing. Test that a tainted slot, or both slots held without provenance, does not regain capacity through recover or same-repo init. Report the separate seed path.
+- [x] Run `cargo test -p cargo-hive --test slots` for the new red cases.
+- [x] Implement quiescence-qualified recovery and the state-preserving unknown/tainted hold. The operator resolves work outside the command, and the command never forces, deletes, archives or stashes it.
+- [x] Re-run tests and inspect held/ready/status under faults. Pass one known slot key through normal, refused and interrupted begin/producer/ready/return/recovery calls. Check argv, environment, public stdout/status, stderr and existing-schema on-disk audit for no disclosure, keeping private file-descriptor delivery separate. Commit as `feat(slot): recover held slots through a new fence`.
 
 _Requirements: SLOTS-4.1, SLOTS-4.2, SLOTS-4.3, SLOTS-4.4, SLOTS-4.5, SLOTS-4.6, SLOTS-4.9, SLOTS-5.3, SLOTS-5.4_
 
@@ -414,6 +414,7 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 - Modify: `crates/gc/src/checkout.rs`
 - Modify: `crates/cargo-hive/src/cli.rs`
 - Modify: `crates/platform/src/slot.rs`
+- Modify: `crates/platform/src/flock.rs`
 - Modify: `crates/cargo-hive/tests/slots.rs`
 - Modify: `crates/cargo-hive/tests/slot_inputs.rs`
 - Modify: `crates/cargo-hive/tests/checkout_gc.rs`
@@ -431,7 +432,7 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 - [ ] Prove named generated Rust input and native archive custody through a real guard and strict GC, including wrong unit, same-mtime changes, identity replacement and overlapping cleanup refusals. Start with actual serde_core and one pinned native archive case. Account for every selected producer and consumer before enabling any real invocation.
 - [ ] Verify the exact workspace graph and selected target modes, project Nextest configuration and store paths, offline SQLx cache and dotenv probes, and side effects of every reviewed executable and required subprocess. Exercise both Nextest selections without running any test body. Refuse unproved behavior before the real profile can publish readiness.
 - [ ] Qualify the complete real installed path at the exact release-mode revision before timing. Demonstrate the ordinary handoff and independent fresh seeded baseline in scratch.
-- [ ] Write the manual acceptance steps in the runbook. Require five valid matched pairs, alternating arm order, a fixed first command and edit, and successive warm handoffs. Define missing actual GC, non-eligible seed, mismatched fixtures and failed/void samples before measuring.
+- [x] Write the manual acceptance steps in the runbook. Require five valid matched pairs, alternating arm order, a fixed first command and edit, and successive warm handoffs. Define missing actual GC, non-eligible seed, mismatched fixtures and failed/void samples before measuring.
 - [ ] Drive the installed entry points on the scratch klynt copy for the owner-supplied actual workspace lint, compile-only test build and package-scoped `gateways` commands. Record their exact flags. Cross a routine tracked Rust edit with dependency inputs fixed and verify the subsequent clean ready and unrelated reuse. A synthetic fixture alone cannot meet this acceptance. Use release-mode hive and include distinct fresh worktree plus seed in the baseline. Time every warm reservation and handoff step, not just Cargo. Preserve sample receipts and integer milliseconds outside the hive receipt under the future runbook's gitignored dated proof directory. The real source checkout stays read-only.
 - [ ] Verify at least four warm end-to-end wins, the warm edit median at most 110% of fresh seeded median, and actual unaffected-unit reuse. Report spread, environment and voids. If a required case fails, keep the profile unsupported and reopen the proposed acceptance instead of advertising proven speed.
 - [ ] At authorized implementation close, run the documented gate under installed `RUSTUP_TOOLCHAIN=1.97.1` and `RUSTUP_TOOLCHAIN=1.100.0` with the Global Constraints scratch isolation and retain the outputs. Do not extend testing outside the repository's scratch/supported proof rules.

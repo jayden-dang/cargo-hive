@@ -220,6 +220,13 @@ be exercised on the admitted platform; none was implemented or tested here.
 Recovery acquires the slot lock, checks and resolves prior work in scope, and
 records a new attempt fence before permitting effects. Lost or tainted producer
 evidence still blocks warm reuse after process quiescence.
+If interrupted GC has used the retained output's one allowed generation of
+inheritance, the original credentialed holder may retire that attempt and
+reserve a named fresh `begin` operation for the same lease and generation.
+This requires a verified later boot, clean detached checkout, and fresh proof
+of the recorded output and consumer scope. The retired attempt and its old
+reservation reply grant no authority. The new attempt must establish its own
+fence and complete fresh scoped GC before any usable readiness.
 The same-UID cooperative boundary is deliberate. Hive cannot stop a user or
 tool from touching a path outside that protocol.
 
