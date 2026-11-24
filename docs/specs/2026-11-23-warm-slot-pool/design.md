@@ -108,7 +108,7 @@ does not change checkout contents, index, mtimes or output roots.
 Satisfies: SLOTS-1.3, SLOTS-2.4, SLOTS-4.1, SLOTS-4.2, SLOTS-4.3, SLOTS-4.4, SLOTS-4.5, SLOTS-4.6, SLOTS-4.7, SLOTS-5.4
 Reuse: rung 2 — `State::locked_or_cancelled` and bounded atomic state writes, platform flock and no-follow identity. Add slot-specific durability reconciliation and inherited descriptor handling.
 Respects: ARCH-2, ARCH-8, ARCH-15, ARCH-16, ARCH-19
-Surface: Frozen — registry, snapshots, capabilities, plans, store, seed and existing receipts readers keep their old formats and locking semantics. Slot-specific I/O uses the existing lock and an additive file.
+Surface: Frozen — registry, snapshots, capabilities, plans, store, seed and existing receipts readers keep their old formats and locking semantics. Slot-specific I/O uses the existing state lock, a private slot record and its independent authority witness.
 Interface: Under a checked slot identity and caller credential, a command either records one fenced transition, returns an earlier outcome, or refuses.
 Depth: n/a — extends the state transaction and platform lock primitives.
 Locality: Extend `crates/state/src/lib.rs` with the private bounded writer and named slot recovery, add `crates/state/src/slots.rs` for slot records, extend `crates/platform/src/flock.rs` for inherited descriptors, and keep workflow transitions in `crates/cargo-hive/src/slot/mod.rs`.
@@ -122,6 +122,14 @@ whose first key is `layout`, followed by a checked positive `revision` and a
 Only a field written as nullable may hold JSON null. Objects reject unknown
 fields. Strings and arrays have explicit limits within the 1 MiB envelope.
 The transition validator also checks cross-references, independently of parsing.
+
+Under the existing state lock, keep an independent owner-private durable
+witness in the slot lock namespace for the authoritative slot record. Bind its
+exact revision and contents before any transition receipt or writer permit
+grants authority. A valid-looking record by itself cannot replace the witnessed
+record. On disagreement or uncertain publication, accept only the exact
+independently witnessed successor after bounded re-read and durability checks.
+Hold unresolved authority without changing source or output.
 
 | JSON record | Fields and constraints |
 |---|---|

@@ -346,7 +346,7 @@ _Requirements: SLOTS-1.2, SLOTS-1.6, SLOTS-1.7, SLOTS-1.8, SLOTS-2.4, SLOTS-3.1,
 
 **Interfaces:**
 - Consumes: Task 7 active preparation/ready states and lease results, Task 1 process evidence and Task 4 checkout cleanliness and ownership checks.
-- Produces (proposed): `RecoveryInput` naming the current `SlotRequestKey` and explicit quiescence evidence, and `RecoveryOutcome` (held, or eligible for new fenced preparation). `slot recover` and historical result lookup share credentialed scope checks. Unresolved path or producer evidence is never made ready.
+- Produces (proposed): `RecoveryInput` naming the current `SlotRequestKey` and explicit quiescence evidence, and `RecoveryOutcome` (held, or eligible for new fenced preparation). `slot recover` and historical result lookup share credentialed scope checks. An independent private witness recorded under the existing state lock identifies the authoritative slot record through publication. Unresolved authority, path or producer evidence is never made ready.
 
 **Depends-on:** Task 7.
 
