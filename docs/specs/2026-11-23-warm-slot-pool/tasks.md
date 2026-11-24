@@ -61,6 +61,7 @@ Design: ./design.md
 | `crates/cargo-hive/src/slot/admission/sqlx.rs` | Verify the reviewed SQLx offline configuration, ancestor probes and selected query-cache bytes. |
 | `crates/cargo-hive/src/slot/generated.rs` | Bind named Cargo-generated inputs to their reviewed producer, consumers and retained unit witnesses. |
 | `crates/cargo-hive/src/slot/generated/serde_core.rs` | Verify the exact serde_core producer, Cargo unit graph and consumed generated Rust file. |
+| `crates/cargo-hive/src/slot/generated/archive.rs` | Verify the reviewed native compiler and archiver, named archive contents and exact Rust link consumer. |
 | `crates/cargo-hive/src/slot/result.rs` | New sanitized JSON projection and existing Receipt audit projection. |
 | `crates/gc/src/checkout.rs` | Expose positive root-lock/completion evidence beside the existing report. |
 | `crates/gc/src/debug_map.rs` | Read strict checkout GC candidates through a checked regular descriptor. |
@@ -411,6 +412,7 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 - Create: `crates/cargo-hive/src/slot/admission/sqlx.rs`
 - Create: `crates/cargo-hive/src/slot/generated.rs`
 - Create: `crates/cargo-hive/src/slot/generated/serde_core.rs`
+- Create: `crates/cargo-hive/src/slot/generated/archive.rs`
 - Modify: `crates/cargo-hive/src/slot/admission.rs`
 - Modify: `crates/cargo-hive/src/slot/profile.rs`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
