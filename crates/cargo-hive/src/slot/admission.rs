@@ -2058,6 +2058,8 @@ mod tests {
                     home: &root,
                     checkout: &fixture.path().join("checkout"),
                     generated: None,
+                    archive: None,
+                    clang: &fixture.path().join("clang"),
                 },
             )
         };
