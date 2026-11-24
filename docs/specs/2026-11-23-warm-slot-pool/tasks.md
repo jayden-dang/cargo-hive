@@ -464,7 +464,7 @@ _Requirements: SLOTS-1.6, SLOTS-2.2, SLOTS-3.4, SLOTS-3.5, SLOTS-3.7, SLOTS-3.8,
 
 ## ROAD-17 amendment (2026-11-24): admit the real Klynt producers
 
-Status: Draft, awaiting operator approval. Revised after `.skills/SLOTS/plan-review.md` and the approved design amendment.
+Status: Approved 2026-11-24 17:36 +07 by Jayden ("Approve plan"; build not started by request). Revised after `.skills/SLOTS/plan-review.md` and the approved design amendment.
 
 The operator approved the rewind on 2026-11-24 through reroute-plan. The design
 amendment "generated-input manifests for real workspaces" (`design.md`), SLOTS-4.10
