@@ -124,7 +124,7 @@ fields. Strings and arrays have explicit limits within the 1 MiB envelope.
 The transition validator also checks cross-references, independently of parsing.
 
 Under the existing state lock, keep an independent owner-private durable
-witness in the slot lock namespace for the authoritative slot record. Bind its
+witness alongside `slots.json` for the authoritative slot record. Bind its
 exact revision and contents before any transition receipt or writer permit
 grants authority. A valid-looking record by itself cannot replace the witnessed
 record. On disagreement or uncertain publication, accept only the exact
