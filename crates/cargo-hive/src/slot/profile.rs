@@ -1047,7 +1047,7 @@ fn verify_native_graph(
         return Err(unproved());
     }
     if let Some(expected) = reviewed_resolution
-        && metadata_resolution_digest(graph, checkout)? != expected
+        && metadata_resolution_digest(graph, checkout, None)? != expected
     {
         return Err(unproved());
     }
@@ -1229,7 +1229,8 @@ fn verify_materialized_graph(
             }
         }
     }
-    if metadata_resolution_digest(graph, checkout)? != materialized.resolve_sha256 {
+    if metadata_resolution_digest(graph, checkout, archive_package)? != materialized.resolve_sha256
+    {
         return Err(unproved());
     }
     Ok(())
@@ -1237,7 +1238,11 @@ fn verify_materialized_graph(
 
 /// Normalizes Cargo's published metadata graph without claiming target or feature selection
 /// of a later compiler or a Nextest invocation.
-fn metadata_resolution_digest(graph: &Discovered, checkout: &Path) -> Result<String, Refusal> {
+fn metadata_resolution_digest(
+    graph: &Discovered,
+    checkout: &Path,
+    archive_package: Option<&str>,
+) -> Result<String, Refusal> {
     let unproved =
         || refused("Cargo reported an incomplete reviewed feature and dependency graph.");
     let mut keys = BTreeMap::new();
@@ -1574,7 +1579,8 @@ mod tests {
         };
         let expected = digest(br#"{"workspace:Cargo.toml":[[],[["renamed","workspace:dep/Cargo.toml",[["dev","cfg(unix)"]]]]],"workspace:dep/Cargo.toml":[[],[]]}"#).unwrap_or_else(|_| panic!("fixture digest"));
         let fingerprint = |graph: &Discovered| {
-            metadata_resolution_digest(graph, root).unwrap_or_else(|_| panic!("fixture resolution"))
+            metadata_resolution_digest(graph, root, None)
+                .unwrap_or_else(|_| panic!("fixture resolution"))
         };
         assert_eq!(fingerprint(&graph), expected);
         graph.nodes[0].deps[0].name = "shared".into();
