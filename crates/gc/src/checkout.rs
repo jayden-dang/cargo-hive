@@ -13,6 +13,7 @@ use cargo_hive_core::receipt::Finding;
 use cargo_hive_core::target::{self, TargetDir};
 use cargo_hive_core::unit_path;
 use cargo_hive_platform::{EntryKind, Fs};
+use cargo_hive_state::slots::{FileIdentity, GeneratedInputWitness, VerifiedRoot};
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -249,6 +250,15 @@ pub fn run_with_evidence(
     expected: &[RequiredRoot],
     cancel: &dyn Fn() -> bool,
 ) -> EvidencedCheckoutReport {
+    run_strict(input, expected, None, cancel)
+}
+
+fn run_strict(
+    input: &CheckoutInput<'_>,
+    expected: &[RequiredRoot],
+    custody: Option<&GeneratedInputCustody<'_>>,
+    cancel: &dyn Fn() -> bool,
+) -> EvidencedCheckoutReport {
     let selected = select_targets(input.scan, input.checkout, input.nested);
     let mut result = EvidencedCheckoutReport {
         report: selection_report(input, &selected),
@@ -286,6 +296,18 @@ pub fn run_with_evidence(
     let Some(roots) = required_roots(input, &selected, expected, report) else {
         return result;
     };
+    let protection = if let Some(custody) = custody {
+        match LockedGeneratedInputs::acquire(input, &roots, custody, cancel) {
+            Ok(protection) => Some(protection),
+            Err(why) => {
+                report.cancelled |= cancel();
+                incomplete_root(report, Some(&custody.root.path), &why);
+                return result;
+            }
+        }
+    } else {
+        None
+    };
     let object_entries = Cell::new(Some(DEPS_CAP));
     for same_path in roots.chunk_by(|a, b| a.path == b.path) {
         if cancel() {
@@ -299,6 +321,7 @@ pub fn run_with_evidence(
         let strict = StrictRoot {
             required: root,
             object_entries: &object_entries,
+            protection: protection.as_ref(),
         };
         let (counts, complete) = clean_target(input, &root.path, Some(strict), cancel, report);
         report.totals.add_target(&counts);
@@ -324,8 +347,174 @@ pub fn run_with_evidence(
             }
         }
     }
+    if let (Some(protection), Some(custody)) = (&protection, custody)
+        && !report.failed
+        && !report.cancelled
+        && let Err(why) = protection.revalidate(input.fs, custody, cancel)
+    {
+        report.cancelled |= cancel();
+        incomplete_root(report, Some(&custody.root.path), &why);
+        result.completed.clear();
+    }
     result.completed.sort_by_key(|root| root.role);
     result
+}
+
+/// Exact retained generated inputs and their revalidation at the verified lock boundary.
+pub struct GeneratedInputCustody<'a> {
+    pub root: &'a VerifiedRoot,
+    pub inputs: &'a [&'a GeneratedInputWitness],
+    pub revalidate: &'a dyn Fn() -> Result<(), String>,
+}
+
+pub fn run_with_generated_inputs(
+    input: &CheckoutInput<'_>,
+    expected: &[RequiredRoot],
+    custody: &GeneratedInputCustody<'_>,
+    cancel: &dyn Fn() -> bool,
+) -> EvidencedCheckoutReport {
+    run_strict(input, expected, Some(custody), cancel)
+}
+
+const MAX_PROTECTED_INPUTS: usize = 64;
+const GENERATED_SCOPE: &str =
+    "Could not verify the exact protected generated inputs in the Cargo build root";
+const GENERATED_OVERLAP: &str =
+    "The cleanup candidate overlaps a protected generated input or its namespace";
+
+struct LockedGeneratedInputs {
+    locks: BTreeMap<PathBuf, locks::VerifiedLocks>,
+    entries: BTreeMap<PathBuf, (EntryKind, FileIdentity)>,
+    identities: BTreeSet<FileIdentity>,
+}
+
+impl LockedGeneratedInputs {
+    fn acquire(
+        input: &CheckoutInput<'_>,
+        roots: &[&RequiredRoot; 2],
+        custody: &GeneratedInputCustody<'_>,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<Self, String> {
+        let [_, build] = roots;
+        let root = custody.root;
+        if !(1..=MAX_PROTECTED_INPUTS).contains(&custody.inputs.len())
+            || build.path != root.path
+            || build.presence
+                != (RootPresence::Present {
+                    dev: root.identity.dev,
+                    ino: root.identity.ino,
+                })
+        {
+            return Err(GENERATED_SCOPE.into());
+        }
+        let mut entries = BTreeMap::new();
+        for root in roots {
+            if let RootPresence::Present { dev, ino } = root.presence {
+                entries.insert(
+                    root.path.clone(),
+                    (EntryKind::Dir, FileIdentity { dev, ino }),
+                );
+            }
+        }
+        for item in custody.inputs {
+            if !item.valid_for(root) {
+                return Err(GENERATED_SCOPE.into());
+            }
+            let mut path = root.path.clone();
+            let relative = item.relative_path.parent().ok_or(GENERATED_SCOPE)?;
+            for (component, identity) in relative.components().zip(&item.parents) {
+                path.push(component.as_os_str());
+                let expected = (EntryKind::Dir, *identity);
+                if entries
+                    .insert(path.clone(), expected)
+                    .is_some_and(|prior| prior != expected)
+                {
+                    return Err(GENERATED_SCOPE.into());
+                }
+            }
+            let expected = (EntryKind::File, item.file);
+            if entries
+                .insert(root.path.join(&item.relative_path), expected)
+                .is_some_and(|prior| prior != expected)
+            {
+                return Err(GENERATED_SCOPE.into());
+            }
+        }
+        let identities: BTreeSet<_> = entries.values().map(|(_, identity)| *identity).collect();
+        if entries.len() != identities.len() {
+            return Err(GENERATED_SCOPE.into());
+        }
+        let mut locks = BTreeMap::new();
+        for root in roots {
+            if cancel() {
+                return Err("checkout GC was cancelled".into());
+            }
+            if matches!(root.presence, RootPresence::Present { .. })
+                && !locks.contains_key(&root.path)
+            {
+                let held =
+                    locks::acquire_verified(input.fs, &root.path, cancel).map_err(|error| {
+                        match error {
+                            locks::VerifyAcquireError::Failed(why) => why,
+                            locks::VerifyAcquireError::Skipped(reason) => format!(
+                                "Could not hold the Cargo output guards: {}",
+                                reason_text(reason)
+                            ),
+                        }
+                    })?;
+                locks.insert(root.path.clone(), held);
+            }
+            if !matches_presence(input, root) {
+                return Err(ROOT_IDENTITY_CHANGED.into());
+            }
+        }
+        let protection = Self {
+            locks,
+            entries,
+            identities,
+        };
+        protection.revalidate(input.fs, custody, cancel)?;
+        Ok(protection)
+    }
+
+    fn check_current(&self, fs: &dyn Fs, cancel: &dyn Fn() -> bool) -> Result<(), String> {
+        for locked in self.locks.values() {
+            locked.verify_current(fs)?;
+        }
+        for (path, (kind, identity)) in &self.entries {
+            if cancel() {
+                return Err("checkout GC was cancelled".into());
+            }
+            if !fs.entry_stat(path).is_ok_and(|stat| {
+                stat.kind == *kind
+                    && stat.dev == identity.dev
+                    && stat.ino == identity.ino
+                    && (*kind != EntryKind::File || stat.nlink == 1)
+            }) {
+                return Err(GENERATED_SCOPE.into());
+            }
+        }
+        Ok(())
+    }
+
+    fn revalidate(
+        &self,
+        fs: &dyn Fs,
+        custody: &GeneratedInputCustody<'_>,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
+        self.check_current(fs, cancel)?;
+        (custody.revalidate)()?;
+        self.check_current(fs, cancel)
+    }
+
+    fn allows_removal(&self, path: &Path, identity: FileIdentity) -> bool {
+        !self.identities.contains(&identity)
+            && !self
+                .entries
+                .iter()
+                .any(|(input, (kind, _))| *kind == EntryKind::File && input.starts_with(path))
+    }
 }
 
 fn required_roots<'a>(
@@ -567,6 +756,7 @@ fn acquire_checkout_locks(
 struct StrictRoot<'a> {
     required: &'a RequiredRoot,
     object_entries: &'a Cell<Option<usize>>,
+    protection: Option<&'a LockedGeneratedInputs>,
 }
 
 fn clean_target(
@@ -577,30 +767,48 @@ fn clean_target(
     report: &mut CheckoutReport,
 ) -> (Counts, bool) {
     let required = strict.as_ref().map(|scope| scope.required);
+    let protection = strict.as_ref().and_then(|scope| scope.protection);
     let mut counts = Counts::empty();
-    let locked = match acquire_checkout_locks(input.fs, path, required.is_some(), cancel) {
-        Ok(locked) => locked,
-        Err(locks::VerifyAcquireError::Skipped(reason)) => {
-            skip_target(&mut counts, report, path, reason);
+    let prelocked = if let Some(protection) = protection {
+        let Some(locked) = protection.locks.get(path) else {
+            incomplete_root(report, Some(path), GENERATED_SCOPE);
             return (counts, false);
-        }
-        Err(locks::VerifyAcquireError::Failed(why)) => {
-            report.failed = true;
-            report.findings.push(Finding {
-                kind: "gc.target_failed".into(),
-                path: Some(path.to_path_buf()),
-                detail: why,
-                measured: BTreeMap::new(),
-            });
-            return (counts, false);
+        };
+        Some(locked)
+    } else {
+        None
+    };
+    let locked = if prelocked.is_some() {
+        None
+    } else {
+        match acquire_checkout_locks(input.fs, path, required.is_some(), cancel) {
+            Ok(locked) => Some(locked),
+            Err(locks::VerifyAcquireError::Skipped(reason)) => {
+                skip_target(&mut counts, report, path, reason);
+                return (counts, false);
+            }
+            Err(locks::VerifyAcquireError::Failed(why)) => {
+                report.failed = true;
+                report.findings.push(Finding {
+                    kind: "gc.target_failed".into(),
+                    path: Some(path.to_path_buf()),
+                    detail: why,
+                    measured: BTreeMap::new(),
+                });
+                return (counts, false);
+            }
         }
     };
+    let verified = prelocked.or(match &locked {
+        Some(CheckoutLocks::Verified(verified)) => Some(verified),
+        _ => None,
+    });
     if required.is_some_and(|root| !check_root(input, root, report)) {
         return (counts, false);
     }
     let mut complete = true;
-    let found = match &locked {
-        CheckoutLocks::Standalone(standalone) => {
+    let found = match (&locked, verified) {
+        (Some(CheckoutLocks::Standalone(standalone)), None) => {
             let found = match target::identify_bounded(input.fs, path, CRATE_DIR_CAP) {
                 Some(Ok(found)) => found,
                 Some(Err(why)) => {
@@ -626,7 +834,7 @@ fn clean_target(
             }
             found
         }
-        CheckoutLocks::Verified(verified) => {
+        (_, Some(verified)) => {
             match target::identify_strict(input.fs, path, CRATE_DIR_CAP, cancel).and_then(|found| {
                 verified.verify_profiles(input.fs, &found)?;
                 Ok(found)
@@ -638,16 +846,21 @@ fn clean_target(
                 }
             }
         }
+        _ => unreachable!("target cleanup requires an acquired guard"),
     };
     let verify_scope = || -> Result<(), String> {
-        if let (Some(root), CheckoutLocks::Verified(verified)) = (required, &locked) {
+        if let (Some(root), Some(verified)) = (required, verified) {
             if cancel() {
                 return Err("checkout GC was cancelled".into());
             }
             if !matches_presence(input, root) {
                 return Err(ROOT_IDENTITY_CHANGED.into());
             }
-            verified.verify_current(input.fs)?;
+            if let Some(protection) = protection {
+                protection.check_current(input.fs, cancel)?;
+            } else {
+                verified.verify_current(input.fs)?;
+            }
         }
         Ok(())
     };
@@ -706,7 +919,22 @@ fn clean_target(
                 let mut stats = Vec::new();
                 for entry in &ordered {
                     match input.fs.entry_stat(entry) {
-                        Ok(stat) if stat.kind != EntryKind::Other => stats.push((entry, stat)),
+                        Ok(stat) if stat.kind != EntryKind::Other => {
+                            if protection.is_some_and(|scope| {
+                                !scope.allows_removal(
+                                    entry,
+                                    FileIdentity {
+                                        dev: stat.dev,
+                                        ino: stat.ino,
+                                    },
+                                )
+                            }) {
+                                incomplete_root(report, Some(entry), GENERATED_OVERLAP);
+                                complete = false;
+                                break 'units;
+                            }
+                            stats.push((entry, stat));
+                        }
                         Ok(_) | Err(_) => {
                             complete = false;
                             report.failed = true;
@@ -759,6 +987,7 @@ fn clean_target(
                                             ino: stat.ino,
                                         },
                                         &verify_scope,
+                                        protection,
                                     )
                                 },
                             )
@@ -818,6 +1047,7 @@ fn clean_target(
                 account_bytes: input.account_bytes,
                 cancel,
                 scope_valid: required.map(|_| &verify_scope as &dyn Fn() -> Result<(), String>),
+                protection,
                 object_entries: strict.as_ref().map(|scope| scope.object_entries),
                 ledger: &mut ledger,
             });
@@ -849,7 +1079,7 @@ fn clean_target(
     if input.account_bytes {
         counts.bytes = Some(tally.per_target.get(path).copied().unwrap_or(tally.total));
     }
-    if let CheckoutLocks::Verified(verified) = &locked {
+    if let Some(verified) = verified {
         report.cancelled |= cancel();
         if complete
             && !report.cancelled
@@ -874,6 +1104,7 @@ struct ObjectsClean<'a> {
     account_bytes: bool,
     cancel: &'a dyn Fn() -> bool,
     scope_valid: Option<&'a dyn Fn() -> Result<(), String>>,
+    protection: Option<&'a LockedGeneratedInputs>,
     object_entries: Option<&'a Cell<Option<usize>>>,
     ledger: &'a mut Ledger,
 }
@@ -1019,6 +1250,7 @@ fn clean_profile_objects(ctx: ObjectsClean<'_>) -> ObjectsOutcome {
                             ino: *ino,
                         },
                         scope_valid,
+                        ctx.protection,
                     )
                 },
             )
@@ -1059,12 +1291,35 @@ fn removal_identity(
     path: &Path,
     expect: Expect,
     scope_valid: &dyn Fn() -> Result<(), String>,
+    protection: Option<&LockedGeneratedInputs>,
 ) -> Result<(), String> {
     let entry = guard::check_entry(fs, root, path, expect);
     scope_valid()?;
-    entry
-        .map(|_| ())
-        .map_err(|reason| format!("{} ({reason:?})", path.display()))
+    let entry = entry.map_err(|reason| format!("{} ({reason:?})", path.display()))?;
+    if let Some(protection) = protection {
+        if !protection.allows_removal(
+            path,
+            FileIdentity {
+                dev: entry.dev,
+                ino: entry.ino,
+            },
+        ) {
+            return Err(GENERATED_OVERLAP.into());
+        }
+        // The bounded custody check ran after the first candidate stat.
+        guard::check_entry(
+            fs,
+            root,
+            path,
+            Expect::Entry {
+                kind: entry.kind,
+                dev: entry.dev,
+                ino: entry.ino,
+            },
+        )
+        .map_err(|reason| format!("{} ({reason:?})", path.display()))?;
+    }
+    Ok(())
 }
 
 fn objects_finding(path: &Path, detail: String) -> Finding {
@@ -1634,6 +1889,198 @@ mod tests {
         plant_fingerprint(&profile);
         plant_locks(&profile);
         target
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn strict_cleanup_refuses_a_protected_unit_but_can_remove_an_unrelated_unit() {
+        use super::{GeneratedInputCustody, RequiredRoot, RootPresence, RootRole};
+        use cargo_hive_core::{fingerprint::UnitKind, unit_path, unit_path::UnitLoc};
+        use cargo_hive_platform::testing::Hooked;
+        use cargo_hive_state::slots::{FileIdentity, GeneratedInputWitness, VerifiedRoot};
+        use std::fs;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Case {
+            ProtectedCandidate,
+            UnrelatedCandidate,
+            ReplacedDuringAccounting,
+            AliasedDuringAccounting,
+            CancelledDuringAccounting,
+        }
+        for case in [
+            Case::ProtectedCandidate,
+            Case::UnrelatedCandidate,
+            Case::ReplacedDuringAccounting,
+            Case::AliasedDuringAccounting,
+            Case::CancelledDuringAccounting,
+        ] {
+            let protected_dead = case == Case::ProtectedCandidate;
+            let completes = case == Case::UnrelatedCandidate;
+            let scratch = Scratch::new("generated-gc-custody");
+            let checkout = scratch.0.join("repo");
+            let target = checkout.join("target");
+            let profile = target.join("debug");
+            fs::create_dir_all(profile.join("build")).unwrap();
+            plant_locks(&profile);
+            fs::write(
+                target.join("CACHEDIR.TAG"),
+                format!("Signature: 8a477f597d28d172789f06886806bc55\n{TAG_LINE}\n"),
+            )
+            .unwrap();
+            let plant = |name: &str, hex: &str, dead| {
+                let loc = UnitLoc {
+                    layout: unit_path::UnitLayout::UnitDir,
+                    name_meta: format!("{name}-{hex}"),
+                };
+                let stem = format!("lib-{name}");
+                let fingerprint = unit_path::fingerprint_dir(&profile, &loc);
+                fs::create_dir_all(&fingerprint).unwrap();
+                fs::write(fingerprint.join(&stem), "0000000000000068").unwrap();
+                fs::write(
+                    fingerprint.join(format!("{stem}.json")),
+                    r#"{"rustc":1,"features":"[]","declared_features":"[]","target":2,"profile":3,"path":4,"deps":[],"local":[],"rustflags":[],"config":5,"compile_kind":0}"#,
+                )
+                .unwrap();
+                let stamp = unit_path::stamp(&profile, &loc, UnitKind::of(&stem));
+                fs::write(&stamp, b"").unwrap();
+                if dead {
+                    fs::File::open(&stamp)
+                        .unwrap()
+                        .set_modified(SystemTime::now() - Duration::from_secs(30 * 86_400))
+                        .unwrap();
+                }
+                let out = unit_path::outputs(&profile, &loc);
+                fs::create_dir_all(&out).unwrap();
+                fs::write(out.join("lib.rmeta"), b"fixture output").unwrap();
+                unit_path::unit_dir(&profile, &loc).unwrap()
+            };
+            let protected = plant("protected", "aaaaaaaaaaaaaaaa", protected_dead);
+            let unrelated = plant("unrelated", "bbbbbbbbbbbbbbbb", !protected_dead);
+            let leaf = protected.join("out/private.rs");
+            fs::write(&leaf, b"pub const REVIEWED: bool = true;\n").unwrap();
+
+            let identity = |path: &Path| FileIdentity::of(&fs::symlink_metadata(path).unwrap());
+            let root = VerifiedRoot {
+                path: target.clone(),
+                identity: identity(&target),
+            };
+            let relative_path = leaf.strip_prefix(&target).unwrap().to_path_buf();
+            let mut named = target.clone();
+            let parents = relative_path
+                .parent()
+                .unwrap()
+                .components()
+                .map(|component| {
+                    named.push(component.as_os_str());
+                    identity(&named)
+                })
+                .collect();
+            let witness = GeneratedInputWitness {
+                declaration_sha256: "1".repeat(64),
+                build_root: root.identity,
+                relative_path,
+                parents,
+                file: identity(&leaf),
+                bytes: fs::metadata(&leaf).unwrap().len(),
+                sha256: "2".repeat(64),
+            };
+            let changed = Arc::new(AtomicBool::new(false));
+            let sharing = {
+                let fs = platform::apfs::Apfs::new(std::env::current_exe().unwrap());
+                let changed = Arc::clone(&changed);
+                let candidate = unrelated.join("out/lib.rmeta");
+                let leaf = leaf.clone();
+                move |path: &Path| {
+                    if path == candidate && !changed.swap(true, Ordering::Relaxed) {
+                        match case {
+                            Case::ReplacedDuringAccounting => {
+                                let bytes = fs::read(&leaf).unwrap();
+                                fs::rename(&leaf, leaf.with_file_name("previous.rs")).unwrap();
+                                fs::write(&leaf, bytes).unwrap();
+                            }
+                            Case::AliasedDuringAccounting => {
+                                fs::hard_link(&leaf, candidate.with_file_name("alias.rs")).unwrap();
+                            }
+                            _ => {}
+                        }
+                    }
+                    fs.sharing(path)
+                }
+            };
+            let fs = Hooked {
+                inner: platform::current().unwrap().fs,
+                compress: None,
+                volume: None,
+                sharing: Some(Box::new(sharing)),
+                entry_stat: None,
+            };
+            let revalidations = Cell::new(0);
+            let revalidate = || {
+                assert!(matches!(
+                    fs.try_lock_exclusive(&profile.join(".cargo-lock")),
+                    platform::TryLock::Held
+                ));
+                assert_eq!(identity(&leaf), witness.file);
+                revalidations.set(revalidations.get() + 1);
+                Ok(())
+            };
+            let custody = GeneratedInputCustody {
+                root: &root,
+                inputs: &[&witness],
+                revalidate: &revalidate,
+            };
+            let expected = [RootRole::Target, RootRole::Build].map(|role| RequiredRoot {
+                path: target.clone(),
+                role,
+                presence: RootPresence::Present {
+                    dev: root.identity.dev,
+                    ino: root.identity.ino,
+                },
+            });
+            let scan = scan_one(&checkout, &target);
+            let input = CheckoutInput {
+                fs: &fs,
+                scan: &scan,
+                checkout: &checkout,
+                nested: &[],
+                now: SystemTime::now(),
+                window: Duration::from_secs(7 * 86_400),
+                account_bytes: true,
+            };
+            let cancel =
+                || case == Case::CancelledDuringAccounting && changed.load(Ordering::Relaxed);
+            let evidence = super::run_with_generated_inputs(&input, &expected, &custody, &cancel);
+            assert!(
+                leaf.is_file(),
+                "strict GC removed a protected generated input: {evidence:?}"
+            );
+            assert_eq!(
+                evidence.complete_roots().is_some(),
+                completes,
+                "{case:?}: {evidence:?}"
+            );
+            assert_eq!(unrelated.exists(), !completes, "{case:?}: {evidence:?}");
+            if !completes {
+                assert!(unrelated.join("out/lib.rmeta").is_file());
+                assert!(protected.join("out/lib.rmeta").is_file());
+            }
+            assert_eq!(changed.load(Ordering::Relaxed), !protected_dead, "{case:?}");
+            assert_eq!(
+                revalidations.get(),
+                if completes { 2 } else { 1 },
+                "{case:?}"
+            );
+            assert_eq!(
+                evidence.report.cancelled,
+                case == Case::CancelledDuringAccounting,
+                "{case:?}"
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]

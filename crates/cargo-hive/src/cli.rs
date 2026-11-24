@@ -1764,6 +1764,26 @@ pub(crate) fn checkout_gc_for_slot(
     expected: &[checkout::RequiredRoot],
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<SlotGcReport, SlotGcRefusal> {
+    checkout_gc_for_slot_inner(state, path, expected, None, cancel)
+}
+
+pub(crate) fn checkout_gc_for_slot_with_generated(
+    state: &State,
+    path: &Path,
+    expected: &[checkout::RequiredRoot],
+    custody: &checkout::GeneratedInputCustody<'_>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<SlotGcReport, SlotGcRefusal> {
+    checkout_gc_for_slot_inner(state, path, expected, Some(custody), cancel)
+}
+
+fn checkout_gc_for_slot_inner(
+    state: &State,
+    path: &Path,
+    expected: &[checkout::RequiredRoot],
+    custody: Option<&checkout::GeneratedInputCustody<'_>>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<SlotGcReport, SlotGcRefusal> {
     let (operation, scan) = slot_output_inputs(state, path, expected, cancel)?;
     let refusal = |evidence, interrupted| SlotGcRefusal {
         expected: expected.to_vec(),
@@ -1780,7 +1800,11 @@ pub(crate) fn checkout_gc_for_slot(
         },
         evidence: Box::new(SlotGcFailure::Run(evidence)),
     };
-    let mut evidence = checkout::run_with_evidence(&operation.input(&scan), expected, cancel);
+    let input = operation.input(&scan);
+    let mut evidence = match custody {
+        Some(custody) => checkout::run_with_generated_inputs(&input, expected, custody, cancel),
+        None => checkout::run_with_evidence(&input, expected, cancel),
+    };
     if evidence.report.cancelled || cancel() {
         evidence.report.cancelled = true;
         return Err(refusal(evidence, true));

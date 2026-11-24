@@ -196,6 +196,40 @@ pub(super) fn verify_retained(
     if !build_is_locked(&roots.build.path) {
         return Err(unproved());
     }
+    verify_named_inputs(profile, producer)?;
+    if !build_is_locked(&roots.build.path) {
+        return Err(unproved());
+    }
+    Ok(())
+}
+
+pub(super) fn retained_gc_inputs(
+    producer: &Producer,
+) -> Option<(&VerifiedRoot, Vec<&GeneratedInputWitness>)> {
+    let Producer::Complete {
+        roots, invocations, ..
+    } = producer
+    else {
+        return None;
+    };
+    let inputs: Vec<_> = invocations
+        .iter()
+        .flat_map(|record| &record.generated_inputs)
+        .collect();
+    (!inputs.is_empty()).then_some((&roots.build, inputs))
+}
+
+// The strict GC caller holds the current output guards across this check.
+pub(super) fn verify_named_inputs(
+    profile: &PoolProfile,
+    producer: &Producer,
+) -> Result<(), Refusal> {
+    let Producer::Complete {
+        roots, invocations, ..
+    } = producer
+    else {
+        return Ok(());
+    };
     for record in invocations
         .iter()
         .filter(|invocation| !invocation.generated_inputs.is_empty())
@@ -211,9 +245,6 @@ pub(super) fn verify_retained(
         for input in &record.generated_inputs {
             verify(&roots.build, input)?;
         }
-    }
-    if !build_is_locked(&roots.build.path) {
-        return Err(unproved());
     }
     Ok(())
 }

@@ -2471,18 +2471,35 @@ fn ready(
         prepare_stage(slot, AttemptStage::GcInProgress)
     })?;
     prepare_stage(&mut snapshot.pool.slots[index], AttemptStage::GcInProgress)?;
+    let producer = &snapshot.pool.slots[index].producer;
+    let revalidate = || {
+        generated::verify_named_inputs(&snapshot.pool.profile, producer)
+            .map_err(|_| "Could not revalidate the reviewed generated input custody".into())
+    };
     proof.release_output_locks();
     let parent = runner_instance(&fence.runner);
     let cancel = || cancelled() || parent_instance().as_ref().ok() != Some(&parent);
-    let gc = crate::cli::checkout_gc_for_slot(state, &proof.path, &expected, &cancel).map_err(
-        |err| {
-            if err.is_cancelled() {
-                Refusal::State(StateError::Cancelled)
-            } else {
-                Refusal::ReturnUncertain(err.detail(&expected))
-            }
-        },
-    )?;
+    let gc = match generated::retained_gc_inputs(producer) {
+        Some((root, inputs)) => crate::cli::checkout_gc_for_slot_with_generated(
+            state,
+            &proof.path,
+            &expected,
+            &cargo_hive_gc::checkout::GeneratedInputCustody {
+                root,
+                inputs: &inputs,
+                revalidate: &revalidate,
+            },
+            &cancel,
+        ),
+        None => crate::cli::checkout_gc_for_slot(state, &proof.path, &expected, &cancel),
+    }
+    .map_err(|err| {
+        if err.is_cancelled() {
+            Refusal::State(StateError::Cancelled)
+        } else {
+            Refusal::ReturnUncertain(err.detail(&expected))
+        }
+    })?;
     if gc.completed != expected
         || gc.expected != expected
         || gc.report.failed
@@ -2500,6 +2517,7 @@ fn ready(
         &anchors,
         &units,
     )?;
+    final_proof.verify_generated_inputs(&snapshot.pool.profile, producer)?;
     let outcome = Outcome {
         pool_id: key.pool_id.into(),
         slot: key.slot,

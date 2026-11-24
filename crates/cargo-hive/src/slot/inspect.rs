@@ -62,6 +62,27 @@ impl CheckoutProof {
     pub(crate) fn release_output_locks(&mut self) {
         self.output_locks.clear();
     }
+
+    pub(super) fn verify_generated_inputs(
+        &self,
+        profile: &PoolProfile,
+        producer: &Producer,
+    ) -> Result<(), Refusal> {
+        super::generated::verify_retained(profile, producer, |build_root| {
+            let mut locks = self
+                .output_locks
+                .iter()
+                .filter(|held| held.path.starts_with(build_root))
+                .peekable();
+            locks.peek().is_some()
+                && locks.all(|held| {
+                    fs::symlink_metadata(&held.path).is_ok_and(|metadata| {
+                        metadata.is_file()
+                            && held.lock.identity() == Some((metadata.dev(), metadata.ino()))
+                    })
+                })
+        })
+    }
 }
 
 pub(super) enum CheckoutInventory {
@@ -109,32 +130,17 @@ fn inspect_with_policy(
         Err(Refusal::ReturnUncertain(detail)) => (CheckoutInventory::Uncertain(detail), Vec::new()),
         Err(err) => return Err(err),
     };
-    if matches!(inventory, CheckoutInventory::Clean) {
-        super::generated::verify_retained(
-            &scope.pool.profile,
-            &scope.slot.producer,
-            |build_root| {
-                let mut locks = output_locks
-                    .iter()
-                    .filter(|held| held.path.starts_with(build_root))
-                    .peekable();
-                locks.peek().is_some()
-                    && locks.all(|held| {
-                        fs::symlink_metadata(&held.path).is_ok_and(|metadata| {
-                            metadata.is_file()
-                                && held.lock.identity() == Some((metadata.dev(), metadata.ino()))
-                        })
-                    })
-            },
-        )?;
-    }
-    verify_linked_head(&path, identity, &pool.common_git_id.path, &head)?;
-    Ok(CheckoutProof {
+    let proof = CheckoutProof {
         path,
         head,
         inventory,
         output_locks,
-    })
+    };
+    if matches!(proof.inventory, CheckoutInventory::Clean) {
+        proof.verify_generated_inputs(&scope.pool.profile, &scope.slot.producer)?;
+    }
+    verify_linked_head(&proof.path, identity, &pool.common_git_id.path, &proof.head)?;
+    Ok(proof)
 }
 
 fn checkout_refusal() -> Refusal {
