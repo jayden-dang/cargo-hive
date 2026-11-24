@@ -76,6 +76,8 @@ struct Seal {
     endpoints: Vec<Endpoint>,
     tools: Tools,
     packages: Vec<NativePackage>,
+    #[serde(default)]
+    metadata_resolution_sha256: Option<String>,
     data: Vec<FiniteData>,
     materialized: Option<MaterializedGraph>,
 }
@@ -154,6 +156,46 @@ pub(super) struct NativeTarget {
     pub name: String,
     pub kind: String,
     pub source: PathBuf,
+    #[serde(default)]
+    pub metadata: Option<NativeTargetMetadata>,
+}
+
+/// Cargo metadata's declared modes do not establish the target's harness.
+#[derive(Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NativeTargetMetadata {
+    pub crate_types: Vec<String>,
+    pub edition: String,
+    pub doc: bool,
+    pub doctest: bool,
+    pub test: bool,
+    #[serde(default)]
+    pub required_features: Vec<String>,
+}
+
+impl NativeTargetMetadata {
+    fn valid(&self, kind: &str) -> bool {
+        (match kind {
+            "bin" | "test" | "bench" => self.crate_types == ["bin"],
+            "proc-macro" => self.crate_types == ["proc-macro"],
+            "lib" => {
+                bounded_unique(self.crate_types.iter().map(String::as_str))
+                    && self.crate_types.iter().all(|value| {
+                        matches!(
+                            value.as_str(),
+                            "lib" | "rlib" | "dylib" | "cdylib" | "staticlib"
+                        )
+                    })
+            }
+            _ => false,
+        }) && matches!(self.edition.as_str(), "2015" | "2018" | "2021" | "2024")
+            && self.required_features.len() <= ENTRY_LIMIT
+            && unique(self.required_features.iter().map(String::as_str))
+            && self
+                .required_features
+                .iter()
+                .all(|feature| feature.len() <= 128)
+    }
 }
 
 const PACKAGE_LIMIT: usize = 1024;
@@ -862,6 +904,28 @@ pub(super) struct NativeBuild {
     seal: Seal,
 }
 
+impl Seal {
+    fn valid_local_target_catalog(&self) -> bool {
+        let mut targets = self.packages.iter().flat_map(|package| &package.targets);
+        match &self.metadata_resolution_sha256 {
+            Some(expected) => {
+                slots::hex(expected, 64)
+                    && self.recipe != Recipe::NativeBuild
+                    && self
+                        .endpoints
+                        .iter()
+                        .all(|endpoint| endpoint.whole_tree.is_some())
+                    && self
+                        .materialized
+                        .as_ref()
+                        .is_none_or(|graph| &graph.resolve_sha256 == expected)
+                    && targets.all(|target| target.metadata.is_some())
+            }
+            None => targets.all(|target| target.metadata.is_none()),
+        }
+    }
+}
+
 impl NativeBuild {
     pub fn read(
         profile: &PoolProfile,
@@ -945,6 +1009,7 @@ impl NativeBuild {
                 .as_ref()
                 .is_some_and(|graph| !graph.valid(seal.packages.len()))
             || !seal.packages.iter().all(valid_package)
+            || !seal.valid_local_target_catalog()
             || !bounded_unique(seal.data.iter().map(|item| item.id.as_str()))
             || !seal.data.iter().all(|item| {
                 bounded_unique(item.sha256.iter().map(String::as_str))
@@ -1021,6 +1086,22 @@ impl NativeBuild {
 
     pub fn packages(&self) -> &[NativePackage] {
         &self.seal.packages
+    }
+
+    /// Binds the all-feature metadata probe. Exact compile and launch selections are separate.
+    pub fn metadata_resolution(&self) -> Option<&str> {
+        self.seal.metadata_resolution_sha256.as_deref()
+    }
+
+    pub fn require_supported_target_mode(&self) -> Result<(), Refusal> {
+        if self.metadata_resolution().is_some() {
+            return Err(refused(if self.seal.recipe.is_nextest() {
+                "The reviewed Cargo target catalog lacks exact Nextest selection, harness and child proof."
+            } else {
+                "The reviewed Cargo target catalog lacks exact Clippy compiler-unit selection proof."
+            }));
+        }
+        Ok(())
     }
 
     pub fn verify_checkout(
@@ -1631,13 +1712,38 @@ fn native_environment(entries: &[slots::Environment]) -> bool {
 }
 
 fn valid_package(package: &NativePackage) -> bool {
-    relative(&package.manifest)
-        && bounded_unique(package.targets.iter().map(|target| target.name.as_str()))
-        && package.targets.iter().all(|target| {
-            relative(&target.source) && matches!(target.kind.as_str(), "bin" | "lib" | "proc-macro")
+    if !relative(&package.manifest)
+        || !(1..=ENTRY_LIMIT).contains(&package.targets.len())
+        || package
+            .targets
+            .iter()
+            .any(|target| !relative(&target.source))
+        || package.dependencies.len() > ENTRY_LIMIT
+        || !unique(package.dependencies.iter().map(String::as_str))
+    {
+        return false;
+    }
+    if package
+        .targets
+        .iter()
+        .any(|target| target.metadata.is_some())
+    {
+        let mut identities = BTreeSet::new();
+        package.targets.iter().all(|target| {
+            portable_leaf(&target.name)
+                && identities.insert((&target.name, &target.kind))
+                && target
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.valid(&target.kind))
         })
-        && package.dependencies.len() <= ENTRY_LIMIT
-        && unique(package.dependencies.iter().map(String::as_str))
+    } else {
+        bounded_unique(package.targets.iter().map(|target| target.name.as_str()))
+            && package
+                .targets
+                .iter()
+                .all(|target| matches!(target.kind.as_str(), "bin" | "lib" | "proc-macro"))
+    }
 }
 
 fn relative(path: &Path) -> bool {
@@ -1660,7 +1766,7 @@ fn unique<'a>(values: impl Iterator<Item = &'a str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::Endpoint;
+    use super::{Endpoint, NativeBuild, NativePackage, Seal, valid_package};
     use serde_json::json;
 
     #[test]
@@ -1676,6 +1782,105 @@ mod tests {
 
         if let Err(error) = serde_json::from_value::<Endpoint>(endpoint) {
             panic!("the sealed endpoint refused its reviewed whole-tree inventory: {error}");
+        }
+    }
+
+    #[test]
+    fn a_reviewed_target_inventory_distinguishes_integration_tests_and_benches() {
+        let target = |kind, source, test| {
+            json!({
+                "name": "exercise",
+                "kind": kind,
+                "source": source,
+                "metadata": {
+                    "crate_types": ["bin"],
+                    "edition": "2021",
+                    "doc": false,
+                    "doctest": false,
+                    "test": test,
+                    "required_features": ["testkit"],
+                },
+            })
+        };
+        let mut package = json!({
+            "name": "gateways",
+            "version": "1.0.0",
+            "manifest": "Cargo.toml",
+            "targets": [
+                target("test", "tests/exercise.rs", true),
+                target("bench", "benches/exercise.rs", false),
+            ],
+            "dependencies": [],
+        });
+        let reviewed: NativePackage = serde_json::from_value(package.clone())
+            .unwrap_or_else(|error| panic!("reviewed target inventory refused: {error}"));
+        assert!(valid_package(&reviewed));
+
+        package["targets"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("metadata");
+        let incomplete: NativePackage = serde_json::from_value(package).unwrap();
+        assert!(!valid_package(&incomplete));
+    }
+
+    #[test]
+    fn metadata_catalogs_carry_no_clippy_or_nextest_launch_authority() {
+        let tool = json!({ "path": "/reviewed/tool", "sha256": "a".repeat(64) });
+        for recipe in ["clippy", "nextest_workspace", "nextest_gateways"] {
+            let seal: Seal = serde_json::from_value(json!({
+                "schema": 1,
+                "recipe": recipe,
+                "profile": {"id": "reviewed", "revision": 1},
+                "proof": "test-catalog",
+                "invocation": recipe,
+                "layout": "flat",
+                "native_target": "aarch64-apple-darwin",
+                "endpoints": [{
+                    "commit": "b".repeat(40),
+                    "tree": "c".repeat(40),
+                    "whole_tree": {"entries": 1, "sha256": "d".repeat(64)},
+                }],
+                "tools": {
+                    "cargo": tool,
+                    "rustc": tool,
+                    "rust_runtime": [],
+                    "target_sysroot": [],
+                    "clang": tool,
+                    "ld": tool,
+                    "otool": tool,
+                    "sdk": "/reviewed/sdk",
+                    "sdk_settings": tool,
+                    "system_library": tool,
+                },
+                "packages": [{
+                    "name": "gateways",
+                    "version": "1.0.0",
+                    "manifest": "Cargo.toml",
+                    "targets": [{
+                        "name": "it",
+                        "kind": "test",
+                        "source": "tests/it.rs",
+                        "metadata": {
+                            "crate_types": ["bin"],
+                            "edition": "2021",
+                            "doc": false,
+                            "doctest": false,
+                            "test": true,
+                        },
+                    }],
+                    "dependencies": [],
+                }],
+                "metadata_resolution_sha256": "e".repeat(64),
+                "data": [],
+            }))
+            .unwrap();
+            assert!(seal.valid_local_target_catalog());
+            let candidate = NativeBuild {
+                seal,
+                seal_digest: "f".repeat(64),
+            };
+            assert!(candidate.require_supported_target_mode().is_err());
         }
     }
 }

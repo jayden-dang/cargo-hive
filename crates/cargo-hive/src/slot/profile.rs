@@ -1,6 +1,8 @@
 //! Admits only the actual command and graph covered by the pool's reviewed profile.
 
-use super::admission::{MaterializedGraph, NativeBuild, NativePackage, NativeTarget};
+use super::admission::{
+    MaterializedGraph, NativeBuild, NativePackage, NativeTarget, NativeTargetMetadata,
+};
 use super::{CheckoutProof, Refusal, canonical_worktree_path, check_cancelled, exists, git_scope};
 use cargo_hive_cargo::metadata;
 use cargo_hive_platform::{
@@ -329,8 +331,14 @@ pub(super) fn check_invocation(
     }
     let dependency_witness = if let Some(seal) = &native {
         let material = seal.materialized();
-        verify_native_graph(&discovered, &checkout.path, seal.packages(), material)?;
-        if let Some(material) = material {
+        verify_native_graph(
+            &discovered,
+            &checkout.path,
+            seal.packages(),
+            material,
+            seal.metadata_resolution(),
+        )?;
+        let verified_dependency = if let Some(material) = material {
             verify_materialized_graph(&discovered, &checkout.path, &cargo_home, material)?;
             let after = seal.verify_dependency_material(profile, &cargo_home, &checkout.path)?;
             if material_before != after {
@@ -341,7 +349,9 @@ pub(super) fn check_invocation(
             after
         } else {
             None
-        }
+        };
+        seal.require_supported_target_mode()?;
+        verified_dependency
     } else {
         None
     };
@@ -891,6 +901,26 @@ struct PackageTarget {
     name: String,
     kind: Vec<String>,
     src_path: PathBuf,
+    crate_types: Option<Vec<String>>,
+    edition: Option<String>,
+    doc: Option<bool>,
+    doctest: Option<bool>,
+    test: Option<bool>,
+    #[serde(default, rename = "required-features")]
+    required_features: Vec<String>,
+}
+
+impl PackageTarget {
+    fn metadata(&self) -> Option<NativeTargetMetadata> {
+        Some(NativeTargetMetadata {
+            crate_types: self.crate_types.clone()?,
+            edition: self.edition.clone()?,
+            doc: self.doc?,
+            doctest: self.doctest?,
+            test: self.test?,
+            required_features: self.required_features.clone(),
+        })
+    }
 }
 
 struct Discovered {
@@ -980,8 +1010,10 @@ fn verify_native_graph(
     checkout: &Path,
     expected: &[NativePackage],
     materialized: Option<&MaterializedGraph>,
+    reviewed_resolution: Option<&str>,
 ) -> Result<(), Refusal> {
     let unproved = || refused("The actual Cargo graph differs from the sealed native build.");
+    let detailed = reviewed_resolution.is_some();
     let ids: BTreeMap<_, _> = graph
         .packages
         .iter()
@@ -999,6 +1031,11 @@ fn verify_native_graph(
     {
         return Err(unproved());
     }
+    if let Some(expected) = reviewed_resolution
+        && metadata_resolution_digest(graph, checkout)? != expected
+    {
+        return Err(unproved());
+    }
     for package in &graph.packages {
         if package.source.is_some() {
             if materialized.is_none() || members.contains(&package.id) {
@@ -1010,13 +1047,14 @@ fn verify_native_graph(
             return Err(unproved());
         }
         let node = nodes.get(&package.id).ok_or_else(unproved)?;
-        if materialized.is_none() && !node.features.is_empty() {
+        if !detailed && materialized.is_none() && !node.features.is_empty() {
             return Err(unproved());
         }
         let mut dependencies = Vec::new();
         for dependency in &node.deps {
             let name = ids.get(&dependency.pkg).ok_or_else(unproved)?;
-            if materialized.is_none()
+            if !detailed
+                && materialized.is_none()
                 && (dependency.name != **name
                     || dependency.dep_kinds.len() != 1
                     || dependency.dep_kinds[0].kind.is_some()
@@ -1036,6 +1074,11 @@ fn verify_native_graph(
             targets.push(NativeTarget {
                 name: target.name.clone(),
                 kind: kind.clone(),
+                metadata: if detailed {
+                    Some(target.metadata().ok_or_else(unproved)?)
+                } else {
+                    None
+                },
                 source: target
                     .src_path
                     .strip_prefix(checkout)
@@ -1043,7 +1086,7 @@ fn verify_native_graph(
                     .to_path_buf(),
             });
         }
-        targets.sort_by(|left, right| left.name.cmp(&right.name));
+        targets.sort_by(|left, right| (&left.name, &left.kind).cmp(&(&right.name, &right.kind)));
         let actual = NativePackage {
             name: package.name.clone(),
             version: package.version.clone(),
@@ -1055,11 +1098,38 @@ fn verify_native_graph(
             targets,
             dependencies,
         };
-        if !expected.contains(&actual) {
+        let matches = if detailed {
+            expected
+                .iter()
+                .any(|reviewed| matches_reviewed_package(reviewed, &actual))
+        } else {
+            expected.contains(&actual)
+        };
+        if !matches {
             return Err(unproved());
         }
     }
     Ok(())
+}
+
+fn matches_reviewed_package(reviewed: &NativePackage, actual: &NativePackage) -> bool {
+    reviewed.name == actual.name
+        && reviewed.version == actual.version
+        && reviewed.manifest.as_os_str() == actual.manifest.as_os_str()
+        && reviewed.dependencies == actual.dependencies
+        && reviewed.targets.len() == actual.targets.len()
+        && actual
+            .targets
+            .windows(2)
+            .all(|pair| (&pair[0].name, &pair[0].kind) != (&pair[1].name, &pair[1].kind))
+        && actual.targets.iter().all(|seen| {
+            reviewed.targets.iter().any(|saved| {
+                saved.name == seen.name
+                    && saved.kind == seen.kind
+                    && saved.source.as_os_str() == seen.source.as_os_str()
+                    && saved.metadata == seen.metadata
+            })
+        })
 }
 
 fn verify_materialized_graph(
@@ -1078,9 +1148,8 @@ fn verify_materialized_graph(
         .iter()
         .map(|pkg| (&pkg.id, pkg))
         .collect();
-    let mut keys = BTreeMap::new();
     for pkg in &graph.packages {
-        let key = if let Some(source) = &pkg.source {
+        if let Some(source) = &pkg.source {
             let expected = packages.get(&pkg.id).ok_or_else(unproved)?;
             let root = home.join(&expected.root);
             let targets = pkg
@@ -1120,15 +1189,31 @@ fn verify_materialized_graph(
             {
                 return Err(unproved());
             }
-            pkg.id.clone()
+        }
+    }
+    if metadata_resolution_digest(graph, checkout)? != materialized.resolve_sha256 {
+        return Err(unproved());
+    }
+    Ok(())
+}
+
+/// Normalizes Cargo's published metadata graph without claiming target or feature selection
+/// of a later compiler or a Nextest invocation.
+fn metadata_resolution_digest(graph: &Discovered, checkout: &Path) -> Result<String, Refusal> {
+    let unproved =
+        || refused("Cargo reported an incomplete reviewed feature and dependency graph.");
+    let mut keys = BTreeMap::new();
+    for package in &graph.packages {
+        let key = if package.source.is_some() {
+            package.id.clone()
         } else {
-            let manifest = pkg
+            let manifest = package
                 .manifest_path
                 .strip_prefix(checkout)
                 .map_err(|_| unproved())?;
             format!("workspace:{}", manifest.to_str().ok_or_else(unproved)?)
         };
-        if keys.insert(&pkg.id, key).is_some() {
+        if keys.insert(&package.id, key).is_some() {
             return Err(unproved());
         }
     }
@@ -1156,11 +1241,10 @@ fn verify_materialized_graph(
             return Err(unproved());
         }
     }
-    let verified = digest(&serde_json::to_vec(&nodes).map_err(|_| unproved())?)?;
-    if verified != materialized.resolve_sha256 {
+    if nodes.len() != keys.len() {
         return Err(unproved());
     }
-    Ok(())
+    digest(&serde_json::to_vec(&nodes).map_err(|_| unproved())?)
 }
 
 fn reviewed_source_facts(
@@ -1260,4 +1344,165 @@ pub(super) fn digest(bytes: &[u8]) -> Result<String, Refusal> {
     let bytes =
         sha256(bytes).map_err(|_| refused("Could not bind the producer evidence digest."))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Discovered, NativePackage, deserialize_discovery, digest, metadata,
+        metadata_resolution_digest, verify_native_graph,
+    };
+    use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn the_native_graph_matches_the_exact_reviewed_local_target_facts() {
+        let root = Path::new("/scratch/checkout");
+        let observed = |kind, source, test| {
+            json!({
+                "name": "exercise",
+                "kind": [kind],
+                "src_path": source,
+                "crate_types": ["bin"],
+                "edition": "2021",
+                "doc": false,
+                "doctest": false,
+                "test": test,
+                "required-features": ["testkit"],
+            })
+        };
+        let reviewed = |kind, source, test| {
+            json!({
+                "name": "exercise",
+                "kind": kind,
+                "source": source,
+                "metadata": {
+                    "crate_types": ["bin"],
+                    "edition": "2021",
+                    "doc": false,
+                    "doctest": false,
+                    "test": test,
+                    "required_features": ["testkit"],
+                },
+            })
+        };
+        let package_id = "path+file:///scratch/checkout#gateways@1.0.0";
+        let packages = json!([{
+            "name": "gateways",
+            "version": "1.0.0",
+            "id": package_id,
+            "manifest_path": root.join("Cargo.toml"),
+            "source": null,
+            "targets": [
+                observed("test", "/scratch/checkout/tests/exercise.rs", true),
+                observed("bench", "/scratch/checkout/benches/exercise.rs", false),
+            ],
+        }]);
+        let nodes = json!([{"id": package_id, "deps": [], "features": ["testkit"]}]);
+        let mut graph = Discovered {
+            resolved: metadata::Resolved {
+                workspace_root: root.into(),
+                target_directory: root.join("target"),
+                build_directory: root.join("target"),
+            },
+            packages: deserialize_discovery(&packages)
+                .unwrap_or_else(|_| panic!("fixture packages")),
+            graph_digest: String::new(),
+            workspace_members: vec![package_id.to_owned()],
+            nodes: deserialize_discovery(&nodes).unwrap_or_else(|_| panic!("fixture resolution")),
+        };
+        let expected: Vec<NativePackage> = serde_json::from_value(json!([{
+            "name": "gateways",
+            "version": "1.0.0",
+            "manifest": "Cargo.toml",
+            "targets": [
+                reviewed("bench", "benches/exercise.rs", false),
+                reviewed("test", "tests/exercise.rs", true),
+            ],
+            "dependencies": [],
+        }]))
+        .unwrap();
+        let resolution = digest(br#"{"workspace:Cargo.toml":[["testkit"],[]]}"#)
+            .unwrap_or_else(|_| panic!("fixture digest"));
+        let verify = |graph: &Discovered| {
+            verify_native_graph(graph, root, &expected, None, Some(&resolution))
+        };
+        assert!(
+            verify(&graph).is_ok(),
+            "the same named, exact integration test and benchmark must both match"
+        );
+        graph.nodes[0].features.clear();
+        assert!(
+            verify(&graph).is_err(),
+            "a changed resolve feature set must refuse"
+        );
+        graph.nodes[0].features.push("testkit".into());
+        let target = &mut graph.packages[0].targets[1];
+        let reviewed_path = target.src_path.clone();
+        target.src_path = root.join("other/exercise.rs");
+        assert!(
+            verify(&graph).is_err(),
+            "a different target source must refuse"
+        );
+        graph.packages[0].targets[1].src_path = reviewed_path;
+        graph.packages[0].targets[0].required_features.clear();
+        assert!(
+            verify(&graph).is_err(),
+            "changed target requirements must refuse"
+        );
+        graph.packages[0].targets[0]
+            .required_features
+            .push("testkit".into());
+        graph.packages[0].targets[0].test = None;
+        assert!(
+            verify(&graph).is_err(),
+            "missing observed target facts must refuse"
+        );
+    }
+
+    #[test]
+    fn the_metadata_graph_binds_dependency_names_kinds_and_exact_manifest_paths() {
+        let root = Path::new("/scratch/checkout");
+        let main = "path+file:///scratch/checkout#gateways@1.0.0";
+        let dependency = "path+file:///scratch/checkout/dep#shared@1.0.0";
+        let packages = json!([
+            {"id": main, "name": "gateways", "version": "1.0.0",
+             "manifest_path": root.join("Cargo.toml"), "targets": []},
+            {"id": dependency, "name": "shared", "version": "1.0.0",
+             "manifest_path": root.join("dep/Cargo.toml"), "targets": []},
+        ]);
+        let nodes = json!([
+            {"id": main, "features": [], "deps": [{
+                "name": "renamed",
+                "pkg": dependency,
+                "dep_kinds": [{"kind": "dev", "target": "cfg(unix)"}],
+            }]},
+            {"id": dependency, "features": [], "deps": []},
+        ]);
+        let mut graph = Discovered {
+            resolved: metadata::Resolved {
+                workspace_root: root.into(),
+                target_directory: root.join("target"),
+                build_directory: root.join("target"),
+            },
+            packages: deserialize_discovery(&packages)
+                .unwrap_or_else(|_| panic!("fixture packages")),
+            graph_digest: String::new(),
+            workspace_members: vec![main.to_owned(), dependency.to_owned()],
+            nodes: deserialize_discovery(&nodes).unwrap_or_else(|_| panic!("fixture resolution")),
+        };
+        let expected = digest(br#"{"workspace:Cargo.toml":[[],[["renamed","workspace:dep/Cargo.toml",[["dev","cfg(unix)"]]]]],"workspace:dep/Cargo.toml":[[],[]]}"#).unwrap_or_else(|_| panic!("fixture digest"));
+        let fingerprint = |graph: &Discovered| {
+            metadata_resolution_digest(graph, root).unwrap_or_else(|_| panic!("fixture resolution"))
+        };
+        assert_eq!(fingerprint(&graph), expected);
+        graph.nodes[0].deps[0].name = "shared".into();
+        assert_ne!(fingerprint(&graph), expected);
+        graph.nodes[0].deps[0].name = "renamed".into();
+        graph.nodes[0].deps[0].dep_kinds[0].target = None;
+        assert_ne!(fingerprint(&graph), expected);
+        graph.nodes[0].deps[0].dep_kinds[0].target = Some("cfg(unix)".into());
+        graph.packages[1].manifest_path = root.join("other/Cargo.toml");
+        assert_ne!(fingerprint(&graph), expected);
+    }
 }
