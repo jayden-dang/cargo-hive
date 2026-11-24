@@ -1666,6 +1666,7 @@ mod tests {
             ignored_vars: Vec::new(),
             walk_faults: Vec::new(),
             cleared_profiles: BTreeSet::new(),
+            untagged: Vec::new(),
             workspaces: workspaces
                 .into_iter()
                 .map(|(dir, checkout, result)| WorkspaceResolution {

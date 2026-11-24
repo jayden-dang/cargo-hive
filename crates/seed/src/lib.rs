@@ -321,6 +321,90 @@ fn run_clone_selected(
     destination: CloneDestination<'_>,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Outcome, Error> {
+    let tag_checkout = (destination.slot.is_none()).then(|| destination.checkout.path.clone());
+    let mut outcome = clone_units(
+        ctx,
+        repo,
+        toolchain,
+        filled,
+        unit_layout,
+        destination,
+        cancel,
+    )?;
+    if let Some(checkout) = tag_checkout
+        && outcome.target.is_none()
+        && !outcome.cancelled
+    {
+        tag_empty_target(ctx, &checkout, &mut outcome, cancel);
+    }
+    Ok(outcome)
+}
+
+/// When nothing was placed, still leave a target that seed creates carrying Cargo's tag, so a
+/// build by a tool that creates `target/` first cannot leave the checkout unrecognized. A
+/// target that exists is never written to.
+fn tag_empty_target(
+    ctx: &Ctx<'_>,
+    checkout: &Path,
+    outcome: &mut Outcome,
+    cancel: &(dyn Fn() -> bool + Sync),
+) {
+    let Ok(resolved) = cargo_hive_cargo::metadata::resolve(checkout, cancel) else {
+        return;
+    };
+    if resolved.build_directory != resolved.target_directory {
+        return;
+    }
+    let target = resolved.target_directory;
+    match ctx.fs.create_dir(&target) {
+        Ok(()) => {}
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::NotFound
+            ) =>
+        {
+            return;
+        }
+        Err(err) => {
+            outcome.findings.push((
+                "tag.clone".to_string(),
+                Some(target.clone()),
+                format!("{}: {err}; the new target was not tagged", target.display()),
+            ));
+            return;
+        }
+    }
+    let tag = target.join("CACHEDIR.TAG");
+    let written = match ctx.fs.clone_file(&tag_path(ctx.state), &tag) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tag)
+                .and_then(|mut file| file.write_all(cargo_hive_core::target::CARGO_TAG.as_bytes()))
+        }
+    };
+    if let Err(err) = written {
+        outcome.findings.push((
+            "tag.clone".to_string(),
+            Some(tag.clone()),
+            format!("{}: {err}; the new target was not tagged", tag.display()),
+        ));
+    }
+}
+
+fn clone_units(
+    ctx: &Ctx<'_>,
+    repo: &Repo,
+    toolchain: &Toolchain,
+    filled: Filled,
+    unit_layout: Option<UnitLayout>,
+    destination: CloneDestination<'_>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Outcome, Error> {
     let CloneDestination { checkout, slot } = destination;
     let Filled {
         report: filled,

@@ -909,6 +909,13 @@ fn status(state: &State, args: &[std::path::PathBuf], no_sizes: bool, out: Outpu
             fault.detail.clone(),
         );
     }
+    for path in &scan.untagged {
+        b.finding(
+            "target.untagged",
+            Some(path.clone()),
+            discover::untagged_detail(path),
+        );
+    }
     if no_sizes {
         b.unmeasured("sizes", "--no-sizes was given");
     } else {
@@ -1880,6 +1887,13 @@ fn checkout_cmd(state: &State, path: &Path, out: &OutputArgs) -> i32 {
             "walk.unreadable",
             Some(fault.path.clone()),
             fault.detail.clone(),
+        );
+    }
+    for path in &scan.untagged {
+        b.finding(
+            "target.untagged",
+            Some(path.clone()),
+            discover::untagged_detail(path),
         );
     }
     for var in &scan.ignored_vars {

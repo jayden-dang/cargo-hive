@@ -597,7 +597,7 @@ fn a_store_with_no_tag_clones_nothing_with_a_finding() {
     );
     assert_early_finish_bytes(&receipt);
     assert!(!tag.exists());
-    assert!(!lane.join("target").exists());
+    assert_only_cargo_tag(&lane.join("target"));
 }
 
 #[test]
@@ -620,7 +620,7 @@ fn a_store_tag_that_cannot_be_stated_names_the_error() {
             .unwrap_or(0),
         0
     );
-    assert!(!lane.join("target").exists());
+    assert_only_cargo_tag(&lane.join("target"));
     let named = outcome.findings.iter().any(|(_, path, detail)| {
         path.as_deref() == Some(tag.as_path())
             && detail.contains(&err.to_string())
@@ -666,7 +666,7 @@ fn a_store_with_no_source_record_clones_nothing_and_says_so() {
             .any(|f| f["kind"] == "source.none"),
         "{receipt}"
     );
-    assert!(!lane.join("target").exists());
+    assert_only_cargo_tag(&lane.join("target"));
 }
 
 #[test]
@@ -704,7 +704,7 @@ fn an_empty_choice_clones_nothing_and_reports_why() {
     assert_eq!(findings.len(), 1, "{receipt}");
     assert_eq!(findings[0]["kind"], "units.empty", "{receipt}");
     assert_early_finish_bytes(&receipt);
-    assert!(!lane.join("target").exists());
+    assert_only_cargo_tag(&lane.join("target"));
 }
 
 #[test]
@@ -733,7 +733,7 @@ fn no_toolchain_row_clones_nothing_with_a_finding_and_exit_zero() {
         stored["toolchains"].as_object().unwrap().is_empty(),
         "{stored}"
     );
-    assert!(!lane.join("target").exists());
+    assert_only_cargo_tag(&lane.join("target"));
 }
 
 #[test]
@@ -2100,6 +2100,19 @@ fn ref_outcome(outcome: &cargo_hive_seed::Outcome) -> cargo_hive_seed::Outcome {
         placed: outcome.placed.clone(),
         target: outcome.target.clone(),
     }
+}
+
+/// Seed created the target with nothing to place: only Cargo's tag, in Cargo's exact bytes.
+fn assert_only_cargo_tag(target: &Path) {
+    let names: Vec<_> = fs::read_dir(target)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, [std::ffi::OsString::from("CACHEDIR.TAG")]);
+    assert_eq!(
+        fs::read_to_string(target.join("CACHEDIR.TAG")).unwrap(),
+        cargo_hive_core::target::CARGO_TAG
+    );
 }
 
 fn assert_early_finish_bytes(receipt: &serde_json::Value) {

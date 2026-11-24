@@ -779,7 +779,22 @@ pub struct TargetScan {
     pub walk_faults: Vec<WalkFault>,
     /// Profile paths this run found supported; merge must drop them even if disk still lists them.
     pub cleared_profiles: BTreeSet<PathBuf>,
+    /// Resolved target dirs with Cargo's layout but no tag: absent from `targets`, never read.
+    pub untagged: Vec<PathBuf>,
     pub workspaces: Vec<WorkspaceResolution>,
+}
+
+/// The `target.untagged` finding detail for `path`.
+pub fn untagged_detail(path: &Path) -> String {
+    format!(
+        "{path} has Cargo's target layout but no CACHEDIR.TAG, so hive does not recognize it \
+         as a Cargo target and does not read, seed or clean it (a tool such as cargo-nextest \
+         created it before Cargo did). Add Cargo's tag with: \
+         printf '{tag}' > {path}/CACHEDIR.TAG \
+         or delete the directory and let Cargo create it",
+        tag = target::CARGO_TAG.replace('\n', "\\n"),
+        path = path.display()
+    )
 }
 
 pub fn resolvers_of(scan: &TargetScan, target: &Path) -> Vec<PathBuf> {
@@ -1060,6 +1075,14 @@ pub fn targets(
             unreadable: identified.err(),
         });
     }
+    let untagged: Vec<PathBuf> = resolved
+        .iter()
+        .flat_map(|r| [&r.target_directory, &r.build_directory])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|dir| target::is_untagged_cargo_shaped(dir))
+        .cloned()
+        .collect();
     let workspaces = resolutions
         .iter()
         .map(|r| WorkspaceResolution {
@@ -1075,6 +1098,7 @@ pub fn targets(
         ignored_vars: overrides.into_iter().map(|(name, _)| name).collect(),
         walk_faults,
         cleared_profiles,
+        untagged,
         workspaces,
     }
 }
@@ -1137,6 +1161,7 @@ pub fn targets_for_checkout_gc(
         ignored_vars: Vec::new(),
         walk_faults,
         cleared_profiles: BTreeSet::new(),
+        untagged: Vec::new(),
         workspaces,
     }
 }
@@ -1535,6 +1560,7 @@ mod tests {
             ignored_vars: Vec::new(),
             walk_faults: Vec::new(),
             cleared_profiles: BTreeSet::new(),
+            untagged: Vec::new(),
             workspaces,
         }
     }
