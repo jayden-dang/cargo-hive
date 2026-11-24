@@ -6708,16 +6708,29 @@ fn exercise_materialized_dependency(scenario: DependencyFixture) {
 #[test]
 #[ignore = "requires the isolated pinned serde_core proof cache"]
 fn the_packaged_serde_core_producer_preserves_the_generated_input_through_gc() {
-    exercise_packaged_serde_core(false);
+    exercise_packaged_serde_core(SerdeCoreCase::Preserve);
 }
 
 #[test]
 #[ignore = "requires the isolated pinned serde_core proof cache"]
 fn the_packaged_serde_core_producer_refuses_an_active_derive_dependency() {
-    exercise_packaged_serde_core(true);
+    exercise_packaged_serde_core(SerdeCoreCase::ActiveDerive);
 }
 
-fn exercise_packaged_serde_core(active_derive: bool) {
+#[test]
+#[ignore = "requires the isolated pinned serde_core proof cache"]
+fn the_packaged_serde_core_producer_refuses_an_undeclared_consumer() {
+    exercise_packaged_serde_core(SerdeCoreCase::UndeclaredConsumer);
+}
+
+enum SerdeCoreCase {
+    Preserve,
+    ActiveDerive,
+    UndeclaredConsumer,
+}
+
+fn exercise_packaged_serde_core(case: SerdeCoreCase) {
+    let active_derive = matches!(case, SerdeCoreCase::ActiveDerive);
     const GENERATED_SHA256: &str =
         "27ad1b5fb4eebeb1da6419cbfad3ac1922ed1d817fcbab0a1dae1bdfd38d8307";
     const PRODUCER_SHA256: &str =
@@ -6943,6 +6956,63 @@ fn exercise_packaged_serde_core(active_derive: bool) {
         fixture_sha(&fs::read(&generated).unwrap()),
         GENERATED_SHA256
     );
+    if matches!(case, SerdeCoreCase::UndeclaredConsumer) {
+        use cargo_hive_core::{fingerprint, unit_path};
+
+        let cargo_profile = checkout.join("target/debug");
+        let current = fingerprint::read_profile(&cargo_profile).graph.unwrap();
+        let unit = current
+            .units
+            .iter()
+            .find(|unit| unit.loc.package() == "independent" && unit.stem == "lib-independent")
+            .unwrap();
+        let output = unit_path::outputs(&cargo_profile, &unit.loc);
+        let dep_info: Vec<_> = [
+            output.join(format!("independent-{}.d", unit.loc.hex())),
+            output.join("independent.d"),
+        ]
+        .into_iter()
+        .filter(|path| path.is_file())
+        .collect();
+        let [dep_info] = dep_info.as_slice() else {
+            panic!("expected one native independent dep-info: {dep_info:?}");
+        };
+        let bytes = fs::read_to_string(dep_info).unwrap();
+        let mut with_extra_input = String::new();
+        for line in bytes.lines() {
+            if !line.starts_with('#') && line.contains(": ") {
+                with_extra_input.push_str(&format!("{line} {}\n", generated.display()));
+            } else {
+                with_extra_input.push_str(line);
+                with_extra_input.push('\n');
+            }
+        }
+        with_extra_input.push_str(&format!("\n{}:\n", generated.display()));
+        assert_ne!(bytes, with_extra_input);
+        fs::write(dep_info, with_extra_input).unwrap();
+        let before = fs::read(fixture.file()).unwrap();
+        let out = produce("1", &"9".repeat(32));
+        assert_no_credential(&out, &credential);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "an undeclared reader must block the next producer: {out:?}"
+        );
+        let held: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(
+            held["detail"]
+                .as_str()
+                .unwrap()
+                .contains("generated Rust input"),
+            "{held}"
+        );
+        assert!(
+            fs::read(fixture.file()).unwrap() == before,
+            "the unsupported checkout must never pass the start fence"
+        );
+        return;
+    }
+
     let identity = fs::metadata(&generated).unwrap().ino();
     let unrelated_stamp = workspace_unit_stamp_path(&checkout, "independent");
     fs::File::open(&unrelated_stamp)

@@ -1076,7 +1076,10 @@ impl NativeBuild {
                     || !project.fixed_in(&profile.graph_inputs)
             })
             || seal.generated_inputs.len() > 1
-            || (!seal.generated_inputs.is_empty() && seal.recipe != Recipe::NativeBuild)
+            || (!seal.generated_inputs.is_empty()
+                && (seal.recipe != Recipe::NativeBuild
+                    || invocation.target_root.as_os_str() != "target"
+                    || invocation.build_root.as_os_str() != "target"))
             || seal.native_archive.as_ref().is_some_and(|archive| {
                 seal.recipe != Recipe::NativeBuild || !seal.generated_inputs.is_empty()
                     || !seal.materialized.as_ref().is_some_and(|graph| {

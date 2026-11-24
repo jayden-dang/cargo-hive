@@ -2,7 +2,7 @@
 
 use super::{GeneratedRust, unproved, verify};
 use crate::slot::{
-    Refusal,
+    Refusal, check_cancelled,
     profile::{digest, read_input_bounded},
 };
 use cargo_hive_core::{
@@ -16,7 +16,18 @@ use cargo_hive_platform::{
 use cargo_hive_state::slots::{
     CargoLayout, EligibleProducer, FileIdentity, GeneratedInputWitness, VerifiedRoot,
 };
-use std::path::{Component, Path, PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::ErrorKind,
+    os::unix::fs::MetadataExt as _,
+    path::{Component, Path, PathBuf},
+};
+
+const MAX_COMPILER_UNITS: usize = 512;
+const MAX_COMPILER_ENTRIES: usize = 65_536;
+const MAX_DEP_INFO_FILE: usize = 1024 * 1024;
+const MAX_DEP_INFO_BYTES: usize = 16 * MAX_DEP_INFO_FILE;
 
 pub(in crate::slot) struct GeneratedRustPlan {
     declaration: GeneratedRust,
@@ -82,8 +93,9 @@ impl GeneratedRustPlan {
                 if !is_locked(&profile) {
                     return Err(unproved());
                 }
-                verify(&roots.build, &saved.generated_inputs[0])?;
-                if !is_locked(&profile) {
+                if self.observe(&roots.build, None)? != saved.generated_inputs[0]
+                    || !is_locked(&profile)
+                {
                     return Err(unproved());
                 }
                 Ok(())
@@ -97,9 +109,25 @@ impl GeneratedRustPlan {
         root: &VerifiedRoot,
         layout: CargoLayout,
     ) -> Result<GeneratedInputWitness, Refusal> {
+        let layout = match layout {
+            CargoLayout::Flat => UnitLayout::Flat,
+            CargoLayout::UnitDir => UnitLayout::UnitDir,
+        };
+        self.observe(root, Some(layout))
+    }
+
+    fn observe(
+        &self,
+        root: &VerifiedRoot,
+        expected_layout: Option<UnitLayout>,
+    ) -> Result<GeneratedInputWitness, Refusal> {
+        if root.path.file_name().is_none_or(|name| name != "target") {
+            return Err(unproved());
+        }
         let profile = Self::profile_directory(root);
-        let fs = cargo_hive_platform::host_fs();
-        let report = StrictProfileReader::new(fs.as_ref(), &cancelled).read_profile(&profile);
+        let platform_fs = cargo_hive_platform::host_fs();
+        let report =
+            StrictProfileReader::new(platform_fs.as_ref(), &cancelled).read_profile(&profile);
         if report.format != Format::Supported
             || report.partial_unit_dirs != 0
             || report.not_current != 0
@@ -107,10 +135,14 @@ impl GeneratedRustPlan {
             return Err(unproved());
         }
         let graph = report.graph.ok_or_else(unproved)?;
-        let layout = match layout {
-            CargoLayout::Flat => UnitLayout::Flat,
-            CargoLayout::UnitDir => UnitLayout::UnitDir,
-        };
+        let mut layouts = report.layouts.into_iter();
+        let layout = layouts.next().ok_or_else(unproved)?;
+        if layouts.next().is_some()
+            || expected_layout.is_some_and(|expected| expected != layout)
+            || !(1..=MAX_COMPILER_UNITS).contains(&graph.units.len())
+        {
+            return Err(unproved());
+        }
         let producer = &self.declaration.producer;
         let [consumer] = self.declaration.consumers.as_slice() else {
             return Err(unproved());
@@ -194,20 +226,56 @@ impl GeneratedRustPlan {
             return Err(unproved());
         }
         let input = out.join(&self.declaration.leaf);
-        let library_dep_info = unit_path::outputs(&profile, &library.loc)
-            .join(format!("serde_core-{}.d", library.loc.hex()));
+        let library_dep_info = unit_dep_info(library, &profile)?;
+        let mut remaining = MAX_DEP_INFO_BYTES;
         require_dep_info(
             &compiled_dep_info,
             &self.package_root,
             &self.package_root.join(&producer.source),
             None,
+            &mut remaining,
         )?;
         require_dep_info(
             &library_dep_info,
             &self.package_root,
             &self.package_root.join(&consumer.source),
             Some(&input),
+            &mut remaining,
         )?;
+        let build_source = root.path.parent().ok_or_else(unproved)?;
+        let protected = fs::symlink_metadata(&input).map_err(|_| unproved())?;
+        let protected = FileIdentity::of(&protected);
+        let mut inventory = BTreeMap::<PathBuf, BTreeSet<PathBuf>>::new();
+        for unit in &graph.units {
+            check_cancelled()?;
+            if unit == run {
+                if layout == UnitLayout::UnitDir {
+                    inventory.entry(out.clone()).or_default();
+                }
+                continue;
+            }
+            let path = if unit == compiled {
+                compiled_dep_info.clone()
+            } else if unit == library {
+                library_dep_info.clone()
+            } else {
+                let path = unit_dep_info(unit, &profile)?;
+                let mut inputs = Vec::new();
+                read_dep_info(&path, &mut remaining, &mut inputs)?;
+                if !inputs
+                    .iter()
+                    .all(|path| workspace_source(path, build_source, &root.path, protected))
+                {
+                    return Err(unproved());
+                }
+                path
+            };
+            let directory = path.parent().ok_or_else(unproved)?.to_path_buf();
+            if !inventory.entry(directory).or_default().insert(path) {
+                return Err(unproved());
+            }
+        }
+        verify_dep_info_inventory(platform_fs.as_ref(), inventory)?;
         capture_witness(
             root,
             &input,
@@ -265,52 +333,160 @@ pub(super) fn artifact_bytes(path: &Path, cap: usize) -> Result<Vec<u8>, Refusal
     read_input_bounded(path, cap)?.ok_or_else(unproved)
 }
 
+fn exact_dep_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.bytes().any(|byte| {
+            byte.is_ascii_control() || byte.is_ascii_whitespace() || b":#\\$".contains(&byte)
+        })
+        && path
+            .strip_prefix('/')
+            .unwrap_or(path)
+            .split('/')
+            .all(|part| !matches!(part, "" | "." | ".."))
+}
+
+fn regular(path: &Path) -> Result<bool, Refusal> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        _ => Err(unproved()),
+    }
+}
+
+fn unit_dep_info(unit: &Unit, profile: &Path) -> Result<PathBuf, Refusal> {
+    let kind = match unit.kind {
+        UnitKind::Lib => "lib-",
+        UnitKind::Bin => "bin-",
+        _ => return Err(unproved()),
+    };
+    let target = unit.stem.strip_prefix(kind).ok_or_else(unproved)?;
+    if target.is_empty()
+        || !target
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+    {
+        return Err(unproved());
+    }
+    let output = unit_path::outputs(profile, &unit.loc);
+    let hashed = output.join(format!("{target}-{}.d", unit.loc.hex()));
+    if unit.loc.layout == UnitLayout::Flat {
+        return Ok(hashed);
+    }
+    let plain = output.join(format!("{target}.d"));
+    match (regular(&hashed)?, regular(&plain)?) {
+        (true, false) => Ok(hashed),
+        (false, true) => Ok(plain),
+        _ => Err(unproved()),
+    }
+}
+
+fn verify_dep_info_inventory(
+    fs: &dyn cargo_hive_platform::Fs,
+    inventory: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
+) -> Result<(), Refusal> {
+    let mut remaining = MAX_COMPILER_ENTRIES;
+    for (directory, expected) in inventory {
+        check_cancelled()?;
+        let entries = fs
+            .read_dir_bounded(&directory, remaining)
+            .map_err(|_| unproved())?;
+        remaining = remaining.checked_sub(entries.len()).ok_or_else(unproved)?;
+        let mut observed = BTreeSet::new();
+        for (name, kind) in entries {
+            if name.ends_with(".d")
+                && (kind != cargo_hive_platform::EntryKind::File
+                    || !observed.insert(directory.join(name)))
+            {
+                return Err(unproved());
+            }
+        }
+        if observed != expected {
+            return Err(unproved());
+        }
+    }
+    Ok(())
+}
+
+fn read_dep_info(
+    path: &Path,
+    remaining: &mut usize,
+    inputs: &mut Vec<PathBuf>,
+) -> Result<(), Refusal> {
+    let bytes = artifact_bytes(path, MAX_DEP_INFO_FILE.min(*remaining))?;
+    *remaining -= bytes.len();
+    let text = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(|text| text.strip_suffix('\n'))
+        .ok_or_else(unproved)?;
+    let mut lines = text.lines();
+    let (target, prerequisites) = lines
+        .next()
+        .and_then(|line| line.split_once(": "))
+        .ok_or_else(unproved)?;
+    if !exact_dep_path(target) || path.as_os_str() != target {
+        return Err(unproved());
+    }
+    let dependencies: Vec<_> = prerequisites.split(' ').collect();
+    if !dependencies.iter().all(|entry| exact_dep_path(entry)) {
+        return Err(unproved());
+    }
+    let names: BTreeSet<_> = dependencies.iter().copied().collect();
+    let mut rules = BTreeSet::from([target]);
+    let mut phony = BTreeSet::new();
+    for line in lines.filter(|line| !line.is_empty()) {
+        if let Some(env) = line.strip_prefix("# env-dep:") {
+            if env.is_empty() || env.bytes().any(|byte| byte.is_ascii_control()) {
+                return Err(unproved());
+            }
+        } else if let Some((target, repeated)) = line.split_once(": ") {
+            if !exact_dep_path(target) || repeated != prerequisites || !rules.insert(target) {
+                return Err(unproved());
+            }
+        } else if let Some(name) = line.strip_suffix(':') {
+            if !names.contains(name) || !phony.insert(name) {
+                return Err(unproved());
+            }
+        } else {
+            return Err(unproved());
+        }
+    }
+    if phony != names {
+        return Err(unproved());
+    }
+    inputs.extend(dependencies.into_iter().map(PathBuf::from));
+    Ok(())
+}
+
+fn workspace_source(path: &Path, checkout: &Path, output: &Path, protected: FileIdentity) -> bool {
+    let path = checkout.join(path);
+    path.starts_with(checkout)
+        && !path.starts_with(output)
+        && path
+            .canonicalize()
+            .is_ok_and(|resolved| resolved.as_os_str() == path.as_os_str())
+        && fs::symlink_metadata(&path).is_ok_and(|metadata| {
+            metadata.is_file() && metadata.nlink() == 1 && FileIdentity::of(&metadata) != protected
+        })
+}
+
 fn require_dep_info(
     dep_info: &Path,
     package_root: &Path,
     source: &Path,
     generated: Option<&Path>,
+    remaining: &mut usize,
 ) -> Result<(), Refusal> {
-    let exact = |path: &Path| {
-        path.to_str()
-            .filter(|path| {
-                !path
-                    .bytes()
-                    .any(|byte| byte.is_ascii_whitespace() || b":#\\".contains(&byte))
-            })
-            .ok_or_else(unproved)
-            .map(str::to_owned)
-    };
-    let dep_info_path = exact(dep_info)?;
-    let package_root = exact(package_root)?;
-    let source = exact(source)?;
-    let generated = generated.map(exact).transpose()?;
-    let bytes = artifact_bytes(dep_info, 1024 * 1024)?;
-    let data = std::str::from_utf8(&bytes).map_err(|_| unproved())?;
-    let (target, dependencies) = data
-        .lines()
-        .next()
-        .and_then(|line| line.split_once(": "))
-        .ok_or_else(unproved)?;
-    let mut paths = dependencies.split(' ');
-    if target != dep_info_path || paths.next() != Some(source.as_str()) {
+    let mut inputs = Vec::new();
+    read_dep_info(dep_info, remaining, &mut inputs)?;
+    let mut inputs = inputs.iter().map(PathBuf::as_path);
+    if inputs.next() != Some(source) {
         return Err(unproved());
     }
     let mut observed_generated = 0;
-    for path in paths {
-        if Some(path) == generated.as_deref() {
+    for path in inputs {
+        if Some(path) == generated {
             observed_generated += 1;
-        } else if generated.is_none()
-            || !path
-                .strip_prefix(&package_root)
-                .and_then(|path| path.strip_prefix('/'))
-                .is_some_and(|relative| {
-                    relative
-                        .split('/')
-                        .all(|part| !matches!(part, "" | "." | ".."))
-                        && exact(Path::new(path)).is_ok()
-                })
-        {
+        } else if generated.is_none() || !path.starts_with(package_root) {
             return Err(unproved());
         }
     }
