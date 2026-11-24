@@ -10,7 +10,9 @@ use super::{
     slot_identity_present, slot_producer_is_eligible, slots, try_exclusive,
     verify_no_checkout_ancestor, verify_operation_repo, with_slot_state,
 };
-use cargo_hive_state::slots::{RecoveryQuiescence, RecoveryRequest};
+use cargo_hive_state::slots::{
+    PriorPhase, RecoveryAuthorization, RecoveryQuiescence, RecoveryRequest,
+};
 use serde::Deserialize;
 use std::io;
 
@@ -20,8 +22,8 @@ const COMMAND: &str = "slot recover";
 #[serde(deny_unknown_fields)]
 struct RecoveryInput {
     observed_revision: u64,
-    attempt_id: u64,
-    begin_op: String,
+    attempt_id: Option<u64>,
+    begin_op: Option<String>,
     authority: RecoveryAuthority,
     quiescence: RecoveryQuiescence,
 }
@@ -29,7 +31,20 @@ struct RecoveryInput {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum RecoveryAuthority {
-    Holder { credential: String, nonce: String },
+    Holder {
+        credential: String,
+        nonce: Option<String>,
+    },
+    Operator {
+        confirmation: OperatorConfirmation,
+        result_credential: String,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OperatorConfirmation {
+    AbandonResolvedWork,
 }
 
 impl RecoveryInput {
@@ -47,12 +62,31 @@ impl RecoveryInput {
 
 pub(super) fn run(state: &State, operation: &SlotOperation) -> Result<SlotResult, Refusal> {
     let input = RecoveryInput::read()?;
-    let RecoveryAuthority::Holder { credential, nonce } = input.authority;
+    let (credential, authority) = match input.authority {
+        RecoveryAuthority::Holder { credential, nonce } => {
+            if nonce.is_some() != input.attempt_id.is_some()
+                || !nonce
+                    .as_ref()
+                    .is_none_or(|value| slots::hex(value, KEY_HEX_LEN))
+            {
+                return Err(credential_refusal());
+            }
+            (credential, RecoveryAuthorization::Holder { nonce })
+        }
+        RecoveryAuthority::Operator {
+            confirmation: OperatorConfirmation::AbandonResolvedWork,
+            result_credential,
+        } => (result_credential, RecoveryAuthorization::Operator),
+    };
     if input.observed_revision == 0
-        || input.attempt_id == 0
-        || !slots::hex(&input.begin_op, 32)
+        || input.attempt_id == Some(0)
+        || input.attempt_id.is_some() != input.begin_op.is_some()
+        || !input
+            .begin_op
+            .as_ref()
+            .is_none_or(|operation| slots::hex(operation, 32))
+        || input.attempt_id.is_some() != (input.quiescence != RecoveryQuiescence::NoPermitIssued)
         || !slots::hex(&credential, KEY_HEX_LEN)
-        || !slots::hex(&nonce, KEY_HEX_LEN)
     {
         return Err(credential_refusal());
     }
@@ -62,12 +96,12 @@ pub(super) fn run(state: &State, operation: &SlotOperation) -> Result<SlotResult
         operation.generation,
         OperationKind::Recover,
         &operation.op,
-        Some(input.attempt_id),
+        input.attempt_id,
     )?;
     let original = RecoveryRequest {
         observed_revision: input.observed_revision,
         begin_op: input.begin_op,
-        nonce,
+        authority,
         quiescence: input.quiescence,
     };
     let request = OutcomeRequest::Recover {
@@ -137,23 +171,50 @@ pub(super) fn run(state: &State, operation: &SlotOperation) -> Result<SlotResult
         {
             return Err(stale());
         }
-        let Phase::Preparing { attempt, lease } = &slot.phase else {
-            return Err(stale());
+        let (lease, attempt) = match &slot.phase {
+            Phase::Reserved { lease }
+            | Phase::Held {
+                prior: PriorPhase::Reserved { lease },
+                ..
+            } => (lease, None),
+            Phase::Preparing { attempt, lease }
+            | Phase::Held {
+                prior: PriorPhase::Preparing { attempt, lease },
+                ..
+            } => (lease, Some(attempt)),
+            _ => return Err(stale()),
         };
-        if Some(attempt.attempt_id) != key.attempt_id
-            || attempt.begin_op != original.begin_op
-            || attempt.runner.nonce != original.nonce
-            || lease.credential != outcome.credential
+        let authority_matches = match &original.authority {
+            RecoveryAuthorization::Holder { nonce } => {
+                lease.credential == outcome.credential
+                    && attempt.map(|attempt| &attempt.runner.nonce) == nonce.as_ref()
+            }
+            RecoveryAuthorization::Operator => {
+                lease.credential != outcome.credential
+                    && !slot
+                        .outcomes
+                        .iter()
+                        .any(|entry| entry.credential == outcome.credential)
+            }
+        };
+        if !authority_matches
+            || attempt.map(|attempt| attempt.attempt_id) != key.attempt_id
+            || attempt.map(|attempt| &attempt.begin_op) != original.begin_op.as_ref()
         {
             return Err(stale());
         }
-        if original.quiescence != RecoveryQuiescence::BeforeFirstEffect
-            || attempt.stage != AttemptStage::PermitIssued
-            || attempt.prior_head != slot.last_head
-            || attempt.lock_offset.is_none()
-            || !attempt.anchors.is_empty()
-            || attempt.anchor_cursor != 0
-        {
+        let no_writer = match (original.quiescence, attempt) {
+            (RecoveryQuiescence::NoPermitIssued, None) => true,
+            (RecoveryQuiescence::BeforeFirstEffect, Some(attempt)) => {
+                attempt.stage == AttemptStage::PermitIssued
+                    && attempt.prior_head == slot.last_head
+                    && attempt.lock_offset.is_some()
+                    && attempt.anchors.is_empty()
+                    && attempt.anchor_cursor == 0
+            }
+            _ => false,
+        };
+        if !no_writer {
             return Err(Refusal::ReturnUncertain(
                 "Recovery could not establish that the prior preparation authorized no writer.",
             ));

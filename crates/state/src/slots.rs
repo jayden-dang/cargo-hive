@@ -1331,14 +1331,26 @@ pub enum OutcomeRequest {
 #[serde(deny_unknown_fields)]
 pub struct RecoveryRequest {
     pub observed_revision: u64,
-    pub begin_op: String,
-    pub nonce: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub begin_op: Option<String>,
+    pub authority: RecoveryAuthorization,
     pub quiescence: RecoveryQuiescence,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RecoveryAuthorization {
+    Holder {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce: Option<String>,
+    },
+    Operator,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RecoveryQuiescence {
+    NoPermitIssued,
     BeforeFirstEffect,
     VerifiedLaterBoot,
 }
@@ -1433,11 +1445,20 @@ impl Outcome {
                 TransitionResult::Recovered,
             ) => match recovery {
                 Some(recovery) => require(
-                    preparing
+                    self.attempt_id.is_none_or(|attempt| attempt > 0)
                         && recovery.observed_revision > 0
-                        && hex(&recovery.begin_op, 32)
-                        && hex(&recovery.nonce, 64)
-                        && recovery.begin_op != self.operation,
+                        && preparing == recovery.begin_op.is_some()
+                        && preparing == (recovery.quiescence != RecoveryQuiescence::NoPermitIssued)
+                        && recovery.begin_op.as_ref().is_none_or(|begin_op| {
+                            hex(begin_op, 32) && begin_op != &self.operation
+                        })
+                        && match &recovery.authority {
+                            RecoveryAuthorization::Operator => true,
+                            RecoveryAuthorization::Holder { nonce } => {
+                                preparing == nonce.is_some()
+                                    && nonce.as_ref().is_none_or(|nonce| hex(nonce, 64))
+                            }
+                        },
                     "invalid recovery attempt binding",
                 ),
                 None => require(self.attempt_id.is_none(), "unexpected attempt on outcome"),

@@ -4192,6 +4192,89 @@ fn recovery_retires_a_preparation_before_checkout_without_granting_access() {
 }
 
 #[test]
+fn recovery_accepts_exact_operator_confirmation_without_the_lost_reservation_key() {
+    let fixture = PoolFixture::new();
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = Path::new(initialized["slots"][0]["path"].as_str().unwrap());
+    let commit = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let old_key = "a".repeat(64);
+    let result_key = "b".repeat(64);
+    let reservation_op = "1".repeat(32);
+    let recovery_op = "2".repeat(32);
+    let args = fixture.reservation(pool, 1, 0, &commit, &reservation_op);
+    let (out, reserved) = finish_private(start_private(&fixture.hive, args, &old_key));
+    assert!(out.status.success(), "{reserved}");
+    let revision = fixture.record()["revision"].as_u64().unwrap();
+    let before = fs::read(fixture.file()).unwrap();
+    let request = json!({
+        "observed_revision": revision,
+        "authority": {
+            "kind": "operator",
+            "confirmation": "abandon_resolved_work",
+            "result_credential": result_key
+        },
+        "quiescence": { "kind": "no_permit_issued" }
+    });
+    let recover = |input: &Value| {
+        let args = fixture.replay("recover", pool, 1, 1, &recovery_op);
+        let (out, result) = finish_private(start_private(&fixture.hive, args, &input.to_string()));
+        assert_no_credential(&out, &old_key);
+        assert_no_credential(&out, &result_key);
+        assert!(result.get("path").is_none());
+        (out, result)
+    };
+    for (field, wrong) in [
+        ("confirmation", json!("force")),
+        ("result_credential", json!(old_key)),
+    ] {
+        let mut bad = request.clone();
+        bad["authority"][field] = wrong;
+        assert_eq!(recover(&bad).0.status.code(), Some(1));
+        assert!(fs::read(fixture.file()).unwrap() == before);
+    }
+    let mut stale = request.clone();
+    stale["observed_revision"] = json!(revision - 1);
+    assert_eq!(recover(&stale).0.status.code(), Some(1));
+    assert!(fs::read(fixture.file()).unwrap() == before);
+
+    let (out, recovered) = recover(&request);
+    assert!(
+        out.status.success(),
+        "the exact operator confirmation should recover: {recovered}"
+    );
+    assert_eq!(recovered["kind"], "recovered");
+    let saved = fixture.record();
+    assert_eq!(saved["revision"], revision + 1);
+    assert_eq!(saved["pools"][0]["slots"][0]["phase"]["kind"], "vacant");
+    assert_eq!(saved["pools"][0]["slots"][0]["generation"], 1);
+    assert!(!checkout.exists());
+
+    let lookup = |op, credential: &str| {
+        let args = fixture.replay("outcome", pool, 1, 1, op);
+        finish_private(start_private(&fixture.hive, args, credential))
+    };
+    assert_eq!(lookup(&recovery_op, &old_key).0.status.code(), Some(1));
+    let (out, replay) = lookup(&recovery_op, &result_key);
+    assert!(out.status.success(), "{replay}");
+    assert_eq!(replay, recovered);
+    let (out, previous_reserve) = lookup(&reservation_op, &old_key);
+    assert!(out.status.success(), "{previous_reserve}");
+    assert_eq!(previous_reserve["current"], false);
+    assert!(previous_reserve.get("path").is_none());
+    assert!(fixture.record() == saved);
+    for receipt in fs::read_dir(fixture.hive.home.path.join("receipts")).unwrap() {
+        let bytes = fs::read_to_string(receipt.unwrap().path()).unwrap();
+        assert!(!bytes.contains(&old_key) && !bytes.contains(&result_key));
+        for line in bytes.lines() {
+            let receipt: cargo_hive_core::receipt::Receipt = serde_json::from_str(line).unwrap();
+            assert_eq!(receipt.schema, cargo_hive_core::receipt::SCHEMA);
+        }
+    }
+}
+
+#[test]
 fn the_packaged_guide_returns_a_first_ready_slot_with_absent_roots() {
     let fixture = reviewed_pool_fixture(None);
     fixture.hive.write_ready_capabilities();
