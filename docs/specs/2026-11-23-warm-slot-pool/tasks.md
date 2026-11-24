@@ -408,6 +408,7 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 - Modify: `crates/cargo-hive/src/slot/admission.rs`
 - Modify: `crates/cargo-hive/src/slot/profile.rs`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
+- Modify: `crates/cargo-hive/src/slot/inspect.rs`
 - Modify: `crates/cargo-hive/src/slot/prepare.rs`
 - Modify: `crates/state/src/slots.rs`
 - Modify: `crates/core/src/unit_path.rs`
