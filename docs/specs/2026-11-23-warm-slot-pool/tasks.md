@@ -53,6 +53,7 @@ Design: ./design.md
 | `crates/cargo-hive/tests/fixtures/current/cli-tree.txt` | Update only the current command tree golden for the new slot branch. |
 | `crates/cargo-hive/src/slot/mod.rs` | New slot dispatch, identity-scoped transition/replay and operator recovery. |
 | `crates/cargo-hive/src/slot/inspect.rs` | New positive slot identity, dirty-return, and candidate root checks. |
+| `crates/cargo-hive/src/slot/fallback.rs` | Verify a separate fresh checkout and both output roles before guarded registry-only seed placement. |
 | `crates/cargo-hive/src/slot/profile.rs` | New effective producer, certified graph/consumer and mtime evidence checks. |
 | `crates/cargo-hive/src/slot/admission.rs` | Validate bounded sealed profile closure evidence and approved data variants. |
 | `crates/cargo-hive/src/slot/result.rs` | New sanitized JSON projection and existing Receipt audit projection. |
@@ -363,6 +364,14 @@ _Requirements: SLOTS-4.1, SLOTS-4.2, SLOTS-4.3, SLOTS-4.4, SLOTS-4.5, SLOTS-4.6,
 ### Task 9: Guide take, refused return and a distinct seeded fallback
 
 **Files:**
+- Create: `crates/cargo-hive/src/slot/fallback.rs`
+- Modify: `crates/cargo-hive/src/cli.rs`
+- Modify: `crates/cargo-hive/src/slot/mod.rs`
+- Modify: `crates/cargo-hive/src/slot/inspect.rs`
+- Modify: `crates/cargo-hive/src/slot/result.rs`
+- Modify: `crates/cargo/src/discover.rs`
+- Modify: `crates/cargo-hive/tests/cli_tree.rs`
+- Modify: `crates/cargo-hive/tests/fixtures/current/cli-tree.txt`
 - Modify: `plugin/skills/hive/SKILL.md`
 - Modify: `plugin/skills/hive/scripts/slot-handoff.sh`
 - Modify: `README.md`
@@ -374,7 +383,7 @@ _Requirements: SLOTS-4.1, SLOTS-4.2, SLOTS-4.3, SLOTS-4.4, SLOTS-4.5, SLOTS-4.6,
 
 **Interfaces:**
 - Consumes: Task 7 guide and slot results and Task 8 retry/recovery actions, plus the existing `seed` command.
-- Produces: installed take/use/return guidance, before-use guarded Cargo notice, exact private-helper version gate, separate seeded fallback and guard tests for old and new examples.
+- Produces: installed take/use/return guidance, before-use guarded Cargo notice, exact private-helper version gate, separate seeded fallback and guard tests for old and new examples. The installed helper uses a hidden fallback operation that binds registry-only placement to the verified fresh secondary and its own output scope. It reuses existing scoped seed and the physical output overlap comparison.
 
 **Depends-on:** Task 8.
 
