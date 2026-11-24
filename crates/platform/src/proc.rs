@@ -251,7 +251,7 @@ pub fn run_bounded(
     capture: Capture,
     cancel: impl FnMut() -> bool,
 ) -> Result<Ran, ChildOutputError> {
-    run_bounded_with(spec, deadline, capture, cancel, false, Stdio::null())
+    run_bounded_with(spec, deadline, capture, cancel, false, Stdio::null(), true)
 }
 
 /// Runs with the same capped capture as `run_bounded`, requiring EOF on every
@@ -262,7 +262,18 @@ pub fn run_bounded_complete(
     capture: Capture,
     cancel: impl FnMut() -> bool,
 ) -> Result<Ran, ChildOutputError> {
-    run_bounded_with(spec, deadline, capture, cancel, true, Stdio::null())
+    run_bounded_with(spec, deadline, capture, cancel, true, Stdio::null(), true)
+}
+
+/// Captures a child inside the existing guarded writer group. On timeout it
+/// kills only the direct child. The caller's watcher owns group cleanup.
+pub fn run_bounded_complete_in_writer_group(
+    spec: &Spec,
+    deadline: Duration,
+    capture: Capture,
+    cancel: impl FnMut() -> bool,
+) -> Result<Ran, ChildOutputError> {
+    run_bounded_with(spec, deadline, capture, cancel, true, Stdio::null(), false)
 }
 
 /// Runs with capped, complete capture and an open file as the child's stdin.
@@ -273,7 +284,15 @@ pub fn run_bounded_complete_with_file_stdin(
     capture: Capture,
     cancel: impl FnMut() -> bool,
 ) -> Result<Ran, ChildOutputError> {
-    run_bounded_with(spec, deadline, capture, cancel, true, Stdio::from(stdin))
+    run_bounded_with(
+        spec,
+        deadline,
+        capture,
+        cancel,
+        true,
+        Stdio::from(stdin),
+        true,
+    )
 }
 
 fn run_bounded_with(
@@ -283,6 +302,7 @@ fn run_bounded_with(
     mut cancel: impl FnMut() -> bool,
     require_eof: bool,
     stdin: Stdio,
+    own_group: bool,
 ) -> Result<Ran, ChildOutputError> {
     let stdout_stdio = if capture.stdout_cap == 0 {
         Stdio::null()
@@ -295,14 +315,17 @@ fn run_bounded_with(
         Stdio::piped()
     };
     let start = Instant::now();
-    let mut child = command(spec)
+    let mut command = command(spec);
+    command
         .stdin(stdin)
         .stdout(stdout_stdio)
-        .stderr(stderr_stdio)
-        .process_group(0)
+        .stderr(stderr_stdio);
+    if own_group {
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| ChildOutputError::Failed(format!("could not spawn: {e}")))?;
-    let pid = child.id();
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
@@ -329,41 +352,16 @@ fn run_bounded_with(
         None => None,
     };
 
-    let (wait_tx, wait_rx) = mpsc::channel();
-    thread::spawn(move || {
-        let status = child.wait();
-        let exited_after = start.elapsed();
-        let _ = wait_tx.send((status, exited_after));
-    });
-
-    let slice = Duration::from_millis(20);
-    let (status, exited_after) = loop {
-        match wait_rx.recv_timeout(slice) {
-            Ok((Ok(status), exited_after)) => break (status, exited_after),
-            Ok((Err(e), _)) => {
-                finish_readers(stdout_rx, stderr_rx);
-                return Err(ChildOutputError::Failed(e.to_string()));
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if cancel() {
-                    kill_pgid(pid);
-                    let _ = wait_rx.recv();
-                    finish_readers(stdout_rx, stderr_rx);
-                    return Err(ChildOutputError::Cancelled);
-                }
-                if start.elapsed() >= deadline {
-                    kill_pgid(pid);
-                    let _ = wait_rx.recv();
-                    finish_readers(stdout_rx, stderr_rx);
-                    return Err(ChildOutputError::TimedOut);
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                finish_readers(stdout_rx, stderr_rx);
-                return Err(ChildOutputError::Failed(
-                    "waiter thread disconnected before exit".into(),
-                ));
-            }
+    let waited = if own_group {
+        wait_for_group(child, start, deadline, &mut cancel)
+    } else {
+        wait_in_writer_group(child, start, deadline, &mut cancel)
+    };
+    let (status, exited_after) = match waited {
+        Ok(result) => result,
+        Err(error) => {
+            finish_readers(stdout_rx, stderr_rx);
+            return Err(error);
         }
     };
 
@@ -382,6 +380,77 @@ fn run_bounded_with(
         stdout,
         stderr_tail,
     })
+}
+
+fn wait_for_group(
+    mut child: std::process::Child,
+    start: Instant,
+    deadline: Duration,
+    cancel: &mut impl FnMut() -> bool,
+) -> Result<(ExitStatus, Duration), ChildOutputError> {
+    let pid = child.id();
+    let (wait_tx, wait_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let status = child.wait();
+        let _ = wait_tx.send((status, start.elapsed()));
+    });
+    loop {
+        match wait_rx.recv_timeout(Duration::from_millis(20)) {
+            Ok((status, exited_after)) => {
+                return status
+                    .map(|status| (status, exited_after))
+                    .map_err(|e| ChildOutputError::Failed(e.to_string()));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(error) = wait_limit(start, deadline, cancel) {
+                    kill_pgid(pid);
+                    let _ = wait_rx.recv();
+                    return Err(error);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(ChildOutputError::Failed(
+                    "waiter thread disconnected before exit".into(),
+                ));
+            }
+        }
+    }
+}
+
+fn wait_in_writer_group(
+    mut child: std::process::Child,
+    start: Instant,
+    deadline: Duration,
+    cancel: &mut impl FnMut() -> bool,
+) -> Result<(ExitStatus, Duration), ChildOutputError> {
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| ChildOutputError::Failed(e.to_string()))?
+        {
+            return Ok((status, start.elapsed()));
+        }
+        if let Some(error) = wait_limit(start, deadline, cancel) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn wait_limit(
+    start: Instant,
+    deadline: Duration,
+    cancel: &mut impl FnMut() -> bool,
+) -> Option<ChildOutputError> {
+    if cancel() {
+        Some(ChildOutputError::Cancelled)
+    } else if start.elapsed() >= deadline {
+        Some(ChildOutputError::TimedOut)
+    } else {
+        None
+    }
 }
 
 /// Reads at most `max` stdin bytes and requires EOF within `deadline`.

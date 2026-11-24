@@ -1038,6 +1038,58 @@ pub struct CompletedInvocation {
     pub foreground: Option<ForegroundInstance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generated_inputs: Vec<GeneratedInputWitness>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listing_artifacts: Vec<ListingArtifact>,
+}
+
+pub const MAX_LISTING_ARTIFACTS: usize = 512;
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewedTestBinary {
+    pub package_id: String,
+    pub manifest_path: PathBuf,
+    pub source_path: PathBuf,
+    pub target_name: String,
+    pub target_kind: Vec<String>,
+    pub features: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListingArtifact {
+    pub target: ReviewedTestBinary,
+    pub executable: PathBuf,
+    pub sha256: String,
+    pub device: u64,
+    pub inode: u64,
+    pub bytes: u64,
+    pub mode: u32,
+}
+
+impl ListingArtifact {
+    fn valid_for(&self, checkout: &Path, root: &VerifiedRoot) -> bool {
+        absolute(&self.executable)
+            && self.executable.starts_with(&root.path)
+            && self.executable != root.path
+            && absolute(&self.target.manifest_path)
+            && self.target.manifest_path.starts_with(checkout)
+            && self.target.manifest_path.file_name() == Some("Cargo.toml".as_ref())
+            && absolute(&self.target.source_path)
+            && self.target.source_path.starts_with(checkout)
+            && !self.target.package_id.is_empty()
+            && self.target.package_id.len() <= 4096
+            && !self.target.target_name.is_empty()
+            && self.target.target_name.len() <= 256
+            && self.target.target_kind.len() == 1
+            && self.target.features.len() <= MAX_PROFILE_ENTRIES
+            && self.target.features.windows(2).all(|f| f[0] < f[1])
+            && hex(&self.sha256, 64)
+            && self.device == root.identity.dev
+            && self.inode != 0
+            && (1..=2 * 1024 * 1024 * 1024).contains(&self.bytes)
+            && self.mode & 0o111 != 0
+    }
 }
 
 /// A sealed generated Rust input beneath its observed Cargo build root.
@@ -1330,6 +1382,26 @@ impl Producer {
                     if let Some(foreground) = &item.foreground {
                         foreground.validate(&item.runner)?;
                     }
+                    require(
+                        item.listing_artifacts.len() <= MAX_LISTING_ARTIFACTS
+                            && (item.listing_artifacts.is_empty()
+                                || item.foreground.is_some()
+                                    && item.evidence.stable_digest.is_some()
+                                    && item.listing_artifacts.iter().all(|artifact| {
+                                        artifact.valid_for(&slot_path, &roots.target)
+                                    })
+                                    && unique(
+                                        item.listing_artifacts
+                                            .iter()
+                                            .map(|artifact| &artifact.target),
+                                    )
+                                    && unique(
+                                        item.listing_artifacts
+                                            .iter()
+                                            .map(|artifact| (artifact.device, artifact.inode)),
+                                    )),
+                        "invalid completed listing artifact evidence",
+                    )?;
                     require(
                         item.generated_inputs.len() <= MAX_GENERATED_INPUTS
                             && (item.generated_inputs.is_empty()

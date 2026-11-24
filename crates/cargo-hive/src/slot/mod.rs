@@ -2,6 +2,7 @@
 
 mod admission;
 mod fallback;
+pub(crate) mod gates;
 mod generated;
 mod inspect;
 mod prepare;
@@ -730,6 +731,54 @@ struct ProducerCommand<'a> {
 }
 
 impl ProducerCommand<'_> {
+    fn configure_recipe_gate(
+        &self,
+        checked: &mut profile::CheckedInvocation,
+        prior: &EligibleProducer,
+        offset: Option<i64>,
+        create: bool,
+    ) -> Result<Option<PathBuf>, Refusal> {
+        let Some(recipe) = &checked.recipe_gate else {
+            return Ok(None);
+        };
+        let unproved =
+            || Refusal::ReturnUncertain("Could not establish the private Nextest recipe gate.");
+        let offset = offset.ok_or_else(unproved)?;
+        let dir = self.state.root().join(format!(
+            "slot-recipe-{}-{}-{}-{}",
+            self.key.pool_id, self.key.slot, self.key.generation, self.key.operation
+        ));
+        let lock = gates::ActiveLock {
+            path: self
+                .state
+                .root()
+                .join(LOCK_NAMESPACE)
+                .join(self.key.pool_id)
+                .join(Slot::lock_name_for(self.key.slot)),
+            identity: LockFileIdentity {
+                dev: self.lock_id.dev,
+                ino: self.lock_id.ino,
+            },
+            offset,
+        };
+        let retained = match prior {
+            EligibleProducer::Complete { invocations, .. } => invocations
+                .iter()
+                .rev()
+                .find(|record| {
+                    record.evidence.invocation == checked.evidence.invocation
+                        && record.evidence.stable_digest == checked.evidence.stable_digest
+                })
+                .map(|record| record.listing_artifacts.as_slice())
+                .unwrap_or_default(),
+            _ => &[],
+        };
+        checked.cargo = recipe
+            .configure(&dir, lock, create, &mut checked.environment, retained)
+            .map_err(|_| unproved())?;
+        Ok(Some(dir))
+    }
+
     fn slot_index(&self) -> usize {
         usize::from(self.key.slot - 1)
     }
@@ -824,7 +873,7 @@ impl ProducerCommand<'_> {
         }
         let roots = prior.roots();
         let mut proof = self.inspect(snapshot, &input, &roots, empty_proof(&prior))?;
-        let checked = profile::check_invocation(&pool.profile, &input.shape, &proof, &roots)?;
+        let mut checked = profile::check_invocation(&pool.profile, &input.shape, &proof, &roots)?;
         if let Some(generated) = &checked.generated {
             generated.require_prior(&prior, &input.shape.invocation, |profile| {
                 proof.holds_output_profile(profile)
@@ -836,11 +885,12 @@ impl ProducerCommand<'_> {
             ));
         }
         self.prove_output_scope(snapshot, &proof.path, &roots, empty_proof(&prior))?;
+        let guide_guard_offset = control.as_ref().map(|(_, offset)| *offset);
+        self.configure_recipe_gate(&mut checked, &prior, guide_guard_offset, true)?;
         let permit = control
             .as_ref()
             .map(|_| launch_permit(&checked, &input.shape.argv))
             .transpose()?;
-        let guide_guard_offset = control.as_ref().map(|(_, offset)| *offset);
         let pending = PendingProducer {
             epoch: OutputEpoch {
                 pool_id: pool.pool_id.clone(),
@@ -1093,7 +1143,7 @@ impl ProducerCommand<'_> {
             &pending.roots,
             empty_proof(&pending.prior),
         )?;
-        let checked = profile::check_invocation(
+        let mut checked = profile::check_invocation(
             &snapshot.pool.profile,
             &input.shape,
             &proof,
@@ -1107,6 +1157,12 @@ impl ProducerCommand<'_> {
                 proof.holds_output_profile(profile)
             })?;
         }
+        let recipe_gate = self.configure_recipe_gate(
+            &mut checked,
+            &pending.prior,
+            pending.guide_guard_offset,
+            false,
+        )?;
         let parent = runner_instance(&self.runner);
         let lock = LockFileIdentity {
             dev: self.lock_id.dev,
@@ -1175,7 +1231,9 @@ impl ProducerCommand<'_> {
         let mut writer_images = vec![(checked.cargo.as_path(), checked.environment.len())];
         let terminal_environment = checked.terminal.as_ref().map(|terminal| {
             let mut expected = checked.environment.clone();
-            expected.insert("CARGO".into(), checked.cargo.as_os_str().to_owned());
+            expected
+                .entry("CARGO".into())
+                .or_insert_with(|| checked.cargo.as_os_str().to_owned());
             writer_images.push((terminal.as_path(), expected.len()));
             expected
         });
@@ -1237,7 +1295,19 @@ impl ProducerCommand<'_> {
         if finished.pool.slots[self.slot_index()] != snapshot.pool.slots[self.slot_index()] {
             return Err(watch_refusal());
         }
-        self.finish(&finished, &input, &pending, child)
+        let listing_artifacts = recipe_gate
+            .as_deref()
+            .map(gates::verify_completion)
+            .transpose()
+            .map_err(|_| {
+                Refusal::ReturnUncertain("The Nextest child gate evidence is incomplete.")
+            })?
+            .unwrap_or_default();
+        let result = self.finish(&finished, &input, &pending, child, listing_artifacts)?;
+        if let Some(dir) = recipe_gate {
+            drop(cargo_hive_platform::TempDir::adopt(dir));
+        }
+        Ok(result)
     }
 
     fn finish(
@@ -1246,6 +1316,7 @@ impl ProducerCommand<'_> {
         input: &ProducerInvocation,
         pending: &PendingProducer,
         child: ForegroundInstance,
+        listing_artifacts: Vec<slots::ListingArtifact>,
     ) -> Result<SlotResult, Refusal> {
         let roots = profile::completed_roots(&pending.roots)?;
         let roots_for_check = OutputRoots {
@@ -1291,6 +1362,7 @@ impl ProducerCommand<'_> {
             runner: pending.runner.clone(),
             foreground: Some(child),
             generated_inputs,
+            listing_artifacts,
         });
         self.publish(snapshot, |slot| {
             let outcome = slot

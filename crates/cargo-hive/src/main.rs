@@ -2,5 +2,8 @@
 #![forbid(unsafe_code, reason = "only the platform crate may touch the OS (ARCH-15)")]
 
 fn main() {
-    std::process::exit(cargo_hive::cli::main_with(std::env::args_os().collect()));
+    let args = std::env::args_os().collect::<Vec<_>>();
+    std::process::exit(
+        cargo_hive::recipe_child(&args).unwrap_or_else(|| cargo_hive::cli::main_with(args)),
+    );
 }

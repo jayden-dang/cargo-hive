@@ -138,22 +138,40 @@ removed an unrelated stale unit. These fixtures bind the actual compiler unit
 or linked executable and refuse an undeclared consumer or a substituted file.
 The real SQLite, Ring and AWS-LC producers still require their own proofs.
 
-In disposable controls on both pins, the two exact Nextest recipes listed
-their selected integration binaries in normal and ignored discovery modes.
-Across eight runs, the test bodies and custom benchmark stayed unexecuted.
-The controls recorded exact child facts from the instrumented fixture
-executables. The stock Nextest output supplies no complete descendant record.
-The stock SQLx compile-only controls exercised workspace cache selection,
-shadowing and override precedence. The nested Cargo process lacked direct
-custody evidence. These checks qualify data and fixture behavior. The real
-Klynt profile still requires the exact selected units, harness startup,
-producer behavior and child custody for each recipe.
+The approved child gates use a private, byte-identical copy of pinned Cargo
+with a distinct executable basename. This lets the two exact Nextest recipes
+forward the recipe-local Cargo gate. The target runner checks compiled artifact
+identity and both listing modes before starting an approved test executable.
+The Cargo gate checks the SQLx macro's offline metadata request and response.
+On both Rust pins, disposable runs exercised the workspace and gateways
+selectors. Each gateways run also exercised a real SQLx macro expansion and
+recorded both Nextest listing receipts and the nested Cargo receipt in the same
+operation. Use the same gate in both arms when the real profile qualifies.
+[ADR-0007](../../adr/0007-gate-reviewed-nextest-children.md).
 
-The current foreground watcher sees the top-level writer. The pinned tools
-supply no complete pre-execution record for the two real Nextest recipes.
-The macOS descendant execution authorization interface requires an entitlement
-and an ancestor supervisor. That crosses the current design boundary, so the
-real recipes remain held.
+The packaged guide returned and retook the same disposable workspace on
+both pins. Scoped GC preserved the unrelated test executable, its
+modification time and its listing receipt. The affected executable rebuilt.
+On Cargo 1.100, a successful test build left two unit directories with only
+an empty `out` directory and no fingerprint. The handoff recognizes that
+shape when the prior producer recorded verified listing receipts. Incomplete
+units with artifacts still block preparation.
+
+The SQLx child checks were exercised with a disposable private launch plan.
+For the pinned Klynt endpoints, the shared workspace cache contains 1,531
+verified files. A Rust token scan found 1,929 explicit SQLx query macro sites
+across seven packages and matched all of them to that cache. The edit did
+not change the scanned query tokens. On both pins, the exact SQLx metadata
+arguments returned the same 44 workspace members when run from each
+candidate package in a disposable copy. The real profile still needs a
+per-recipe binding to the selected compiler units and their nested requests.
+
+Read-only inspection of historical Klynt outputs found Mach-O initializer
+sections in 112 of 154 executable fingerprint matches. All 224 entries
+resolved to the same two symbols. Each of the 112 archived executables calls
+AWS-LC CPU capability initialization and registers two AWS-LC shutdown
+callbacks through `__cxa_atexit`. The real profile still needs startup and
+native producer review tied to the exact selected artifacts.
 
 The real qualification has no observed Hive admission receipt. The saved
 isolated 1.97.1 lint and compile-only runs used earlier flags and serve as

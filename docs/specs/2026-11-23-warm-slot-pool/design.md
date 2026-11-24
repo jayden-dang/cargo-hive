@@ -310,8 +310,10 @@ canonical path/object identities for both endpoints before effects, and again
 when validating the requested commit and producer. The existing
 `metadata::Resolved` covers paths only; it supplies no graph proof. An actual
 changeset outside the profile's bounded edit set or any unproved graph input
-refuses support. The guide supplies the actual fixed stock Cargo command and
-its nonsecret effective input environment. It refuses unreviewed CLI, env,
+refuses support. The guide supplies the fixed Cargo arguments and the
+approved nonsecret environment, including the
+[recipe-scoped Nextest gates](#recipe-scoped-nextest-child-proof).
+It refuses unreviewed CLI, env,
 configuration or wrapper overrides before launch; both interpreted roots
 must match independent, uncached discovery with the supported profile inputs.
 
@@ -552,6 +554,23 @@ by hand appear as integer milliseconds outside hive's receipt and name the
 machine/toolchain. These targets are Draft, separate from approved Scorecard
 targets. Compare against the real release-mode checkout GC implementation,
 never the historical emulation.
+
+### Recipe-scoped Nextest child proof
+
+The two reviewed Nextest recipes use the approved ARCH-1 exception in
+[ADR 0007](../../adr/0007-gate-reviewed-nextest-children.md). Keep the original
+argument vectors. The private launcher rechecks the pinned Cargo copy and
+uses its private basename as argv zero. The Cargo gate checks each admitted
+request before dispatch and binds the completion to its response. Supply
+both timing arms with the same gate policy and overhead.
+
+The Nextest build response must account for the exact reviewed listing units.
+The runner checks the observed binary identity and bytes, physical package
+directory, inherited guard and one of the two exact listing modes before
+dispatch. SQLx metadata checks cover the pinned program, physical consumer
+directory, offline input selection, approved workspace root and successful
+bounded response. Compiler and startup closure need independent review before
+real builds. A fixture-only proof does not grant warm readiness.
 
 ## Seams for testing
 

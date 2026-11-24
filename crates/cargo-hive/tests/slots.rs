@@ -5904,7 +5904,7 @@ fn external_fixture_seal(fixture: &PoolFixture, head: &str, recipe: &str, argv: 
         tools["cargo_nextest"] = material(&nextest);
     }
     let seal = fixture._repo_dir.path.join("external-recipe.json");
-    fs::write(&seal, serde_json::to_vec(&json!({
+    let mut seal_value = json!({
         "schema":1,"recipe":recipe,"profile":{"id":"fixture","revision":1},
         "proof":"check-proof","invocation":"check","layout":layout,"native_target":native,
         "endpoints":[{"commit":head,"tree":git(&fixture.repo,&["rev-parse","HEAD^{tree}"])}],
@@ -5912,7 +5912,19 @@ fn external_fixture_seal(fixture: &PoolFixture, head: &str, recipe: &str, argv: 
             {"name":root_package,"version":"0.1.0","manifest":"Cargo.toml","targets":[{"name":root_package,"kind":"lib","source":"src/lib.rs"}],"dependencies":[]},
             {"name":"independent","version":"0.1.0","manifest":"independent/Cargo.toml","targets":[{"name":"independent","kind":"lib","source":"independent/src/lib.rs"}],"dependencies":[]}
         ], "data":[{"id":"source","sha256":[effect(&fixture.repo.join("src/lib.rs"))],"absent":false}]
-    })).unwrap()).unwrap();
+    });
+    if recipe.starts_with("nextest_") {
+        let mut units = vec![json!({
+            "manifest":"Cargo.toml", "target_name":root_package, "features":[]
+        })];
+        if recipe == "nextest_workspace" {
+            units.push(json!({
+                "manifest":"independent/Cargo.toml", "target_name":"independent", "features":[]
+            }));
+        }
+        seal_value["recipe_gate"] = json!(units);
+    }
+    fs::write(&seal, serde_json::to_vec(&seal_value).unwrap()).unwrap();
     let graph = profile["graph_inputs"].as_array_mut().unwrap();
     graph.push(json!({"locator":{"kind":"checkout","path":"independent/src/lib.rs"},"expectation":{"kind":"present","identity":{"kind":"git_object","oid":git(&fixture.repo,&["rev-parse","HEAD:independent/src/lib.rs"])}}}));
     let hash = effect(&seal);
@@ -5954,37 +5966,32 @@ static INIT_WITNESS: extern "C" fn() = listing_witness;
 
 #[test]
 fn the_packaged_guide_attests_the_exact_native_external_producers() {
-    let recipes: [(&str, &[&str]); 2] = [
-        (
-            "clippy",
-            &[
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--all-features",
-                "--locked",
-                "--",
-                "-D",
-                "warnings",
-            ],
-        ),
-        (
-            "nextest_workspace",
-            &[
-                "nextest",
-                "run",
-                "--workspace",
-                "--all-features",
-                "--no-run",
-                "--locked",
-                "--user-config-file",
-                "none",
-            ],
-        ),
+    let args = [
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
     ];
-    for (recipe, args) in recipes {
-        exercise_external_recipe(recipe, args, false, None);
-    }
+    exercise_external_recipe("clippy", &args, false, None);
+}
+
+#[test]
+fn the_workspace_nextest_recipe_keeps_listing_custody_through_scoped_gc() {
+    let args = [
+        "nextest",
+        "run",
+        "--workspace",
+        "--all-features",
+        "--no-run",
+        "--locked",
+        "--user-config-file",
+        "none",
+    ];
+    exercise_external_recipe("nextest_workspace", &args, false, None);
 }
 
 fn exercise_external_recipe(
@@ -6062,22 +6069,27 @@ fn exercise_external_recipe(
     assert!(out.status.success(), "{recipe}: {out:?}");
     let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
-    let mut command = fixture
-        .hive
-        .command_with(Path::new("/bin/bash"), &["--noprofile", "--norc"]);
-    producer_environment(&mut command);
-    let child = command
-        .arg(helper)
-        .args(["produce", env!("CARGO_BIN_EXE_cargo-hive")])
-        .arg(&fixture.repo)
-        .args([pool, "1", "1", &"5".repeat(32), "check"])
-        .stdin(fs::File::open(&key).unwrap())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let out = common::wait_within(child, Duration::from_secs(45));
-    assert_no_credential(&out, &fs::read_to_string(&key).unwrap());
+    let credential = fs::read_to_string(&key).unwrap();
+    let produce = |generation, operation: &str| {
+        let mut command = fixture
+            .hive
+            .command_with(Path::new("/bin/bash"), &["--noprofile", "--norc"]);
+        producer_environment(&mut command);
+        let child = command
+            .arg(&helper)
+            .args(["produce", env!("CARGO_BIN_EXE_cargo-hive")])
+            .arg(&fixture.repo)
+            .args([pool, "1", generation, operation, "check"])
+            .stdin(fs::File::open(&key).unwrap())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = common::wait_within(child, Duration::from_secs(90));
+        assert_no_credential(&output, &credential);
+        output
+    };
+    let out = produce("1", &"5".repeat(32));
     assert!(out.status.success(), "{recipe}: {out:?}");
     let complete: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(complete["kind"], "producer_complete");
@@ -6121,6 +6133,81 @@ fn exercise_external_recipe(
             assert_eq!((facts[0], facts[1]), (guard.dev(), guard.ino()));
             assert!(facts[2] >= 1 << 32);
             assert_eq!(*offset.get_or_insert(facts[2]), facts[2]);
+        }
+        if gateways {
+            let first = fixture.record();
+            let first_artifacts =
+                &first["pools"][0]["slots"][0]["producer"]["invocations"][0]["listing_artifacts"];
+            let artifacts = first_artifacts.as_array().unwrap();
+            assert_eq!(artifacts.len(), 1);
+            let executable = Path::new(artifacts[0]["executable"].as_str().unwrap());
+            let before = fs::metadata(executable).unwrap();
+
+            let repeated = produce("1", &"6".repeat(32));
+            assert!(repeated.status.success(), "retained listing: {repeated:?}");
+            let completed: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+            assert_eq!(completed["kind"], "producer_complete");
+            let second = fixture.record();
+            let second_artifacts =
+                &second["pools"][0]["slots"][0]["producer"]["invocations"][1]["listing_artifacts"];
+            assert_eq!(first_artifacts, second_artifacts);
+            let after = fs::metadata(executable).unwrap();
+            assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        } else {
+            let first = fixture.record();
+            let first_artifacts =
+                first["pools"][0]["slots"][0]["producer"]["invocations"][0]["listing_artifacts"]
+                    .as_array()
+                    .unwrap();
+            assert_eq!(first_artifacts.len(), 2);
+            let independent = first_artifacts
+                .iter()
+                .find(|artifact| artifact["target"]["target_name"] == "independent")
+                .unwrap();
+            let affected = first_artifacts
+                .iter()
+                .find(|artifact| artifact["target"]["target_name"] == "fixture")
+                .unwrap();
+            let unaffected_path = Path::new(independent["executable"].as_str().unwrap());
+            let affected_path = Path::new(affected["executable"].as_str().unwrap());
+            let unaffected_before = fs::metadata(unaffected_path).unwrap();
+
+            let args = fixture.replay("return", pool, 1, 1, &"6".repeat(32));
+            let (out, returned) = finish_private(start_private(&fixture.hive, args, &credential));
+            assert!(out.status.success(), "{returned}");
+            let out = common::wait_within(
+                start_packaged_take_at(&fixture, pool, &head, &key, "take", "1"),
+                Duration::from_secs(120),
+            );
+            assert_no_credential(&out, &credential);
+            assert!(
+                out.status.success(),
+                "retake: {out:?}; phase: {}",
+                fixture.record()["pools"][0]["slots"][0]["phase"]["attempt"]["stage"]
+            );
+            let ready: Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(ready["generation"], 2);
+            assert_eq!(ready["path"], json!(checkout));
+
+            let output = produce("2", &"7".repeat(32));
+            assert!(
+                output.status.success(),
+                "listing after scoped GC: {output:?}"
+            );
+            let second = fixture.record();
+            let second_artifacts =
+                second["pools"][0]["slots"][0]["producer"]["invocations"][0]["listing_artifacts"]
+                    .as_array()
+                    .unwrap();
+            assert_eq!(second_artifacts.len(), 2);
+            assert!(second_artifacts.contains(independent));
+            assert!(!second_artifacts.contains(affected));
+            let unaffected_after = fs::metadata(unaffected_path).unwrap();
+            assert_eq!(
+                unaffected_before.modified().unwrap(),
+                unaffected_after.modified().unwrap()
+            );
+            assert!(affected_path.exists());
         }
     }
 }

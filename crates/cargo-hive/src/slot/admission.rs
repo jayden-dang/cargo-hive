@@ -4,6 +4,7 @@ mod checkout;
 mod nextest;
 mod sqlx;
 
+use super::gates;
 use super::generated::{
     ARCHIVE_CONSUMER, ARCHIVE_INDEPENDENT_LIB, ARCHIVE_PACKAGE, ARCHIVE_WORKSPACE_LIB,
     GeneratedPlan, GeneratedRust, GeneratedRustPlan, NativeArchive, NativeArchivePlan,
@@ -88,6 +89,8 @@ struct Seal {
     metadata_resolution_sha256: Option<String>,
     #[serde(default)]
     nextest_project: Option<nextest::ProjectConfig>,
+    #[serde(default)]
+    recipe_gate: Option<Vec<gates::UnitReview>>,
     data: Vec<FiniteData>,
     materialized: Option<MaterializedGraph>,
     #[serde(default)]
@@ -1073,6 +1076,16 @@ impl NativeBuild {
                 .is_some_and(|graph| !graph.valid(seal.packages.len()))
             || !seal.packages.iter().all(valid_package)
             || !seal.valid_local_target_catalog()
+            || seal.recipe_gate.as_ref().is_some_and(|units| {
+                !seal.recipe.is_nextest()
+                    || !(1..=256).contains(&units.len())
+                    || units.iter().collect::<BTreeSet<_>>().len() != units.len()
+                    || units.iter().any(|unit| {
+                        !relative(&unit.manifest)
+                            || unit.target_name.is_empty()
+                            || unit.features.windows(2).any(|pair| pair[0] >= pair[1])
+                    })
+            })
             || seal.nextest_project.as_ref().is_some_and(|project| {
                 !seal.recipe.is_nextest()
                     || seal.metadata_resolution_sha256.is_none()
@@ -1304,7 +1317,7 @@ impl NativeBuild {
     pub fn require_supported_target_mode(&self) -> Result<(), Refusal> {
         if self.seal.sqlx_offline.is_some() {
             return Err(refused(
-                "The reviewed SQLx offline inputs lack exact macro, consumer and nested Cargo custody proof.",
+                "The reviewed SQLx offline inputs lack a sealed macro and consumer plan and real nested Cargo custody proof.",
             ));
         }
         if self.metadata_resolution().is_some() {
@@ -1597,6 +1610,39 @@ impl NativeBuild {
                 .as_ref()
                 .map(|tool| tool.path.as_path()),
         }
+    }
+
+    pub fn recipe_gate(&self) -> Option<&[gates::UnitReview]> {
+        self.seal.recipe_gate.as_deref()
+    }
+
+    pub fn recipe_launch(
+        &self,
+        workspace: &Path,
+        cargo_home: &Path,
+        units: Vec<gates::artifact::ReviewedTestBinary>,
+    ) -> Result<gates::ReviewedLaunch, Refusal> {
+        let malformed = || refused("The reviewed Nextest gate lacks its pinned tools or recipe.");
+        let selection = match self.seal.recipe {
+            Recipe::NextestWorkspace => gates::Selection::Workspace,
+            Recipe::NextestGateways => gates::Selection::Gateways,
+            _ => return Err(malformed()),
+        };
+        let tools = &self.seal.tools;
+        let pinned = |tool: &Material| gates::PinnedFile {
+            path: tool.path.clone(),
+            sha256: tool.sha256.clone(),
+        };
+        Ok(gates::ReviewedLaunch {
+            selection,
+            workspace: workspace.to_path_buf(),
+            target: workspace.join("target"),
+            cargo_home: cargo_home.to_path_buf(),
+            cargo: pinned(&tools.cargo),
+            rustc: pinned(&tools.rustc),
+            nextest: pinned(tools.cargo_nextest.as_ref().ok_or_else(malformed)?),
+            units,
+        })
     }
 
     fn bind_external(

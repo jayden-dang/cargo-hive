@@ -413,7 +413,13 @@ impl<'a> StrictProfileReader<'a> {
     }
 
     pub fn read_profile(&self, profile: &Path) -> ProfileReport {
-        read_profile_with(profile, crate::caps::CRATE_DIR_CAP, Some(self))
+        read_profile_with(profile, crate::caps::CRATE_DIR_CAP, Some(self), false)
+    }
+
+    /// A completed Cargo test build can leave un-fingerprinted unit directories
+    /// that contain only an empty `out` directory.
+    pub fn read_profile_with_empty_unit_outputs(&self, profile: &Path) -> ProfileReport {
+        read_profile_with(profile, crate::caps::CRATE_DIR_CAP, Some(self), true)
     }
 
     fn check_cancel(&self) -> Result<(), String> {
@@ -481,6 +487,14 @@ impl<'a> StrictProfileReader<'a> {
             ));
         }
         Ok(entries.into_iter().map(|(name, _)| name).collect())
+    }
+
+    fn has_only_empty_unit_output(&self, unit: &Path) -> Result<bool, String> {
+        if self.list_names(unit)? != ["out"] {
+            return Ok(false);
+        }
+        let output = unit.join("out");
+        Ok(self.is_dir(&output)? && self.list_names(&output)?.is_empty())
     }
 }
 
@@ -815,13 +829,14 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
 }
 
 fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
-    read_profile_with(profile_dir, dir_cap, None)
+    read_profile_with(profile_dir, dir_cap, None, false)
 }
 
 fn read_profile_with(
     profile_dir: &Path,
     dir_cap: usize,
     strict: Option<&StrictProfileReader<'_>>,
+    allow_empty_unit_outputs: bool,
 ) -> ProfileReport {
     let path = profile_dir.to_path_buf();
     let unsupported = |units: usize, reason: String| ProfileReport {
@@ -987,7 +1002,17 @@ fn read_profile_with(
                     match fingerprint_directory(&fp_dir, strict) {
                         Ok(true) => {}
                         Ok(false) => {
-                            partial_unit_dirs += 1;
+                            let empty_output = match strict.filter(|_| allow_empty_unit_outputs) {
+                                Some(reader) => match reader.has_only_empty_unit_output(&unit_root)
+                                {
+                                    Ok(empty) => empty,
+                                    Err(why) => return unsupported(counted, why),
+                                },
+                                None => false,
+                            };
+                            if !empty_output {
+                                partial_unit_dirs += 1;
+                            }
                             continue;
                         }
                         Err(why) => return unsupported(counted, why),
@@ -1982,6 +2007,30 @@ mod tests {
         let r = read_profile(&p);
         assert_eq!(r.format, Format::Supported);
         assert_eq!((r.units, r.partial_unit_dirs), (1, 2));
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn the_empty_unit_output_reader_still_counts_incomplete_units_with_artifacts() {
+        let p = scratch();
+        let output = p.join("build/lib/0123456789abcdef/out");
+        fs::create_dir_all(&output).unwrap();
+        let host = cargo_hive_platform::host_fs();
+        let reader = StrictProfileReader::new(host.as_ref(), &|| false);
+        assert_eq!(reader.read_profile(&p).partial_unit_dirs, 1);
+        let empty = reader.read_profile_with_empty_unit_outputs(&p);
+        assert_eq!(empty.format, Format::Supported);
+        assert_eq!(empty.partial_unit_dirs, 0);
+
+        fs::write(output.join("lib.rlib"), b"unproved output").unwrap();
+        let occupied = reader.read_profile_with_empty_unit_outputs(&p);
+        assert_eq!(occupied.format, Format::Supported);
+        assert_eq!(occupied.partial_unit_dirs, 1);
+
+        fs::remove_file(output.join("lib.rlib")).unwrap();
+        fs::create_dir(p.join("build/lib/0123456789abcdef/fingerprint")).unwrap();
+        let fingerprint = reader.read_profile_with_empty_unit_outputs(&p);
+        assert_eq!(fingerprint.partial_unit_dirs, 1);
         fs::remove_dir_all(p).unwrap();
     }
 

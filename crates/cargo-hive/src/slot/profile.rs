@@ -44,6 +44,7 @@ pub(super) struct CheckedInvocation {
     pub needs_guide: bool,
     pub environment: BTreeMap<std::ffi::OsString, std::ffi::OsString>,
     pub generated: Option<GeneratedPlan>,
+    pub recipe_gate: Option<super::gates::ReviewedLaunch>,
 }
 
 pub(super) fn refused(detail: &'static str) -> Refusal {
@@ -431,6 +432,39 @@ pub(super) fn check_invocation(
     .map_err(|_| refused("Could not bind the stable producer profile inputs."))?;
     let stable_digest = digest(&stable_bytes)?;
 
+    let recipe_gate = native
+        .as_ref()
+        .and_then(|seal| seal.recipe_gate().map(|review| (seal, review)))
+        .map(|(seal, review)| {
+            let unproved = || refused("The reviewed listing unit is absent or ambiguous.");
+            let mut units = Vec::with_capacity(review.len());
+            for unit in review {
+                let manifest = cwd.join(&unit.manifest);
+                let candidates: Vec<_> = discovered
+                    .packages
+                    .iter()
+                    .filter(|pkg| pkg.source.is_none() && pkg.manifest_path == manifest)
+                    .flat_map(|pkg| pkg.targets.iter().map(move |target| (pkg, target)))
+                    .filter(|(_, target)| {
+                        target.name == unit.target_name && target.test == Some(true)
+                    })
+                    .collect();
+                let [(package, target)] = candidates.as_slice() else {
+                    return Err(unproved());
+                };
+                units.push(super::gates::artifact::ReviewedTestBinary {
+                    package_id: package.id.clone(),
+                    manifest_path: manifest,
+                    source_path: target.src_path.clone(),
+                    target_name: target.name.clone(),
+                    target_kind: target.kind.clone(),
+                    features: unit.features.clone(),
+                });
+            }
+            seal.recipe_launch(&cwd, &cargo_home, units)
+        })
+        .transpose()?;
+
     Ok(CheckedInvocation {
         evidence: InvocationEvidence {
             invocation: invocation.id.clone(),
@@ -445,6 +479,7 @@ pub(super) fn check_invocation(
         cwd,
         environment,
         generated,
+        recipe_gate,
         needs_guide: native.is_some(),
     })
 }

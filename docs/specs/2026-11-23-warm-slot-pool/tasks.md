@@ -413,12 +413,20 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 - Create: `crates/cargo-hive/src/slot/generated.rs`
 - Create: `crates/cargo-hive/src/slot/generated/serde_core.rs`
 - Create: `crates/cargo-hive/src/slot/generated/archive.rs`
+- Create: `crates/cargo-hive/src/slot/gates/mod.rs` (private child requests and fixture launch)
+- Create: `crates/cargo-hive/src/slot/gates/artifact.rs` (Cargo artifact and listing checks)
+- Create: `crates/cargo-hive/src/slot/gates/metadata.rs` (SQLx metadata checks)
+- Modify: `crates/cargo-hive/src/lib.rs` (private child entry)
+- Modify: `crates/cargo-hive/src/main.rs` (private child dispatch)
+- Modify: `crates/platform/src/proc.rs` (bounded capture in writer group)
+- Create: `crates/cargo-hive/tests/nextest_gates.rs` (private executable boundary)
 - Modify: `crates/cargo-hive/src/slot/admission.rs`
 - Modify: `crates/cargo-hive/src/slot/profile.rs`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
 - Modify: `crates/cargo-hive/src/slot/inspect.rs`
 - Modify: `crates/cargo-hive/src/slot/prepare.rs`
 - Modify: `crates/state/src/slots.rs`
+- Modify: `crates/core/src/fingerprint.rs`
 - Modify: `crates/core/src/unit_path.rs`
 - Modify: `crates/gc/src/checkout.rs`
 - Modify: `crates/cargo-hive/src/cli.rs`
@@ -439,6 +447,7 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 
 - [x] Prove a bounded whole-tree source verifier on both Cargo layouts, including exact immutable bytes and admitted edits. Cover both real endpoint inventories without weakening profile validation for earlier callers.
 - [x] Prove named generated Rust input and native archive custody through a real guard and strict GC, including wrong unit, same-mtime changes, identity replacement and overlapping cleanup refusals. Start with actual serde_core and one pinned native archive case. Account for every selected producer and consumer before enabling any real invocation.
+- [x] Exercise the approved recipe-local Cargo and Nextest listing gates on both pins in an isolated fixture. Bind gate completion to durable producer custody and retain approved artifact evidence across GC before enabling the real profile.
 - [ ] Verify the exact workspace graph and selected target modes, project Nextest configuration and store paths, offline SQLx cache and dotenv probes, and side effects of every reviewed executable and required subprocess. Exercise both Nextest selections without running any test body. Refuse unproved behavior before the real profile can publish readiness.
 - [ ] Qualify the complete real installed path at the exact release-mode revision before timing. Demonstrate the ordinary handoff and independent fresh seeded baseline in scratch.
 - [x] Write the manual acceptance steps in the runbook. Require five valid matched pairs, alternating arm order, a fixed first command and edit, and successive warm handoffs. Define missing actual GC, non-eligible seed, mismatched fixtures and failed/void samples before measuring.

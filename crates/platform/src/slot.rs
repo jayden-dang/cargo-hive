@@ -696,11 +696,7 @@ mod foreground {
             return Err(invalid("guide parent changed"));
         }
         let pid = i32::try_from(parent.pid).map_err(|_| invalid("invalid guide parent PID"))?;
-        let mut image = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-        // SAFETY: image is writable for its entire bounded length.
-        let length =
-            unsafe { libc::proc_pidpath(pid, image.as_mut_ptr().cast(), image.len() as u32) };
-        if length <= 0 || image.split(|byte| *byte == 0).next() != Some(b"/bin/bash") {
+        if !matches_program(pid, std::path::Path::new("/bin/bash")) {
             return Err(invalid("guide parent is not the bundled Bash runner"));
         }
         let offset = match expected_offset {
@@ -719,6 +715,31 @@ mod foreground {
             ));
         }
         Ok(offset)
+    }
+
+    fn matches_program(pid: i32, expected: &std::path::Path) -> bool {
+        let mut image = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: image is writable for its entire bounded length.
+        let length =
+            unsafe { libc::proc_pidpath(pid, image.as_mut_ptr().cast(), image.len() as u32) };
+        length > 0
+            && image.split(|byte| *byte == 0).next()
+                == Some(expected.as_os_str().as_encoded_bytes())
+    }
+
+    /// Binds a private recipe gate to its direct parent's approved image and
+    /// the same inherited open lock description.
+    pub fn recipe_parent_matches(
+        expected: &std::path::Path,
+        fd: i32,
+        lock: LockFileIdentity,
+        offset: i64,
+    ) -> io::Result<bool> {
+        let parent = parent_instance()?;
+        let pid = i32::try_from(parent.pid).map_err(|_| invalid("invalid recipe parent PID"))?;
+        Ok(matches_program(pid, expected)
+            && owns_lock(pid, fd, lock, Some(offset))?
+            && parent_instance()? == parent)
     }
 
     fn invalid(message: &'static str) -> io::Error {
@@ -1247,7 +1268,20 @@ mod foreground {
 }
 
 #[cfg(target_os = "macos")]
-pub use foreground::{ForegroundWatch, verify_guide_lock};
+pub use foreground::{ForegroundWatch, recipe_parent_matches, verify_guide_lock};
+
+#[cfg(not(target_os = "macos"))]
+pub fn recipe_parent_matches(
+    _expected: &std::path::Path,
+    _fd: i32,
+    _lock: crate::flock::LockFileIdentity,
+    _offset: i64,
+) -> io::Result<bool> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        MACOS_ONLY_MESSAGE,
+    ))
+}
 
 #[cfg(not(target_os = "macos"))]
 pub fn verify_guide_lock(

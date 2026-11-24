@@ -424,7 +424,10 @@ fn cargo_units(
     producer: &Producer,
     require_all: bool,
 ) -> Result<UnitWitnesses, Refusal> {
-    let Producer::Complete { roots, .. } = producer else {
+    let Producer::Complete {
+        roots, invocations, ..
+    } = producer
+    else {
         return Ok(UnitWitnesses(BTreeMap::new()));
     };
     let anchors = consumers(profile, producer);
@@ -436,6 +439,9 @@ fn cargo_units(
         target::identify_strict(fs.as_ref(), &roots.build.path, CRATE_DIR_CAP, &cancelled)
             .map_err(|_| unproved())?;
     let reader = StrictProfileReader::new(fs.as_ref(), &cancelled);
+    let completed_nextest = invocations
+        .iter()
+        .any(|invocation| !invocation.listing_artifacts.is_empty());
     let mut witnessed: BTreeMap<_, BTreeMap<_, _>> = anchors
         .keys()
         .cloned()
@@ -451,7 +457,11 @@ fn cargo_units(
     }
     for (directory, _) in profiles {
         check_cancelled()?;
-        let report = reader.read_profile(&directory);
+        let report = if completed_nextest {
+            reader.read_profile_with_empty_unit_outputs(&directory)
+        } else {
+            reader.read_profile(&directory)
+        };
         if report.format != Format::Supported
             || report.partial_unit_dirs != 0
             || report.not_current != 0
