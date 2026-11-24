@@ -4717,49 +4717,24 @@ fn packaged_slot_command(
 }
 
 fn guarded_workspace_check(slot: &LeasedSlot, generation: u64) {
-    let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
-    let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
-        .unwrap()
+    // The installed guide owns the lock in its dedicated process. Holding it
+    // in the test runner exposes it to unrelated sibling forks before exec.
+    let binary = Path::new(env!("CARGO_BIN_EXE_cargo-hive"));
+    let mut child = packaged_slot_command(&slot.fixture, binary, "produce")
+        .arg(&slot.fixture.repo)
+        .args([
+            &slot.pool,
+            "1",
+            &generation.to_string(),
+            &slot.operation,
+            "check",
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
         .unwrap();
-    let mut request = producer_input(slot);
-    request["shape"]["argv"] = json!(["check", "--locked", "--workspace"]);
-    let (out, started) = finish_private(start_producer(
-        slot,
-        generation,
-        &slot.operation,
-        &request,
-        Some(&lock),
-        |_| (),
-    ));
-    assert!(out.status.success(), "{started}");
-    let mut args = producer_gate_args(slot);
-    args.push("--workspace".into());
-    let mut cargo = stopped_stock_cargo_with_args(slot, Some(&lock), args);
-    request["action"] = json!("watch");
-    request["child_pid"] = json!(cargo.id());
-    let mut watcher = start_producer(
-        slot,
-        generation,
-        &slot.operation,
-        &request,
-        Some(&lock),
-        |_| (),
-    );
-    let until = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(status) = cargo.try_wait().unwrap() {
-            assert!(status.success(), "{status}");
-            break;
-        }
-        if Instant::now() >= until || watcher.try_wait().unwrap().is_some() {
-            cargo.kill().unwrap();
-            cargo.wait().unwrap();
-            let (_, result) = finish_private(watcher);
-            panic!("watch did not permit Cargo: {result}");
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let (out, completed) = finish_private(watcher);
+    writeln!(child.stdin.take().unwrap(), "{}", slot.credential).unwrap();
+    let (out, completed) = finish_private(child);
+    assert_no_credential(&out, &slot.credential);
     assert!(out.status.success(), "{completed}");
     assert_eq!(completed["kind"], "producer_complete");
 }
