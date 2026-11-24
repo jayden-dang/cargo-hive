@@ -2,6 +2,7 @@
 
 mod checkout;
 mod nextest;
+mod sqlx;
 
 use super::profile::{digest, read_input_bounded, refused};
 use super::{CheckoutProof, Refusal, directory_stamp, git_scope};
@@ -83,6 +84,8 @@ struct Seal {
     nextest_project: Option<nextest::ProjectConfig>,
     data: Vec<FiniteData>,
     materialized: Option<MaterializedGraph>,
+    #[serde(default)]
+    sqlx_offline: Option<sqlx::OfflineInputs>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -1026,7 +1029,14 @@ impl NativeBuild {
             })
             || !valid_inventory(&seal.tools.rust_runtime)
             || !valid_inventory(&seal.tools.target_sysroot)
-            || !native_environment(&invocation.environment)
+            || !native_environment(&invocation.environment, seal.sqlx_offline.is_some())
+            || seal.sqlx_offline.as_ref().is_some_and(|inputs| {
+                !inputs.valid(&seal.packages)
+                    || seal
+                        .endpoints
+                        .iter()
+                        .any(|endpoint| endpoint.whole_tree.is_none())
+            })
             || (!matches!(seal.recipe, Recipe::NativeBuild)
                 && seal.packages.iter().any(|package| {
                     package
@@ -1103,6 +1113,11 @@ impl NativeBuild {
     }
 
     pub fn require_supported_target_mode(&self) -> Result<(), Refusal> {
+        if self.seal.sqlx_offline.is_some() {
+            return Err(refused(
+                "The reviewed SQLx offline inputs lack exact macro, consumer and nested Cargo custody proof.",
+            ));
+        }
         if self.metadata_resolution().is_some() {
             return Err(refused(if self.seal.recipe.is_nextest() {
                 "The reviewed Cargo target catalog lacks exact Nextest selection, harness and child proof."
@@ -1163,6 +1178,9 @@ impl NativeBuild {
             {
                 return Err(unproved());
             }
+        }
+        if let Some(sqlx) = &self.seal.sqlx_offline {
+            sqlx.verify(&checkout.path, invocation)?;
         }
         if let Some(manifest) = &endpoint.whole_tree {
             checkout::verify_whole_tree(&checkout.path, &checkout.head, manifest, &observed)?;
@@ -1703,8 +1721,14 @@ fn xcode_path(cwd: &Path, home: &OsStr, args: &[&str]) -> Result<PathBuf, Refusa
     path.canonicalize().map_err(|_| unproved())
 }
 
-fn native_environment(entries: &[slots::Environment]) -> bool {
-    entries.len() == 2
+fn native_environment(entries: &[slots::Environment], sqlx_offline: bool) -> bool {
+    let count = if sqlx_offline {
+        3 + usize::from(entries.iter().any(|entry| entry.name == "SQLX_OFFLINE_DIR"))
+    } else {
+        2
+    };
+    entries.len() == count
+        && unique(entries.iter().map(|entry| entry.name.as_str()))
         && entries
             .iter()
             .all(|entry| match (&*entry.name, &entry.expectation) {
@@ -1712,6 +1736,12 @@ fn native_environment(entries: &[slots::Environment]) -> bool {
                     Path::new(value).is_absolute()
                 }
                 ("CARGO_NET_OFFLINE", EnvironmentExpectation::Present { value }) => value == "true",
+                ("SQLX_OFFLINE", EnvironmentExpectation::Present { value }) => {
+                    sqlx_offline && value == "true"
+                }
+                ("SQLX_OFFLINE_DIR", EnvironmentExpectation::Present { value }) => {
+                    sqlx_offline && Path::new(value).is_absolute()
+                }
                 _ => false,
             })
 }
@@ -1892,6 +1922,67 @@ mod tests {
                 panic!("reviewed Nextest project data was refused: {error}");
             }
         }
+    }
+
+    #[test]
+    fn reviewed_offline_sqlx_data_carries_no_macro_launch_authority() {
+        let tool = json!({ "path": "/reviewed/tool", "sha256": "a".repeat(64) });
+        let seal: Seal = serde_json::from_value(json!({
+            "schema": 1,
+            "recipe": "clippy",
+            "profile": {"id": "reviewed", "revision": 1},
+            "proof": "offline-data",
+            "invocation": "clippy",
+            "layout": "flat",
+            "native_target": "aarch64-apple-darwin",
+            "endpoints": [{
+                "commit": "b".repeat(40),
+                "tree": "c".repeat(40),
+                "whole_tree": {"entries": 1, "sha256": "d".repeat(64)},
+            }],
+            "tools": {
+                "cargo": tool,
+                "rustc": tool,
+                "rust_runtime": [],
+                "target_sysroot": [],
+                "clang": tool,
+                "ld": tool,
+                "otool": tool,
+                "sdk": "/reviewed/sdk",
+                "sdk_settings": tool,
+                "system_library": tool,
+            },
+            "packages": [{
+                "name": "persistence",
+                "version": "1.0.0",
+                "manifest": "persistence/Cargo.toml",
+                "targets": [{"name": "persistence", "kind": "lib", "source": "persistence/src/lib.rs"}],
+                "dependencies": [],
+            }],
+            "data": [],
+            "sqlx_offline": {
+                "packages": [{
+                    "manifest": "persistence/Cargo.toml",
+                    "queries": [{
+                        "query_sha256": "e".repeat(64),
+                        "data_sha256": "f".repeat(64),
+                        "cache": "workspace",
+                    }],
+                }],
+            },
+        }))
+        .unwrap_or_else(|error| panic!("the seal refused its reviewed offline data: {error}"));
+        let native = NativeBuild {
+            seal,
+            seal_digest: "0".repeat(64),
+        };
+        let Err(error) = native.require_supported_target_mode() else {
+            panic!("offline data without executable and consumer evidence admitted a macro");
+        };
+        assert!(matches!(
+            error,
+            crate::slot::Refusal::ReturnUncertain(reason) if reason.contains("SQLx")
+        ));
     }
 
     #[test]
