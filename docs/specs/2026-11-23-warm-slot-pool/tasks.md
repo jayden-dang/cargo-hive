@@ -60,6 +60,7 @@ Design: ./design.md
 | `crates/cargo-hive/src/slot/admission/nextest.rs` | Verify reviewed project Nextest configuration and bound its effective default mode and store. |
 | `crates/cargo-hive/src/slot/admission/sqlx.rs` | Verify the reviewed SQLx offline configuration, ancestor probes and selected query-cache bytes. |
 | `crates/cargo-hive/src/slot/generated.rs` | Bind named Cargo-generated inputs to their reviewed producer, consumers and retained unit witnesses. |
+| `crates/cargo-hive/src/slot/generated/serde_core.rs` | Verify the exact serde_core producer, Cargo unit graph and consumed generated Rust file. |
 | `crates/cargo-hive/src/slot/result.rs` | New sanitized JSON projection and existing Receipt audit projection. |
 | `crates/gc/src/checkout.rs` | Expose positive root-lock/completion evidence beside the existing report. |
 | `crates/gc/src/debug_map.rs` | Read strict checkout GC candidates through a checked regular descriptor. |
@@ -391,12 +392,12 @@ _Requirements: SLOTS-4.1, SLOTS-4.2, SLOTS-4.3, SLOTS-4.4, SLOTS-4.5, SLOTS-4.6,
 
 **Depends-on:** Task 8.
 
-- [ ] Assert every actionable take carries the pre-build use policy and warning. Keep private checkpoints out of public operator help/examples. Write the guide/CLI parser checks and run a real full-pool and rejected-profile journey, including an attempted fallback alias of a tainted slot. Prove the actual eligible fallback is a distinct independently seeded secondary with separate roots and only registry units, with no copied workspace-unit output.
-- [ ] Test the installed helper with exact bundled version, same-major/minor but different patch, malformed version and failed probe. For take and resume, a mismatch must leave reservation/lease state, sources, index, mtimes, output and GC unchanged. Guard the shipped non-slot same-major/minor rule.
-- [ ] Run `cargo test -p cargo-hive --test skill --test slots` to observe the absent guide and fallback behavior.
-- [ ] Document setup and the ordinary reserve/ready/return path, handling of lost acknowledgements, held and unsupported results, and human resolution of unfinished work. Keep internal checkpoint flags out of the usual examples. Check the exact bundled `metadata.hive-version` before private work, explain the update remedy and preserve the non-slot version rule. A seed refusal is explicit.
-- [ ] Re-run the tests and walk an actual normal, full and refused journey in scratch using the installed guide. Preserve ordinary seed and checkout GC examples.
-- [ ] Commit as `docs(hive): teach scoped slot use and fallbacks`.
+- [x] Assert every actionable take carries the pre-build use policy and warning. Keep private checkpoints out of public operator help/examples. Write the guide/CLI parser checks and run a real full-pool and rejected-profile journey, including an attempted fallback alias of a tainted slot. Prove the actual eligible fallback is a distinct independently seeded secondary with separate roots and only registry units, with no copied workspace-unit output.
+- [x] Test the installed helper with exact bundled version, same-major/minor but different patch, malformed version and failed probe. For take and resume, a mismatch must leave reservation/lease state, sources, index, mtimes, output and GC unchanged. Guard the shipped non-slot same-major/minor rule.
+- [x] Run `cargo test -p cargo-hive --test skill --test slots` to observe the absent guide and fallback behavior.
+- [x] Document setup and the ordinary reserve/ready/return path, handling of lost acknowledgements, held and unsupported results, and human resolution of unfinished work. Keep internal checkpoint flags out of the usual examples. Check the exact bundled `metadata.hive-version` before private work, explain the update remedy and preserve the non-slot version rule. A seed refusal is explicit.
+- [x] Re-run the tests and walk an actual normal, full and refused journey in scratch using the installed guide. Preserve ordinary seed and checkout GC examples.
+- [x] Commit as `docs(hive): teach scoped slot use and fallbacks`.
 
 _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.12_
 
@@ -409,6 +410,7 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 - Create: `crates/cargo-hive/src/slot/admission/nextest.rs`
 - Create: `crates/cargo-hive/src/slot/admission/sqlx.rs`
 - Create: `crates/cargo-hive/src/slot/generated.rs`
+- Create: `crates/cargo-hive/src/slot/generated/serde_core.rs`
 - Modify: `crates/cargo-hive/src/slot/admission.rs`
 - Modify: `crates/cargo-hive/src/slot/profile.rs`
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
