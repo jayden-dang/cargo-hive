@@ -4006,6 +4006,30 @@ done
 }
 
 #[test]
+fn the_first_permit_durably_binds_the_native_boot_and_pool() {
+    let PreparingSlot {
+        fixture,
+        pool,
+        credential,
+        nonce,
+        ..
+    } = native_guide_before_first_checkout();
+    let expected = cargo_hive_platform::slot::boot_witness(&pool).unwrap();
+    let saved = fixture.record();
+    let attempt = &saved["pools"][0]["slots"][0]["phase"]["attempt"];
+    assert_eq!(attempt["runner"]["boot_session"], expected.boot_session);
+    assert!(
+        attempt["host_binding"] == json!(expected.host_binding),
+        "the native pool-scoped host digest was missing from the durable attempt"
+    );
+    let (out, status) = fixture.status();
+    assert!(out.status.success(), "{status}");
+    assert_no_credential(&out, &credential);
+    assert_no_credential(&out, &nonce);
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("host_binding"));
+}
+
+#[test]
 fn recovery_retires_a_preparation_before_checkout_without_granting_access() {
     let PreparingSlot {
         fixture,

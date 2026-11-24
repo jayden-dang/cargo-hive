@@ -483,6 +483,8 @@ pub struct Attempt {
     pub attempt_id: u64,
     pub begin_op: String,
     pub runner: Runner,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_binding: Option<[u8; 32]>,
     pub stage: AttemptStage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock_offset: Option<i64>,
@@ -503,6 +505,7 @@ impl Attempt {
         require(
             self.attempt_id > 0
                 && hex(&self.begin_op, 32)
+                && self.host_binding.is_none_or(|digest| digest != [0; 32])
                 && self.lock_offset.is_none_or(|offset| offset >= (1 << 32)),
             "invalid attempt identity",
         )?;
@@ -2795,6 +2798,7 @@ mod tests {
                 attempt_id,
                 begin_op,
                 runner: runner.clone(),
+                host_binding: None,
                 stage: AttemptStage::GcInProgress,
                 lock_offset: Some(1 << 32),
                 prior_head: None,

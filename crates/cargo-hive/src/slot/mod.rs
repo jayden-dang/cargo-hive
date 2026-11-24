@@ -19,8 +19,8 @@ use cargo_hive_platform::flock::{
 use cargo_hive_platform::proc::{self, read_stdin_complete};
 use cargo_hive_platform::signals::{self, cancelled};
 use cargo_hive_platform::slot::{
-    ForegroundExec, ForegroundWatch, ProcessInstance, descriptor_writable, parent_instance,
-    verify_guide_lock,
+    ForegroundExec, ForegroundWatch, ProcessInstance, boot_witness, descriptor_writable,
+    parent_instance, verify_guide_lock,
 };
 use cargo_hive_state::slots::{
     self, Attempt, AttemptStage, BypassReport, CHECKOUT_NAMESPACE, CompletedInvocation,
@@ -1565,6 +1565,12 @@ fn begin(
         ));
     }
     let lock_offset = check_runner(None)?;
+    let witness = boot_witness(key.pool_id).map_err(|_| {
+        Refusal::ReturnUncertain("Could not verify the local boot and host before preparation.")
+    })?;
+    if witness.boot_session != runner.boot_session {
+        return Err(producer_fence_refusal());
+    }
     let inspection = if let Some(prior) = slot.last_head.as_deref() {
         verify_requested_tree(&pool.main, &lease.requested_commit)?;
         prepare::verify_changes(&pool.main, prior, &lease.requested_commit, &pool.profile)?;
@@ -1619,6 +1625,7 @@ fn begin(
                 attempt_id,
                 begin_op: key.operation.into(),
                 runner: runner.clone(),
+                host_binding: Some(witness.host_binding),
                 stage: AttemptStage::PermitIssued,
                 lock_offset: Some(lock_offset),
                 prior_head: slot.last_head.clone(),
