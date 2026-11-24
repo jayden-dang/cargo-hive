@@ -3,8 +3,10 @@
 //! known keys with known types. Any deviation makes the whole profile dir unsupported.
 
 use crate::unit_path::{UnitLayout, UnitLoc};
+use cargo_hive_platform::{EntryKind, Fs};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
@@ -390,6 +392,122 @@ fn read_hash(reader: &mut impl Read, stem: &str) -> Result<Option<UnitHash>, Str
         .ok_or_else(|| format!("hash file `{stem}` is not 16 lowercase hex characters"))
 }
 
+const STRICT_PROFILE_BYTES: usize = 128 * 1024 * 1024;
+
+/// Shares strict fingerprint entry and byte limits across all profiles in one target.
+pub struct StrictProfileReader<'a> {
+    fs: &'a dyn Fs,
+    cancel: &'a dyn Fn() -> bool,
+    entries: Cell<usize>,
+    bytes: Cell<usize>,
+}
+
+impl<'a> StrictProfileReader<'a> {
+    pub fn new(fs: &'a dyn Fs, cancel: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            fs,
+            cancel,
+            entries: Cell::new(crate::caps::CRATE_DIR_CAP),
+            bytes: Cell::new(STRICT_PROFILE_BYTES),
+        }
+    }
+
+    pub fn read_profile(&self, profile: &Path) -> ProfileReport {
+        read_profile_with(profile, crate::caps::CRATE_DIR_CAP, Some(self), false)
+    }
+
+    /// A completed Cargo test build can leave un-fingerprinted unit directories
+    /// that contain only an empty `out` directory.
+    pub fn read_profile_with_empty_unit_outputs(&self, profile: &Path) -> ProfileReport {
+        read_profile_with(profile, crate::caps::CRATE_DIR_CAP, Some(self), true)
+    }
+
+    fn check_cancel(&self) -> Result<(), String> {
+        if (self.cancel)() {
+            Err("fingerprint reading was cancelled".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn charge_entries(&self, count: usize) -> Result<(), String> {
+        self.check_cancel()?;
+        let left = self
+            .entries
+            .get()
+            .checked_sub(count)
+            .ok_or("fingerprint entry limit exceeded")?;
+        self.entries.set(left);
+        Ok(())
+    }
+
+    fn read_file(&self, path: &Path, max: usize) -> Result<Vec<u8>, String> {
+        self.check_cancel()?;
+        let limit = max.min(self.bytes.get());
+        let bytes = self
+            .fs
+            .read_regular_bounded(path, limit)
+            .map_err(|err| err.to_string())?;
+        let left = self
+            .bytes
+            .get()
+            .checked_sub(bytes.len())
+            .ok_or("fingerprint byte limit exceeded")?;
+        self.bytes.set(left);
+        Ok(bytes)
+    }
+
+    fn is_dir(&self, path: &Path) -> Result<bool, String> {
+        self.check_cancel()?;
+        match self.fs.entry_stat(path) {
+            Ok(stat) if stat.kind == EntryKind::Dir => Ok(true),
+            Ok(stat) if stat.kind == EntryKind::File => Ok(false),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(format!("{}: {err}", path.display())),
+            _ => Err(format!("{} has an unsupported entry type", path.display())),
+        }
+    }
+
+    fn list_names(&self, dir: &Path) -> Result<Vec<String>, String> {
+        if !self.is_dir(dir)? {
+            return Err(format!("{} is not a directory", dir.display()));
+        }
+        let entries = self
+            .fs
+            .read_dir_bounded(dir, self.entries.get())
+            .map_err(|err| format!("{}: {err}", dir.display()))?;
+        self.charge_entries(entries.len())?;
+        if let Some((name, _)) = entries
+            .iter()
+            .find(|(_, kind)| !matches!(kind, EntryKind::File | EntryKind::Dir))
+        {
+            return Err(format!(
+                "{} has an unsupported entry type",
+                dir.join(name).display()
+            ));
+        }
+        Ok(entries.into_iter().map(|(name, _)| name).collect())
+    }
+
+    fn has_only_empty_unit_output(&self, unit: &Path) -> Result<bool, String> {
+        if self.list_names(unit)? != ["out"] {
+            return Ok(false);
+        }
+        let output = unit.join("out");
+        Ok(self.is_dir(&output)? && self.list_names(&output)?.is_empty())
+    }
+}
+
+fn fingerprint_directory(
+    path: &Path,
+    strict: Option<&StrictProfileReader<'_>>,
+) -> Result<bool, String> {
+    match strict {
+        Some(reader) => reader.is_dir(path),
+        None => Ok(path.is_dir()),
+    }
+}
+
 /// An emptied hash is a unit Cargo is rebuilding. The JSON beside it is stale, so the unit is
 /// not current; its stem and features are still the ones the last successful build wrote.
 fn read_unit(
@@ -397,20 +515,35 @@ fn read_unit(
     json_name: &str,
     loc: UnitLoc,
     shared_features: &mut HashMap<String, Arc<str>>,
+    strict: Option<&StrictProfileReader<'_>>,
 ) -> Result<ParsedUnit, String> {
     let stem = json_name.trim_end_matches(".json");
-    let mut hash_file =
-        fs::File::open(dir.join(stem)).map_err(|e| format!("hash file `{stem}`: {e}"))?;
-    let hash = read_hash(&mut hash_file, stem)?;
+    let hash_path = dir.join(stem);
+    let hash = if let Some(reader) = strict {
+        let bytes = reader
+            .read_file(&hash_path, UnitHash::HEX_LEN)
+            .map_err(|err| format!("hash file `{stem}`: {err}"))?;
+        read_hash(&mut bytes.as_slice(), stem)?
+    } else {
+        let mut file =
+            fs::File::open(hash_path).map_err(|err| format!("hash file `{stem}`: {err}"))?;
+        read_hash(&mut file, stem)?
+    };
     let json_path = dir.join(json_name);
-    let len = fs::metadata(&json_path)
-        .map_err(|e| format!("{json_name}: {e}"))?
-        .len();
-    if len > MAX_JSON_BYTES {
-        return Err(format!("{json_name}: larger than 4 MiB"));
-    }
-    let mut file = fs::File::open(&json_path).map_err(|e| format!("{json_name}: {e}"))?;
-    let bytes = read_capped(&mut file).map_err(|e| format!("{json_name}: {e}"))?;
+    let bytes = if let Some(reader) = strict {
+        reader
+            .read_file(&json_path, MAX_JSON_BYTES as usize)
+            .map_err(|err| format!("{json_name}: {err}"))?
+    } else {
+        let len = fs::metadata(&json_path)
+            .map_err(|e| format!("{json_name}: {e}"))?
+            .len();
+        if len > MAX_JSON_BYTES {
+            return Err(format!("{json_name}: larger than 4 MiB"));
+        }
+        let mut file = fs::File::open(&json_path).map_err(|e| format!("{json_name}: {e}"))?;
+        read_capped(&mut file).map_err(|e| format!("{json_name}: {e}"))?
+    };
     decode_unit(&bytes, hash, stem, loc, shared_features)
 }
 
@@ -565,7 +698,18 @@ fn flat_loc_for(dir: &Path) -> UnitLoc {
     }
 }
 
-fn list_names(dir: &Path, problem: &mut Option<String>, cap: usize) -> Option<Vec<String>> {
+fn list_names(
+    dir: &Path,
+    problem: &mut Option<String>,
+    cap: usize,
+    strict: Option<&StrictProfileReader<'_>>,
+) -> Option<Vec<String>> {
+    if let Some(reader) = strict {
+        return reader
+            .list_names(dir)
+            .map_err(|why| problem.get_or_insert(why))
+            .ok();
+    }
     match fs::read_dir(dir) {
         Ok(entries) => {
             let mut names = Vec::new();
@@ -607,7 +751,13 @@ fn output_names(names: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn absorb_fingerprint_dir(dir: &Path, loc: UnitLoc, names: &[String], acc: &mut ProfileAccum<'_>) {
+fn absorb_fingerprint_dir(
+    dir: &Path,
+    loc: UnitLoc,
+    names: &[String],
+    acc: &mut ProfileAccum<'_>,
+    strict: Option<&StrictProfileReader<'_>>,
+) {
     if names.is_empty() {
         return;
     }
@@ -632,7 +782,7 @@ fn absorb_fingerprint_dir(dir: &Path, loc: UnitLoc, names: &[String], acc: &mut 
         ));
         return;
     }
-    match read_unit(dir, jsons[0], loc.clone(), acc.shared_features) {
+    match read_unit(dir, jsons[0], loc.clone(), acc.shared_features, strict) {
         Ok(ParsedUnit::Current(u)) => {
             acc.layouts.insert(u.loc.layout);
             *acc.counted += 1;
@@ -661,11 +811,17 @@ fn absorb_fingerprint_dir(dir: &Path, loc: UnitLoc, names: &[String], acc: &mut 
     }
 }
 
-fn is_package_dir_entries(names: &[String], paths: &[PathBuf]) -> bool {
-    names
-        .iter()
-        .zip(paths.iter())
-        .all(|(name, path)| UnitHash::parse(name).is_some() && path.is_dir())
+fn is_package_dir_entries(
+    names: &[String],
+    paths: &[PathBuf],
+    strict: Option<&StrictProfileReader<'_>>,
+) -> Result<bool, String> {
+    for (name, path) in names.iter().zip(paths) {
+        if UnitHash::parse(name).is_none() || !fingerprint_directory(path, strict)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub fn read_profile(profile_dir: &Path) -> ProfileReport {
@@ -673,6 +829,15 @@ pub fn read_profile(profile_dir: &Path) -> ProfileReport {
 }
 
 fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
+    read_profile_with(profile_dir, dir_cap, None, false)
+}
+
+fn read_profile_with(
+    profile_dir: &Path,
+    dir_cap: usize,
+    strict: Option<&StrictProfileReader<'_>>,
+    allow_empty_unit_outputs: bool,
+) -> ProfileReport {
     let path = profile_dir.to_path_buf();
     let unsupported = |units: usize, reason: String| ProfileReport {
         path: path.clone(),
@@ -696,7 +861,11 @@ fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
     let mut saw_package_dir = false;
 
     let fp = profile_dir.join(".fingerprint");
-    if fp.is_dir() {
+    let fp_present = match fingerprint_directory(&fp, strict) {
+        Ok(present) => present,
+        Err(why) => return unsupported(counted, why),
+    };
+    if fp_present {
         saw_fingerprint = true;
         let entries = match fs::read_dir(&fp) {
             Ok(e) => e,
@@ -704,6 +873,11 @@ fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
         };
         let mut dirs: Vec<PathBuf> = Vec::new();
         for (seen, entry) in entries.enumerate() {
+            if let Some(reader) = strict
+                && let Err(why) = reader.charge_entries(1)
+            {
+                return unsupported(counted, why);
+            }
             if seen >= dir_cap {
                 return unsupported(
                     0,
@@ -719,6 +893,12 @@ fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
             };
             match entry.file_type() {
                 Ok(kind) if kind.is_dir() => dirs.push(entry.path()),
+                Ok(kind) if strict.is_some() && !kind.is_file() => {
+                    problem.get_or_insert(format!(
+                        "{} has an unsupported entry type",
+                        entry.path().display()
+                    ));
+                }
                 Ok(_) => {}
                 Err(e) => {
                     problem.get_or_insert(format!("{}: {e}", entry.path().display()));
@@ -727,7 +907,7 @@ fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
         }
         dirs.sort();
         for dir in dirs {
-            let Some(names) = list_names(&dir, &mut problem, dir_cap) else {
+            let Some(names) = list_names(&dir, &mut problem, dir_cap, strict) else {
                 continue;
             };
             absorb_fingerprint_dir(
@@ -742,16 +922,26 @@ fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
                     shared_features: &mut shared_features,
                     problem: &mut problem,
                 },
+                strict,
             );
         }
     }
 
     let build = profile_dir.join("build");
-    if build.is_dir() {
+    let build_present = match fingerprint_directory(&build, strict) {
+        Ok(present) => present,
+        Err(why) => return unsupported(counted, why),
+    };
+    if build_present {
         let mut children: Vec<PathBuf> = Vec::new();
         match fs::read_dir(&build) {
             Ok(entries) => {
                 for (seen, entry) in entries.enumerate() {
+                    if let Some(reader) = strict
+                        && let Err(why) = reader.charge_entries(1)
+                    {
+                        return unsupported(counted, why);
+                    }
                     if seen >= dir_cap {
                         return unsupported(
                             counted,
@@ -789,12 +979,16 @@ fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let Some(child_names) = list_names(&pkg_path, &mut problem, dir_cap) else {
+            let Some(child_names) = list_names(&pkg_path, &mut problem, dir_cap, strict) else {
                 continue;
             };
             let child_paths: Vec<PathBuf> =
                 child_names.iter().map(|name| pkg_path.join(name)).collect();
-            if is_package_dir_entries(&child_names, &child_paths) {
+            let is_package = match is_package_dir_entries(&child_names, &child_paths, strict) {
+                Ok(is_package) => is_package,
+                Err(why) => return unsupported(counted, why),
+            };
+            if is_package {
                 saw_package_dir = true;
                 let mut hexes = child_names.clone();
                 hexes.sort();
@@ -805,11 +999,25 @@ fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
                         layout: UnitLayout::UnitDir,
                         name_meta: format!("{pkg_name}-{hex}"),
                     };
-                    if !fp_dir.is_dir() {
-                        partial_unit_dirs += 1;
-                        continue;
+                    match fingerprint_directory(&fp_dir, strict) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let empty_output = match strict.filter(|_| allow_empty_unit_outputs) {
+                                Some(reader) => match reader.has_only_empty_unit_output(&unit_root)
+                                {
+                                    Ok(empty) => empty,
+                                    Err(why) => return unsupported(counted, why),
+                                },
+                                None => false,
+                            };
+                            if !empty_output {
+                                partial_unit_dirs += 1;
+                            }
+                            continue;
+                        }
+                        Err(why) => return unsupported(counted, why),
                     }
-                    let Some(names) = list_names(&fp_dir, &mut problem, dir_cap) else {
+                    let Some(names) = list_names(&fp_dir, &mut problem, dir_cap, strict) else {
                         continue;
                     };
                     if names.is_empty() {
@@ -828,6 +1036,7 @@ fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
                             shared_features: &mut shared_features,
                             problem: &mut problem,
                         },
+                        strict,
                     );
                 }
             } else if unit_hash(&pkg_name).is_some() {
@@ -841,6 +1050,11 @@ fn read_profile_capped(profile_dir: &Path, dir_cap: usize) -> ProfileReport {
         }
     }
 
+    if let Some(reader) = strict
+        && let Err(why) = reader.check_cancel()
+    {
+        return unsupported(counted, why);
+    }
     if let Some(reason) = problem {
         return unsupported(counted, reason);
     }
@@ -1793,6 +2007,30 @@ mod tests {
         let r = read_profile(&p);
         assert_eq!(r.format, Format::Supported);
         assert_eq!((r.units, r.partial_unit_dirs), (1, 2));
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn the_empty_unit_output_reader_still_counts_incomplete_units_with_artifacts() {
+        let p = scratch();
+        let output = p.join("build/lib/0123456789abcdef/out");
+        fs::create_dir_all(&output).unwrap();
+        let host = cargo_hive_platform::host_fs();
+        let reader = StrictProfileReader::new(host.as_ref(), &|| false);
+        assert_eq!(reader.read_profile(&p).partial_unit_dirs, 1);
+        let empty = reader.read_profile_with_empty_unit_outputs(&p);
+        assert_eq!(empty.format, Format::Supported);
+        assert_eq!(empty.partial_unit_dirs, 0);
+
+        fs::write(output.join("lib.rlib"), b"unproved output").unwrap();
+        let occupied = reader.read_profile_with_empty_unit_outputs(&p);
+        assert_eq!(occupied.format, Format::Supported);
+        assert_eq!(occupied.partial_unit_dirs, 1);
+
+        fs::remove_file(output.join("lib.rlib")).unwrap();
+        fs::create_dir(p.join("build/lib/0123456789abcdef/fingerprint")).unwrap();
+        let fingerprint = reader.read_profile_with_empty_unit_outputs(&p);
+        assert_eq!(fingerprint.partial_unit_dirs, 1);
         fs::remove_dir_all(p).unwrap();
     }
 

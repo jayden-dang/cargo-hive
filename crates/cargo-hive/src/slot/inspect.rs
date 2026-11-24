@@ -11,8 +11,8 @@ use cargo_hive_core::classify::{CheckoutFacts, CheckoutKind, Class, classify};
 use cargo_hive_platform::flock::open_owner_state_file;
 use cargo_hive_platform::{EntryKind, Fs, HeldLock, TryLock, host_fs};
 use cargo_hive_state::slots::{
-    self, CheckoutIdentity, FileIdentity, Locator, Pool, PoolProfile, Producer, RootExpectation,
-    RootProof, Slot, VerifiedRoot,
+    self, CheckoutIdentity, EmptyEpoch, FileIdentity, Locator, OutputRoots, Pool, PoolProfile,
+    Producer, RootExpectation, RootProof, Slot, VerifiedRoot,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, Metadata};
@@ -22,6 +22,7 @@ use std::path::{Component, Path, PathBuf};
 
 const TRACKED_LIMIT: usize = 4 * 1024 * 1024;
 const CHECKOUT_ENTRIES: usize = 100_000;
+const OUTPUT_LOCK_NAMES: [&str; 3] = [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"];
 const UNFINISHED_GIT: &str =
     "The slot contains tracked or index changes or an unfinished Git operation.";
 const UNFINISHED_FILES: &str =
@@ -46,11 +47,52 @@ pub(super) struct ExpectedCheckout<'a> {
     pub head: Option<&'a str>,
 }
 
-pub(super) struct CheckoutProof {
+pub(crate) struct CheckoutProof {
     pub path: PathBuf,
     pub head: String,
-    pub inventory: CheckoutInventory,
-    _output_locks: Vec<HeldLock>,
+    pub(super) inventory: CheckoutInventory,
+    output_locks: Vec<HeldOutputLock>,
+}
+
+struct HeldOutputLock {
+    path: PathBuf,
+    lock: HeldLock,
+}
+
+impl CheckoutProof {
+    pub(crate) fn release_output_locks(&mut self) {
+        self.output_locks.clear();
+    }
+
+    pub(super) fn verify_generated_inputs(
+        &self,
+        profile: &PoolProfile,
+        producer: &Producer,
+    ) -> Result<(), Refusal> {
+        super::generated::verify_retained(profile, producer, |profile| {
+            self.holds_output_profile(profile)
+        })
+    }
+
+    pub(super) fn holds_output_profile(&self, profile: &Path) -> bool {
+        self.output_locks
+            .iter()
+            .any(|held| held.path.parent() == Some(profile))
+            && OUTPUT_LOCK_NAMES.into_iter().all(|name| {
+                let path = profile.join(name);
+                let current = match fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.is_file() => Some((metadata.dev(), metadata.ino())),
+                    Err(err) if err.kind() == ErrorKind::NotFound => None,
+                    _ => return false,
+                };
+                let recorded = self
+                    .output_locks
+                    .iter()
+                    .find(|held| held.path == path)
+                    .and_then(|held| held.lock.identity());
+                current == recorded
+            })
+    }
 }
 
 pub(super) enum CheckoutInventory {
@@ -63,6 +105,28 @@ pub(super) fn inspect_checkout(
     scope: &SlotScope<'_>,
     expected: &ExpectedCheckout<'_>,
 ) -> Result<CheckoutProof, Refusal> {
+    inspect_with_policy(scope, expected, None)
+}
+
+pub(super) struct ProducerInventory<'a> {
+    pub roots: &'a OutputRoots<RootExpectation>,
+    pub initial_empty: Option<&'a EmptyEpoch>,
+    pub mutable: &'a BTreeSet<PathBuf>,
+}
+
+pub(super) fn inspect_producer_checkout(
+    scope: &SlotScope<'_>,
+    expected: &ExpectedCheckout<'_>,
+    policy: &ProducerInventory<'_>,
+) -> Result<CheckoutProof, Refusal> {
+    inspect_with_policy(scope, expected, Some(policy))
+}
+
+fn inspect_with_policy(
+    scope: &SlotScope<'_>,
+    expected: &ExpectedCheckout<'_>,
+    policy: Option<&ProducerInventory<'_>>,
+) -> Result<CheckoutProof, Refusal> {
     let pool = scope.pool;
     let path = pool.checkout_path(scope.slot);
     let identity = expected.identity;
@@ -70,23 +134,23 @@ pub(super) fn inspect_checkout(
         return Err(checkout_refusal());
     }
     let head = verify_checkout_scope(scope, &path, expected)?;
-    let (inventory, output_locks) = match inventory(scope, &path, identity, head.len()) {
+    let (inventory, output_locks) = match inventory(scope, &path, identity, head.len(), policy) {
         Ok(locks) => (CheckoutInventory::Clean, locks),
         Err(Refusal::ReturnWork(detail)) => (CheckoutInventory::Dirty(detail), Vec::new()),
         Err(Refusal::ReturnUncertain(detail)) => (CheckoutInventory::Uncertain(detail), Vec::new()),
         Err(err) => return Err(err),
     };
-    if !linked_checkout_identity_matches(&path, identity, &pool.common_git_id.path)
-        || observed_head(&path)? != head
-    {
-        return Err(checkout_refusal());
-    }
-    Ok(CheckoutProof {
+    let proof = CheckoutProof {
         path,
         head,
         inventory,
-        _output_locks: output_locks,
-    })
+        output_locks,
+    };
+    if matches!(proof.inventory, CheckoutInventory::Clean) {
+        proof.verify_generated_inputs(&scope.pool.profile, &scope.slot.producer)?;
+    }
+    verify_linked_head(&proof.path, identity, &pool.common_git_id.path, &proof.head)?;
+    Ok(proof)
 }
 
 fn checkout_refusal() -> Refusal {
@@ -102,7 +166,7 @@ pub(super) fn owned_identity(path: &Path) -> Option<FileIdentity> {
         .map(FileIdentity::of)
 }
 
-fn verify_checkout_scope(
+pub(super) fn verify_checkout_scope(
     scope: &SlotScope<'_>,
     path: &Path,
     expected: &ExpectedCheckout<'_>,
@@ -222,25 +286,83 @@ fn observed_head(path: &Path) -> Result<String, Refusal> {
     Ok(head.into())
 }
 
+pub(super) fn verify_linked_head(
+    path: &Path,
+    identity: &CheckoutIdentity,
+    common: &Path,
+    commit: &str,
+) -> Result<(), Refusal> {
+    if !linked_checkout_identity_matches(path, identity, common) || observed_head(path)? != commit {
+        return Err(checkout_refusal());
+    }
+    Ok(())
+}
+
+pub(super) fn inspect_fresh_checkout(
+    checkout: &Path,
+    common: &Path,
+    commit: &str,
+) -> Result<CheckoutIdentity, Refusal> {
+    let identity = super::new_checkout_identity(checkout, common)?;
+    verify_linked_head(checkout, &identity, common, commit)?;
+    reject_incomplete_operations(&identity.admin.path)?;
+    let tracked = tracked_paths(checkout, commit.len())?;
+    let fs = host_fs();
+    inspect_inventory(
+        checkout,
+        &identity,
+        &tracked,
+        BTreeMap::new(),
+        None,
+        fs.as_ref(),
+    )?;
+    verify_linked_head(checkout, &identity, common, commit)?;
+    Ok(identity)
+}
+
 fn inventory(
     scope: &SlotScope<'_>,
     checkout: &Path,
     identity: &CheckoutIdentity,
     oid_len: usize,
-) -> Result<Vec<HeldLock>, Refusal> {
+    policy: Option<&ProducerInventory<'_>>,
+) -> Result<Vec<HeldOutputLock>, Refusal> {
     reject_incomplete_operations(&identity.admin.path)?;
     let tracked = tracked_paths(checkout, oid_len)?;
     let fs = host_fs();
-    let retained = retained_roots(scope, checkout, &tracked, fs.as_ref())?;
+    let retained = retained_roots(scope, checkout, &tracked, fs.as_ref(), policy)?;
+    inspect_inventory(
+        checkout,
+        identity,
+        &tracked,
+        retained,
+        policy.map(|policy| policy.mutable),
+        fs.as_ref(),
+    )
+}
+
+fn inspect_inventory(
+    checkout: &Path,
+    identity: &CheckoutIdentity,
+    tracked: &BTreeMap<PathBuf, EntryKind>,
+    retained: BTreeMap<PathBuf, FileIdentity>,
+    mutable: Option<&BTreeSet<PathBuf>>,
+    fs: &dyn Fs,
+) -> Result<Vec<HeldOutputLock>, Refusal> {
     let mut directories = BTreeSet::new();
-    for path in tracked.keys().chain(retained.keys()) {
+    for path in tracked
+        .keys()
+        .chain(retained.keys())
+        .chain(mutable.into_iter().flatten())
+    {
         directories.extend(path.ancestors().skip(1).map(Path::to_path_buf));
     }
     let mut walk = CheckoutWalk {
-        fs: fs.as_ref(),
+        fs,
         checkout,
         device: identity.directory.dev,
-        tracked: &tracked,
+        tracked,
+        mutable,
         directories,
         retained,
         remaining: CHECKOUT_ENTRIES,
@@ -270,16 +392,35 @@ fn inventory(
             "-z",
             "--no-branch",
             "--no-show-stash",
+            "--no-renames",
             "--untracked-files=no",
             "--ignore-submodules=none",
         ],
         GIT_OUTPUT_LIMIT,
     )?;
-    if !status.is_empty() {
+    if !status.is_empty()
+        && !mutable.is_some_and(|paths| reviewed_worktree_edits(&status, checkout, paths))
+    {
         return Err(Refusal::ReturnWork(UNFINISHED_GIT));
     }
     reject_incomplete_operations(&identity.admin.path)?;
     Ok(walk.output_locks)
+}
+
+fn reviewed_worktree_edits(status: &[u8], checkout: &Path, paths: &BTreeSet<PathBuf>) -> bool {
+    nul_records(status).is_ok_and(|rows| {
+        rows.into_iter().all(|row| {
+            let Ok(row) = std::str::from_utf8(row) else {
+                return false;
+            };
+            let fields = row.splitn(9, ' ').collect::<Vec<_>>();
+            matches!(
+                fields.as_slice(),
+                ["1", ".M" | ".D", "N...", _, _, _, _, _, path]
+                    if paths.contains(&checkout.join(path))
+            )
+        })
+    })
 }
 
 fn reject_incomplete_operations(admin: &Path) -> Result<(), Refusal> {
@@ -435,45 +576,20 @@ fn retained_roots(
     checkout: &Path,
     tracked: &BTreeMap<PathBuf, EntryKind>,
     fs: &dyn Fs,
+    policy: Option<&ProducerInventory<'_>>,
 ) -> Result<BTreeMap<PathBuf, FileIdentity>, Refusal> {
     let incomplete = || Refusal::ReturnUncertain(UNCERTAIN_ROOT);
     let profile = &scope.pool.profile;
-    let roots = match &scope.slot.producer {
-        Producer::NeverBuilt {
-            evidence: Some(evidence),
-        } => [
-            (&evidence.roots.target).into(),
-            (&evidence.roots.build).into(),
-        ],
-        Producer::SeedOnly { final_roots, .. } => {
-            [(&final_roots.target).into(), (&final_roots.build).into()]
+    let roots = if let Some(policy) = policy {
+        match policy.initial_empty {
+            Some(initial) => [
+                (&initial.roots.target).into(),
+                (&initial.roots.build).into(),
+            ],
+            None => [(&policy.roots.target).into(), (&policy.roots.build).into()],
         }
-        Producer::Complete {
-            roots,
-            invocations,
-            generation,
-            ..
-        } => {
-            if *generation != scope.slot.generation
-                && generation.checked_add(1) != Some(scope.slot.generation)
-            {
-                return Err(Refusal::ReturnUncertain(UNCERTAIN_PRODUCER));
-            }
-            if !invocations.iter().all(|item| {
-                profile.invocations.iter().any(|invocation| {
-                    invocation.id == item.evidence.invocation
-                        && checkout.join(&invocation.target_root) == roots.target.path
-                        && checkout.join(&invocation.build_root) == roots.build.path
-                })
-            }) {
-                return Err(incomplete());
-            }
-            [
-                OutputRoot::Retained(&roots.target),
-                OutputRoot::Retained(&roots.build),
-            ]
-        }
-        _ => return Err(Refusal::ReturnUncertain(UNCERTAIN_PRODUCER)),
+    } else {
+        retained_root_records(scope, checkout)?
     };
     let [target, build] = roots.each_ref().map(OutputRoot::path);
     if !profile.invocations.iter().any(|invocation| {
@@ -516,6 +632,49 @@ fn retained_roots(
         }
     }
     Ok(verified)
+}
+
+fn retained_root_records<'a>(
+    scope: &SlotScope<'a>,
+    checkout: &Path,
+) -> Result<[OutputRoot<'a>; 2], Refusal> {
+    if !scope
+        .slot
+        .producer
+        .has_eligible_evidence(scope.slot.generation)
+    {
+        return Err(Refusal::ReturnUncertain(UNCERTAIN_PRODUCER));
+    }
+    let profile = &scope.pool.profile;
+    Ok(match &scope.slot.producer {
+        Producer::NeverBuilt {
+            evidence: Some(evidence),
+        } => [
+            (&evidence.roots.target).into(),
+            (&evidence.roots.build).into(),
+        ],
+        Producer::SeedOnly { final_roots, .. } => {
+            [(&final_roots.target).into(), (&final_roots.build).into()]
+        }
+        Producer::Complete {
+            roots, invocations, ..
+        } => {
+            if !invocations.iter().all(|item| {
+                profile.invocations.iter().any(|invocation| {
+                    invocation.id == item.evidence.invocation
+                        && checkout.join(&invocation.target_root) == roots.target.path
+                        && checkout.join(&invocation.build_root) == roots.build.path
+                })
+            }) {
+                return Err(Refusal::ReturnUncertain(UNCERTAIN_ROOT));
+            }
+            [
+                OutputRoot::Retained(&roots.target),
+                OutputRoot::Retained(&roots.build),
+            ]
+        }
+        _ => return Err(Refusal::ReturnUncertain(UNCERTAIN_PRODUCER)),
+    })
 }
 
 fn input_paths(profile: &PoolProfile, checkout: &Path) -> Result<BTreeSet<PathBuf>, Refusal> {
@@ -561,11 +720,12 @@ struct CheckoutWalk<'a> {
     checkout: &'a Path,
     device: u64,
     tracked: &'a BTreeMap<PathBuf, EntryKind>,
+    mutable: Option<&'a BTreeSet<PathBuf>>,
     directories: BTreeSet<PathBuf>,
     retained: BTreeMap<PathBuf, FileIdentity>,
     remaining: usize,
     linked_outputs: BTreeMap<(u64, u64), (u64, u64)>,
-    output_locks: Vec<HeldLock>,
+    output_locks: Vec<HeldOutputLock>,
 }
 
 impl CheckoutWalk<'_> {
@@ -612,6 +772,8 @@ impl CheckoutWalk<'_> {
                     match self.tracked.get(&path) {
                         Some(expected) if *expected == kind => {}
                         Some(_) => return Err(Refusal::ReturnWork(UNFINISHED_GIT)),
+                        None if kind == EntryKind::File
+                            && self.mutable.is_some_and(|paths| paths.contains(&path)) => {}
                         None => return Err(Refusal::ReturnWork(UNFINISHED_FILES)),
                     }
                 }
@@ -657,7 +819,7 @@ impl CheckoutWalk<'_> {
             )
         };
         // Resolve the names Cargo opens so the filesystem determines equivalent spellings.
-        for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
+        for name in OUTPUT_LOCK_NAMES {
             let path = dir.join(name);
             let entry = match self.fs.entry_stat(&path) {
                 Ok(entry) if entry.kind == EntryKind::File && entry.dev == self.device => entry,
@@ -671,7 +833,7 @@ impl CheckoutWalk<'_> {
             if lock.identity() != Some((actual.dev, actual.ino)) || actual != entry {
                 return Err(refusal());
             }
-            self.output_locks.push(lock);
+            self.output_locks.push(HeldOutputLock { path, lock });
         }
         Ok(())
     }

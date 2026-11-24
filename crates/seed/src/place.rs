@@ -8,8 +8,9 @@
 //! and the same clone id as its store file; anything else adds that file's allocated blocks.
 //! `private_bytes` is not read. The store's size is its allocated blocks.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -53,9 +54,53 @@ struct Added {
     bytes: u64,
     failed: bool,
     gaps: Vec<(String, String)>,
+    scoped_files: Option<BTreeMap<PathBuf, PlacedFile>>,
+}
+
+#[derive(PartialEq, Eq)]
+struct PlacedFile {
+    identity: cargo_hive_state::slots::FileIdentity,
+    mode: u32,
+    len: u64,
+    changed: (i64, i64),
+    modified: SystemTime,
+}
+
+impl PlacedFile {
+    fn inspect(file: &std::fs::File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        Ok(Self {
+            identity: cargo_hive_state::slots::FileIdentity::of(&metadata),
+            mode: metadata.mode(),
+            len: metadata.len(),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+            modified: metadata.modified()?,
+        })
+    }
 }
 
 impl Added {
+    fn accept(&mut self, fs: &dyn Fs, path: &Path) -> Result<(), Stop> {
+        let Some(files) = &mut self.scoped_files else {
+            return accept_placed(fs, path);
+        };
+        let unproved =
+            || Stop::Failed("the scoped clone was not a proved regular uncompressed file".into());
+        let observed = fs.entry_stat(path).map_err(|_| unproved())?;
+        if observed.kind != EntryKind::File || observed.compressed {
+            return Err(unproved());
+        }
+        let file =
+            cargo_hive_platform::flock::open_owner_state_file(path).map_err(|_| unproved())?;
+        let placed = PlacedFile::inspect(&file).map_err(|_| unproved())?;
+        if (placed.identity.dev, placed.identity.ino) != (observed.dev, observed.ino)
+            || files.insert(path.to_path_buf(), placed).is_some()
+        {
+            return Err(unproved());
+        }
+        Ok(())
+    }
+
     fn gap(&mut self, path: &Path, err: &io::Error) {
         self.failed = true;
         self.gaps.push((
@@ -187,26 +232,191 @@ pub fn place(
     dir_cap: usize,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<PlaceReport, Error> {
+    place_selected(ctx, checkout, units, window, dir_cap, None, cancel)
+}
+
+/// An independently verified, initially absent slot output, using coincident Cargo roles.
+pub struct SlotDestination<'a> {
+    pub target: &'a Path,
+    pub checkout_identity: cargo_hive_state::slots::FileIdentity,
+    pub registry: &'a cargo_hive_cargo::registry::Registry,
+    pub config: &'a cargo_hive_state::Config,
+}
+
+impl SlotDestination<'_> {
+    fn scope_matches(&self, ctx: &Ctx<'_>) -> Result<bool, cargo_hive_state::StateError> {
+        let current: cargo_hive_cargo::registry::Registry = ctx.state.read_regular_bounded(
+            cargo_hive_cargo::registry::FILE,
+            cargo_hive_state::slots::MAX_BYTES,
+        )?;
+        Ok(&current == self.registry && &ctx.state.slot_config()? == self.config)
+    }
+
+    /// Holds the ordinary state lock across one checked placement effect, using the preflight
+    /// registry and configuration. The caller checks all filesystem identities in the effect.
+    pub fn with_effect<T>(
+        &self,
+        state: &cargo_hive_state::State,
+        cancel: &dyn Fn() -> bool,
+        effect: impl FnOnce() -> io::Result<T>,
+    ) -> Result<io::Result<T>, cargo_hive_state::StateError> {
+        state.slot_locked_or_cancelled(cancel, |tx| {
+            let registry: cargo_hive_cargo::registry::Registry = tx.read_slot_registry()?;
+            if &registry != self.registry || &state.slot_config()? != self.config || cancel() {
+                return Ok(Err(io::Error::other(
+                    "the scoped seed registry or configuration changed before placement",
+                )));
+            }
+            Ok(effect())
+        })
+    }
+
+    fn create_root(
+        &self,
+        ctx: &Ctx<'_>,
+        checkout: &Path,
+        cancel: &(dyn Fn() -> bool + Sync),
+    ) -> Result<io::Result<()>, Error> {
+        self.with_effect(ctx.state, cancel, || {
+            if !self.checkout_matches(ctx.fs, checkout)
+                || !self
+                    .target
+                    .parent()
+                    .is_some_and(|parent| parent.canonicalize().as_deref().ok() == Some(parent))
+                || !ctx
+                    .fs
+                    .entry_stat(self.target)
+                    .is_err_and(|err| err.kind() == io::ErrorKind::NotFound)
+            {
+                return Err(io::Error::other(
+                    "the checked slot seed destination changed",
+                ));
+            }
+            ctx.fs.create_dir(self.target)
+        })
+        .map_err(Error::State)
+    }
+
+    fn checkout_matches(&self, fs: &dyn Fs, checkout: &Path) -> bool {
+        self.target != checkout
+            && self.target.starts_with(checkout)
+            && checkout.canonicalize().as_deref().ok() == Some(checkout)
+            && fs.entry_stat(checkout).is_ok_and(|stat| {
+                stat.kind == EntryKind::Dir
+                    && (stat.dev, stat.ino)
+                        == (self.checkout_identity.dev, self.checkout_identity.ino)
+            })
+    }
+}
+
+pub(crate) fn place_for_slot(
+    ctx: &Ctx<'_>,
+    checkout: &Path,
+    units: &[Row],
+    window: Duration,
+    dir_cap: usize,
+    destination: &SlotDestination<'_>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<PlaceReport, Error> {
+    place_selected(
+        ctx,
+        checkout,
+        units,
+        window,
+        dir_cap,
+        Some(destination),
+        cancel,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct PlacementScope<'a> {
+    destination: &'a SlotDestination<'a>,
+    state: &'a cargo_hive_state::State,
+    cancel: &'a (dyn Fn() -> bool + Sync),
+    guard: &'a dyn Fn(&Path) -> bool,
+}
+
+#[derive(Clone, Copy)]
+struct PlacementRoot<'a> {
+    path: &'a Path,
+    scope: Option<PlacementScope<'a>>,
+}
+
+impl PlacementRoot<'_> {
+    fn permits(self, directory: &Path) -> bool {
+        self.scope.is_none_or(|scope| (scope.guard)(directory))
+    }
+
+    fn with_effect<T>(
+        self,
+        parent: &Path,
+        checked: impl FnOnce() -> bool,
+        effect: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        let run = || {
+            if !self.permits(parent) || !checked() {
+                return Err(io::Error::other("a checked slot seed ancestor changed"));
+            }
+            effect()
+        };
+        match self.scope {
+            Some(scope) => scope
+                .destination
+                .with_effect(scope.state, scope.cancel, run)
+                .map_err(io::Error::other)?,
+            None => run(),
+        }
+    }
+}
+
+fn place_selected(
+    ctx: &Ctx<'_>,
+    checkout: &Path,
+    units: &[Row],
+    window: Duration,
+    dir_cap: usize,
+    destination: Option<&SlotDestination<'_>>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<PlaceReport, Error> {
     if units.is_empty() {
         return finish(ctx, PlaceReport::default(), &mut Added::default());
     }
     let mut report = PlaceReport::default();
-    let resolved = match cargo_hive_cargo::metadata::resolve(checkout, cancel) {
-        Ok(resolved) => resolved,
-        Err(reason) => {
-            report.findings.push((
-                "target.unresolved".to_string(),
-                Some(checkout.to_path_buf()),
-                format!(
-                    "{checkout}: {reason}; nothing was cloned",
-                    checkout = checkout.display()
-                ),
+    let target = if let Some(destination) = destination {
+        let ready = !cancel()
+            && destination.checkout_matches(ctx.fs, checkout)
+            && destination
+                .target
+                .parent()
+                .is_some_and(|parent| parent.canonicalize().as_deref().ok() == Some(parent))
+            && ctx
+                .fs
+                .entry_stat(destination.target)
+                .is_err_and(|err| err.kind() == io::ErrorKind::NotFound);
+        if !ready {
+            return Err(Error::Failed(
+                "the verified slot seed destination changed".into(),
             ));
-            return finish(ctx, report, &mut Added::default());
         }
-    };
-    if resolved.build_directory != resolved.target_directory {
-        report.findings.push((
+        destination.target.to_path_buf()
+    } else {
+        let resolved = match cargo_hive_cargo::metadata::resolve(checkout, cancel) {
+            Ok(resolved) => resolved,
+            Err(reason) => {
+                report.findings.push((
+                    "target.unresolved".to_string(),
+                    Some(checkout.to_path_buf()),
+                    format!(
+                        "{checkout}: {reason}; nothing was cloned",
+                        checkout = checkout.display()
+                    ),
+                ));
+                return finish(ctx, report, &mut Added::default());
+            }
+        };
+        if resolved.build_directory != resolved.target_directory {
+            report.findings.push((
             "target.split".to_string(),
             Some(resolved.target_directory.clone()),
             format!(
@@ -215,11 +425,16 @@ pub fn place(
                 resolved.target_directory.display()
             ),
         ));
-        return finish(ctx, report, &mut Added::default());
-    }
-    let target = resolved.target_directory;
+            return finish(ctx, report, &mut Added::default());
+        }
+        resolved.target_directory
+    };
     report.target_directory = Some(target.clone());
-    match ctx.fs.create_dir(&target) {
+    let created = match destination {
+        Some(scope) => scope.create_root(ctx, checkout, cancel)?,
+        None => ctx.fs.create_dir(&target),
+    };
+    match created {
         Ok(()) => {}
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
             report.findings.push((
@@ -252,21 +467,66 @@ pub fn place(
         ))
     })?;
     report.target_identity = Some((stat.dev, stat.ino));
-    let mut added = Added::default();
-    if let Err(stop) = clone_tag(ctx, &mut added, &target) {
+    let check = |directory: &Path| {
+        destination.is_some_and(|destination| {
+            !cancel()
+                && destination.checkout_matches(ctx.fs, checkout)
+                && directory.starts_with(&target)
+                && directory.canonicalize().as_deref().ok() == Some(directory)
+                && ctx.fs.entry_stat(&target).is_ok_and(|actual| {
+                    actual.kind == EntryKind::Dir
+                        && (actual.dev, actual.ino) == (stat.dev, stat.ino)
+                })
+        })
+    };
+    let root = PlacementRoot {
+        path: &target,
+        scope: destination.map(|destination| PlacementScope {
+            destination,
+            state: ctx.state,
+            cancel,
+            guard: &check,
+        }),
+    };
+    if !root.permits(&target) {
+        return Err(Error::Failed("the created slot seed target changed".into()));
+    }
+    let mut added = Added {
+        scoped_files: destination.map(|_| BTreeMap::new()),
+        ..Added::default()
+    };
+    if let Err(stop) = clone_tag(ctx, &mut added, root) {
         return match stop.into_result(&mut report, "tag.clone", &target) {
             Ok(report) => finish(ctx, report, &mut added),
             Err(err) => Err(err),
         };
     }
-    let mut made = HashSet::new();
-    made.insert(target.clone());
+    let mut made = if destination.is_some() {
+        let identity = directory_identity(&target).ok_or_else(|| {
+            Error::Failed("the new slot seed target identity is unavailable".into())
+        })?;
+        if (identity.dev, identity.ino) != (stat.dev, stat.ino) {
+            return Err(Error::Failed(
+                "the new slot seed target identity changed".into(),
+            ));
+        }
+        PlacementDirs::Scoped(BTreeMap::from([(target.clone(), identity)]))
+    } else {
+        PlacementDirs::Standalone(HashSet::from([target.clone()]))
+    };
     for row in units {
         if cancel() {
             report.cancelled = true;
             break;
         }
-        match place_unit(ctx, &target, row, window, dir_cap, &mut made, &mut added) {
+        if let Some(scope) = destination
+            && !scope.scope_matches(ctx).map_err(Error::State)?
+        {
+            return Err(Error::Failed(
+                "the scoped seed registry or configuration changed".into(),
+            ));
+        }
+        match place_unit(ctx, root, row, window, dir_cap, &mut made, &mut added) {
             Ok(UnitOutcome::Cloned(unit, outside)) => {
                 report.cloned += 1;
                 if outside {
@@ -287,12 +547,25 @@ pub fn place(
                     return Err(Error::disk_full(why));
                 }
                 report.disk_full = Some(why);
-                align_mtimes(ctx, &target, &mut report);
+                if destination.is_none() {
+                    align_mtimes(ctx, &target, &mut report);
+                }
                 return finish(ctx, report, &mut added);
             }
         }
     }
-    align_mtimes(ctx, &target, &mut report);
+    if !root.permits(&target) {
+        return Err(Error::Failed(
+            "the slot seed target changed before completion".into(),
+        ));
+    }
+    match destination {
+        Some(_) if !report.cancelled && report.failed == 0 && report.existing == 0 => {
+            align_scoped(root, &made, &added, &mut report)?;
+        }
+        Some(_) => (),
+        None => align_mtimes(ctx, &target, &mut report),
+    }
     finish(ctx, report, &mut added)
 }
 
@@ -334,6 +607,10 @@ fn align_mtimes(ctx: &Ctx<'_>, target: &Path, report: &mut PlaceReport) {
             ));
         }
     }
+    update_stamps(report, newest);
+}
+
+fn update_stamps(report: &mut PlaceReport, newest: SystemTime) {
     let Some(ns) = newest
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -348,6 +625,55 @@ fn align_mtimes(ctx: &Ctx<'_>, target: &Path, report: &mut PlaceReport) {
     }
 }
 
+fn align_scoped(
+    root: PlacementRoot<'_>,
+    made: &PlacementDirs,
+    added: &Added,
+    report: &mut PlaceReport,
+) -> Result<(), Error> {
+    let unproved =
+        || Error::Failed("the verified scoped seed files changed before alignment".into());
+    let files = added.scoped_files.as_ref().ok_or_else(unproved)?;
+    let newest = files
+        .values()
+        .map(|file| file.modified)
+        .max()
+        .ok_or_else(unproved)?;
+    if newest > SystemTime::now() {
+        return Err(unproved());
+    }
+    for (path, original) in files {
+        let parent = path.parent().ok_or_else(unproved)?;
+        root.with_effect(
+            parent,
+            || made.matches(root.path, parent),
+            || {
+                let changed = || io::Error::other("a verified scoped seed file changed");
+                let file = cargo_hive_platform::flock::open_owner_state_file(path)?;
+                if PlacedFile::inspect(&file)? != *original
+                    || !root.permits(parent)
+                    || !made.matches(root.path, parent)
+                {
+                    return Err(changed());
+                }
+                file.set_modified(newest)?;
+                let observed = PlacedFile::inspect(&file)?;
+                if observed.identity != original.identity
+                    || observed.mode != original.mode
+                    || observed.len != original.len
+                    || observed.modified != newest
+                {
+                    return Err(changed());
+                }
+                Ok(())
+            },
+        )
+        .map_err(|_| unproved())?;
+    }
+    update_stamps(report, newest);
+    Ok(())
+}
+
 enum UnitOutcome {
     Cloned(SeededUnit, bool),
     Existing,
@@ -356,13 +682,14 @@ enum UnitOutcome {
 
 fn place_unit(
     ctx: &Ctx<'_>,
-    target: &Path,
+    root: PlacementRoot<'_>,
     row: &Row,
     window: Duration,
     dir_cap: usize,
-    made: &mut HashSet<PathBuf>,
+    made: &mut PlacementDirs,
     added: &mut Added,
 ) -> Result<UnitOutcome, String> {
+    let target = root.path;
     if !normal_only(&row.rel_profile) {
         return Ok(UnitOutcome::Failed(
             target.to_path_buf(),
@@ -395,18 +722,35 @@ fn place_unit(
     let mut has_build = false;
     for rel in &files {
         let dst = target.join(rel);
+        if !root.permits(target) {
+            return Ok(UnitOutcome::Failed(
+                dst,
+                "the slot seed target changed before directory creation".into(),
+            ));
+        }
         if let Some(parent) = dst.parent()
-            && let Err(stop) = ensure_dirs(ctx.fs, parent, target, made)
+            && let Err(stop) = made.ensure(ctx.fs, root, parent)
         {
             return match stop {
                 Stop::Full(why) => Err(why),
                 Stop::Failed(detail) => Ok(UnitOutcome::Failed(dst, detail)),
             };
         }
+        let Some(parent) = dst.parent() else {
+            return Ok(UnitOutcome::Failed(
+                dst,
+                "the slot seed destination changed before cloning".into(),
+            ));
+        };
         let src = entry.join(rel);
-        match ctx.fs.clone_file(&src, &dst) {
+        let cloned = root.with_effect(
+            parent,
+            || made.matches(root.path, parent),
+            || ctx.fs.clone_file(&src, &dst),
+        );
+        match cloned {
             Ok(()) => {
-                if let Err(stop) = accept_placed(ctx.fs, &dst) {
+                if let Err(stop) = added.accept(ctx.fs, &dst) {
                     return match stop {
                         Stop::Full(why) => Err(why),
                         Stop::Failed(detail) => Ok(UnitOutcome::Failed(
@@ -457,12 +801,12 @@ fn place_unit(
     ))
 }
 
-fn clone_tag(ctx: &Ctx<'_>, added: &mut Added, target: &Path) -> Result<(), Stop> {
+fn clone_tag(ctx: &Ctx<'_>, added: &mut Added, root: PlacementRoot<'_>) -> Result<(), Stop> {
     let src = store::tag_path(ctx.state);
-    let dst = target.join("CACHEDIR.TAG");
-    match ctx.fs.clone_file(&src, &dst) {
+    let dst = root.path.join("CACHEDIR.TAG");
+    match root.with_effect(root.path, || true, || ctx.fs.clone_file(&src, &dst)) {
         Ok(()) => {
-            if let Err(stop) = accept_placed(ctx.fs, &dst) {
+            if let Err(stop) = added.accept(ctx.fs, &dst) {
                 return Err(match stop {
                     Stop::Full(why) => Stop::Full(why),
                     Stop::Failed(detail) => Stop::Failed(format!(
@@ -519,6 +863,96 @@ fn list_files(fs: &dyn Fs, root: &Path, dir_cap: usize) -> Result<Vec<PathBuf>, 
         }
     }
     Ok(files)
+}
+
+enum PlacementDirs {
+    Standalone(HashSet<PathBuf>),
+    Scoped(BTreeMap<PathBuf, cargo_hive_state::slots::FileIdentity>),
+}
+
+fn directory_identity(path: &Path) -> Option<cargo_hive_state::slots::FileIdentity> {
+    if path.canonicalize().as_deref().ok() != Some(path) {
+        return None;
+    }
+    cargo_hive_state::slots::owner_directory(path)
+        .ok()
+        .map(|metadata| cargo_hive_state::slots::FileIdentity::of(&metadata))
+}
+
+impl PlacementDirs {
+    fn matches(&self, root: &Path, directory: &Path) -> bool {
+        let Self::Scoped(made) = self else {
+            return true;
+        };
+        scoped_chain_matches(root, directory, made)
+    }
+
+    fn ensure(
+        &mut self,
+        fs: &dyn Fs,
+        root: PlacementRoot<'_>,
+        directory: &Path,
+    ) -> Result<(), Stop> {
+        let made = match self {
+            Self::Scoped(made) => made,
+            Self::Standalone(made) => return ensure_dirs(fs, directory, root.path, made),
+        };
+        let unproved = || Stop::Failed("a checked slot seed ancestor changed".into());
+        let relative = directory.strip_prefix(root.path).map_err(|_| unproved())?;
+        if relative.components().count() > MAX_DEPTH || !normal_only(relative) {
+            return Err(unproved());
+        }
+        let mut parent = root.path.to_path_buf();
+        for part in relative.components() {
+            if !scoped_chain_matches(root.path, &parent, made) {
+                return Err(unproved());
+            }
+            let path = parent.join(part.as_os_str());
+            if let Some(expected) = made.get(&path) {
+                if directory_identity(&path).as_ref() != Some(expected) {
+                    return Err(unproved());
+                }
+            } else {
+                let created = root.with_effect(
+                    &parent,
+                    || scoped_chain_matches(root.path, &parent, made),
+                    || fs.create_dir(&path),
+                );
+                match created {
+                    Ok(()) => (),
+                    Err(err) if is_full(&err) => return Err(Stop::Full(err.to_string())),
+                    Err(err) => return Err(Stop::Failed(err.to_string())),
+                }
+                let identity = directory_identity(&path).ok_or_else(unproved)?;
+                let target = made.get(root.path).ok_or_else(unproved)?;
+                if identity.dev != target.dev {
+                    return Err(unproved());
+                }
+                made.insert(path.clone(), identity);
+            }
+            parent = path;
+        }
+        if scoped_chain_matches(root.path, directory, made) {
+            Ok(())
+        } else {
+            Err(unproved())
+        }
+    }
+}
+
+fn scoped_chain_matches(
+    root: &Path,
+    directory: &Path,
+    made: &BTreeMap<PathBuf, cargo_hive_state::slots::FileIdentity>,
+) -> bool {
+    directory.starts_with(root)
+        && directory
+            .ancestors()
+            .take_while(|path| path.starts_with(root))
+            .all(|path| {
+                made.get(path)
+                    .is_some_and(|id| directory_identity(path).as_ref() == Some(id))
+            })
 }
 
 fn ensure_dirs(
@@ -710,6 +1144,210 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn scoped_seed_does_not_create_through_a_replaced_ancestor() {
+        let proof = cargo_hive_platform::TempDir::adopt(scratch("seed-ancestor"));
+        let root = proof.path().join("target");
+        let profile = root.join("debug");
+        let outside = proof.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&profile).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let mut made = super::PlacementDirs::Scoped(std::collections::BTreeMap::from([
+            (root.clone(), super::directory_identity(&root).unwrap()),
+            (
+                profile.clone(),
+                super::directory_identity(&profile).unwrap(),
+            ),
+        ]));
+        fs::rename(&profile, root.join("retired")).unwrap();
+        std::os::unix::fs::symlink(&outside, &profile).unwrap();
+        let fs = cargo_hive_platform::host_fs();
+        let placement = super::PlacementRoot {
+            path: &root,
+            scope: None,
+        };
+        let result = made.ensure(fs.as_ref(), placement, &profile.join("deps"));
+        assert!(
+            !outside.join("deps").exists(),
+            "scoped placement created through an alias"
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scoped_seed_stops_artifact_effects_when_a_competing_resolver_registers() {
+        use cargo_hive_cargo::{ctx::Ctx, registry};
+        use cargo_hive_platform::{flock, host_fs, proc};
+        use cargo_hive_state::State;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let scratch = cargo_hive_platform::TempDir::adopt(scratch("seed-late-registry"));
+        let state = State::open_at(scratch.path().join("hive")).unwrap();
+        let config = state.slot_config().unwrap();
+        let registry = registry::Registry::default();
+        let checkout = scratch.path().join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        let target = checkout.join("target");
+        let competitor = scratch.path().join("competitor");
+        fs::create_dir_all(competitor.join(".cargo")).unwrap();
+        fs::write(competitor.join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::write(
+            competitor.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = {:?}\n", target),
+        )
+        .unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["add", "."],
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "commit",
+                "-qm",
+                "Fixture",
+            ],
+        ] {
+            let mut git = proc::Spec::new("/usr/bin/git");
+            git.args = args.iter().map(|arg| (*arg).into()).collect();
+            git.cwd = Some(competitor.clone());
+            let output =
+                proc::output_with_deadline(&git, Duration::from_secs(5), || false).unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+
+        let row = crate::store::Row {
+            toolchain_value: 1,
+            name_meta: "fixture-aaaaaaaaaaaaaaaa".into(),
+            fingerprint_hash: "bbbbbbbbbbbbbbbb".into(),
+            kind: "lib".into(),
+            rel_profile: "debug".into(),
+            size: 0,
+            filled_at: 0,
+            last_live_at: 0,
+            repos: Vec::new(),
+            registry_deps: Vec::new(),
+            variant: 0,
+            unit_layout: super::UnitLayout::Flat,
+        };
+        let donor = crate::store::entry_dir(&state, &row).join("debug/deps");
+        fs::create_dir_all(&donor).unwrap();
+        fs::write(donor.join("libfixture-aaaaaaaaaaaaaaaa.rmeta"), b"donor").unwrap();
+        fs::write(crate::store::tag_path(&state), b"cache tag").unwrap();
+
+        let check_checkout = checkout.clone();
+        let check_target = target.clone();
+        let state_root = state.root().to_path_buf();
+        let competitor_root = competitor.clone();
+        let registered = AtomicBool::new(false);
+        let hooked = Hooked {
+            inner: host_fs(),
+            compress: None,
+            volume: None,
+            sharing: None,
+            entry_stat: Some(Box::new(move |path| {
+                // The tag is already placed. This check is the first destination observation
+                // after the donor listing, before any nested directory or artifact effect.
+                if path == check_checkout && check_target.join("CACHEDIR.TAG").is_file() {
+                    let lock = flock::open_owner_state_lock(&state_root.join(".lock")).unwrap();
+                    if let Some(guard) = flock::try_exclusive(&lock).unwrap() {
+                        drop(guard);
+                        if !registered.swap(true, Ordering::SeqCst) {
+                            State::open_at(state_root.clone())
+                                .unwrap()
+                                .locked(|tx| registry::register(&competitor_root, tx))
+                                .unwrap()
+                                .unwrap();
+                        }
+                    }
+                }
+                host_fs().entry_stat(path)
+            })),
+        };
+        let ctx = Ctx {
+            state: &state,
+            fs: &hooked,
+            cfg: &config,
+            now: SystemTime::now(),
+            account_bytes: false,
+            repos: &[],
+            mains: &[],
+            liveness: crate::no_liveness,
+        };
+        let scope = super::SlotDestination {
+            target: &target,
+            checkout_identity: super::directory_identity(&checkout).unwrap(),
+            registry: &registry,
+            config: &config,
+        };
+        let placed = super::place_for_slot(
+            &ctx,
+            &checkout,
+            &[row],
+            Duration::from_secs(60),
+            16,
+            &scope,
+            &|| false,
+        );
+        let current: registry::Registry = state.read(registry::FILE).unwrap();
+        assert_eq!(current.repos[0].main, competitor);
+        assert_eq!(fs::read(target.join("CACHEDIR.TAG")).unwrap(), b"cache tag");
+        assert!(
+            !target.join("debug").exists(),
+            "scoped seed wrote after registration"
+        );
+        assert!(placed.is_err() || placed.is_ok_and(|report| report.placed.is_empty()));
+    }
+
+    #[test]
+    fn scoped_alignment_refuses_a_replaced_file_without_touching_its_destination() {
+        let scratch = cargo_hive_platform::TempDir::adopt(scratch("seed-alignment"));
+        let target = scratch.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let output = target.join("confirmed-clone");
+        let sentinel = scratch.path().join("outside");
+        fs::write(&output, b"confirmed clone").unwrap();
+        fs::write(&sentinel, b"preserve me").unwrap();
+        let before = fs::metadata(&sentinel).unwrap().modified().unwrap();
+        let state = cargo_hive_state::State::open_at(scratch.path().join("hive")).unwrap();
+        let config = state.slot_config().unwrap();
+        let registry = cargo_hive_cargo::registry::Registry::default();
+        let native = cargo_hive_platform::host_fs();
+        let identity = super::directory_identity(&target).unwrap();
+        let scope = super::SlotDestination {
+            target: &target,
+            checkout_identity: super::directory_identity(scratch.path()).unwrap(),
+            registry: &registry,
+            config: &config,
+        };
+        let dirs = super::PlacementDirs::Scoped(std::collections::BTreeMap::from([(
+            target.clone(),
+            identity,
+        )]));
+        let root = super::PlacementRoot {
+            path: &target,
+            scope: Some(super::PlacementScope {
+                destination: &scope,
+                state: &state,
+                cancel: &|| false,
+                guard: &|parent| parent == target,
+            }),
+        };
+        let mut added = super::Added {
+            scoped_files: Some(std::collections::BTreeMap::new()),
+            ..super::Added::default()
+        };
+        assert!(added.accept(native.as_ref(), &output).is_ok());
+        fs::rename(&output, target.join("original-inode")).unwrap();
+        std::os::unix::fs::symlink(&sentinel, &output).unwrap();
+        let mut report = super::PlaceReport::default();
+        assert!(super::align_scoped(root, &dirs, &added, &mut report).is_err());
+        assert_eq!(fs::metadata(&sentinel).unwrap().modified().unwrap(), before);
+        assert_eq!(fs::read(&sentinel).unwrap(), b"preserve me");
     }
 
     fn pretend_compressed(inner: Box<dyn cargo_hive_platform::Fs>) -> Hooked {

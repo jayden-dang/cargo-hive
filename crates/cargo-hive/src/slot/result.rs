@@ -5,8 +5,7 @@ use serde::Serialize;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-pub(super) const FRESH_FALLBACK: &str =
-    "Create a separate fresh secondary checkout and run `cargo hive seed <checkout>` there.";
+pub(super) const FRESH_FALLBACK: &str = "Create a separate fresh secondary checkout and use the installed guide's verified seed fallback.";
 
 #[derive(Serialize)]
 pub(super) struct SlotResult {
@@ -21,6 +20,18 @@ pub(super) struct SlotResult {
     pub slots: Vec<SlotStatus>,
     #[serde(flatten)]
     pub transition: Option<SlotTransition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(rename = "commit", skip_serializing_if = "Option::is_none")]
+    pub fallback_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_units: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_policy: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,6 +74,12 @@ impl SlotResult {
             pool_id: None,
             slots: Vec::new(),
             transition: None,
+            attempt: None,
+            current: None,
+            path: None,
+            fallback_commit: None,
+            registry_units: None,
+            use_policy: None,
             detail: None,
             next_action: None,
             code,
@@ -72,13 +89,21 @@ impl SlotResult {
     pub fn audit_receipt(&self) -> Receipt {
         let scope = Scope {
             repos: self.repo.clone().into_iter().collect(),
-            checkouts: Vec::new(),
+            checkouts: self
+                .path
+                .iter()
+                .filter(|_| self.registry_units.is_some())
+                .cloned()
+                .collect(),
         };
         let mut receipt = Receipt::new(self.command, scope);
         receipt.count(
             "slots",
             self.slots.len() as u64 + u64::from(self.transition.is_some()),
         );
+        if let Some(registry_units) = self.registry_units {
+            receipt.count("registry_units", registry_units);
+        }
         if self.code != 0 {
             receipt.finding("error", None, self.detail.as_deref().unwrap_or(self.kind));
         }

@@ -1,6 +1,6 @@
 ---
 name: hive
-description: Reclaim disk space from Rust build output safely, seed new worktrees or lanes before their first build, and time cold against seeded builds. Use when a target/ directory is large, a disk is filling up, you need to reclaim Rust build space, the same crate is built in many copies across checkouts and worktrees, or you start several lanes. Use this instead of cargo clean or deleting target/.
+description: Reclaim disk space from Rust build output safely, seed new worktrees before their first build, and use reviewed warm checkout slots. Use when a target/ directory is large, a disk is filling up, the same crate is built across several worktrees, or you need to start lanes or time cold against seeded builds. Use this instead of cargo clean or deleting target/.
 metadata:
   hive-version: "0.1.2"
 ---
@@ -17,6 +17,8 @@ Before the first write, learn the binary's version. Take `hive_version` from any
 - If different:
   - `doctor`, `repo list`, `status` and `explain` may still run. Tell the user both versions and how to update: `/plugin marketplace update cargo-hive` for the plugin, or reinstall the binary.
   - Do not run `gc`, `apply`, `repo add`, `repo remove`, `seed` or `bench`. Ask the user to update first.
+
+Slot work requires the full bundled version, including the patch. Use the installed helper's version check with the same absolute binary before setting up the pool. The helper repeats that check before every private request. If it refuses, update the plugin or reinstall the matching binary before proceeding.
 
 ## Free disk
 
@@ -69,6 +71,19 @@ When starting several lanes, seed one lane first, build it, then seed the other 
 ```
 cargo hive seed /path/to/checkout --json
 ```
+
+## Use a reviewed warm checkout
+
+On macOS, initialize a registered main with the operator's reviewed profile and a configured secondary root. Inspect available slots before taking one at the exact commit. Use `scripts/slot-handoff.sh` and its private operand forms. Keep credentials in private files or inherited descriptors and out of arguments, environment and messages.
+
+```
+cargo hive slot init --repo /path/to/main --root /path/to/secondary --profile /path/to/reviewed.json --json
+cargo hive slot status --repo /path/to/main --json
+```
+
+Use the path only from a current ready result with `guide_guarded_cargo_only`. Run Cargo through the guide's guarded producer for a reviewed invocation. An unrecorded build can permanently hold the slot. Return the same lease when work is resolved. Leave unfinished work in place and show the user what needs resolving. If a reply is missing, look up the original operation and confirm it only after checking the exact receipt. The operator can explicitly recover a stuck slot after resolving work and proving its scope. A holder retry requires a fresh fenced preparation. See `cargo hive slot recover --help`.
+
+For a full pool, unsupported profile or unrecoverable slot, use a separate fresh secondary checkout of the registered main at the requested commit. Choose a new path outside the pool, with both Cargo outputs absent and no caller target or build directory override. Use the helper's verified fallback. A successful fallback confirms positive registry-only placement in that checkout. Report an inconclusive or empty placement as a seed refusal and preserve any files already placed.
 
 ## Delete what gc keeps
 

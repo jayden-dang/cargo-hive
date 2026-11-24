@@ -1,0 +1,296 @@
+#!/bin/bash
+# Private entry point used by the installed guide.
+#
+# BINARY is the absolute cargo-hive path. The guide supplies exact recorded scope
+# and fresh caller-held operation IDs for new requests.
+#   check-version BINARY
+#   key BINARY                          (fresh private file open on descriptor 8)
+#   take|take-seeded BINARY MAIN POOL SLOT OBSERVED_GENERATION COMMIT RESERVE BEGIN READY
+#   prepare-recovered BINARY MAIN POOL SLOT GENERATION COMMIT NEXT_BEGIN READY
+#   produce BINARY MAIN POOL SLOT GENERATION OPERATION INVOCATION
+#   return|recover BINARY MAIN POOL SLOT GENERATION OPERATION
+#   resume|confirm BINARY MAIN POOL SLOT GENERATION OPERATION [ATTEMPT]
+#   fallback BINARY MAIN CHECKOUT COMMIT
+# Send the lease credential on private stdin. Recovery uses the Rust command's
+# bounded request on stdin. Resume looks up the result. Confirm after observing it.
+set +x +a
+unset -v credential nonce request step_request producer_request extra
+export -n SHELLOPTS
+
+check_slot_version() {
+    local binary=$1 metadata version
+    local version_pattern='^  hive-version: "([0-9]+\.[0-9]+\.[0-9]+)"$'
+    local line in_metadata=0 closed=0
+    metadata=$(cd -P -- "$(/usr/bin/dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P) || return 1
+    metadata=$metadata/SKILL.md
+    [[ -f $metadata && -r $metadata ]] || return 1
+    /usr/bin/cmp -s "$metadata" <(LC_ALL=C /usr/bin/tr -d '\000' < "$metadata") || return 1
+    version=
+    {
+        IFS= read -r line && [[ $line == --- ]] || return 1
+        while IFS= read -r line; do
+            case $line in
+                ---) closed=1; break ;;
+                metadata:) in_metadata=1 ;;
+                '  hive-version:'*)
+                    [[ $in_metadata == 1 && -z $version && $line =~ $version_pattern ]] || return 1
+                    version=${BASH_REMATCH[1]}
+                    ;;
+                [!\ ]*) in_metadata=0 ;;
+            esac
+        done
+    } < "$metadata"
+    [[ $closed == 1 && -n $version && $binary == /* && -f $binary && -x $binary ]] || return 1
+
+    # Compare the full byte stream, including NULs, and require a successful probe.
+    ( set -o pipefail; "$binary" --version </dev/null 8>&- 9>&- 2>/dev/null |
+        /usr/bin/cmp -s - <(printf 'cargo-hive %s\n' "$version") )
+}
+
+require_slot_version() {
+    check_slot_version "$1" && return 0
+    printf '%s\n' 'Slot use requires the exact cargo-hive version bundled with this guide. Update the plugin or reinstall the matching binary.' >&2
+    return 1
+}
+
+git_for_slot() {
+    /usr/bin/env -i PATH=/usr/bin:/bin GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+        /usr/bin/git --no-replace-objects -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+        -c submodule.recurse=false -c maintenance.auto=false -c gc.auto=0 "$@"
+}
+
+# Keep this Bash process as the parent of every lock-bearing checkpoint.
+take_slot() {
+    local binary=$1 repo=$2 pool=$3 slot=$4 expect=$5 commit=$6
+    local reserve_op=$7 begin_op=$8 ready_op=$9 mode=${10}
+    local id_pattern='^[0-9a-f]{32}$' key_pattern='^[0-9a-f]{64}$'
+    local oid_pattern='^([0-9a-f]{40}|[0-9a-f]{64})$' count_pattern='^(0|[1-9][0-9]*)$'
+    local hive_root=${HIVE_HOME:-$HOME/.hive} credential nonce extra request step_request
+    local lock generation permit attempt checkout witnessed_commit prefix suffix digit
+    local scratch
+    local prior anchor index
+    local -a scope anchors
+
+    [[ $repo == /* && ( $slot == 1 || $slot == 2 ) && $expect =~ $count_pattern && ${#expect} -le 20 &&
+        $pool =~ $id_pattern && $commit =~ $oid_pattern &&
+        $begin_op =~ $id_pattern && $ready_op =~ $id_pattern && $hive_root == /* &&
+        $begin_op != "$ready_op" ]] || return 1
+    if [[ $mode == prepare-recovered ]]; then
+        [[ $expect != 0 && -z $reserve_op ]] || return 1
+    else
+        [[ $reserve_op =~ $id_pattern && $reserve_op != "$begin_op" && $reserve_op != "$ready_op" ]] || return 1
+    fi
+    IFS= read -r credential && [[ $credential =~ $key_pattern ]] || return 1
+    extra=
+    if IFS= read -r extra || [[ -n $extra ]]; then return 1; fi
+
+    umask 077
+    scratch=$(/usr/bin/mktemp -d "${TMPDIR:-/private/tmp}/hive-slot-guide.XXXXXXXX") || return 1
+    local cleanup
+    printf -v cleanup '/bin/rm -f -- %q %q %q; /bin/rmdir -- %q' \
+        "$scratch/nonce" "$scratch/permit" "$scratch/result" "$scratch"
+    trap "$cleanup" EXIT
+    : > "$scratch/nonce" && : > "$scratch/permit" || return 1
+    "$binary" slot key --out-fd 8 --json 8<> "$scratch/nonce" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+    IFS= read -r nonce < "$scratch/nonce" && [[ $nonce =~ $key_pattern ]] || return 1
+    printf -v request '{"credential":"%s","nonce":"%s"}' "$credential" "$nonce"
+    scope=(--repo "$repo" --pool "$pool" --slot "$slot")
+    generation=$expect
+    if [[ $mode != prepare-recovered ]]; then
+        # The slot generation is unsigned. Increment decimal digits without shell overflow.
+        prefix=$expect suffix=
+        while [[ $prefix == *9 ]]; do prefix=${prefix%9}; suffix=0$suffix; done
+        if [[ -z $prefix ]]; then
+            generation=1$suffix
+        else
+            digit=${prefix:${#prefix}-1}
+            generation=${prefix%?}$((digit + 1))$suffix
+        fi
+        "$binary" slot reserve "${scope[@]}" --expect "$expect" --commit "$commit" \
+            --op "$reserve_op" --json <<< "$credential" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+        "$binary" slot ack "${scope[@]}" --generation "$generation" --op "$reserve_op" \
+            --json <<< "$credential" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+    fi
+    lock="$hive_root/slot-locks/$pool/slot-$slot.lock"
+    exec 9< "$lock" || return 1
+    "$binary" slot begin "${scope[@]}" --generation "$generation" --op "$begin_op" --lock-fd 9 \
+        --control-fd 8 --json <<< "$request" 8<> "$scratch/permit" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+    {
+        IFS= read -r -d '' permit && IFS= read -r -d '' attempt && IFS= read -r -d '' checkout &&
+            IFS= read -r -d '' witnessed_commit && IFS= read -r -d '' prior || return 1
+        anchors=()
+        while IFS= read -r -d '' anchor; do
+            [[ -n $anchor && $anchor != /* && ${#anchors[@]} -lt 256 ]] || return 1
+            anchors[${#anchors[@]}]=$anchor
+        done
+        [[ -z $anchor ]] || return 1
+    } < "$scratch/permit"
+    [[ $permit == permit_issued && $attempt =~ $count_pattern && $attempt != 0 &&
+        $checkout == /* && $witnessed_commit == "$commit" ]] || return 1
+
+    printf -v step_request '{"auth":%s,"step":"checkout"}' "$request"
+    "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \
+        --lock-fd 9 --json <<< "$step_request" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+    if [[ -z $prior ]]; then
+        git_for_slot -C "$repo" worktree add --detach -- "$checkout" "$commit" > /dev/null || return 1
+    elif [[ $prior != "$commit" ]]; then
+        git_for_slot -C "$checkout" switch --detach -- "$commit" > /dev/null || return 1
+    fi
+    printf -v step_request '{"auth":%s,"step":"checkout_done"}' "$request"
+    "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \
+        --lock-fd 9 --json <<< "$step_request" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+    if [[ ${#anchors[@]} -gt 0 ]]; then
+        printf -v step_request '{"auth":%s,"step":"anchors"}' "$request"
+        "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \
+            --lock-fd 9 --json <<< "$step_request" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+        for index in "${!anchors[@]}"; do
+            # The verifier opens and checks the anchor before lending it as stdin.
+            printf -v step_request '{"auth":%s,"step":{"anchor_touch":{"index":%s,"action":"exec /usr/bin/touch -m -c -- /dev/fd/0"}}}' "$request" "$index"
+            "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \
+                --lock-fd 9 --json <<< "$step_request" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+        done
+        printf -v step_request '{"auth":%s,"step":"anchors_done"}' "$request"
+        "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \
+            --lock-fd 9 --json <<< "$step_request" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+    fi
+    if [[ $mode == take-seeded ]]; then
+        printf -v step_request '{"auth":%s,"step":"seed"}' "$request"
+        "$binary" slot step-check "${scope[@]}" --generation "$generation" --attempt "$attempt" \
+            --lock-fd 9 --json <<< "$step_request" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+    fi
+    "$binary" slot ready "${scope[@]}" --generation "$generation" --attempt "$attempt" \
+        --op "$ready_op" --lock-fd 9 --json <<< "$request" > "$scratch/result" || {
+        /bin/cat "$scratch/result"
+        return 1
+    }
+    /bin/cat "$scratch/result" || return 1
+}
+
+produce_slot() {
+    local binary=$1 repo=$2 pool=$3 slot=$4 generation=$5 operation=$6 invocation=$7
+    local id_pattern='^[0-9a-f]{32}$' key_pattern='^[0-9a-f]{64}$'
+    local count_pattern='^[1-9][0-9]{0,2}$' invocation_pattern='^[a-zA-Z0-9_.-]{1,64}$'
+    local hive_root=${HIVE_HOME:-$HOME/.hive} credential nonce producer_request extra
+    local scratch field cwd total i stopped writer cleanup stop_cleanup
+    local -a scope assignments argv
+    [[ $repo == /* && $hive_root == /* && ( $slot == 1 || $slot == 2 ) &&
+        $pool =~ $id_pattern && $operation =~ $id_pattern &&
+        $generation =~ ^[1-9][0-9]{0,19}$ && $invocation =~ $invocation_pattern ]] || return 1
+    IFS= read -r credential && [[ $credential =~ $key_pattern ]] || return 1
+    extra=
+    if IFS= read -r extra || [[ -n $extra ]]; then return 1; fi
+    umask 077
+    scratch=$(/usr/bin/mktemp -d "${TMPDIR:-/private/tmp}/hive-slot-producer.XXXXXXXX") || return 1
+    printf -v cleanup '/bin/rm -f -- %q %q %q; /bin/rmdir -- %q' "$scratch/nonce" "$scratch/permit" "$scratch/result" "$scratch"
+    trap "$cleanup" EXIT
+    : > "$scratch/nonce" && : > "$scratch/permit" || return 1
+    "$binary" slot key --out-fd 8 --json 8<> "$scratch/nonce" > "$scratch/result" || return 1
+    IFS= read -r nonce < "$scratch/nonce" && [[ $nonce =~ $key_pattern ]] || return 1
+    scope=(--repo "$repo" --pool "$pool" --slot "$slot" --generation "$generation" --op "$operation" --lock-fd 9)
+    exec 9< "$hive_root/slot-locks/$pool/slot-$slot.lock" || return 1
+    printf -v producer_request '{"action":"guided_start","credential":"%s","nonce":"%s","invocation":"%s"}' "$credential" "$nonce" "$invocation"
+    "$binary" slot producer "${scope[@]}" --control-fd 8 --json <<< "$producer_request"         8<> "$scratch/permit" > "$scratch/result" || { /bin/cat "$scratch/result"; return 1; }
+    assignments=() argv=()
+    {
+        IFS= read -r -d '' field && [[ $field == producer_permit ]] &&
+            IFS= read -r -d '' cwd && [[ $cwd == /* ]] &&
+            IFS= read -r -d '' total && [[ $total =~ $count_pattern && $total -le 256 ]] || return 1
+        for (( i=0; i<total; i++ )); do
+            IFS= read -r -d '' field && [[ $field =~ ^[a-zA-Z_][a-zA-Z0-9_]*= ]] || return 1
+            assignments+=("$field")
+        done
+        IFS= read -r -d '' total && [[ $total =~ $count_pattern && $total -le 65 ]] || return 1
+        for (( i=0; i<total; i++ )); do
+            IFS= read -r -d '' field || return 1
+            argv+=("$field")
+        done
+        extra=
+        if IFS= read -r -d '' extra || [[ -n $extra ]]; then return 1; fi
+    } < "$scratch/permit"
+    [[ ${argv[0]} == /* ]] || return 1
+    cd -P -- "$cwd" || return 1
+    set -m
+    /usr/bin/env -i /bin/bash --noprofile --norc -c         'builtin kill -STOP "$$"; builtin exec -c /usr/bin/env -i "$@"'         producer-gate "${assignments[@]}" "${argv[@]}" </dev/null >&2 &
+    writer=$!
+    printf -v stop_cleanup 'builtin kill -KILL %%+ 2>/dev/null; wait %%+ 2>/dev/null; %s' "$cleanup"
+    trap "$stop_cleanup" EXIT
+    for (( i=0; i<250; i++ )); do
+        stopped=$(/bin/ps -p "$writer" -o state= 9<&-) || return 1
+        [[ $stopped =~ ^[[:space:]]*T ]] && break
+        /bin/sleep 0.02 9<&- || return 1
+    done
+    [[ $stopped =~ ^[[:space:]]*T ]] || return 1
+    printf -v producer_request '{"action":"guided_watch","credential":"%s","nonce":"%s","invocation":"%s","child_pid":%s}' "$credential" "$nonce" "$invocation" "$writer"
+    "$binary" slot producer "${scope[@]}" --json <<< "$producer_request" > "$scratch/result" || {
+        /bin/cat "$scratch/result"
+        return 1
+    }
+    trap "$cleanup" EXIT
+    wait "$writer" || return 1
+    /bin/cat "$scratch/result"
+}
+
+slot_receipt() {
+    local action=$1 binary=$2 repo=$3 pool=$4 slot=$5 generation=$6 operation=$7
+    local -a attempt
+    attempt=()
+    if [[ $# == 8 ]]; then attempt=(--attempt "$8"); fi
+    exec "$binary" slot "$action" --repo "$repo" --pool "$pool" --slot "$slot" \
+        --generation "$generation" --op "$operation" "${attempt[@]}" --json
+}
+
+if [[ $# == 2 && $1 == check-version ]]; then
+    require_slot_version "$2"
+    exit $?
+fi
+
+if [[ $# == 2 && $1 == key ]]; then
+    require_slot_version "$2" || exit 1
+    exec "$2" slot key --out-fd 8 --json
+fi
+
+if [[ $# == 10 && ( $1 == take || $1 == take-seeded ) ]]; then
+    require_slot_version "$2" || exit 1
+    mode=$1
+    shift
+    take_slot "$@" "$mode" && exit 0
+    printf '%s\n' 'Slot preparation could not be confirmed. Inspect the slot before retrying.' >&2
+    exit 1
+fi
+
+if [[ $# == 9 && $1 == prepare-recovered ]]; then
+    require_slot_version "$2" || exit 1
+    take_slot "$2" "$3" "$4" "$5" "$6" "$7" '' "$8" "$9" prepare-recovered && exit 0
+    printf '%s\n' 'Recovered preparation could not be confirmed. Inspect the slot before retrying.' >&2
+    exit 1
+fi
+
+if [[ $# == 8 && $1 == produce ]]; then
+    require_slot_version "$2" || exit 1
+    shift
+    produce_slot "$@" && exit 0
+    printf '%s\n' 'Slot producer could not be confirmed. Preserve its pending or held evidence.' >&2
+    exit 1
+fi
+
+if [[ $# == 7 && ( $1 == return || $1 == recover ) ]]; then
+    require_slot_version "$2" || exit 1
+    slot_receipt "$@"
+fi
+
+if [[ ( $# == 7 || $# == 8 ) && ( $1 == resume || $1 == confirm ) ]]; then
+    require_slot_version "$2" || exit 1
+    action=outcome
+    if [[ $1 == confirm ]]; then action=ack; fi
+    shift
+    slot_receipt "$action" "$@"
+fi
+
+if [[ $# == 5 && $1 == fallback ]]; then
+    require_slot_version "$2" || exit 1
+    exec "$2" slot seed-fallback --repo "$3" --checkout "$4" --commit "$5" --json
+fi
+
+printf '%s\n' 'Expected check-version or a private slot request.' >&2
+exit 2

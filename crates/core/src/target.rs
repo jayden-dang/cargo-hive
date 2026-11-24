@@ -3,6 +3,7 @@
 
 use crate::fingerprint::ProfileReport;
 use serde::Serialize;
+use std::cell::Cell;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -125,7 +126,7 @@ pub fn identify_bounded(
         profile_dirs_with(
             dir,
             cap,
-            &|path, cap| bounded_dirs(fs, path, cap),
+            &|path, cap| bounded_dirs(fs, path, cap, None),
             &|path| is_dir_bounded(fs, path),
         )
     })
@@ -167,6 +168,48 @@ fn identify_tag(
     }
 }
 
+/// Identifies only regular, size-bounded Cargo tags and bounded profile directories.
+pub fn identify_strict(
+    fs: &dyn cargo_hive_platform::Fs,
+    dir: &Path,
+    cap: usize,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Vec<(PathBuf, Layout)>, String> {
+    const TAG_CAP: usize = 16 * 1024;
+    let check_cancel = || {
+        if cancel() {
+            Err("Cargo profile identification was cancelled".to_string())
+        } else {
+            Ok(())
+        }
+    };
+    check_cancel()?;
+    let path = dir.join("CACHEDIR.TAG");
+    let tag = fs
+        .read_regular_bounded(&path, TAG_CAP)
+        .map_err(|err| format!("{}: {err}", path.display()))?;
+    if !valid_tag(&tag).map_err(|err| format!("{}: {err}", path.display()))? {
+        return Err(format!("{} is not a Cargo target tag", path.display()));
+    }
+    let remaining = Cell::new(cap);
+    let profiles = profile_dirs_with(
+        dir,
+        cap,
+        &|path, cap| {
+            check_cancel()?;
+            bounded_dirs(fs, path, cap, Some(&remaining))
+        },
+        &|path| {
+            check_cancel()?;
+            is_dir_bounded(fs, path)
+        },
+    )?;
+    if profiles.is_empty() {
+        return Err(format!("{} has no supported Cargo profiles", dir.display()));
+    }
+    Ok(profiles)
+}
+
 fn valid_tag(tag: &[u8]) -> Result<bool, &'static str> {
     if tag.len() > MAX_TAG_BYTES {
         return Err("larger than 1 MiB; remove this invalid tag and build the target again");
@@ -190,10 +233,18 @@ fn bounded_dirs(
     fs: &dyn cargo_hive_platform::Fs,
     dir: &Path,
     cap: usize,
+    remaining: Option<&Cell<usize>>,
 ) -> Result<Vec<PathBuf>, String> {
+    let cap = remaining.map_or(cap, Cell::get);
     let entries = fs
         .read_dir_bounded(dir, cap)
         .map_err(|err| format!("{}: {err}", dir.display()))?;
+    if let Some(remaining) = remaining {
+        let left = cap
+            .checked_sub(entries.len())
+            .ok_or_else(|| format!("{} has more than {cap} entries", dir.display()))?;
+        remaining.set(left);
+    }
     let mut dirs = Vec::new();
     for (name, kind) in entries {
         if kind == cargo_hive_platform::EntryKind::Dir {
@@ -378,6 +429,23 @@ mod tests {
                 Ok(end >= identifying_end)
             );
         }
+    }
+
+    #[test]
+    fn strict_identification_counts_entries_across_the_whole_profile_search() {
+        let root = scratch("strict-budget");
+        tag(&root, TAG_LINE);
+        fs::create_dir_all(root.join("triple/debug/.fingerprint")).unwrap();
+        let fs = cargo_hive_platform::current().unwrap().fs;
+
+        assert_eq!(
+            identify_strict(fs.as_ref(), &root, 3, &|| false).unwrap(),
+            [(root.join("triple/debug"), Layout::Fingerprint)]
+        );
+        let error = identify_strict(fs.as_ref(), &root, 2, &|| false).unwrap_err();
+        assert!(error.contains("more than"), "{error}");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn tag(dir: &Path, line: &str) {

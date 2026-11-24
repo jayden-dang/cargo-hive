@@ -19,8 +19,9 @@ demonstrate an authorized clean checkout at the requested commit. The supported
 build profile, targeted invalidation and causal fixture establish whether its
 retained output can be delivered. Git status alone misses temporary and restored
 inputs documented in SPIKES.md §4. The agent guide owns mutating Git and mtime
-steps, and hive only reads the checkout, changes its own state, and runs
-checkout-scoped GC.
+steps. Hive reads the checkout, changes its own state, and runs checkout-scoped GC.
+For the retained consumer-anchor step, it may also lend a verified descriptor
+to the guide's fixed timestamp action and launch that action with a deadline.
 
 The design scan covers the lock and state writer, scope, receipt, Git, and GC
 paths. Fresh subgraph retrieval had OWNS for 15 of 16 codes with no active OBS.
@@ -34,8 +35,9 @@ narrative files were present.
 ## Decisions
 
 1. **Lock.** A dirty return stays held and preserves work and outputs. The next
-   agent receives only a verified secondary pool slot. Git changes and mtime
-   touches stay in the guide, and cleanup remains scoped to that checkout.
+   agent receives only a verified secondary pool slot. The guide owns Git changes and authorizes anchor touches. Hive may launch
+   the fixed descriptor-only anchor action described below. Cleanup stays scoped
+   to that checkout.
 2. **Agent-decided.** Use an additive layout-tagged slot record under the state
    root, stable per-slot operation locks and a checked generation. Registry or
    receipt extensions as lease storage would alter shipped formats and cannot
@@ -106,7 +108,7 @@ does not change checkout contents, index, mtimes or output roots.
 Satisfies: SLOTS-1.3, SLOTS-2.4, SLOTS-4.1, SLOTS-4.2, SLOTS-4.3, SLOTS-4.4, SLOTS-4.5, SLOTS-4.6, SLOTS-4.7, SLOTS-5.4
 Reuse: rung 2 — `State::locked_or_cancelled` and bounded atomic state writes, platform flock and no-follow identity. Add slot-specific durability reconciliation and inherited descriptor handling.
 Respects: ARCH-2, ARCH-8, ARCH-15, ARCH-16, ARCH-19
-Surface: Frozen — registry, snapshots, capabilities, plans, store, seed and existing receipts readers keep their old formats and locking semantics. Slot-specific I/O uses the existing lock and an additive file.
+Surface: Frozen — registry, snapshots, capabilities, plans, store, seed and existing receipts readers keep their old formats and locking semantics. Slot-specific I/O uses the existing state lock, a private slot record and its independent authority witness.
 Interface: Under a checked slot identity and caller credential, a command either records one fenced transition, returns an earlier outcome, or refuses.
 Depth: n/a — extends the state transaction and platform lock primitives.
 Locality: Extend `crates/state/src/lib.rs` with the private bounded writer and named slot recovery, add `crates/state/src/slots.rs` for slot records, extend `crates/platform/src/flock.rs` for inherited descriptors, and keep workflow transitions in `crates/cargo-hive/src/slot/mod.rs`.
@@ -120,6 +122,14 @@ whose first key is `layout`, followed by a checked positive `revision` and a
 Only a field written as nullable may hold JSON null. Objects reject unknown
 fields. Strings and arrays have explicit limits within the 1 MiB envelope.
 The transition validator also checks cross-references, independently of parsing.
+
+Under the existing state lock, keep an independent owner-private durable
+witness alongside `slots.json` for the authoritative slot record. Bind its
+exact revision and contents before any transition receipt or writer permit
+grants authority. A valid-looking record by itself cannot replace the witnessed
+record. On disagreement or uncertain publication, accept only the exact
+independently witnessed successor after bounded re-read and durability checks.
+Hold unresolved authority without changing source or output.
 
 | JSON record | Fields and constraints |
 |---|---|
@@ -210,6 +220,13 @@ be exercised on the admitted platform; none was implemented or tested here.
 Recovery acquires the slot lock, checks and resolves prior work in scope, and
 records a new attempt fence before permitting effects. Lost or tainted producer
 evidence still blocks warm reuse after process quiescence.
+If interrupted GC has used the retained output's one allowed generation of
+inheritance, the original credentialed holder may retire that attempt and
+reserve a named fresh `begin` operation for the same lease and generation.
+This requires a verified later boot, clean detached checkout, and fresh proof
+of the recorded output and consumer scope. The retired attempt and its old
+reservation reply grant no authority. The new attempt must establish its own
+fence and complete fresh scoped GC before any usable readiness.
 The same-UID cooperative boundary is deliberate. Hive cannot stop a user or
 tool from touching a path outside that protocol.
 
@@ -293,8 +310,10 @@ canonical path/object identities for both endpoints before effects, and again
 when validating the requested commit and producer. The existing
 `metadata::Resolved` covers paths only; it supplies no graph proof. An actual
 changeset outside the profile's bounded edit set or any unproved graph input
-refuses support. The guide supplies the actual fixed stock Cargo command and
-its nonsecret effective input environment. It refuses unreviewed CLI, env,
+refuses support. The guide supplies the fixed Cargo arguments and the
+approved nonsecret environment, including the
+[recipe-scoped Nextest gates](#recipe-scoped-nextest-child-proof).
+It refuses unreviewed CLI, env,
 configuration or wrapper overrides before launch; both interpreted roots
 must match independent, uncached discovery with the supported profile inputs.
 
@@ -318,10 +337,24 @@ are read. Ordinary edits are admitted only where the profile bounds their
 possible inputs and consumer coverage. An admitted profile enumerates or
 proves exclusion of every direct and transitive consumer of allowed mutable
 inputs, including absent or ancestor probes, environment values, file creation,
-deletion, rename and edits restored with their mtimes. A build that can read a
-retained generated root as input makes that root ineligible for the exception.
-An undeclared or unreviewable producer or consumer leaves the slot unavailable
-for warm reuse.
+deletion, rename and edits restored with their mtimes. A retained generated root
+remains eligible when all reads from it are explicitly reviewed unit-local
+Cargo-generated inputs. An undeclared or unreviewable producer, file or consumer
+leaves the slot unavailable for warm reuse.
+
+**Operator-approved generated inputs.** Name each allowed regular file relative
+to the exact producing Cargo unit's verified output directory. Bind the producer
+and all consuming units to the reviewed invocation, toolchain and layout. A
+guarded invocation starting without the file must establish its reviewed producer
+and consumer sequence, then verify and record the file's canonical identity and
+contents before retention. A later invocation rechecks the recorded identity
+and contents under the current output fence before relying on the input.
+Scoped GC accounts for every dependent unit and rechecks the retained inputs
+before readiness. Missing, replaced, changed or ambiguously owned files leave
+the slot held unless the same scoped cleanup proves all dependent units removed
+and the reviewed next invocation regenerates the file before consuming it.
+The exception grants no general input scan or write access to retained roots.
+See [ADR-0006](../../adr/0006-seal-unit-local-generated-inputs.md).
 
 **Agent-decided profile record (schema 1).** One fixed, reviewed profile is
 submitted at initialization. Required fields use the strict shapes below.
@@ -363,8 +396,12 @@ switch if needed, and recheck the requested commit, worktree and both resolved
 output roots. Compute the conservative union of verified consumer anchors for
 every allowed possibly changed input, without depending on an end-state diff.
 Each anchor is an existing, tracked, in-slot regular file of the actual
-consumer, with identity and content preserved. The skill changes only its
-mtime. Validate a timestamp the admitted Cargo layout will recognize above
+consumer, with identity and content preserved. The guide authorizes each mtime
+action. The verifier checks the current attempt, lock, identity and content, opens
+the regular anchor without following links or waiting on a nonregular file, and
+lends that descriptor to the guide's single fixed Bash touch action. The action
+has a deadline and accepts no checkout pathname. The normal staged readiness
+checks verify its result. Validate a timestamp the admitted Cargo layout will recognize above
 the relevant prior fingerprint/invocation boundary. A future stamp,
 unsupported fingerprint, resolution ambiguity, unexpected symlink or failed
 verification prevents readiness. Never delete or edit fingerprints just to
@@ -517,6 +554,23 @@ by hand appear as integer milliseconds outside hive's receipt and name the
 machine/toolchain. These targets are Draft, separate from approved Scorecard
 targets. Compare against the real release-mode checkout GC implementation,
 never the historical emulation.
+
+### Recipe-scoped Nextest child proof
+
+The two reviewed Nextest recipes use the approved ARCH-1 exception in
+[ADR 0007](../../adr/0007-gate-reviewed-nextest-children.md). Keep the original
+argument vectors. The private launcher rechecks the pinned Cargo copy and
+uses its private basename as argv zero. The Cargo gate checks each admitted
+request before dispatch and binds the completion to its response. Supply
+both timing arms with the same gate policy and overhead.
+
+The Nextest build response must account for the exact reviewed listing units.
+The runner checks the observed binary identity and bytes, physical package
+directory, inherited guard and one of the two exact listing modes before
+dispatch. SQLx metadata checks cover the pinned program, physical consumer
+directory, offline input selection, approved workspace root and successful
+bounded response. Compiler and startup closure need independent review before
+real builds. A fixture-only proof does not grant warm readiness.
 
 ## Seams for testing
 

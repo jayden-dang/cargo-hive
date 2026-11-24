@@ -4,3 +4,5 @@
 pub mod bench;
 pub mod cli;
 mod slot;
+#[doc(hidden)]
+pub use slot::gates::recipe_child;

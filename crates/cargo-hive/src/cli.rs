@@ -1,13 +1,16 @@
 //! Thin adapter: arguments → library calls → one receipt.
 
 use crate::bench::command::BuildCmd;
+use cargo_hive_cargo::discover::{self, Checkout, Snapshot, TargetScan, WalkFault};
 use cargo_hive_cargo::registry::{self, Registry};
 use cargo_hive_core::receipt::{PlanRecord, PlanTierBody, Receipt, ReceiptBuilder, Scope};
+use cargo_hive_gc::checkout::{self, CheckoutInput};
 use cargo_hive_platform::{self as platform, MACOS_ONLY_MESSAGE};
-use cargo_hive_state::{State, StateError};
+use cargo_hive_state::{Config, State, StateError};
 use clap::{Args, Parser, Subcommand};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 #[derive(Parser)]
 #[command(
@@ -140,7 +143,7 @@ pub enum SlotCommand {
         #[command(flatten)]
         out: SlotOutputArgs,
     },
-    /// Recover a held slot (unavailable in this version)
+    /// Recover a held slot after verifying scope and quiescence
     Recover(SlotOperation),
     #[command(hide = true)]
     Key {
@@ -167,7 +170,13 @@ pub enum SlotCommand {
         out: SlotOutputArgs,
     },
     #[command(hide = true)]
-    Begin(SlotLockedOperation),
+    Begin {
+        #[command(flatten)]
+        request: SlotLockedOperation,
+        /// Private output descriptor for the first preparation permit
+        #[arg(long, value_name = "N")]
+        control_fd: u32,
+    },
     #[command(hide = true)]
     StepCheck {
         #[command(flatten)]
@@ -185,7 +194,13 @@ pub enum SlotCommand {
         out: SlotOutputArgs,
     },
     #[command(hide = true)]
-    Producer(SlotLockedOperation),
+    Producer {
+        #[command(flatten)]
+        request: SlotLockedOperation,
+        /// Private descriptor for the checked producer launch
+        #[arg(long, value_name = "N")]
+        control_fd: Option<u32>,
+    },
     #[command(hide = true)]
     Ready {
         #[command(flatten)]
@@ -200,6 +215,20 @@ pub enum SlotCommand {
     Outcome(SlotReplay),
     #[command(hide = true)]
     Ack(SlotReplay),
+    #[command(hide = true)]
+    SeedFallback {
+        /// Canonical registered main checkout
+        #[arg(long, value_name = "MAIN")]
+        repo: PathBuf,
+        /// Separate fresh secondary checkout
+        #[arg(long, value_name = "CHECKOUT")]
+        checkout: PathBuf,
+        /// Full requested Git commit ID
+        #[arg(long, value_name = "OID")]
+        commit: String,
+        #[command(flatten)]
+        out: SlotOutputArgs,
+    },
 }
 
 #[derive(Args)]
@@ -1331,13 +1360,468 @@ fn gc_cmd(state: &State, args: &[std::path::PathBuf], dry_run: bool, out: Output
     emit(state, out, b.finish(), &human, code)
 }
 
-fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 {
-    use cargo_hive_cargo::discover::{self, SNAPSHOT_FILE, Snapshot};
-    use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
-    use cargo_hive_gc::checkout::{self, CheckoutInput};
-    use cargo_hive_state::window_days;
+enum CheckoutGcError {
+    State(StateError),
+    Discovery(Vec<WalkFault>),
+    Unsupported,
+    Refused {
+        release: Option<String>,
+        reason: Refusal,
+    },
+}
+
+struct CheckoutGc {
+    registry: Registry,
+    fs: Box<dyn platform::Fs>,
+    cfg: Config,
+    snapshot: Snapshot,
+    scope: Scope,
+    checkout: PathBuf,
+    live: Vec<Checkout>,
+    nested: Vec<PathBuf>,
+    checkout_faults: Vec<WalkFault>,
+    release: Option<String>,
+    window: Duration,
+    account_bytes: bool,
+}
+
+fn find_checkout_complete(
+    registry: &Registry,
+    cfg: &Config,
+    path: &Path,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Found, CheckoutGcError> {
+    let mains: Vec<_> = registry
+        .repos
+        .iter()
+        .map(|repo| repo.main.clone())
+        .collect();
+    let mut selected = None;
+    let mut rows = Vec::new();
+    let mut faults = Vec::new();
+    for repo in &registry.repos {
+        if cancel() {
+            break;
+        }
+        let (mut checkouts, mut unreadable) =
+            discover::checkouts_complete(repo, &mains, cfg, cancel);
+        if selected.is_none()
+            && let Some(row) = checkouts.iter().find(|candidate| {
+                !candidate.missing
+                    && candidate.path == path
+                    && candidate.class == cargo_hive_core::classify::Class::Secondary
+            })
+        {
+            selected = Some((repo.clone(), row.clone()));
+        }
+        rows.append(&mut checkouts);
+        faults.append(&mut unreadable);
+    }
+    if !faults.is_empty() {
+        return Err(CheckoutGcError::Discovery(faults));
+    }
+    let Some((repo, row)) = selected else {
+        return Err(CheckoutGcError::Refused {
+            release: None,
+            reason: Refusal {
+                kind: "refusal",
+                path: None,
+                detail: "could not verify the exact secondary checkout for cleanup".into(),
+                code: 1,
+            },
+        });
+    };
+    Ok(Found {
+        repo,
+        row,
+        rows,
+        faults,
+    })
+}
+
+impl CheckoutGc {
+    fn prepare(
+        state: &State,
+        path: &Path,
+        strict_cancel: Option<&(dyn Fn() -> bool + Sync)>,
+    ) -> Result<Self, CheckoutGcError> {
+        use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
+
+        let loaded = (|| -> Result<_, StateError> {
+            if let Some(cancel) = strict_cancel {
+                let check_cancel = || {
+                    if cancel() {
+                        Err(StateError::Cancelled)
+                    } else {
+                        Ok(())
+                    }
+                };
+                let max_bytes = cargo_hive_state::slots::MAX_BYTES;
+                check_cancel()?;
+                let registry: Registry = state.read_regular_bounded(registry::FILE, max_bytes)?;
+                check_cancel()?;
+                let config = state.slot_config()?;
+                check_cancel()?;
+                let capabilities: Capabilities =
+                    state.read_regular_bounded(doctor::CAPABILITIES_FILE, max_bytes)?;
+                check_cancel()?;
+                return Ok((registry, config, capabilities, Snapshot::default()));
+            }
+            Ok((
+                state.read::<Registry>(registry::FILE)?,
+                state.config()?,
+                state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
+                state.read::<Snapshot>(discover::SNAPSHOT_FILE)?,
+            ))
+        })();
+        let (reg, cfg, caps, snapshot) = loaded.map_err(CheckoutGcError::State)?;
+        let platform = platform::current().map_err(|_| CheckoutGcError::Unsupported)?;
+        let days = cargo_hive_state::window_days(cfg.gc_window_days).map_err(|err| {
+            CheckoutGcError::Refused {
+                release: None,
+                reason: Refusal {
+                    kind: "refusal",
+                    path: None,
+                    detail: err.to_string(),
+                    code: 1,
+                },
+            }
+        })?;
+        let toolchain = match strict_cancel {
+            Some(cancel) => {
+                cargo_hive_cargo::toolchain::resolve_toolchain_until(state.root(), cancel)
+            }
+            None => cargo_hive_cargo::toolchain::resolve_toolchain(state.root()),
+        };
+        let release = toolchain.ok().map(|t| t.release);
+        for cap in [Capability::FingerprintReading, Capability::Deletion] {
+            if let Err(refusal) = doctor::require(&caps, cap, release.as_deref()) {
+                return Err(CheckoutGcError::Refused {
+                    release,
+                    reason: Refusal {
+                        kind: "refusal",
+                        path: None,
+                        detail: refusal.to_string(),
+                        code: 1,
+                    },
+                });
+            }
+        }
+        let Found {
+            repo,
+            row,
+            rows,
+            faults,
+        } = if let Some(cancel) = strict_cancel {
+            find_checkout_complete(&reg, &cfg, path, cancel)
+        } else {
+            find_checkout(&reg, &cfg, path).map_err(|mut reason| {
+                if let Some((p, owner)) = reason
+                    .path
+                    .as_ref()
+                    .and_then(|p| owning_repo(&reg, p).map(|owner| (p, owner)))
+                {
+                    reason.detail = format!(
+                        "{path} is not a checkout of {main}; name the checkout's root directory",
+                        path = p.display(),
+                        main = owner.main.display(),
+                    );
+                }
+                CheckoutGcError::Refused {
+                    release: release.clone(),
+                    reason,
+                }
+            })
+        }?;
+        let live: Vec<_> = rows.into_iter().filter(|c| !c.missing).collect();
+        let nested = live
+            .iter()
+            .map(|c| c.path.clone())
+            .filter(|p| p != &row.path && p.starts_with(&row.path))
+            .collect();
+        Ok(Self {
+            registry: reg,
+            fs: platform.fs,
+            cfg,
+            snapshot,
+            scope: Scope {
+                repos: vec![repo.main],
+                checkouts: vec![row.path.clone()],
+            },
+            checkout: row.path,
+            live,
+            nested,
+            checkout_faults: faults,
+            release,
+            window: Duration::from_secs(days.saturating_mul(86_400)),
+            account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
+        })
+    }
+
+    fn scan(&mut self, cancel: impl Fn() -> bool + Sync) -> TargetScan {
+        discover::targets(&self.live, &self.cfg, false, &mut self.snapshot, cancel)
+    }
+
+    fn input<'a>(&'a self, scan: &'a TargetScan) -> CheckoutInput<'a> {
+        CheckoutInput {
+            fs: &*self.fs,
+            scan,
+            checkout: &self.checkout,
+            nested: &self.nested,
+            now: SystemTime::now(),
+            window: self.window,
+            account_bytes: self.account_bytes,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SlotGcReport {
+    pub(crate) expected: Vec<checkout::RequiredRoot>,
+    pub(crate) completed: [checkout::RequiredRoot; 2],
+    pub(crate) report: checkout::CheckoutReport,
+}
+
+#[derive(Debug)]
+pub(crate) struct SlotGcRefusal {
+    pub(crate) expected: Vec<checkout::RequiredRoot>,
+    pub(crate) reason: Refusal,
+    pub(crate) evidence: Box<SlotGcFailure>,
+}
+
+impl SlotGcRefusal {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.reason.code == 130
+    }
+    pub(crate) fn detail(&self, expected: &[checkout::RequiredRoot]) -> &'static str {
+        if self.expected != expected {
+            return "The requested cleanup roots changed.";
+        }
+        match &*self.evidence {
+            SlotGcFailure::Setup => "Could not establish scoped cleanup inputs and capabilities.",
+            SlotGcFailure::Discovery {
+                checkout_faults,
+                target_faults,
+                unresolved,
+            } if !checkout_faults.is_empty()
+                || !target_faults.is_empty()
+                || !unresolved.is_empty() =>
+            {
+                "Scoped checkout or Cargo root discovery was incomplete."
+            }
+            SlotGcFailure::Run(evidence) if evidence.expected() == expected => {
+                "Scoped cleanup could not prove both Cargo output roots complete."
+            }
+            _ => "Could not verify the scoped cleanup result.",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum SlotGcFailure {
+    Setup,
+    RootScope,
+    Discovery {
+        checkout_faults: Vec<WalkFault>,
+        target_faults: Vec<WalkFault>,
+        unresolved: Vec<(PathBuf, String)>,
+    },
+    Run(checkout::EvidencedCheckoutReport),
+}
+
+fn slot_output_inputs(
+    state: &State,
+    path: &Path,
+    expected: &[checkout::RequiredRoot],
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<(CheckoutGc, TargetScan), SlotGcRefusal> {
+    let refuse = |detail: &str, evidence| SlotGcRefusal {
+        expected: expected.to_vec(),
+        reason: Refusal {
+            kind: "refusal",
+            path: None,
+            detail: detail.into(),
+            code: 1,
+        },
+        evidence: Box::new(evidence),
+    };
+    let cancelled = |evidence| SlotGcRefusal {
+        expected: expected.to_vec(),
+        reason: Refusal {
+            kind: "error",
+            path: None,
+            detail: "gc was cancelled".into(),
+            code: 130,
+        },
+        evidence: Box::new(evidence),
+    };
+    let checkout_fault = |checkout_faults| SlotGcFailure::Discovery {
+        checkout_faults,
+        target_faults: Vec::new(),
+        unresolved: Vec::new(),
+    };
+    if cancel() {
+        return Err(cancelled(SlotGcFailure::Setup));
+    }
+    let operation = match CheckoutGc::prepare(state, path, Some(cancel)) {
+        Ok(operation) => operation,
+        Err(CheckoutGcError::Discovery(faults)) => {
+            let evidence = checkout_fault(faults);
+            return Err(if cancel() {
+                cancelled(evidence)
+            } else {
+                refuse("checkout discovery was incomplete", evidence)
+            });
+        }
+        Err(CheckoutGcError::State(StateError::Cancelled)) => {
+            return Err(cancelled(SlotGcFailure::Setup));
+        }
+        Err(_) if cancel() => return Err(cancelled(SlotGcFailure::Setup)),
+        Err(_) => {
+            return Err(refuse(
+                "could not establish scoped cleanup inputs and capabilities",
+                SlotGcFailure::Setup,
+            ));
+        }
+    };
+    if cancel() {
+        return Err(cancelled(checkout_fault(operation.checkout_faults)));
+    }
+    if !operation.checkout_faults.is_empty() {
+        return Err(refuse(
+            "checkout discovery was incomplete",
+            checkout_fault(operation.checkout_faults),
+        ));
+    }
+    let required_paths: Vec<_> = expected.iter().map(|root| root.path.clone()).collect();
+    let scan = discover::targets_for_checkout_gc(&operation.live, &required_paths, cancel);
+    let unresolved = discover::failed_workspaces(&scan);
+    let interrupted = cancel();
+    if interrupted || !scan.walk_faults.is_empty() || !unresolved.is_empty() {
+        let evidence = SlotGcFailure::Discovery {
+            checkout_faults: Vec::new(),
+            target_faults: scan.walk_faults,
+            unresolved,
+        };
+        return Err(if interrupted {
+            cancelled(evidence)
+        } else {
+            refuse(
+                "Cargo target discovery or ownership was incomplete",
+                evidence,
+            )
+        });
+    }
+    Ok((operation, scan))
+}
+
+#[derive(Debug)]
+pub(crate) struct SlotOutputScope {
+    pub(crate) registry: Registry,
+    pub(crate) config: Config,
+}
+
+impl SlotOutputScope {
+    pub(crate) fn is_current(&self, state: &State) -> bool {
+        state
+            .read_regular_bounded::<Registry>(registry::FILE, cargo_hive_state::slots::MAX_BYTES)
+            .is_ok_and(|registry| registry == self.registry)
+            && state
+                .slot_config()
+                .is_ok_and(|config| config == self.config)
+    }
+}
+
+pub(crate) fn verify_slot_output_scope(
+    state: &State,
+    path: &Path,
+    expected: &[checkout::RequiredRoot],
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<SlotOutputScope, SlotGcRefusal> {
+    let (operation, scan) = slot_output_inputs(state, path, expected, cancel)?;
+    if !checkout::verify_root_scope(&operation.input(&scan), expected, cancel) {
+        let interrupted = cancel();
+        return Err(SlotGcRefusal {
+            expected: expected.to_vec(),
+            reason: Refusal {
+                kind: if interrupted { "error" } else { "refusal" },
+                path: None,
+                detail: "Could not prove exclusive ownership of both slot output roles.".into(),
+                code: if interrupted { 130 } else { 1 },
+            },
+            evidence: Box::new(SlotGcFailure::RootScope),
+        });
+    }
+    Ok(SlotOutputScope {
+        registry: operation.registry,
+        config: operation.cfg,
+    })
+}
+
+pub(crate) fn checkout_gc_for_slot(
+    state: &State,
+    path: &Path,
+    expected: &[checkout::RequiredRoot],
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<SlotGcReport, SlotGcRefusal> {
+    checkout_gc_for_slot_inner(state, path, expected, None, cancel)
+}
+
+pub(crate) fn checkout_gc_for_slot_with_generated(
+    state: &State,
+    path: &Path,
+    expected: &[checkout::RequiredRoot],
+    custody: &checkout::GeneratedInputCustody<'_>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<SlotGcReport, SlotGcRefusal> {
+    checkout_gc_for_slot_inner(state, path, expected, Some(custody), cancel)
+}
+
+fn checkout_gc_for_slot_inner(
+    state: &State,
+    path: &Path,
+    expected: &[checkout::RequiredRoot],
+    custody: Option<&checkout::GeneratedInputCustody<'_>>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<SlotGcReport, SlotGcRefusal> {
+    let (operation, scan) = slot_output_inputs(state, path, expected, cancel)?;
+    let refusal = |evidence, interrupted| SlotGcRefusal {
+        expected: expected.to_vec(),
+        reason: Refusal {
+            kind: if interrupted { "error" } else { "refusal" },
+            path: None,
+            detail: if interrupted {
+                "gc was cancelled"
+            } else {
+                "scoped cleanup could not prove completion for both Cargo output roots"
+            }
+            .into(),
+            code: if interrupted { 130 } else { 1 },
+        },
+        evidence: Box::new(SlotGcFailure::Run(evidence)),
+    };
+    let input = operation.input(&scan);
+    let mut evidence = match custody {
+        Some(custody) => checkout::run_with_generated_inputs(&input, expected, custody, cancel),
+        None => checkout::run_with_evidence(&input, expected, cancel),
+    };
+    if evidence.report.cancelled || cancel() {
+        evidence.report.cancelled = true;
+        return Err(refusal(evidence, true));
+    }
+    let Some(completed) = evidence.complete_roots().cloned() else {
+        return Err(refusal(evidence, false));
+    };
+    Ok(SlotGcReport {
+        expected: evidence.expected().to_vec(),
+        completed,
+        report: evidence.report,
+    })
+}
+
+fn checkout_cmd(state: &State, path: &Path, out: &OutputArgs) -> i32 {
+    use cargo_hive_cargo::discover::SNAPSHOT_FILE;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::time::Duration;
     let command = "gc --checkout";
     if let Err(e) = platform::signals::install() {
         return emit_failure(
@@ -1349,95 +1833,44 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
         );
     }
     let cancelled = || platform::signals::cancelled();
-    let loaded = (|| -> Result<_, StateError> {
-        Ok((
-            state.read::<Registry>(registry::FILE)?,
-            state.config()?,
-            state.read::<Capabilities>(doctor::CAPABILITIES_FILE)?,
-            state.read::<Snapshot>(SNAPSHOT_FILE)?,
-        ))
-    })();
-    let (reg, cfg, caps, mut snapshot) = match loaded {
-        Ok(v) => v,
-        Err(e) => return emit_failure(state, *out, command, &e.to_string(), 1),
-    };
-    let Ok(platform) = platform::current() else {
-        eprintln!("{MACOS_ONLY_MESSAGE}");
-        return 2;
-    };
-    let days = match window_days(cfg.gc_window_days) {
-        Ok(days) => days,
-        Err(err) => {
-            let mut b = Receipt::new(command, Scope::default());
-            b.finding("refusal", None, err.to_string());
-            return emit(state, *out, b.finish(), &format!("refused: {err}\n"), 1);
+    let mut operation = match CheckoutGc::prepare(state, path, None) {
+        Ok(operation) => operation,
+        Err(CheckoutGcError::State(err)) => {
+            return emit_failure(state, *out, command, &err.to_string(), 1);
         }
-    };
-    let release = cargo_hive_cargo::toolchain::resolve_toolchain(state.root())
-        .ok()
-        .map(|t| t.release);
-    for cap in [Capability::FingerprintReading, Capability::Deletion] {
-        if let Err(refusal) = doctor::require(&caps, cap, release.as_deref()) {
-            let mut b = Receipt::new(command, Scope::default());
-            b.toolchain(release.clone());
-            b.finding("refusal", None, refusal.to_string());
-            return emit(state, *out, b.finish(), &format!("refused: {refusal}\n"), 1);
+        Err(CheckoutGcError::Discovery(faults)) => {
+            let detail = faults
+                .first()
+                .map_or("checkout discovery was incomplete", |fault| &fault.detail);
+            return emit_failure(state, *out, command, detail, 1);
         }
-    }
-    let Found {
-        repo,
-        row,
-        rows: all_rows,
-        faults: checkout_faults,
-    } = match find_checkout(&reg, &cfg, path) {
-        Ok(v) => v,
-        Err(r) => {
-            let detail = match r
-                .path
-                .as_ref()
-                .and_then(|p| owning_repo(&reg, p).map(|owner| (p, owner)))
-            {
-                Some((p, owner)) => format!(
-                    "{path} is not a checkout of {main}; name the checkout's root directory",
-                    path = p.display(),
-                    main = owner.main.display()
-                ),
-                None => r.detail.clone(),
-            };
+        Err(CheckoutGcError::Unsupported) => {
+            eprintln!("{MACOS_ONLY_MESSAGE}");
+            return 2;
+        }
+        Err(CheckoutGcError::Refused { release, reason }) => {
             let mut b = Receipt::new(command, Scope::default());
-            b.toolchain(release.clone());
-            b.finding(r.kind, r.path, detail.clone());
+            b.toolchain(release);
+            b.finding(reason.kind, reason.path, reason.detail.clone());
             return emit(
                 state,
                 *out,
                 b.finish(),
-                &format!("refused: {detail}\n"),
-                r.code,
+                &format!("refused: {}\n", reason.detail),
+                reason.code,
             );
         }
     };
-    let mut b = Receipt::new(
-        command,
-        Scope {
-            repos: vec![repo.main.clone()],
-            checkouts: vec![row.path.clone()],
-        },
-    );
-    b.toolchain(release.clone());
-    for fault in &checkout_faults {
+    let mut b = Receipt::new(command, operation.scope.clone());
+    b.toolchain(operation.release.clone());
+    for fault in &operation.checkout_faults {
         b.finding(
             "walk.unreadable",
             Some(fault.path.clone()),
             fault.detail.clone(),
         );
     }
-    let live: Vec<_> = all_rows.into_iter().filter(|c| !c.missing).collect();
-    let nested: Vec<_> = live
-        .iter()
-        .map(|c| c.path.clone())
-        .filter(|p| p != &row.path && p.starts_with(&row.path))
-        .collect();
-    let scan = discover::targets(&live, &cfg, false, &mut snapshot, cancelled);
+    let scan = operation.scan(cancelled);
     if cancelled() {
         b.finding("error", None, "gc was cancelled");
         return emit(state, *out, b.finish(), "gc was cancelled\n", 130);
@@ -1452,7 +1885,6 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
     for var in &scan.ignored_vars {
         b.note(format!("{var} is set in the caller's environment and was ignored: ownership comes from each checkout's own Cargo configuration"));
     }
-    let account_bytes = !caps.disabled.contains_key(&Capability::EvictionAccounting);
     let volumes = |fs: &dyn platform::Fs| -> BTreeMap<String, (std::path::PathBuf, u64)> {
         scan.targets
             .iter()
@@ -1460,25 +1892,14 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
             .map(|v| (v.container, (v.mount, v.available_bytes)))
             .collect()
     };
-    let before = volumes(&*platform.fs);
-    let report = checkout::run(
-        &CheckoutInput {
-            fs: &*platform.fs,
-            scan: &scan,
-            checkout: &row.path,
-            nested: &nested,
-            now: std::time::SystemTime::now(),
-            window: Duration::from_secs(days.saturating_mul(86_400)),
-            account_bytes,
-        },
-        &cancelled,
-    );
-    let after = volumes(&*platform.fs);
+    let before = volumes(&*operation.fs);
+    let report = checkout::run(&operation.input(&scan), &cancelled);
+    let after = volumes(&*operation.fs);
     let touched: BTreeSet<String> = report
         .per_target
         .iter()
         .filter(|(_, c)| c.units_deleted + c.unit_files_deleted + c.objects_deleted > 0)
-        .filter_map(|(p, _)| platform.fs.volume(p).ok().map(|v| v.container))
+        .filter_map(|(p, _)| operation.fs.volume(p).ok().map(|v| v.container))
         .collect();
     for note in cargo_hive_gc::plan_tier::apply::cross_check_notes(&before, &after, &touched) {
         b.note(note);
@@ -1497,7 +1918,7 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
                 .unwrap_or_default()
         ));
     }
-    if !account_bytes {
+    if !operation.account_bytes {
         for name in ["freed_bytes", "deleted_bytes_still_shared"] {
             b.unmeasured(name, "doctor check (c) did not pass");
         }
@@ -1528,7 +1949,7 @@ fn checkout_cmd(state: &State, path: &std::path::Path, out: &OutputArgs) -> i32 
         let disk = tx.read(SNAPSHOT_FILE)?;
         tx.write(
             SNAPSHOT_FILE,
-            &discover::merge_snapshot(snapshot, disk, &scan.cleared_profiles),
+            &discover::merge_snapshot(operation.snapshot, disk, &scan.cleared_profiles),
         )?;
         Ok(true)
     }) {
@@ -1977,6 +2398,7 @@ fn explain_cmd(state: &State, args: &[std::path::PathBuf], top: usize, out: Outp
     emit(state, out, b.finish(), &explanation.human, code)
 }
 
+#[derive(Debug)]
 pub(crate) struct Refusal {
     pub kind: &'static str,
     pub path: Option<std::path::PathBuf>,
@@ -2108,9 +2530,308 @@ pub(crate) fn locate_checkout(
     Ok((repo, row, toolchain))
 }
 
-fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
+type SeedCheckout = (
+    registry::Repo,
+    discover::Checkout,
+    cargo_hive_cargo::toolchain::Toolchain,
+);
+
+fn run_selected_seed(
+    state: &State,
+    reg: &Registry,
+    cfg: &cargo_hive_state::Config,
+    caps: &cargo_hive_doctor::Capabilities,
+    selected: &SeedCheckout,
+    destination: Option<&cargo_hive_seed::place::SlotDestination<'_>>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Option<Result<cargo_hive_seed::Outcome, cargo_hive_seed::Error>> {
     use cargo_hive_cargo::ctx::Ctx;
-    use cargo_hive_doctor::{self as doctor, Capabilities, Capability};
+    use cargo_hive_doctor::Capability;
+    let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
+    let platform = platform::current().ok()?;
+    let (repo, row, toolchain) = selected;
+    let ctx = Ctx {
+        state,
+        fs: &*platform.fs,
+        cfg,
+        now: std::time::SystemTime::now(),
+        account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
+        repos: std::slice::from_ref(repo),
+        mains: &registered_mains,
+        liveness: cargo_hive_gc::liveness::liveness,
+    };
+    Some(match destination {
+        Some(destination) => cargo_hive_seed::run_prefilled_slot_seed(
+            &ctx,
+            repo,
+            row,
+            toolchain,
+            caps.unit_layout_or_flat(),
+            destination,
+            cancel,
+        ),
+        None => cargo_hive_seed::run(
+            &ctx,
+            repo,
+            row,
+            toolchain,
+            caps.unit_layout_or_flat(),
+            cancel,
+        ),
+    })
+}
+
+pub(crate) fn initial_seed_for_slot(
+    state: &State,
+    proof: &crate::slot::CheckoutProof,
+    evidence: cargo_hive_state::slots::EmptyEpoch,
+    generation: u64,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<(cargo_hive_state::slots::SeedEvidence, SlotOutputScope), &'static str> {
+    use cargo_hive_state::slots::{OutputRoots, RootExpectation, RootProof, SeedEvidence};
+    let refused = "Initial seed could not prove complete registry-only placement in the new slot.";
+    let (RootProof::Absent { path }, RootProof::Absent { path: build }) =
+        (&evidence.roots.target, &evidence.roots.build)
+    else {
+        return Err("Initial registry-only seed requires positively absent output roots.");
+    };
+    if path != build {
+        return Err("Initial registry-only seed requires coincident target and build roots.");
+    }
+    let expected = [checkout::RootRole::Target, checkout::RootRole::Build].map(|role| {
+        checkout::RequiredRoot {
+            path: path.clone(),
+            role,
+            presence: checkout::RootPresence::InitiallyAbsent,
+        }
+    });
+    let scope =
+        verify_slot_output_scope(state, &proof.path, &expected, cancel).map_err(|_| refused)?;
+    let destination = cargo_hive_seed::place::SlotDestination {
+        target: path,
+        checkout_identity: evidence.epoch.checkout.directory,
+        registry: &scope.registry,
+        config: &scope.config,
+    };
+    let placed = place_absent_registry_seed(state, &proof.path, None, &destination, cancel)
+        .map_err(|_| refused)?;
+    if !scope.is_current(state) {
+        return Err(refused);
+    }
+    initialize_seed_locks(
+        state,
+        &destination,
+        placed.root.identity,
+        &placed.units,
+        cancel,
+    )?;
+    if !scope.is_current(state) {
+        return Err(refused);
+    }
+    let root = RootExpectation::Present { root: placed.root };
+    Ok((
+        SeedEvidence {
+            evidence,
+            generation,
+            final_roots: OutputRoots {
+                target: root.clone(),
+                build: root,
+            },
+            registry_units: placed.units.len() as u64,
+        },
+        scope,
+    ))
+}
+
+pub(crate) struct RegistryPlacement {
+    pub(crate) root: cargo_hive_state::slots::VerifiedRoot,
+    pub(crate) units: Vec<cargo_hive_seed::place::SeededUnit>,
+}
+
+/// Places already stored registry units into the independently checked absent root.
+pub(crate) fn place_absent_registry_seed(
+    state: &State,
+    checkout: &Path,
+    required_main: Option<&Path>,
+    destination: &cargo_hive_seed::place::SlotDestination<'_>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<RegistryPlacement, &'static str> {
+    use cargo_hive_state::slots::{FileIdentity, VerifiedRoot};
+
+    let refused = "Seed could not prove complete registry-only placement in the fresh output root.";
+    let max_bytes = cargo_hive_state::slots::MAX_BYTES;
+    let reg = destination.registry;
+    let cfg = destination.config;
+    cargo_hive_state::window_days(cfg.gc_window_days).map_err(|_| refused)?;
+    let caps = state
+        .read_regular_bounded(cargo_hive_doctor::CAPABILITIES_FILE, max_bytes)
+        .map_err(|_| refused)?;
+    let found = find_checkout_complete(reg, cfg, checkout, cancel).map_err(|_| refused)?;
+    if found.row.path != checkout
+        || required_main.is_some_and(|main| found.repo.main != main)
+        || cancel()
+    {
+        return Err(refused);
+    }
+    let toolchain = cargo_hive_cargo::toolchain::resolve_toolchain_until(checkout, cancel)
+        .map_err(|_| refused)?;
+    for cap in [
+        cargo_hive_doctor::Capability::Seeding,
+        cargo_hive_doctor::Capability::Deletion,
+    ] {
+        cargo_hive_doctor::require(&caps, cap, Some(toolchain.release.as_str()))
+            .map_err(|_| refused)?;
+    }
+    let selected = (found.repo, found.row, toolchain);
+    let outcome = run_selected_seed(state, reg, cfg, &caps, &selected, Some(destination), cancel)
+        .ok_or(refused)?
+        .map_err(|_| refused)?;
+    let count = outcome.placed.len() as u64;
+    if cancel()
+        || outcome.cancelled
+        || count == 0
+        || !outcome.findings.is_empty()
+        || outcome.counts.get("clone_units_cloned") != Some(&count)
+        || [
+            "clone_units_failed",
+            "clone_units_dropped",
+            "clone_units_existing",
+            "clone_units_outside_window",
+        ]
+        .iter()
+        .any(|name| outcome.counts.get(*name).copied().unwrap_or_default() != 0)
+        || outcome
+            .placed
+            .iter()
+            .any(|unit| Some(unit.unit_layout) != caps.unit_layout_or_flat())
+    {
+        return Err(refused);
+    }
+    let path = destination.target;
+    let observed = cargo_hive_state::slots::owner_directory(path).map_err(|_| refused)?;
+    let identity = FileIdentity::of(&observed);
+    if outcome.target.as_ref() != Some(&(path.to_path_buf(), (identity.dev, identity.ino))) {
+        return Err(refused);
+    }
+    Ok(RegistryPlacement {
+        root: VerifiedRoot {
+            path: path.to_path_buf(),
+            identity,
+        },
+        units: outcome.placed,
+    })
+}
+
+fn initialize_seed_locks(
+    state: &State,
+    scope: &cargo_hive_seed::place::SlotDestination<'_>,
+    root_id: cargo_hive_state::slots::FileIdentity,
+    placed: &[cargo_hive_seed::place::SeededUnit],
+    cancel: &dyn Fn() -> bool,
+) -> Result<(), &'static str> {
+    use cargo_hive_core::{caps::CRATE_DIR_CAP, target, unit_path::UnitLayout};
+    use cargo_hive_platform::flock::open_owner_state_file;
+    use cargo_hive_state::slots::{FileIdentity, owner_directory};
+    use std::io;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+    use std::path::Component;
+
+    let refused = "Initial registry-only seed could not establish the native Cargo profile locks.";
+    let root = scope.target;
+    let layout = match placed.first().ok_or(refused)?.unit_layout {
+        UnitLayout::Flat => target::Layout::Fingerprint,
+        UnitLayout::UnitDir => target::Layout::NewBuildDir,
+    };
+    let proposed: std::collections::BTreeSet<_> = placed
+        .iter()
+        .map(|unit| {
+            if unit.rel_profile.as_os_str().is_empty()
+                || !unit
+                    .rel_profile
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+            {
+                return Err(refused);
+            }
+            Ok(root.join(&unit.rel_profile))
+        })
+        .collect::<Result<_, _>>()?;
+    let fs = platform::host_fs();
+    let profiles =
+        target::identify_strict(fs.as_ref(), root, CRATE_DIR_CAP, cancel).map_err(|_| refused)?;
+    if profiles.len() != proposed.len()
+        || profiles
+            .iter()
+            .any(|(path, observed)| *observed != layout || !proposed.contains(path))
+    {
+        return Err(refused);
+    }
+
+    let name = cargo_hive_state::slots::random_pool_id().map_err(|_| refused)?;
+    let scratch = state.root().join(format!(".slot-lock-template-{name}"));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&scratch)
+        .map_err(|_| refused)?;
+    let scratch = platform::TempDir::adopt(scratch);
+    let template = scratch.path().join("lock");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&template)
+        .map_err(|_| refused)?;
+    let template_id = FileIdentity::of(&file.metadata().map_err(|_| refused)?);
+    file.sync_all().map_err(|_| refused)?;
+
+    // Seed places artifacts without running Cargo. Only a freshly placed profile can initialize
+    // the vacant advisory lock paths. Ordinary cleanup still requires and acquires these locks.
+    for (profile, _) in profiles {
+        let identity = owner_directory(&profile)
+            .map_err(|_| refused)
+            .map(|meta| FileIdentity::of(&meta))?;
+        let checked = || {
+            owner_directory(root).is_ok_and(|meta| FileIdentity::of(&meta) == root_id)
+                && owner_directory(&profile).is_ok_and(|meta| FileIdentity::of(&meta) == identity)
+                && profile.canonicalize().as_ref().ok() == Some(&profile)
+                && !cancel()
+        };
+        if identity.dev != root_id.dev || !checked() {
+            return Err(refused);
+        }
+        for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
+            scope
+                .with_effect(state, cancel, || {
+                    if !checked()
+                        || FileIdentity::of(&open_owner_state_file(&template)?.metadata()?)
+                            != template_id
+                    {
+                        return Err(io::Error::other(refused));
+                    }
+                    let destination = profile.join(name);
+                    fs.clone_file(&template, &destination)?;
+                    let clone = open_owner_state_file(&destination)?.metadata()?;
+                    if clone.len() != 0
+                        || clone.mode() & 0o7777 != 0o600
+                        || clone.dev() != root_id.dev
+                        || FileIdentity::of(&clone) == template_id
+                    {
+                        return Err(io::Error::other(refused));
+                    }
+                    Ok(())
+                })
+                .map_err(|_| refused)?
+                .map_err(|_| refused)?;
+        }
+        if !checked() {
+            return Err(refused);
+        }
+    }
+    Ok(())
+}
+
+fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
+    use cargo_hive_doctor::{self as doctor, Capabilities};
     use cargo_hive_state::window_days;
     let loaded = (|| -> Result<_, StateError> {
         Ok((
@@ -2138,7 +2859,7 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
         );
     }
     let cancelled = || platform::signals::cancelled();
-    let (repo, row, toolchain) = match locate_checkout(&reg, &cfg, &caps, checkout) {
+    let selected = match locate_checkout(&reg, &cfg, &caps, checkout) {
         Ok(v) => v,
         Err(r) => {
             b.finding(r.kind, r.path, r.detail.clone());
@@ -2150,33 +2871,14 @@ fn seed_cmd(state: &State, checkout: &std::path::Path, out: OutputArgs) -> i32 {
             return emit(state, out, b.finish(), &human, r.code);
         }
     };
-    let real = row.path.clone();
-    let registered_mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
-    let Ok(platform) = platform::current() else {
+    let real = selected.1.path.clone();
+    b.toolchain(Some(selected.2.release.clone()));
+    b.scope_mut().checkouts.push(real.clone());
+    let Some(result) = run_selected_seed(state, &reg, &cfg, &caps, &selected, None, &cancelled)
+    else {
         eprintln!("{MACOS_ONLY_MESSAGE}");
         return 2;
     };
-    let repos = [repo];
-    let ctx = Ctx {
-        state,
-        fs: &*platform.fs,
-        cfg: &cfg,
-        now: std::time::SystemTime::now(),
-        account_bytes: !caps.disabled.contains_key(&Capability::EvictionAccounting),
-        repos: &repos,
-        mains: &registered_mains,
-        liveness: cargo_hive_gc::liveness::liveness,
-    };
-    b.toolchain(Some(toolchain.release.clone()));
-    b.scope_mut().checkouts.push(real.clone());
-    let result = cargo_hive_seed::run(
-        &ctx,
-        &repos[0],
-        &row,
-        &toolchain,
-        caps.unit_layout_or_flat(),
-        &cancelled,
-    );
     let code = cargo_hive_seed::exit_code(&result);
     cargo_hive_seed::record_seed_result(&mut b, &result);
     match result {
@@ -2345,6 +3047,809 @@ mod tests {
     use cargo_hive_state::Config;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+
+    #[cfg(target_os = "macos")]
+    fn checkout_gc_fixture() -> (platform::TempDir, State, Registry, PathBuf) {
+        let fs = platform::current().unwrap().fs;
+        let scratch = fs
+            .temp_dir(Path::new("/private/tmp"), "slot-checkout-gc")
+            .unwrap();
+        let state = State::open_at(scratch.path().join("hive")).unwrap();
+        let main = scratch.path().join("main");
+        let lane = main.join("lane");
+        let cache = scratch.path().join("missing-cache");
+        std::fs::create_dir(&main).unwrap();
+        fixture_git(&main, &["init", "-q"]);
+        std::fs::write(
+            main.join("Cargo.toml"),
+            "[package]\nname = \"slot-fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(main.join("src")).unwrap();
+        std::fs::write(main.join("src/lib.rs"), "").unwrap();
+        fixture_git(&main, &["add", "."]);
+        fixture_git(
+            &main,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        );
+        fixture_git(
+            &main,
+            &["worktree", "add", "-q", "--detach", lane.to_str().unwrap()],
+        );
+        let roots = Git::at(&main).root_commits().unwrap();
+        let reg = Registry {
+            repos: vec![registry::Repo {
+                main,
+                root_commits: roots,
+            }],
+            ..Default::default()
+        };
+        let caps = Capabilities {
+            toolchain_release: Some(
+                cargo_hive_cargo::toolchain::resolve_toolchain(state.root())
+                    .unwrap()
+                    .release,
+            ),
+            lock_check: cargo_hive_doctor::LOCK_CHECK_VERSION,
+            ..Capabilities::default()
+        };
+        state
+            .locked(|tx| {
+                tx.write(registry::FILE, &reg)?;
+                tx.write(cargo_hive_doctor::CAPABILITIES_FILE, &caps)?;
+                tx.write(
+                    "config.json",
+                    &serde_json::json!({ "secondary_roots": [], "cache_roots": [cache] }),
+                )
+            })
+            .unwrap();
+        (scratch, state, reg, lane)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fixture_git(path: &Path, args: &[&str]) -> std::process::Output {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    }
+
+    #[cfg(target_os = "macos")]
+    fn absent_roots(lane: &Path) -> [checkout::RequiredRoot; 2] {
+        [checkout::RootRole::Target, checkout::RootRole::Build].map(|role| checkout::RequiredRoot {
+            path: lane.join("target"),
+            role,
+            presence: checkout::RootPresence::InitiallyAbsent,
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_checks_an_initially_empty_root_without_writing_it() {
+        use std::os::unix::fs::MetadataExt;
+        let (_scratch, state, _, lane) = checkout_gc_fixture();
+        let mut required = absent_roots(&lane);
+        let path = required[0].path.clone();
+        std::fs::create_dir(&path).unwrap();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        for root in &mut required {
+            root.presence = checkout::RootPresence::InitiallyEmpty {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            };
+        }
+        let result = checkout_gc_for_slot(&state, &lane, &required, &|| false).unwrap();
+        assert_eq!(result.completed, required);
+        assert_eq!(std::fs::symlink_metadata(&path).unwrap().ino(), meta.ino());
+        assert!(std::fs::read_dir(&path).unwrap().next().is_none());
+        let unexpected = path.join("unexpected");
+        std::fs::write(&unexpected, b"keep").unwrap();
+        assert!(checkout_gc_for_slot(&state, &lane, &required, &|| false).is_err());
+        assert_eq!(std::fs::read(unexpected).unwrap(), b"keep");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_refuses_incomplete_discovery() {
+        let (scratch, state, reg, lane) = checkout_gc_fixture();
+        let cache = scratch.path().join("missing-cache");
+        let required = absent_roots(&lane);
+        use std::os::unix::fs::PermissionsExt;
+
+        let blocked = lane.join("unreadable-source");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .err()
+            .unwrap();
+        assert_eq!(refusal.reason.code, 1);
+        assert!(
+            refusal.reason.detail.contains("target discovery"),
+            "{}",
+            refusal.reason.detail
+        );
+
+        let SlotGcFailure::Discovery {
+            checkout_faults,
+            target_faults,
+            unresolved,
+        } = *refusal.evidence
+        else {
+            panic!("expected target scan evidence");
+        };
+        assert!(checkout_faults.is_empty() && unresolved.is_empty());
+        assert!(target_faults.iter().any(|fault| fault.path == blocked));
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let positive = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .ok()
+            .unwrap();
+        assert_eq!(positive.completed, required);
+        assert!(!state.root().join(discover::SNAPSHOT_FILE).exists());
+        assert!(!required[0].path.exists());
+
+        let clones = scratch.path().join("clones");
+        let clone = clones.join("related");
+        std::fs::create_dir(&clones).unwrap();
+        fixture_git(
+            &clones,
+            &[
+                "clone",
+                "--quiet",
+                reg.repos[0].main.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+        std::fs::create_dir(clone.join(".cargo")).unwrap();
+        std::fs::write(
+            clone.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = {:?}", required[0].path),
+        )
+        .unwrap();
+        state
+            .locked(|tx| {
+                tx.write(
+                    "config.json",
+                    &serde_json::json!({
+                        "secondary_roots": [clones], "cache_roots": [cache]
+                    }),
+                )
+            })
+            .unwrap();
+        let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .expect_err("the related clone resolves the slot output");
+        assert_eq!(refusal.reason.code, 1);
+        let SlotGcFailure::Run(evidence) = *refusal.evidence else {
+            panic!("expected recognized clone ownership");
+        };
+        assert!(evidence.completed().is_empty());
+
+        let missing = scratch.path().join("missing-secondary");
+        state
+            .locked(|tx| {
+                tx.write(
+                    "config.json",
+                    &serde_json::json!({
+                        "secondary_roots": [missing], "cache_roots": [cache]
+                    }),
+                )
+            })
+            .unwrap();
+        let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .err()
+            .unwrap();
+        assert_eq!(refusal.reason.code, 1);
+        assert!(
+            refusal.reason.detail.contains("checkout discovery"),
+            "{}",
+            refusal.reason.detail
+        );
+
+        let SlotGcFailure::Discovery {
+            checkout_faults,
+            target_faults,
+            unresolved,
+        } = *refusal.evidence
+        else {
+            panic!("expected checkout scan evidence");
+        };
+        assert!(target_faults.is_empty() && unresolved.is_empty());
+        assert_eq!(checkout_faults[0].path, missing);
+
+        let other = scratch.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::create_dir(other.join("src")).unwrap();
+        std::fs::create_dir(other.join(".cargo")).unwrap();
+        std::fs::write(
+            other.join("Cargo.toml"),
+            "[package]\nname = \"separate-repository\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(other.join("src/lib.rs"), "").unwrap();
+        std::fs::write(
+            other.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = {:?}", required[0].path),
+        )
+        .unwrap();
+        fixture_git(&other, &["init", "-q"]);
+        fixture_git(&other, &["add", "."]);
+        fixture_git(
+            &other,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "other",
+            ],
+        );
+        let mut reg = reg;
+        reg.repos.push(registry::Repo {
+            root_commits: Git::at(&other).root_commits().unwrap(),
+            main: other,
+        });
+        state
+            .locked(|tx| {
+                tx.write(registry::FILE, &reg)?;
+                tx.write(
+                    "config.json",
+                    &serde_json::json!({
+                        "secondary_roots": [], "cache_roots": [cache]
+                    }),
+                )
+            })
+            .unwrap();
+        let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .err()
+            .unwrap();
+        assert_eq!(refusal.reason.code, 1);
+        assert!(
+            refusal.reason.detail.contains("prove completion"),
+            "{}",
+            refusal.reason.detail
+        );
+        assert!(!required[0].path.exists());
+
+        let SlotGcFailure::Run(evidence) = *refusal.evidence else {
+            panic!("expected incomplete ownership evidence");
+        };
+        assert!(evidence.completed().is_empty());
+        assert!(
+            evidence
+                .report
+                .findings
+                .iter()
+                .any(|finding| finding.kind == "gc.root_incomplete")
+        );
+
+        let target = required[0].path.clone();
+        let debug = target.join("debug");
+        let unit = debug.join(".fingerprint/fixture-aaaaaaaaaaaaaaaa");
+        let foreign_output = unit.join("foreign-target");
+        std::fs::create_dir_all(&foreign_output).unwrap();
+        let sentinel = foreign_output.join("keep");
+        std::fs::write(&sentinel, b"foreign output").unwrap();
+        std::fs::write(
+            target.join("CACHEDIR.TAG"),
+            cargo_hive_core::target::TAG_LINE,
+        )
+        .unwrap();
+        std::fs::write(debug.join(".cargo-build-lock"), "").unwrap();
+        std::fs::write(unit.join("lib-fixture"), "0000000000000068").unwrap();
+        std::fs::write(
+            unit.join("lib-fixture.json"),
+            r#"{"rustc":1,"features":"[]","declared_features":"[]","target":2,"profile":3,"path":4,"deps":[],"local":[],"rustflags":[],"config":5,"compile_kind":0}"#,
+        )
+        .unwrap();
+        let stamp = unit.join("invoked.timestamp");
+        std::fs::write(&stamp, b"").unwrap();
+        std::fs::File::open(&stamp)
+            .unwrap()
+            .set_modified(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400),
+            )
+            .unwrap();
+        std::fs::write(
+            reg.repos[1].main.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = {:?}", foreign_output),
+        )
+        .unwrap();
+        let identity = platform::current().unwrap().fs.entry_stat(&target).unwrap();
+        let required = required.map(|mut root| {
+            root.presence = checkout::RootPresence::Present {
+                dev: identity.dev,
+                ino: identity.ino,
+            };
+            root
+        });
+        let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .expect_err("a nested foreign output must block strict cleanup");
+        let SlotGcFailure::Run(evidence) = *refusal.evidence else {
+            panic!("expected typed root refusal");
+        };
+        assert!(evidence.completed().is_empty());
+        assert!(evidence.report.per_target.is_empty(), "cleanup started");
+        assert!(evidence.report.findings.iter().any(|finding| {
+            finding.kind == "gc.root_incomplete" && finding.path.as_ref() == Some(&target)
+        }));
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"foreign output");
+        assert!(stamp.is_file());
+
+        std::fs::write(reg.repos[1].main.join("Cargo.toml"), "[broken").unwrap();
+        let refusal = checkout_gc_for_slot(&state, &lane, &required, &|| false)
+            .err()
+            .unwrap();
+        assert_eq!(refusal.reason.code, 1);
+        assert!(
+            refusal.reason.detail.contains("ownership"),
+            "{}",
+            refusal.reason.detail
+        );
+        let SlotGcFailure::Discovery {
+            checkout_faults,
+            target_faults,
+            unresolved,
+        } = *refusal.evidence
+        else {
+            panic!("expected unresolved workspace evidence");
+        };
+        assert!(checkout_faults.is_empty() && target_faults.is_empty());
+        assert_eq!(unresolved[0].0, reg.repos[1].main);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_resolves_nested_linked_checkout_workspaces_independently() {
+        assert_shared_nested_project(true);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_resolves_independent_workspaces_in_one_checkout() {
+        assert_shared_nested_project(false);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_shared_nested_project(linked: bool) {
+        let (scratch, state, mut reg, lane) = checkout_gc_fixture();
+        std::fs::create_dir(scratch.path().join("missing-cache")).unwrap();
+        let other = scratch.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::create_dir(other.join("src")).unwrap();
+        std::fs::write(
+            other.join("Cargo.toml"),
+            "[package]\nname = \"outer\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(other.join("src/lib.rs"), "").unwrap();
+        fixture_git(&other, &["init", "-q"]);
+        fixture_git(&other, &["add", "."]);
+        fixture_git(
+            &other,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "other",
+            ],
+        );
+        let workspace_checkout = if linked {
+            let nested = other.join("nested");
+            fixture_git(
+                &other,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "--detach",
+                    nested.to_str().unwrap(),
+                ],
+            );
+            fixture_git(&nested, &["rm", "Cargo.toml", "src/lib.rs"]);
+            nested
+        } else {
+            other.clone()
+        };
+        let project = workspace_checkout.join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir(project.join(".cargo")).unwrap();
+        std::fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"nested\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.join("src/lib.rs"), "").unwrap();
+        std::fs::write(
+            project.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = {:?}", lane.join("target")),
+        )
+        .unwrap();
+        fixture_git(&workspace_checkout, &["add", "."]);
+        fixture_git(
+            &workspace_checkout,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "nested project",
+            ],
+        );
+        reg.repos.push(registry::Repo {
+            root_commits: Git::at(&other).root_commits().unwrap(),
+            main: other,
+        });
+        state.locked(|tx| tx.write(registry::FILE, &reg)).unwrap();
+        let result = checkout_gc_for_slot(&state, &lane, &absent_roots(&lane), &|| false);
+        let refusal = result.expect_err("the nested checkout shares the slot output");
+        assert_eq!(refusal.reason.code, 1);
+        assert!(!lane.join("target").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_keeps_measured_effects_on_success_and_cancellation() {
+        let (scratch, state, _, lane) = checkout_gc_fixture();
+        std::fs::create_dir(scratch.path().join("missing-cache")).unwrap();
+        let target = lane.join("target");
+        let debug = target.join("debug");
+        std::fs::create_dir_all(debug.join(".fingerprint")).unwrap();
+        std::fs::create_dir_all(debug.join("deps")).unwrap();
+        std::fs::write(
+            target.join("CACHEDIR.TAG"),
+            cargo_hive_core::target::TAG_LINE,
+        )
+        .unwrap();
+        std::fs::write(debug.join(".cargo-build-lock"), "").unwrap();
+        let fs = platform::current().unwrap().fs;
+        let identity = fs.entry_stat(&target).unwrap();
+        let expectations = absent_roots(&lane).map(|mut root| {
+            root.presence = checkout::RootPresence::Present {
+                dev: identity.dev,
+                ino: identity.ino,
+            };
+            root
+        });
+
+        let object = debug.join("deps/orphan.0.rcgu.o");
+        let second = debug.join("deps/second.0.rcgu.o");
+        std::fs::write(&object, "object").unwrap();
+        let complete = checkout_gc_for_slot(&state, &lane, &expectations, &|| false)
+            .expect("cleanup completes");
+        assert_eq!(complete.expected, expectations);
+        assert_eq!(complete.completed, expectations);
+        assert_eq!(complete.report.totals.objects_deleted, 1);
+        assert!(!object.exists());
+
+        std::fs::write(&object, "object").unwrap();
+        std::fs::write(&second, "object").unwrap();
+        let refused = checkout_gc_for_slot(&state, &lane, &expectations, &|| {
+            !object.exists() || !second.exists()
+        })
+        .expect_err("cancellation follows the first effect");
+        assert_eq!(refused.reason.code, 130);
+        assert_ne!(object.exists(), second.exists());
+        let SlotGcFailure::Run(evidence) = *refused.evidence else {
+            panic!("expected partial cleanup evidence");
+        };
+        assert!(evidence.report.cancelled);
+        assert!(evidence.completed().is_empty());
+        assert_eq!(evidence.report.totals.objects_deleted, 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_refuses_unsafe_setup_artifacts() {
+        let (scratch, state, _, lane) = checkout_gc_fixture();
+        let expected = absent_roots(&lane);
+        assert!(checkout_gc_for_slot(&state, &lane, &expected, &|| false).is_ok());
+        std::fs::create_dir(scratch.path().join("missing-cache")).unwrap();
+        let assert_strict_refusal = || {
+            let refusal = checkout_gc_for_slot(&state, &lane, &expected, &|| false)
+                .expect_err("strict setup must refuse unsafe state");
+            assert_eq!(refusal.reason.code, 1);
+            assert_eq!(refusal.expected, expected);
+            assert!(matches!(*refusal.evidence, SlotGcFailure::Setup));
+            assert!(refusal.reason.path.is_none());
+            assert!(!expected[0].path.exists());
+        };
+        for name in [registry::FILE, cargo_hive_doctor::CAPABILITIES_FILE] {
+            let file = state.root().join(name);
+            let valid = std::fs::read(&file).unwrap();
+
+            let mut oversized = valid.clone();
+            oversized.resize(cargo_hive_state::slots::MAX_BYTES as usize + 1, b' ');
+            std::fs::write(&file, oversized).unwrap();
+            assert!(CheckoutGc::prepare(&state, &lane, None).is_ok());
+            assert_strict_refusal();
+
+            let alternate = scratch.path().join(name);
+            std::fs::write(&alternate, &valid).unwrap();
+            std::fs::remove_file(&file).unwrap();
+            std::os::unix::fs::symlink(alternate, &file).unwrap();
+            assert!(CheckoutGc::prepare(&state, &lane, None).is_ok());
+            assert_strict_refusal();
+
+            std::fs::remove_file(&file).unwrap();
+            std::fs::create_dir(&file).unwrap();
+            assert_strict_refusal();
+            std::fs::remove_dir(&file).unwrap();
+
+            for invalid in [b"{".as_slice(), br#"{"layout":999}"#] {
+                std::fs::write(&file, invalid).unwrap();
+                assert_strict_refusal();
+                assert!(CheckoutGc::prepare(&state, &lane, None).is_err());
+            }
+
+            std::fs::write(&file, valid).unwrap();
+        }
+        assert!(checkout_gc_for_slot(&state, &lane, &expected, &|| false).is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_reports_cancellation_between_setup_reads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (_scratch, state, _, lane) = checkout_gc_fixture();
+        let expected = absent_roots(&lane);
+        let checks = AtomicUsize::new(0);
+        let cancel = || checks.fetch_add(1, Ordering::Relaxed) == 2;
+        let refusal = checkout_gc_for_slot(&state, &lane, &expected, &cancel)
+            .expect_err("cancellation after reading the registry stops setup");
+        assert_eq!(refusal.reason.code, 130);
+        assert_eq!(refusal.expected, expected);
+        assert!(matches!(*refusal.evidence, SlotGcFailure::Setup));
+        assert!(!expected[0].path.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_retains_expected_paths_on_a_setup_refusal() {
+        let (scratch, state, _, lane) = checkout_gc_fixture();
+        let missing = scratch.path().join("missing-checkout");
+        let required = absent_roots(&lane);
+        let refusal = checkout_gc_for_slot(&state, &missing, &required, &|| false)
+            .expect_err("missing checkout refuses GC");
+        assert_eq!(refusal.reason.code, 1);
+        assert_eq!(refusal.expected, required);
+        assert!(refusal.reason.path.is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_cancels_a_bounded_clone_probe() {
+        use cargo_hive_platform::proc::{self, Capture, Spec};
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_ROOT: &str = "HIVE_TEST_CHECKOUT_GC_CLONE_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let state = State::open_at(root.join("hive")).unwrap();
+            let lane = root.join("main/lane");
+            let expected = absent_roots(&lane);
+            let cancel = || root.join("clone-probe-started").is_file();
+            let refusal = checkout_gc_for_slot(&state, &lane, &expected, &cancel)
+                .expect_err("interrupted clone scope must refuse");
+            assert!(cancel(), "the bounded Git probe was reached");
+            assert_eq!(refusal.reason.code, 130, "{refusal:?}");
+            assert_eq!(refusal.expected, expected);
+            return;
+        }
+
+        let (scratch, state, _, _) = checkout_gc_fixture();
+        let root = scratch.path();
+        let secondary = root.join("clones");
+        let candidate = secondary.join("fifo-clone/.git");
+        std::fs::create_dir_all(candidate.join("objects")).unwrap();
+        std::fs::write(candidate.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(
+            Command::new("mkfifo")
+                .arg(candidate.join("config"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        state
+            .locked(|tx| {
+                tx.write(
+                    "config.json",
+                    &serde_json::json!({
+                        "secondary_roots": [secondary], "cache_roots": [],
+                    }),
+                )
+            })
+            .unwrap();
+
+        let shim = root.join("git");
+        std::fs::write(
+            &shim,
+            r#"#!/bin/sh
+case " $* " in
+    *" rev-parse "*)
+        for param in "$@"; do
+            case "$param" in
+                */fifo-clone)
+                    : > "$HIVE_TEST_CHECKOUT_GC_CLONE_ROOT/clone-probe-started"
+                    exec sleep 10
+                    ;;
+            esac
+        done
+        ;;
+esac
+exec /usr/bin/git "$@"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut path = vec![root.to_path_buf()];
+        path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let mut spec = Spec::new(std::env::current_exe().unwrap());
+        spec.args = [
+            "--exact",
+            "cli::tests::slot_checkout_gc_cancels_a_bounded_clone_probe",
+        ]
+        .map(Into::into)
+        .into();
+        spec.env_set = vec![
+            (CHILD_ROOT.into(), root.as_os_str().to_owned()),
+            ("PATH".into(), std::env::join_paths(path).unwrap()),
+        ];
+        let child = proc::run_bounded_complete(
+            &spec,
+            Duration::from_secs(6),
+            Capture { stdout_cap: 16384, stderr_cap: 16384 },
+            || false,
+        )
+        .expect("strict checkout discovery must bypass direct reads of clone config and stop its Git child");
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn slot_checkout_gc_requires_complete_git_inventory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_ROOT: &str = "HIVE_TEST_CHECKOUT_GC_INVENTORY_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let state = State::open_at(root.join("hive")).unwrap();
+            let lane = root.join("main/lane");
+            let result = checkout_gc_for_slot(&state, &lane, &absent_roots(&lane), &|| false);
+            let refusal = result.expect_err("unproved Git checkout scope allowed cleanup");
+            assert_eq!(refusal.reason.code, 1);
+            if std::env::var_os("HIVE_TEST_GIT_INVENTORY_CASE").as_deref()
+                != Some(std::ffi::OsStr::new("covered-live-record"))
+            {
+                assert!(
+                    refusal.reason.detail.contains("checkout discovery"),
+                    "{}",
+                    refusal.reason.detail
+                );
+            }
+            assert!(!state.root().join(discover::SNAPSHOT_FILE).exists());
+            return;
+        }
+
+        let (scratch, _, reg, lane) = checkout_gc_fixture();
+        let root = scratch.path();
+        std::fs::create_dir(root.join("missing-cache")).unwrap();
+        let main = &reg.repos[0].main;
+        let valid = fixture_git(main, &["worktree", "list", "--porcelain", "-z"]).stdout;
+        assert!(valid.ends_with(b"\0\0"), "{valid:?}");
+        let incomplete = valid[..valid.len() - 1].to_vec();
+        let mut malformed = incomplete.clone();
+        malformed.extend_from_slice(b"unexpected attribute\0\0");
+        let mut oversize = incomplete.clone();
+        oversize.extend_from_slice(b"locked ");
+        oversize.resize(64 * 1024 - 1, b'x');
+        oversize.extend_from_slice(b"\0\0");
+
+        let hidden = main.join("hidden");
+        fixture_git(
+            main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                hidden.to_str().unwrap(),
+            ],
+        );
+        std::fs::create_dir(hidden.join(".cargo")).unwrap();
+        std::fs::write(
+            hidden.join(".cargo/config.toml"),
+            format!("[build]\ntarget-dir = {:?}", lane.join("target")),
+        )
+        .unwrap();
+        let complete = fixture_git(main, &["worktree", "list", "--porcelain", "-z"]).stdout;
+        assert!(complete.len() > valid.len());
+
+        let shim = root.join("git");
+        std::fs::write(
+            &shim,
+            r#"#!/bin/sh
+case " $* " in
+    *" worktree list "*)
+        if [ "$1" = "--no-optional-locks" ]; then exec cat "$HIVE_TEST_STRICT_GIT"; fi
+        printf 'legacy worktree listing\n' >> "$HIVE_TEST_LEGACY_GIT_CALLS"
+        exec cat "$HIVE_TEST_LEGACY_GIT"
+        ;;
+esac
+exec /usr/bin/git "$@"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut path = vec![root.to_path_buf()];
+        path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let path = std::env::join_paths(path).unwrap();
+        let legacy_data = root.join("legacy");
+        let strict_data = root.join("strict");
+        let legacy_calls = root.join("legacy-calls");
+        let mut failures = Vec::new();
+        for (label, legacy, strict) in [
+            ("incomplete", &incomplete, &incomplete),
+            ("malformed", &malformed, &malformed),
+            ("oversize", &oversize, &oversize),
+            ("covered-live-record", &valid, &complete),
+        ] {
+            std::fs::write(&legacy_data, legacy).unwrap();
+            std::fs::write(&strict_data, strict).unwrap();
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::tests::slot_checkout_gc_requires_complete_git_inventory",
+                ])
+                .env(CHILD_ROOT, root)
+                .env("PATH", &path)
+                .env("HIVE_TEST_GIT_INVENTORY_CASE", label)
+                .env("HIVE_TEST_LEGACY_GIT_CALLS", &legacy_calls)
+                .env("HIVE_TEST_LEGACY_GIT", &legacy_data)
+                .env("HIVE_TEST_STRICT_GIT", &strict_data)
+                .output()
+                .unwrap();
+            if !child.status.success() {
+                failures.push(format!(
+                    "{label}: {}",
+                    String::from_utf8_lossy(&child.stdout)
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        assert!(
+            !legacy_calls.exists(),
+            "strict discovery invoked the unbounded worktree listing"
+        );
+    }
 
     #[test]
     fn locating_a_missing_path_refuses_with_the_path_as_given() {

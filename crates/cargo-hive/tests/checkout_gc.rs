@@ -4,6 +4,7 @@ mod common;
 
 use cargo_hive_core::liveness::Liveness;
 use cargo_hive_core::unit_path::{self, UnitLayout};
+use cargo_hive_gc::checkout::{RequiredRoot, RootPresence, RootRole};
 use common::cargo_fixture::{
     THIRTY_DAYS, WINDOW, backdate_all, decide, decide_at, layout_of, set_mtime,
 };
@@ -930,6 +931,786 @@ fn stamp_for_a_run_build_script_uses_the_kind_specific_path() {
 }
 
 #[test]
+fn completed_checkout_gc_proves_each_role_of_a_coincident_root() {
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let (report, completed) =
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+
+    assert_eq!(completed, required, "{report:?}");
+    assert!(report.totals.units_deleted > 0, "{report:?}");
+    assert_eq!(report.per_target.len(), 1, "{report:?}");
+}
+
+#[test]
+fn checkout_gc_requires_a_distinct_role_and_existing_target_row() {
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, mut scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let before = tree(&target);
+
+    let (report, completed) = checkout_with_evidence(
+        fs.as_ref(),
+        &scan,
+        &checkout,
+        &nested,
+        &required[..1],
+        &|| false,
+    );
+    assert!(completed.is_empty(), "{report:?}");
+    assert_eq!(tree(&target), before, "{report:?}");
+
+    scan.targets.clear();
+    let (report, completed) =
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+    assert!(completed.is_empty(), "{report:?}");
+    assert!(!report.findings.is_empty(), "{report:?}");
+    assert_eq!(tree(&target), before);
+}
+
+#[test]
+fn checkout_gc_binds_split_roots_and_preserves_an_earlier_effect_on_a_later_skip() {
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, mut scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let build = checkout.join("z-build");
+    assert!(
+        Command::new("cp")
+            .args(["-c", "-R"])
+            .arg(&target)
+            .arg(&build)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut build_row = scan
+        .targets
+        .iter()
+        .find(|row| row.path == target)
+        .unwrap()
+        .clone();
+    build_row.path = build.clone();
+    scan.targets.push(build_row);
+    scan.workspaces
+        .iter_mut()
+        .find(|workspace| workspace.checkout == checkout)
+        .unwrap()
+        .result
+        .as_mut()
+        .unwrap()
+        .build_directory = build.clone();
+    let required = provided_roots(fs.as_ref(), &target, &build);
+    let before = tree(&build);
+    let mut holder = hive.hold_lock_child("flock", &build.join("debug/.cargo-build-lock"));
+
+    let (report, completed) =
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+    let _ = holder.kill();
+    let _ = holder.wait();
+
+    assert_eq!(completed, required[..1], "{report:?}");
+    assert_eq!(report.per_target.len(), 2, "{report:?}");
+    assert!(report.totals.units_deleted > 0, "{report:?}");
+    assert_eq!(
+        report.totals.skips.get("targets_skipped_held"),
+        Some(&1),
+        "{report:?}"
+    );
+    assert_eq!(tree(&build), before);
+    for root in [&target, &build] {
+        for name in [".cargo-build-lock", ".cargo-lock", ".cargo-artifact-lock"] {
+            let lock = root.join("debug").join(name);
+            assert!(
+                common::wait_until_lock_free(&lock, Duration::from_secs(5)),
+                "the fixture lock did not become available: {}",
+                lock.display()
+            );
+        }
+    }
+
+    let (report, completed) =
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+    assert_eq!(completed, required, "{report:?}");
+    assert!(report.totals.units_deleted > 0, "{report:?}");
+}
+
+#[test]
+fn checkout_gc_only_counts_an_absent_root_when_initial_absence_was_proved() {
+    let hive = hive_for_checkout_evidence();
+    let repo = RegistryRepo::new(&hive);
+    let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let required = [RootRole::Target, RootRole::Build].map(|role| RequiredRoot {
+        path: target.clone(),
+        role,
+        presence: RootPresence::InitiallyAbsent,
+    });
+    let (report, completed) =
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+    assert_eq!(completed, required, "{report:?}");
+    assert!(report.per_target.is_empty(), "{report:?}");
+    assert!(!target.exists());
+
+    fs::create_dir(&target).unwrap();
+    let (report, completed) =
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+    assert!(completed.is_empty(), "{report:?}");
+    assert!(target.is_dir());
+}
+
+#[test]
+fn strict_gc_requires_exclusive_ownership_of_missing_output_paths() {
+    use cargo_hive_cargo::{discover, registry};
+    let hive = hive_for_checkout_evidence();
+    let scratch = Scratch::new("absent-output-alias");
+    let checkout = init_repo(&scratch.path.join("slot"), "");
+    let other = init_repo(&scratch.path.join("other"), "");
+    register(&hive, &checkout);
+    register(&hive, &other);
+    let base = checkout.join("lane");
+    fs::create_dir(&base).unwrap();
+    let target = base.join("target/nested");
+    let build = checkout.join("build-output");
+    fs::create_dir_all(checkout.join(".cargo")).unwrap();
+    fs::write(
+        checkout.join(".cargo/config.toml"),
+        format!(
+            "[build]\ntarget-dir = {:?}\nbuild-dir = {:?}\n",
+            target, build
+        ),
+    )
+    .unwrap();
+    let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
+    let config = state.config().unwrap();
+    let reg: registry::Registry = state.read(registry::FILE).unwrap();
+    let mains: Vec<_> = reg.repos.iter().map(|repo| repo.main.clone()).collect();
+    let checkouts: Vec<_> = reg
+        .repos
+        .iter()
+        .flat_map(|repo| discover::checkouts(repo, &mains, &config).0)
+        .collect();
+    let fs = cargo_hive_platform::current().unwrap().fs;
+    let required =
+        [(&target, RootRole::Target), (&build, RootRole::Build)].map(|(path, role)| RequiredRoot {
+            path: path.clone(),
+            role,
+            presence: RootPresence::InitiallyAbsent,
+        });
+    fs::create_dir_all(other.join(".cargo")).unwrap();
+    for (other_target, other_build, exclusive) in [
+        (base.join("TARGET"), other.join("build-output"), false),
+        (
+            other.join("target-output"),
+            base.join("TARGET/NESTED/child"),
+            false,
+        ),
+        (
+            other.join("target-output"),
+            checkout.join("BUILD-OUTPUT"),
+            false,
+        ),
+        (
+            base.join("target/nésted"),
+            other.join("build-output"),
+            false,
+        ),
+        (base.join("TARGETS"), checkout.join("BUILD-OUTPUTS"), true),
+    ] {
+        fs::write(
+            other.join(".cargo/config.toml"),
+            format!(
+                "[build]\ntarget-dir = {:?}\nbuild-dir = {:?}\n",
+                other_target, other_build
+            ),
+        )
+        .unwrap();
+        let scan =
+            discover::targets_for_checkout_gc(&checkouts, &[target.clone(), build.clone()], || {
+                false
+            });
+        assert!(scan.walk_faults.is_empty(), "strict discovery walk failed");
+        let foreign = scan
+            .workspaces
+            .iter()
+            .find(|row| row.checkout == other)
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap();
+        assert_eq!(foreign.target_directory, other_target);
+        assert_eq!(foreign.build_directory, other_build);
+        let (report, completed) =
+            checkout_with_evidence(fs.as_ref(), &scan, &checkout, &[], &required, &|| false);
+        if exclusive {
+            assert_eq!(completed, required, "{report:?}");
+        } else {
+            assert!(completed.is_empty() && report.failed, "{report:?}");
+        }
+        assert!(report.per_target.is_empty(), "{report:?}");
+        for path in [&target, &build, &other_target, &other_build] {
+            assert!(!path.exists(), "GC created {}", path.display());
+        }
+    }
+}
+
+#[test]
+fn checkout_gc_cannot_prove_a_cancelled_root() {
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let before = tree(&target);
+    let (report, completed) =
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| true);
+    assert!(completed.is_empty(), "{report:?}");
+    assert!(report.cancelled, "{report:?}");
+    assert_eq!(tree(&target), before);
+}
+
+fn nested_output_fixture(root: &Path, entries: &[&str]) -> [PathBuf; 2] {
+    let profile = root.join("debug");
+    fs::create_dir_all(&profile).unwrap();
+    fs::write(root.join("CACHEDIR.TAG"), cargo_hive_core::target::TAG_LINE).unwrap();
+    fs::write(profile.join(".cargo-build-lock"), b"").unwrap();
+    [
+        ("one", "0123456789abcdef", 1),
+        ("two", "1123456789abcdef", 2),
+    ]
+    .map(|(package, hash, fingerprint)| {
+        let unit = plant_unit(
+            &profile,
+            UnitLayout::UnitDir,
+            package,
+            hash,
+            &format!("lib-{package}"),
+            fingerprint,
+            &[],
+            entries,
+        );
+        unit_path::outputs(&profile, &unit)
+    })
+}
+
+#[test]
+fn strict_object_listing_stops_at_the_first_cancelled_nested_listing() {
+    use cargo_hive_platform::{Fs, TryLock};
+    use std::cell::Cell;
+    let hive = hive_for_checkout_evidence();
+    let repo = RegistryRepo::new(&hive);
+    let target = repo.main.join("target");
+    let outputs = nested_output_fixture(&target, &["loose.0.rcgu.o"]);
+    let (real, scan, checkout, nested) = library_scan(&hive, &repo);
+    let required = provided_roots(real.as_ref(), &target, &target);
+    let lock = target.join("debug/.cargo-build-lock");
+    let visits = Cell::new(0);
+    let scoped = ListingFs {
+        real,
+        list: |real: &dyn Fs, path: &Path, cap| {
+            let entries = real.read_dir_bounded(path, cap)?;
+            if outputs.iter().any(|out| path == out) {
+                assert!(matches!(real.try_lock_exclusive(&lock), TryLock::Held));
+                visits.set(visits.get() + 1);
+            }
+            Ok(entries)
+        },
+    };
+    let before = tree(&target);
+    let (report, completed) =
+        checkout_with_evidence(&scoped, &scan, &checkout, &nested, &required, &|| {
+            visits.get() > 0
+        });
+    assert_eq!(visits.get(), 1, "{report:?}");
+    assert!(completed.is_empty() && report.cancelled, "{report:?}");
+    assert_eq!(report.totals.objects_deleted, 0, "{report:?}");
+    assert_eq!(tree(&target), before);
+    assert!(common::wait_until_lock_free(&lock, Duration::from_secs(5)));
+}
+
+#[test]
+fn strict_object_listing_spends_one_budget_across_nested_directories() {
+    use cargo_hive_platform::{EntryKind, Fs};
+    let hive = hive_for_checkout_evidence();
+    let repo = RegistryRepo::new(&hive);
+    let target = repo.main.join("target");
+    let outputs = nested_output_fixture(&target, &["fixture.o"]);
+    let (real, scan, checkout, nested) = library_scan(&hive, &repo);
+    let required = provided_roots(real.as_ref(), &target, &target);
+    let before = tree(&target);
+    let mut real = Some(real);
+    let budget = cargo_hive_core::caps::DEPS_CAP;
+    // Two entries in build, one package entry during unit-layout detection, two
+    // entries in the profile, then two build entries and one entry per package.
+    let outer_entries = 2 + 1 + 2 + 2 + 2;
+    for extra in [0, 1] {
+        let scoped = ListingFs {
+            real: real.take().unwrap(),
+            list: |fs: &dyn Fs, path: &Path, cap| {
+                let Some(index) = outputs.iter().position(|out| path == out) else {
+                    return fs.read_dir_bounded(path, cap);
+                };
+                let half = budget / 2;
+                let entries = if index == 0 {
+                    half
+                } else {
+                    half - outer_entries + extra
+                };
+                if entries > cap {
+                    return Err(std::io::Error::other("fixture listing exceeded its cap"));
+                }
+                Ok((0..entries)
+                    .map(|n| (format!("entry-{n}"), EntryKind::Dir))
+                    .collect())
+            },
+        };
+        let (report, completed) =
+            checkout_with_evidence(&scoped, &scan, &checkout, &nested, &required, &|| false);
+        if extra == 0 {
+            assert_eq!(completed, required, "{report:?}");
+        } else {
+            assert!(completed.is_empty(), "{report:?}");
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .any(|f| f.kind == "gc.objects_undecided"),
+                "{report:?}"
+            );
+        }
+        assert_eq!(report.totals.objects_deleted, 0, "{report:?}");
+        assert_eq!(tree(&target), before);
+        real = Some(scoped.real);
+    }
+}
+
+#[test]
+fn checkout_gc_refuses_shared_outside_nested_and_unreadable_scope_without_effects() {
+    use cargo_hive_cargo::discover::{WalkFault, WorkspaceResolution};
+
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, mut scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let before = tree(&target);
+    let no_cleanup = |scan: &_, nested: &[PathBuf], required: &[RequiredRoot]| {
+        let (report, completed) =
+            checkout_with_evidence(fs.as_ref(), scan, &checkout, nested, required, &|| false);
+        assert!(completed.is_empty(), "{report:?}");
+        assert!(!report.findings.is_empty(), "{report:?}");
+    };
+
+    no_cleanup(&scan, &[target.join("nested-checkout")], &required);
+    scan.walk_faults.push(WalkFault {
+        path: checkout.join("unreadable"),
+        detail: "test discovery read error".into(),
+        cannot_enter: false,
+    });
+    no_cleanup(&scan, &nested, &required);
+    scan.walk_faults.clear();
+    let owner = scan
+        .workspaces
+        .iter()
+        .find(|resolution| resolution.checkout == checkout)
+        .unwrap();
+    scan.workspaces.push(WorkspaceResolution {
+        dir: repo.scratch.path.join("other"),
+        checkout: repo.scratch.path.join("other"),
+        result: owner.result.clone(),
+    });
+    no_cleanup(&scan, &nested, &required);
+    scan.workspaces.pop();
+    assert_eq!(tree(&target), before);
+
+    let outside = repo.scratch.path.join("outside");
+    fs::rename(&target, &outside).unwrap();
+    let before = tree(&outside);
+    let owner = scan
+        .workspaces
+        .iter_mut()
+        .find(|resolution| resolution.checkout == checkout)
+        .unwrap();
+    let resolved = owner.result.as_mut().unwrap();
+    resolved.target_directory = outside.clone();
+    resolved.build_directory = outside.clone();
+    scan.targets
+        .iter_mut()
+        .find(|row| row.path == target)
+        .unwrap()
+        .path = outside.clone();
+    let required = provided_roots(fs.as_ref(), &outside, &outside);
+    no_cleanup(&scan, &nested, &required);
+    assert_eq!(tree(&outside), before);
+}
+
+#[test]
+fn checkout_gc_rechecks_the_root_inode_after_cargo_exclusion() {
+    checkout_gc_refuses_root_exchange(RootExchange::BeforeLockedStat);
+}
+
+#[test]
+fn checkout_gc_does_not_delete_after_a_root_exchange_following_the_first_locked_stat() {
+    checkout_gc_refuses_root_exchange(RootExchange::AfterLockedStat);
+}
+
+#[test]
+fn checkout_gc_rechecks_identity_after_accounting_and_before_removing() {
+    checkout_gc_refuses_root_exchange(RootExchange::DuringAccounting);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RootExchange {
+    BeforeLockedStat,
+    AfterLockedStat,
+    DuringAccounting,
+}
+
+fn checkout_gc_refuses_root_exchange(timing: RootExchange) {
+    use cargo_hive_platform::testing::Hooked;
+    use cargo_hive_platform::{Fs, TryLock};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let original = repo.scratch.path.join("original");
+    let stash = original.clone();
+    let original_before: std::collections::BTreeMap<_, _> = tree(&target)
+        .into_iter()
+        .map(|(path, evidence)| (original.join(path.strip_prefix(&target).unwrap()), evidence))
+        .collect();
+    let replacement = repo.scratch.path.join("replacement");
+    assert!(
+        Command::new("cp")
+            .args(["-c", "-R"])
+            .arg(&target)
+            .arg(&replacement)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let before = tree(&replacement)
+        .into_iter()
+        .map(|(path, evidence)| {
+            (
+                target.join(path.strip_prefix(&replacement).unwrap()),
+                evidence,
+            )
+        })
+        .collect();
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let real = cargo_hive_platform::apfs::Apfs::new(std::env::current_exe().unwrap());
+    let selected = target.clone();
+    let swapped = Arc::new(AtomicBool::new(false));
+    let did_swap = swapped.clone();
+    let exchange = Arc::new(move |root: &Path| {
+        if !did_swap.swap(true, Ordering::Relaxed) {
+            fs::rename(root, &stash).unwrap();
+            fs::rename(&replacement, root).unwrap();
+        }
+    });
+    let exchange_during_accounting = exchange.clone();
+    let accounting_root = target.clone();
+    let sharing_fs = cargo_hive_platform::apfs::Apfs::new(std::env::current_exe().unwrap());
+    let hooked = Hooked {
+        inner: fs,
+        compress: None,
+        volume: None,
+        sharing: Some(Box::new(move |path| {
+            let result = sharing_fs.sharing(path);
+            if timing == RootExchange::DuringAccounting && path.starts_with(&accounting_root) {
+                exchange_during_accounting(&accounting_root);
+            }
+            result
+        })),
+        entry_stat: Some(Box::new(move |path| {
+            if timing != RootExchange::DuringAccounting
+                && path == selected
+                && matches!(
+                    real.try_lock_exclusive(&path.join("debug/.cargo-build-lock")),
+                    TryLock::Held
+                )
+            {
+                let stat_before = real.entry_stat(path);
+                exchange(path);
+                if timing == RootExchange::AfterLockedStat {
+                    return stat_before;
+                }
+            }
+            real.entry_stat(path)
+        })),
+    };
+    let (report, completed) =
+        checkout_with_evidence(&hooked, &scan, &checkout, &nested, &required, &|| false);
+    assert!(
+        swapped.load(Ordering::Relaxed),
+        "swap must occur while the Cargo lock is held"
+    );
+    assert!(completed.is_empty(), "{report:?}");
+    assert!(report.failed, "{report:?}");
+    assert!(
+        tree(&target) == before,
+        "replacement changed during cleanup: {report:?}"
+    );
+    assert!(
+        tree(&original) == original_before,
+        "original changed during cleanup: {report:?}"
+    );
+}
+
+#[test]
+fn checkout_gc_cannot_clean_a_replacement_profile_under_displaced_locks() {
+    use cargo_hive_platform::testing::Hooked;
+    use cargo_hive_platform::{Fs, TryLock};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let debug = target.join("debug");
+    let original = repo.scratch.path.join("original-profile");
+    let replacement = repo.scratch.path.join("replacement-profile");
+    assert!(
+        Command::new("cp")
+            .args(["-c", "-R"])
+            .arg(&debug)
+            .arg(&replacement)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut holder = hive.hold_lock_child("flock", &replacement.join(".cargo-build-lock"));
+    let before: std::collections::BTreeMap<_, _> = tree(&replacement)
+        .into_iter()
+        .map(|(path, entry)| (debug.join(path.strip_prefix(&replacement).unwrap()), entry))
+        .collect();
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let selected = target.clone();
+    let did_swap = Arc::new(AtomicBool::new(false));
+    let swapped = did_swap.clone();
+    let real = cargo_hive_platform::apfs::Apfs::new(std::env::current_exe().unwrap());
+    let hooked = Hooked {
+        inner: fs,
+        compress: None,
+        volume: None,
+        sharing: None,
+        entry_stat: Some(Box::new(move |path| {
+            if path == selected
+                && !swapped.load(Ordering::Relaxed)
+                && matches!(
+                    real.try_lock_exclusive(&debug.join(".cargo-build-lock")),
+                    TryLock::Held
+                )
+            {
+                fs::rename(&debug, &original).unwrap();
+                fs::rename(&replacement, &debug).unwrap();
+                swapped.store(true, Ordering::Relaxed);
+            }
+            real.entry_stat(path)
+        })),
+    };
+    let (report, completed) =
+        checkout_with_evidence(&hooked, &scan, &checkout, &nested, &required, &|| false);
+    let _ = holder.kill();
+    let _ = holder.wait();
+    assert!(
+        did_swap.load(Ordering::Relaxed),
+        "exchange must occur after the Cargo lock is acquired"
+    );
+    assert!(completed.is_empty(), "{report:?}");
+    assert!(
+        tree(&target.join("debug")) == before,
+        "replacement changed: {report:?}"
+    );
+}
+
+#[test]
+fn checkout_gc_refuses_an_oversized_tag_before_removing_files() {
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let mut tag = fs::read(target.join("CACHEDIR.TAG")).unwrap();
+    tag.resize(64 * 1024 + 1, b' ');
+    fs::write(target.join("CACHEDIR.TAG"), tag).unwrap();
+    let before = tree(&target);
+    let (report, completed) =
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+    assert!(completed.is_empty(), "{report:?}");
+    assert!(tree(&target) == before, "files changed: {report:?}");
+}
+
+#[test]
+fn checkout_gc_refuses_symbolic_links_in_fingerprint_inputs() {
+    for use_json in [false, true] {
+        let hive = hive_for_checkout_evidence();
+        let repo = aged_binaries(&hive);
+        let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+        let target = checkout.join("target");
+        let required = provided_roots(fs.as_ref(), &target, &target);
+        let dir = fingerprint_dir_for(&target, &newest_fingerprint_unit(&target));
+        let json = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let input = if use_json {
+            json
+        } else {
+            dir.join(json.file_stem().unwrap())
+        };
+        let original = repo.scratch.path.join("original-fingerprint-input");
+        fs::rename(&input, &original).unwrap();
+        std::os::unix::fs::symlink(&original, &input).unwrap();
+        let before = tree(&target);
+        let (report, completed) =
+            checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+        assert!(completed.is_empty(), "{report:?}");
+        assert!(
+            tree(&target) == before,
+            "files changed for {}: {report:?}",
+            input.display()
+        );
+    }
+}
+
+#[test]
+fn checkout_gc_retains_measured_file_effects_when_a_later_removal_fails() {
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let before = tree(&target);
+    let rec = Recording::over_real().fail_removes_after(1);
+    let (report, completed) =
+        checkout_with_evidence(&rec, &scan, &checkout, &nested, &required, &|| false);
+    assert!(completed.is_empty(), "{report:?}");
+    assert!(report.failed, "{report:?}");
+    assert!(
+        tree(&target).len() < before.len(),
+        "fixture removed no files"
+    );
+    assert!(report.totals.unit_files_deleted > 0, "{report:?}");
+}
+
+#[test]
+fn checkout_gc_cannot_prove_either_kind_of_undecided_traversal() {
+    let hive = hive_for_checkout_evidence();
+    let repo = RegistryRepo::with_binaries(&hive);
+    cargo_json(&hive, &repo.main, &["test", "--no-run"]);
+    let (fs, scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let debug = target.join("debug");
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let bin = find_linked_named(&debug, "app-").expect("a built app binary");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(bin)
+        .unwrap()
+        .set_len(4)
+        .unwrap();
+    let before = tree(&target);
+    let (report, completed) =
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+    assert!(completed.is_empty(), "{report:?}");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "gc.objects_undecided"),
+        "{report:?}"
+    );
+    assert_eq!(tree(&target), before);
+
+    let dir = fingerprint_dir_for(&target, &newest_fingerprint_unit(&target));
+    fs::write(dir.join("extra-corrupt.json"), b"{}").unwrap();
+    let before = tree(&target);
+    let (report, completed) =
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+    assert!(completed.is_empty(), "{report:?}");
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "gc.undecided"),
+        "{report:?}"
+    );
+    assert_eq!(tree(&target), before);
+}
+
+fn hive_for_checkout_evidence() -> Hive {
+    let hive = Hive::ready();
+    fs::create_dir(hive.home.path.join("no-cache")).unwrap();
+    hive
+}
+
+#[test]
+fn checkout_gc_requires_an_uncached_scan_before_any_deletion() {
+    let hive = hive_for_checkout_evidence();
+    let repo = aged_binaries(&hive);
+    let (fs, mut scan, checkout, nested) = library_scan(&hive, &repo);
+    let target = checkout.join("target");
+    let required = provided_roots(fs.as_ref(), &target, &target);
+    let before = tree(&target);
+    scan.metadata_cache_hits = 1;
+    let (report, completed) =
+        checkout_with_evidence(fs.as_ref(), &scan, &checkout, &nested, &required, &|| false);
+    assert!(completed.is_empty(), "{report:?}");
+    assert_eq!(tree(&target), before);
+}
+
+fn provided_roots(
+    fs: &dyn cargo_hive_platform::Fs,
+    target: &Path,
+    build: &Path,
+) -> [RequiredRoot; 2] {
+    [(target, RootRole::Target), (build, RootRole::Build)].map(|(path, role)| {
+        let stat = fs.entry_stat(path).unwrap();
+        RequiredRoot {
+            path: path.to_path_buf(),
+            role,
+            presence: RootPresence::Present {
+                dev: stat.dev,
+                ino: stat.ino,
+            },
+        }
+    })
+}
+
+fn checkout_with_evidence(
+    fs: &dyn cargo_hive_platform::Fs,
+    scan: &cargo_hive_cargo::discover::TargetScan,
+    checkout: &Path,
+    nested: &[PathBuf],
+    required: &[RequiredRoot],
+    cancel: &dyn Fn() -> bool,
+) -> (cargo_hive_gc::checkout::CheckoutReport, Vec<RequiredRoot>) {
+    let input = cargo_hive_gc::checkout::CheckoutInput {
+        fs,
+        scan,
+        checkout,
+        nested,
+        now: SystemTime::now(),
+        window: WINDOW,
+        account_bytes: true,
+    };
+    let evidence = cargo_hive_gc::checkout::run_with_evidence(&input, required, cancel);
+    assert_eq!(evidence.expected(), required);
+    let completed = evidence.completed().to_vec();
+    (evidence.report, completed)
+}
+
+#[test]
 fn a_unit_changed_between_scan_and_lock_is_judged_on_the_fresh_read() {
     let hive = Hive::ready();
     let repo = aged_binaries(&hive);
@@ -1726,9 +2507,17 @@ fn an_out_cap_hit_or_unreadable_package_dir_names_the_dir_and_deletes_no_object(
     let keep = out_dir.join("keep.0.rcgu.o");
     let pkg = profile.join("build/probe");
     let objects_before = count_regular_files_under(&out_dir);
-    let fail = FailListFs {
+    let fail = ListingFs {
         real,
-        blocked: pkg.clone(),
+        list: |real: &dyn cargo_hive_platform::Fs, dir: &Path, cap| {
+            if dir == pkg {
+                return Err(std::io::Error::other(format!(
+                    "{}: permission denied",
+                    dir.display()
+                )));
+            }
+            real.read_dir_bounded(dir, cap)
+        },
     };
     let state = cargo_hive_state::State::open_at(hive.home.path.clone()).unwrap();
     let cfg = state.config().unwrap();
@@ -1764,12 +2553,19 @@ fn an_out_cap_hit_or_unreadable_package_dir_names_the_dir_and_deletes_no_object(
     );
 }
 
-struct FailListFs {
+struct ListingFs<F> {
     real: Box<dyn cargo_hive_platform::Fs>,
-    blocked: PathBuf,
+    list: F,
 }
 
-impl cargo_hive_platform::Fs for FailListFs {
+impl<F> cargo_hive_platform::Fs for ListingFs<F>
+where
+    F: Fn(
+        &dyn cargo_hive_platform::Fs,
+        &Path,
+        usize,
+    ) -> std::io::Result<Vec<(String, cargo_hive_platform::EntryKind)>>,
+{
     fn temp_dir(
         &self,
         parent: &Path,
@@ -1835,13 +2631,7 @@ impl cargo_hive_platform::Fs for FailListFs {
         dir: &Path,
         cap: usize,
     ) -> std::io::Result<Vec<(String, cargo_hive_platform::EntryKind)>> {
-        if dir == self.blocked {
-            return Err(std::io::Error::other(format!(
-                "{}: permission denied",
-                dir.display()
-            )));
-        }
-        self.real.read_dir_bounded(dir, cap)
+        (self.list)(self.real.as_ref(), dir, cap)
     }
     fn remove_tree(&self, path: &Path) -> std::io::Result<()> {
         self.real.remove_tree(path)

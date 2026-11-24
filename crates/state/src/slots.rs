@@ -5,7 +5,7 @@ use cargo_hive_platform::flock::{
     LockFileIdentity, checked_owner_directory, checked_stable_ancestor, open_owner_state_file,
     open_owner_state_lock, open_private_file,
 };
-use cargo_hive_platform::slot::random_slot_bytes;
+use cargo_hive_platform::slot::{random_slot_bytes, sha256};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -14,11 +14,15 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::{Component, Path, PathBuf};
 
 pub const FILE: &str = "slots.json";
+pub const AUTHORITY_FILE: &str = "slots.authority";
 pub const LOCK_NAMESPACE: &str = "slot-locks";
 pub const CHECKOUT_NAMESPACE: &str = "hive-slots";
 pub const MAX_BYTES: u64 = 1_048_576;
 pub const MAX_POOLS: usize = 128;
 pub const MAX_OUTCOMES: usize = 32;
+pub const MAX_GENERATED_INPUTS: usize = 8;
+pub const MAX_GENERATED_INPUT_BYTES: u64 = 1024 * 1024;
+const MAX_RETAINED_GENERATED_BYTES: u64 = 8 * MAX_GENERATED_INPUT_BYTES;
 const MAX_PROFILE_ENTRIES: usize = 256;
 const MAX_PATH_BYTES: usize = 4_096;
 
@@ -90,7 +94,7 @@ impl SlotsFile {
                         "reused checkout or Git admin identity",
                     )?;
                 }
-                slot.validate(pool)?;
+                slot.validate(pool, self.revision)?;
             }
         }
         for pool in &self.pools {
@@ -130,6 +134,9 @@ impl SlotsFile {
                         || old.generation.checked_add(1) == Some(new.generation),
                     "slot generation is stale or skipped",
                 )?;
+                new.phase.validate_preparation_successor(old, new)?;
+                new.validate_retry_successor(old)?;
+                old.producer.validate_successor(&new.producer, old, new)?;
             }
         }
         Ok(())
@@ -181,6 +188,8 @@ pub struct Slot {
     pub last_head: Option<String>,
     pub generation: u64,
     pub phase: Phase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<PreparationRetry>,
     pub producer: Producer,
     pub outcomes: Vec<Outcome>,
 }
@@ -195,6 +204,7 @@ impl Slot {
             last_head: None,
             generation: 0,
             phase: Phase::Vacant,
+            retry: None,
             producer: Producer::NeverBuilt { evidence: None },
             outcomes: Vec::new(),
         }
@@ -208,7 +218,7 @@ impl Slot {
         format!("slot-{number}.lock")
     }
 
-    fn validate(&self, pool: &Pool) -> FormatResult {
+    fn validate(&self, pool: &Pool, revision: u64) -> FormatResult {
         require((1..=2).contains(&self.number), "invalid slot number")?;
         require(
             self.path.as_os_str() == format!("slot-{}", self.number).as_str(),
@@ -252,7 +262,30 @@ impl Slot {
                     && self.outcomes.is_empty()),
             "unused generation cannot carry prior checkout or lease",
         )?;
-        self.phase.validate(self)?;
+        self.phase.validate(self, revision)?;
+        if let Some(retry) = &self.retry {
+            let lease = self
+                .phase
+                .active_lease()
+                .ok_or("retry lacks an active lease")?;
+            require(
+                retry.retired_attempt > 0
+                    && retry.retired_attempt <= revision
+                    && hex(&retry.begin_op, 32)
+                    && retry.begin_op != lease.reservation_op
+                    && self.phase.preparing_attempt().is_none_or(|attempt| {
+                        attempt.begin_op == retry.begin_op
+                            && attempt.attempt_id > retry.retired_attempt
+                    })
+                    && self.phase.ready_preparation().is_none_or(|preparation| {
+                        preparation.as_ref().is_some_and(|completed| {
+                            completed.begin_op == retry.begin_op
+                                && completed.attempt_id > retry.retired_attempt
+                        })
+                    }),
+                "invalid retry preparation binding",
+            )?;
+        }
         self.producer.validate(pool, self)?;
         require(
             self.outcomes.len() <= MAX_OUTCOMES,
@@ -261,6 +294,31 @@ impl Slot {
         let mut keys = BTreeSet::new();
         for outcome in &self.outcomes {
             outcome.validate(pool, self)?;
+            if let Some(Some(preparation)) = self.phase.ready_preparation()
+                && outcome.generation == self.generation
+                && !self.retry.as_ref().is_some_and(|retry| {
+                    outcome
+                        .attempt_id
+                        .is_some_and(|attempt| attempt <= retry.retired_attempt)
+                })
+            {
+                let matches = match &outcome.request {
+                    OutcomeRequest::Begin { runner } => {
+                        outcome.attempt_id == Some(preparation.attempt_id)
+                            && outcome.operation == preparation.begin_op
+                            && runner == &preparation.runner
+                    }
+                    OutcomeRequest::Ready { runner } => {
+                        outcome.attempt_id == Some(preparation.attempt_id)
+                            && runner == &preparation.runner
+                    }
+                    _ => true,
+                };
+                require(
+                    matches,
+                    "completed preparation conflicts with its retained outcome",
+                )?;
+            }
             require(
                 keys.insert((
                     outcome.generation,
@@ -271,6 +329,50 @@ impl Slot {
             )?;
         }
         Ok(())
+    }
+
+    fn validate_retry_successor(&self, prior: &Slot) -> FormatResult {
+        if self.retry == prior.retry {
+            if self.retry.is_some() {
+                require(
+                    self.generation == prior.generation
+                        && self.phase.active_lease() == prior.phase.active_lease(),
+                    "an active retry cannot rebind its lease",
+                )?;
+            }
+            return Ok(());
+        }
+        let Some(retry) = &self.retry else {
+            return require(
+                matches!(self.phase, Phase::Vacant),
+                "an active lease cannot drop its recovery fence",
+            );
+        };
+        let Phase::Preparing { lease, attempt } = &prior.phase else {
+            return Err("only an interrupted preparation can establish a retry fence");
+        };
+        require(
+            matches!(&self.phase, Phase::Reserved { lease: next } if next == lease)
+                && prior.generation == self.generation
+                && attempt.stage == AttemptStage::GcInProgress
+                && attempt.attempt_id == retry.retired_attempt
+                && attempt.host_binding.is_some()
+                && self.outcomes.iter().any(|outcome| {
+                    outcome.generation == self.generation
+                        && outcome.attempt_id == Some(attempt.attempt_id)
+                        && outcome.credential == lease.credential
+                        && !prior.outcomes.contains(outcome)
+                        && matches!(&outcome.request,
+                            OutcomeRequest::Recover { recovery: Some(request) }
+                                if request.next_begin_op.as_ref() == Some(&retry.begin_op)
+                                    && request.begin_op.as_ref() == Some(&attempt.begin_op)
+                                    && matches!(&request.authority,
+                                        RecoveryAuthorization::Holder { nonce: Some(nonce) } if nonce == &attempt.runner.nonce
+                                    )
+                        )
+                }),
+            "retry must retire the exact interrupted GC attempt under the original lease",
+        )
     }
 }
 
@@ -337,6 +439,13 @@ impl GitIdentity {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PreparationRetry {
+    pub retired_attempt: u64,
+    pub begin_op: String,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckoutIdentity {
     pub directory: FileIdentity,
     pub admin: GitIdentity,
@@ -356,6 +465,8 @@ pub enum Phase {
     Leased {
         lease: Lease,
         ready_commit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preparation: Option<CompletedPreparation>,
     },
     Held {
         reason: HoldReason,
@@ -367,9 +478,19 @@ pub enum Phase {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PriorPhase {
     Vacant,
-    Reserved { lease: Lease },
-    Preparing { lease: Lease, attempt: Attempt },
-    Leased { lease: Lease, ready_commit: String },
+    Reserved {
+        lease: Lease,
+    },
+    Preparing {
+        lease: Lease,
+        attempt: Attempt,
+    },
+    Leased {
+        lease: Lease,
+        ready_commit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preparation: Option<CompletedPreparation>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -413,7 +534,70 @@ impl Phase {
         }
     }
 
-    fn validate(&self, slot: &Slot) -> FormatResult {
+    fn preparing_attempt(&self) -> Option<&Attempt> {
+        match self {
+            Self::Preparing { attempt, .. }
+            | Self::Held {
+                prior: PriorPhase::Preparing { attempt, .. },
+                ..
+            } => Some(attempt),
+            _ => None,
+        }
+    }
+
+    fn ready_preparation(&self) -> Option<&Option<CompletedPreparation>> {
+        match self {
+            Self::Leased { preparation, .. }
+            | Self::Held {
+                prior: PriorPhase::Leased { preparation, .. },
+                ..
+            } => Some(preparation),
+            _ => None,
+        }
+    }
+
+    fn validate_preparation_successor(&self, old: &Slot, new: &Slot) -> FormatResult {
+        if let (Some(previous), Some(next)) =
+            (old.phase.preparing_attempt(), self.preparing_attempt())
+        {
+            require(
+                old.generation == new.generation
+                    && previous.attempt_id == next.attempt_id
+                    && previous.begin_op == next.begin_op
+                    && previous.runner == next.runner
+                    && previous.host_binding == next.host_binding,
+                "an active preparation cannot rebind its writer",
+            )?;
+        }
+        let Some(next) = self.ready_preparation() else {
+            return Ok(());
+        };
+        if let Some(previous) = old.phase.ready_preparation() {
+            return require(
+                previous == next && old.generation == new.generation,
+                "a ready lease cannot rebind its completed preparation",
+            );
+        }
+        if let Some(completed) = next {
+            require(
+                old.generation == new.generation
+                    && matches!(old.phase, Self::Preparing { .. })
+                    && matches!(self, Self::Leased { .. })
+                    && old.phase.active_lease() == self.active_lease()
+                    && old.phase.preparing_attempt().is_some_and(|attempt| {
+                        attempt.stage == AttemptStage::GcInProgress
+                            && attempt.attempt_id == completed.attempt_id
+                            && attempt.begin_op == completed.begin_op
+                            && attempt.runner == completed.runner
+                            && attempt.host_binding == Some(completed.host_binding)
+                    }),
+                "Ready must preserve the exact completed GC attempt and writer",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate(&self, slot: &Slot, revision: u64) -> FormatResult {
         let (lease, attempt, ready) = match self {
             Self::Vacant
             | Self::Held {
@@ -433,25 +617,38 @@ impl Phase {
             Self::Leased {
                 lease,
                 ready_commit,
+                preparation,
             }
             | Self::Held {
                 prior:
                     PriorPhase::Leased {
                         lease,
                         ready_commit,
+                        preparation,
                     },
                 ..
-            } => (lease, None, Some(ready_commit)),
+            } => (lease, None, Some((ready_commit, preparation))),
         };
         lease.validate()?;
         if let Some(attempt) = attempt {
+            require(
+                attempt.attempt_id <= revision,
+                "preparation is newer than the record",
+            )?;
             attempt.validate()?;
         }
-        if let Some(commit) = ready {
+        if let Some((commit, preparation)) = ready {
             require(
                 commit == &lease.requested_commit && slot.last_head.as_ref() == Some(commit),
                 "invalid ready HEAD binding",
             )?;
+            if let Some(preparation) = preparation {
+                require(
+                    preparation.attempt_id <= revision,
+                    "completed preparation is newer than the record",
+                )?;
+                preparation.validate()?;
+            }
         }
         Ok(())
     }
@@ -482,14 +679,39 @@ pub struct Attempt {
     pub attempt_id: u64,
     pub begin_op: String,
     pub runner: Runner,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_binding: Option<[u8; 32]>,
     pub stage: AttemptStage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchors: Vec<AnchorWitness>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub anchor_cursor: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 impl Attempt {
     fn validate(&self) -> FormatResult {
         require(
-            self.attempt_id > 0 && hex(&self.begin_op, 32),
+            self.attempt_id > 0
+                && hex(&self.begin_op, 32)
+                && self.host_binding.is_none_or(|digest| digest != [0; 32])
+                && self.lock_offset.is_none_or(|offset| offset >= (1 << 32)),
             "invalid attempt identity",
+        )?;
+        require(
+            self.prior_head.as_ref().is_none_or(|head| object_id(head))
+                && self.anchors.len() <= MAX_PROFILE_ENTRIES
+                && self.anchor_cursor <= self.anchors.len()
+                && unique(self.anchors.iter().map(|anchor| &anchor.path))
+                && self.anchors.iter().all(AnchorWitness::valid),
+            "invalid preparation input witness",
         )?;
         self.runner.validate()
     }
@@ -499,7 +721,67 @@ impl Attempt {
 #[serde(rename_all = "snake_case")]
 pub enum AttemptStage {
     PermitIssued,
+    CheckoutInProgress,
+    AwaitingAnchors,
+    AnchorsInProgress,
+    CheckoutVerified,
+    SeedInProgress,
     GcInProgress,
+}
+
+/// The preparation whose verified effects reached durable readiness.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletedPreparation {
+    pub attempt_id: u64,
+    pub begin_op: String,
+    pub runner: Runner,
+    pub host_binding: [u8; 32],
+}
+
+impl CompletedPreparation {
+    fn validate(&self) -> FormatResult {
+        require(
+            self.attempt_id > 0 && hex(&self.begin_op, 32) && self.host_binding != [0; 32],
+            "invalid completed preparation binding",
+        )?;
+        self.runner.validate()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnchorWitness {
+    pub path: PathBuf,
+    pub identity: FileIdentity,
+    pub object: String,
+    pub mode: u32,
+    pub prior_unit: (i64, i64),
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_digest: Option<String>,
+    pub floor: (i64, i64),
+    pub touched: Option<(i64, i64)>,
+}
+
+impl AnchorWitness {
+    fn valid(&self) -> bool {
+        let valid_stamp =
+            |&(seconds, nanos): &(i64, i64)| seconds > 0 && (0..1_000_000_000).contains(&nanos);
+        relative(&self.path)
+            && self.identity.valid()
+            && object_id(&self.object)
+            && self
+                .unit_digest
+                .as_ref()
+                .is_none_or(|digest| hex(digest, 64))
+            && valid_stamp(&self.prior_unit)
+            && valid_stamp(&self.floor)
+            && self.floor >= self.prior_unit
+            && self
+                .touched
+                .as_ref()
+                .is_none_or(|stamp| valid_stamp(stamp) && *stamp > self.floor)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -551,6 +833,8 @@ pub enum Producer {
         generation: u64,
         roots: OutputRoots<Option<VerifiedRoot>>,
         reason: ProvenanceLoss,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<BypassReport>,
     },
     Unknown {
         epoch: OutputEpoch,
@@ -558,6 +842,13 @@ pub enum Producer {
         roots: OutputRoots<Option<VerifiedRoot>>,
         reason: ProvenanceLoss,
     },
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BypassReport {
+    pub operation: String,
+    pub runner: Runner,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -571,6 +862,10 @@ pub struct PendingProducer {
     pub operation: String,
     pub runner: Runner,
     pub prior: EligibleProducer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<ForegroundInstance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guide_guard_offset: Option<i64>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -579,17 +874,31 @@ pub enum EligibleProducer {
     NeverBuilt {
         evidence: EmptyEpoch,
     },
-    SeedOnly {
-        evidence: EmptyEpoch,
-        generation: u64,
-        final_roots: OutputRoots<RootExpectation>,
-        registry_units: u64,
-    },
+    SeedOnly(SeedEvidence),
     Complete {
         generation: u64,
         roots: OutputRoots<VerifiedRoot>,
         invocations: Vec<CompletedInvocation>,
     },
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SeedEvidence {
+    pub evidence: EmptyEpoch,
+    pub generation: u64,
+    pub final_roots: OutputRoots<RootExpectation>,
+    pub registry_units: u64,
+}
+
+impl SeedEvidence {
+    fn derives_from_empty(
+        evidence: &EmptyEpoch,
+        final_roots: &OutputRoots<RootExpectation>,
+    ) -> bool {
+        evidence.roots.target.accepts_seed(&final_roots.target)
+            && evidence.roots.build.accepts_seed(&final_roots.build)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -645,6 +954,19 @@ impl RootExpectation {
 }
 
 impl RootProof {
+    fn accepts_seed(&self, later: &RootExpectation) -> bool {
+        match (self, later) {
+            (Self::Absent { path }, RootExpectation::Absent { path: final_path }) => {
+                path == final_path
+            }
+            (Self::Absent { path }, RootExpectation::Present { root }) => path == &root.path,
+            (Self::Empty { root }, RootExpectation::Present { root: final_root }) => {
+                root == final_root
+            }
+            _ => false,
+        }
+    }
+
     fn validate(&self, slot_path: &Path) -> FormatResult {
         match self {
             Self::Absent { path } => validate_output_path(path, slot_path),
@@ -687,6 +1009,8 @@ pub struct InvocationEvidence {
     pub invocation: String,
     pub graph_digest: String,
     pub environment_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_digest: Option<String>,
 }
 
 impl InvocationEvidence {
@@ -697,6 +1021,10 @@ impl InvocationEvidence {
             .any(|item| item.id == self.invocation)
             && hex(&self.graph_digest, 64)
             && hex(&self.environment_digest, 64)
+            && self
+                .stable_digest
+                .as_ref()
+                .is_none_or(|digest| hex(digest, 64))
     }
 }
 
@@ -706,6 +1034,138 @@ pub struct CompletedInvocation {
     pub evidence: InvocationEvidence,
     pub operation: String,
     pub runner: Runner,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground: Option<ForegroundInstance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_inputs: Vec<GeneratedInputWitness>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listing_artifacts: Vec<ListingArtifact>,
+}
+
+pub const MAX_LISTING_ARTIFACTS: usize = 512;
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewedTestBinary {
+    pub package_id: String,
+    pub manifest_path: PathBuf,
+    pub source_path: PathBuf,
+    pub target_name: String,
+    pub target_kind: Vec<String>,
+    pub features: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListingArtifact {
+    pub target: ReviewedTestBinary,
+    pub executable: PathBuf,
+    pub sha256: String,
+    pub device: u64,
+    pub inode: u64,
+    pub bytes: u64,
+    pub mode: u32,
+}
+
+impl ListingArtifact {
+    fn valid_for(&self, checkout: &Path, root: &VerifiedRoot) -> bool {
+        absolute(&self.executable)
+            && self.executable.starts_with(&root.path)
+            && self.executable != root.path
+            && absolute(&self.target.manifest_path)
+            && self.target.manifest_path.starts_with(checkout)
+            && self.target.manifest_path.file_name() == Some("Cargo.toml".as_ref())
+            && absolute(&self.target.source_path)
+            && self.target.source_path.starts_with(checkout)
+            && !self.target.package_id.is_empty()
+            && self.target.package_id.len() <= 4096
+            && !self.target.target_name.is_empty()
+            && self.target.target_name.len() <= 256
+            && self.target.target_kind.len() == 1
+            && self.target.features.len() <= MAX_PROFILE_ENTRIES
+            && self.target.features.windows(2).all(|f| f[0] < f[1])
+            && hex(&self.sha256, 64)
+            && self.device == root.identity.dev
+            && self.inode != 0
+            && (1..=2 * 1024 * 1024 * 1024).contains(&self.bytes)
+            && self.mode & 0o111 != 0
+    }
+}
+
+/// A sealed generated Rust input beneath its observed Cargo build root.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratedInputWitness {
+    pub declaration_sha256: String,
+    pub build_root: FileIdentity,
+    pub relative_path: PathBuf,
+    pub parents: Vec<FileIdentity>,
+    pub file: FileIdentity,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+impl GeneratedInputWitness {
+    pub fn cargo_profile(&self, root: &VerifiedRoot) -> Option<PathBuf> {
+        if !self.valid_for(root) {
+            return None;
+        }
+        let mut components = self.relative_path.components();
+        let (Some(Component::Normal(profile)), Some(Component::Normal(build))) =
+            (components.next(), components.next())
+        else {
+            return None;
+        };
+        (build == "build").then(|| root.path.join(profile))
+    }
+
+    pub fn valid_for(&self, root: &VerifiedRoot) -> bool {
+        let parent = self.relative_path.parent();
+        let count = parent.map_or(0, |path| path.components().count());
+        self.build_root == root.identity
+            && root.identity.valid()
+            && (2..=16).contains(&count)
+            && self.parents.len() == count
+            && relative(&self.relative_path)
+            && self
+                .relative_path
+                .to_str()
+                .is_some_and(|path| path.split('/').all(identifier))
+            && parent
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "out")
+            && self
+                .relative_path
+                .extension()
+                .is_some_and(|extension| extension == "rs" || extension == "a")
+            && self.parents.iter().chain([&self.file]).all(|identity| {
+                identity.valid() && identity.dev == root.identity.dev && *identity != root.identity
+            })
+            && unique(self.parents.iter().chain([&self.file]))
+            && (1..=MAX_GENERATED_INPUT_BYTES).contains(&self.bytes)
+            && hex(&self.declaration_sha256, 64)
+            && hex(&self.sha256, 64)
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForegroundInstance {
+    pub pid: u32,
+    pub start_secs: u64,
+    pub start_micros: u64,
+}
+
+impl ForegroundInstance {
+    fn validate(&self, runner: &Runner) -> FormatResult {
+        require(
+            self.pid > 1
+                && self.pid != runner.pid
+                && (self.start_secs, self.start_micros) >= (runner.start_secs, runner.start_micros)
+                && self.start_micros < 1_000_000,
+            "invalid foreground writer instance",
+        )
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -720,6 +1180,156 @@ pub enum ProvenanceLoss {
 impl Producer {
     pub fn lost(&self) -> bool {
         matches!(self, Self::Tainted { .. } | Self::Unknown { .. })
+    }
+
+    pub fn has_eligible_evidence(&self, generation: u64) -> bool {
+        let current_or_previous =
+            |prior: u64| prior == generation || prior.checked_add(1) == Some(generation);
+        match self {
+            Self::NeverBuilt { evidence } => evidence.is_some(),
+            Self::SeedOnly { generation, .. } => current_or_previous(*generation),
+            Self::Complete {
+                generation,
+                invocations,
+                ..
+            } => {
+                current_or_previous(*generation)
+                    && !invocations.is_empty()
+                    && invocations.iter().all(|record| record.foreground.is_some())
+            }
+            _ => false,
+        }
+    }
+
+    pub fn eligible(&self, generation: u64) -> Option<EligibleProducer> {
+        if !self.has_eligible_evidence(generation) {
+            return None;
+        }
+        match self {
+            Self::NeverBuilt {
+                evidence: Some(evidence),
+            } => Some(EligibleProducer::NeverBuilt {
+                evidence: evidence.clone(),
+            }),
+            Self::SeedOnly {
+                evidence,
+                generation,
+                final_roots,
+                registry_units,
+                ..
+            } => Some(EligibleProducer::SeedOnly(SeedEvidence {
+                evidence: evidence.clone(),
+                generation: *generation,
+                final_roots: final_roots.clone(),
+                registry_units: *registry_units,
+            })),
+            Self::Complete {
+                generation,
+                roots,
+                invocations,
+                ..
+            } => Some(EligibleProducer::Complete {
+                generation: *generation,
+                roots: roots.clone(),
+                invocations: invocations.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn validate_successor(&self, next: &Self, old: &Slot, new: &Slot) -> FormatResult {
+        if self == next {
+            return Ok(());
+        }
+        if self.lost() {
+            return Err("lost producer provenance cannot be reset on the retained checkout");
+        }
+        if let Self::Pending(pending) = self {
+            return match next {
+                Self::Pending(watching)
+                    if pending.foreground.is_none()
+                        && watching.foreground.is_some()
+                        && new.generation == old.generation
+                        && new.phase == old.phase
+                        && pending.matches_start(watching) =>
+                {
+                    Ok(())
+                }
+                Self::Complete {
+                    epoch,
+                    generation,
+                    profile,
+                    roots,
+                    invocations,
+                } if epoch == &pending.epoch
+                    && generation == &pending.generation
+                    && profile == &pending.profile
+                    && new.generation == old.generation
+                    && new.phase == old.phase
+                    && pending.roots.target.accepts(&roots.target)
+                    && pending.roots.build.accepts(&roots.build)
+                    && pending.completed_records_match(invocations) =>
+                {
+                    Ok(())
+                }
+                Self::Unknown {
+                    epoch, generation, ..
+                } if epoch == &pending.epoch && generation == &pending.generation => Ok(()),
+                Self::Tainted {
+                    epoch,
+                    generation,
+                    report: Some(report),
+                    ..
+                } if epoch == &pending.epoch
+                    && generation == &pending.generation
+                    && report.runner == pending.runner
+                    && new.phase == old.phase =>
+                {
+                    Ok(())
+                }
+                _ => {
+                    Err("pending producer may only complete its exact invocation or become unknown")
+                }
+            };
+        }
+        match next {
+            Self::Tainted {
+                generation,
+                report: Some(_),
+                ..
+            } => require(
+                *generation == old.generation
+                    && new.generation == old.generation
+                    && new.phase == old.phase
+                    && matches!(old.phase, Phase::Leased { .. }),
+                "off-profile report does not match the current ready lease",
+            ),
+            Self::Pending(pending) => require(
+                old.generation == new.generation
+                    && old.phase == new.phase
+                    && matches!(old.phase, Phase::Leased { .. })
+                    && pending.foreground.is_none()
+                    && self.eligible(new.generation).as_ref() == Some(&pending.prior)
+                    && pending.prior.roots() == pending.roots,
+                "pending producer does not match the current eligible lease and output",
+            ),
+            Self::Complete { .. } => Err("producer completion requires its durable pending start"),
+            Self::NeverBuilt { evidence: Some(_) } => require(
+                matches!(self, Self::NeverBuilt { evidence: None }) && old.checkout_id.is_none(),
+                "initial output evidence requires a new checkout",
+            ),
+            Self::SeedOnly { evidence, .. } => require(
+                match self {
+                    Self::NeverBuilt { evidence: None } => old.checkout_id.is_none(),
+                    Self::NeverBuilt {
+                        evidence: Some(empty),
+                    } => empty == evidence,
+                    _ => false,
+                },
+                "registry-only seed evidence requires the initial empty checkout",
+            ),
+            _ => Ok(()),
+        }
     }
 
     fn validate(&self, pool: &Pool, slot: &Slot) -> FormatResult {
@@ -754,22 +1364,85 @@ impl Producer {
                 "invalid invocation evidence",
             )
         };
-        let validate_completed = |invocations: &[CompletedInvocation]| {
-            require(
-                !invocations.is_empty() && invocations.len() <= MAX_PROFILE_ENTRIES,
-                "invalid completed invocation count",
-            )?;
-            let mut operations = BTreeSet::new();
-            for item in invocations {
+        let validate_completed =
+            |invocations: &[CompletedInvocation], roots: &OutputRoots<VerifiedRoot>| {
                 require(
-                    hex(&item.operation, 32) && operations.insert(&item.operation),
-                    "invalid completed invocation operation",
+                    !invocations.is_empty() && invocations.len() <= MAX_PROFILE_ENTRIES,
+                    "invalid completed invocation count",
                 )?;
-                validate_invocation(&item.evidence)?;
-                item.runner.validate()?;
-            }
-            Ok(())
-        };
+                let mut operations = BTreeSet::new();
+                let mut generated_bytes = 0_u64;
+                for item in invocations {
+                    require(
+                        hex(&item.operation, 32) && operations.insert(&item.operation),
+                        "invalid completed invocation operation",
+                    )?;
+                    validate_invocation(&item.evidence)?;
+                    item.runner.validate()?;
+                    if let Some(foreground) = &item.foreground {
+                        foreground.validate(&item.runner)?;
+                    }
+                    require(
+                        item.listing_artifacts.len() <= MAX_LISTING_ARTIFACTS
+                            && (item.listing_artifacts.is_empty()
+                                || item.foreground.is_some()
+                                    && item.evidence.stable_digest.is_some()
+                                    && item.listing_artifacts.iter().all(|artifact| {
+                                        artifact.valid_for(&slot_path, &roots.target)
+                                    })
+                                    && unique(
+                                        item.listing_artifacts
+                                            .iter()
+                                            .map(|artifact| &artifact.target),
+                                    )
+                                    && unique(
+                                        item.listing_artifacts
+                                            .iter()
+                                            .map(|artifact| (artifact.device, artifact.inode)),
+                                    )),
+                        "invalid completed listing artifact evidence",
+                    )?;
+                    require(
+                        item.generated_inputs.len() <= MAX_GENERATED_INPUTS
+                            && (item.generated_inputs.is_empty()
+                                || item.foreground.is_some()
+                                    && item.evidence.stable_digest.is_some()
+                                    && pool.profile.proofs.iter().any(|proof| {
+                                        proof.invocation == item.evidence.invocation
+                                            && proof
+                                                .evidence
+                                                .strip_prefix("closure-v1:sha256=")
+                                                .is_some_and(|digest| hex(digest, 64))
+                                    }))
+                            && item
+                                .generated_inputs
+                                .iter()
+                                .all(|input| input.valid_for(&roots.build))
+                            && unique(
+                                item.generated_inputs
+                                    .iter()
+                                    .map(|input| &input.declaration_sha256),
+                            )
+                            && unique(
+                                item.generated_inputs
+                                    .iter()
+                                    .map(|input| &input.relative_path),
+                            )
+                            && unique(item.generated_inputs.iter().map(|input| &input.file)),
+                        "invalid completed generated input witnesses",
+                    )?;
+                    generated_bytes = item
+                        .generated_inputs
+                        .iter()
+                        .fold(generated_bytes, |sum, witness| {
+                            sum.saturating_add(witness.bytes)
+                        });
+                }
+                require(
+                    generated_bytes <= MAX_RETAINED_GENERATED_BYTES,
+                    "generated input witnesses exceed their byte budget",
+                )
+            };
         match self {
             Self::NeverBuilt { evidence: None } => require(
                 slot.checkout_id.is_none(),
@@ -788,7 +1461,11 @@ impl Producer {
                 validate_generation(*generation)?;
                 validate_empty(evidence)?;
                 validate_profile(profile)?;
-                final_roots.validate(|root| root.validate(&slot_path))
+                final_roots.validate(|root| root.validate(&slot_path))?;
+                require(
+                    SeedEvidence::derives_from_empty(evidence, final_roots),
+                    "seed output roots differ from their empty proof",
+                )
             }
             Self::Pending(pending) => {
                 require(
@@ -811,8 +1488,14 @@ impl Producer {
                     operation,
                     runner,
                     prior,
+                    foreground,
+                    guide_guard_offset,
                 } = pending.as_ref();
                 epoch_matches(epoch)?;
+                require(
+                    guide_guard_offset.is_none_or(|offset| offset > 0),
+                    "invalid producer guide guard",
+                )?;
                 validate_generation(*generation)?;
                 validate_profile(profile)?;
                 require(
@@ -820,19 +1503,22 @@ impl Producer {
                     "invalid pending invocation binding",
                 )?;
                 runner.validate()?;
+                if let Some(foreground) = foreground {
+                    foreground.validate(runner)?;
+                }
                 validate_invocation(invocation)?;
                 roots.validate(|root| root.validate(&slot_path))?;
                 match prior {
                     EligibleProducer::NeverBuilt { evidence } => validate_empty(evidence),
-                    EligibleProducer::SeedOnly {
-                        evidence,
-                        generation,
-                        final_roots,
-                        ..
-                    } => {
-                        validate_generation(*generation)?;
-                        validate_empty(evidence)?;
-                        final_roots.validate(|root| root.validate(&slot_path))
+                    EligibleProducer::SeedOnly(seed) => {
+                        validate_generation(seed.generation)?;
+                        validate_empty(&seed.evidence)?;
+                        seed.final_roots
+                            .validate(|root| root.validate(&slot_path))?;
+                        require(
+                            SeedEvidence::derives_from_empty(&seed.evidence, &seed.final_roots),
+                            "seed output roots differ from their empty proof",
+                        )
                     }
                     EligibleProducer::Complete {
                         generation,
@@ -841,7 +1527,7 @@ impl Producer {
                     } => {
                         validate_generation(*generation)?;
                         roots.validate(|root| root.validate(&slot_path))?;
-                        validate_completed(invocations)
+                        validate_completed(invocations, roots)
                     }
                 }
             }
@@ -856,15 +1542,30 @@ impl Producer {
                 validate_generation(*generation)?;
                 validate_profile(profile)?;
                 roots.validate(|root| root.validate(&slot_path))?;
-                validate_completed(invocations)
+                validate_completed(invocations, roots)
             }
             Self::Tainted {
                 epoch,
                 generation,
                 roots,
-                ..
+                reason,
+                report,
+            } => {
+                if let Some(report) = report {
+                    require(
+                        *reason == ProvenanceLoss::OffProfile && hex(&report.operation, 32),
+                        "invalid reported off-profile write",
+                    )?;
+                    report.runner.validate()?;
+                }
+                epoch_matches(epoch)?;
+                validate_generation(*generation)?;
+                roots.validate(|root| {
+                    root.as_ref()
+                        .map_or(Ok(()), |root| root.validate(&slot_path))
+                })
             }
-            | Self::Unknown {
+            Self::Unknown {
                 epoch,
                 generation,
                 roots,
@@ -878,6 +1579,67 @@ impl Producer {
                 })
             }
         }
+    }
+}
+
+impl EligibleProducer {
+    pub fn roots(&self) -> OutputRoots<RootExpectation> {
+        let occupied = |root: &VerifiedRoot| RootExpectation::Present { root: root.clone() };
+        let initial = |proof: &RootProof| match proof {
+            RootProof::Absent { path } => RootExpectation::Absent { path: path.clone() },
+            RootProof::Empty { root } => occupied(root),
+        };
+        match self {
+            Self::NeverBuilt { evidence } => OutputRoots {
+                target: initial(&evidence.roots.target),
+                build: initial(&evidence.roots.build),
+            },
+            Self::SeedOnly(seed) => seed.final_roots.clone(),
+            Self::Complete { roots, .. } => OutputRoots {
+                target: occupied(&roots.target),
+                build: occupied(&roots.build),
+            },
+        }
+    }
+
+    pub fn completed_in_generation(&self, current: u64) -> &[CompletedInvocation] {
+        match self {
+            Self::Complete {
+                generation,
+                invocations,
+                ..
+            } if *generation == current => invocations,
+            _ => &[],
+        }
+    }
+}
+
+impl RootExpectation {
+    pub fn accepts(&self, observed: &VerifiedRoot) -> bool {
+        match self {
+            Self::Absent { path } => path == &observed.path,
+            Self::Present { root } => root == observed,
+        }
+    }
+}
+
+impl PendingProducer {
+    fn matches_start(&self, watching: &Self) -> bool {
+        let mut start = watching.clone();
+        start.foreground = None;
+        self == &start
+    }
+
+    fn completed_records_match(&self, records: &[CompletedInvocation]) -> bool {
+        let Some((record, prior)) = records.split_last() else {
+            return false;
+        };
+        prior == self.prior.completed_in_generation(self.generation)
+            && record.operation == self.operation
+            && record.runner == self.runner
+            && record.evidence == self.invocation
+            && self.foreground.is_some()
+            && record.foreground == self.foreground
     }
 }
 
@@ -945,8 +1707,44 @@ pub enum OutcomeRequest {
     Producer {
         runner: Runner,
         invocation: InvocationEvidence,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ready_commit: Option<String>,
     },
-    Recover,
+    Recover {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recovery: Option<RecoveryRequest>,
+    },
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryRequest {
+    pub observed_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub begin_op: Option<String>,
+    pub authority: RecoveryAuthorization,
+    pub quiescence: RecoveryQuiescence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_begin_op: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RecoveryAuthorization {
+    Holder {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nonce: Option<String>,
+    },
+    Operator,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RecoveryQuiescence {
+    NoPermitIssued,
+    BeforeFirstEffect,
+    ForegroundCompleted,
+    VerifiedLaterBoot,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1033,21 +1831,69 @@ impl Outcome {
                 self.attempt_id.is_none() && object_id(commit),
                 "invalid return outcome",
             ),
-            (OperationKind::Recover, OutcomeRequest::Recover, TransitionResult::Recovered) => {
-                require(self.attempt_id.is_none(), "unexpected attempt on outcome")
-            }
+            (
+                OperationKind::Recover,
+                OutcomeRequest::Recover { recovery },
+                TransitionResult::Recovered,
+            ) => match recovery {
+                Some(recovery) => require(
+                    self.attempt_id.is_none_or(|attempt| attempt > 0)
+                        && recovery.observed_revision > 0
+                        && preparing == recovery.begin_op.is_some()
+                        && preparing == (recovery.quiescence != RecoveryQuiescence::NoPermitIssued)
+                        && recovery.begin_op.as_ref().is_none_or(|begin_op| {
+                            hex(begin_op, 32) && begin_op != &self.operation
+                        })
+                        && recovery.next_begin_op.as_ref().is_none_or(|begin_op| {
+                            hex(begin_op, 32)
+                                && begin_op != &self.operation
+                                && recovery.begin_op.as_ref() != Some(begin_op)
+                                && recovery.quiescence == RecoveryQuiescence::VerifiedLaterBoot
+                                && matches!(
+                                    recovery.authority,
+                                    RecoveryAuthorization::Holder { .. }
+                                )
+                        })
+                        && match &recovery.authority {
+                            RecoveryAuthorization::Operator => true,
+                            RecoveryAuthorization::Holder { nonce } => {
+                                preparing == nonce.is_some()
+                                    && nonce.as_ref().is_none_or(|nonce| hex(nonce, 64))
+                            }
+                        },
+                    "invalid recovery attempt binding",
+                ),
+                None => require(self.attempt_id.is_none(), "unexpected attempt on outcome"),
+            },
             (
                 OperationKind::ProducerStart,
-                OutcomeRequest::Producer { runner, invocation },
+                OutcomeRequest::Producer {
+                    runner,
+                    invocation,
+                    ready_commit,
+                },
                 TransitionResult::ProducerPending,
             )
             | (
                 OperationKind::ProducerComplete,
-                OutcomeRequest::Producer { runner, invocation },
+                OutcomeRequest::Producer {
+                    runner,
+                    invocation,
+                    ready_commit,
+                },
                 TransitionResult::ProducerComplete,
             ) => {
                 require(
-                    self.attempt_id.is_none() && invocation.is_valid_for(&pool.profile),
+                    self.attempt_id.is_none()
+                        && invocation.is_valid_for(&pool.profile)
+                        && ready_commit.as_deref().is_none_or(|commit| {
+                            object_id(commit)
+                                && (self.generation != slot.generation
+                                    || slot
+                                        .phase
+                                        .active_lease()
+                                        .is_none_or(|lease| lease.requested_commit == commit))
+                        }),
                     "invalid producer outcome",
                 )?;
                 runner.validate()
@@ -1705,9 +2551,25 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<SlotsFile, StateError> {
     Ok(slots)
 }
 
+fn remove_private_temp(path: &Path, file: &File) {
+    if let (Ok(named), Ok(created)) = (fs::symlink_metadata(path), file.metadata())
+        && FileIdentity::of(&named) == FileIdentity::of(&created)
+    {
+        let _ = fs::remove_file(path);
+    }
+}
+
 impl Tx<'_> {
     /// Missing is distinct from any unsafe, unsupported or malformed record.
     pub fn read_slots(&self) -> Result<Option<SlotsFile>, StateError> {
+        let saved = self.read_slot_record()?;
+        if let Some(saved) = &saved {
+            self.verify_slot_authority(saved)?;
+        }
+        Ok(saved)
+    }
+
+    fn read_slot_record(&self) -> Result<Option<SlotsFile>, StateError> {
         let path = self.root.join(FILE);
         owner_directory(self.root).map_err(|err| format_error(&path, err.to_string()))?;
         let file = match open_exact_private(&path) {
@@ -1721,6 +2583,60 @@ impl Tx<'_> {
             Err(err) => return Err(format_error(&path, err.to_string())),
         };
         decode(&path, &read_bounded(&path, file)?).map(Some)
+    }
+
+    fn read_slot_authority(&self) -> io::Result<Option<[u8; 32]>> {
+        let path = self.root.join(AUTHORITY_FILE);
+        let mut file = match open_exact_private(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return match fs::symlink_metadata(&path) {
+                    Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(None),
+                    _ => Err(err),
+                };
+            }
+            Err(err) => return Err(err),
+        };
+        let mut digest = [0; 32];
+        file.read_exact(&mut digest)?;
+        if file.read(&mut [0])? != 0 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(Some(digest))
+    }
+
+    fn write_slot_authority(&self, digest: &[u8; 32]) -> io::Result<()> {
+        let path = self.root.join(AUTHORITY_FILE);
+        let tmp = self
+            .root
+            .join(format!(".{AUTHORITY_FILE}.tmp-{}", random_pool_id()?));
+        let mut file = new_private_file(&tmp)?;
+        let result = file
+            .write_all(digest)
+            .and_then(|()| file.sync_all())
+            .and_then(|()| fs::rename(&tmp, &path))
+            .and_then(|()| sync_directory(self.root));
+        if result.is_err() {
+            remove_private_temp(&tmp, &file);
+        }
+        result
+    }
+
+    fn verify_slot_authority(&self, record: &SlotsFile) -> Result<(), StateError> {
+        let path = self.root.join(FILE);
+        let bytes = encode(&path, record)?;
+        let digest = sha256(&bytes).map_err(|err| io_err(&path, err))?;
+        if self.read_slot_authority().ok().flatten() != Some(digest) {
+            return Err(Self::slot_authority_error(&path));
+        }
+        Ok(())
+    }
+
+    fn slot_authority_error(path: &Path) -> StateError {
+        format_error(
+            path,
+            format!("could not verify the last authoritative slot record against {AUTHORITY_FILE}"),
+        )
     }
 
     /// Publishes a checked successor while the state lock remains held.
@@ -1742,6 +2658,7 @@ impl Tx<'_> {
         if decode(&path, &read_bounded(&path, reader)?)? != canonical {
             return Err(format_error(&path, "authoritative revision changed"));
         }
+        self.verify_slot_authority(&canonical)?;
         file.sync_all()
             .and_then(|()| sync_directory(self.root))
             .map_err(|err| io_err(&path, err))
@@ -1755,6 +2672,12 @@ impl Tx<'_> {
     ) -> Result<(), StateError> {
         let path = self.root.join(FILE);
         let current = self.read_slots()?;
+        let prior_authority = self
+            .read_slot_authority()
+            .map_err(|_| Self::slot_authority_error(&path))?;
+        if current.is_some() != prior_authority.is_some() {
+            return Err(Self::slot_authority_error(&path));
+        }
         if current.as_ref().map(|file| file.revision) != previous
             || previous.unwrap_or(0).checked_add(1) != Some(next.revision)
         {
@@ -1777,6 +2700,7 @@ impl Tx<'_> {
                 format!("would be larger than {MAX_BYTES} bytes"),
             ));
         }
+        let digest = sha256(&bytes).map_err(|err| io_err(&path, err))?;
 
         let suffix = random_pool_id().map_err(|err| io_err(&path, err))?;
         let tmp = self.root.join(format!(".{FILE}.tmp-{suffix}"));
@@ -1785,16 +2709,31 @@ impl Tx<'_> {
         let result = file
             .write_all(&bytes)
             .and_then(|()| file.sync_all())
+            // Persist the independent candidate digest first. A reader that sees a
+            // different record cannot acknowledge or authorize a slot transition.
+            .and_then(|()| self.write_slot_authority(&digest))
             .and_then(|()| publish(&tmp, &path));
         if let Err(err) = result {
-            if let Ok(named) = fs::symlink_metadata(&tmp)
-                && let Ok(created) = file.metadata()
-                && FileIdentity::of(&named) == FileIdentity::of(&created)
-            {
-                let _ = fs::remove_file(&tmp);
-            }
+            remove_private_temp(&tmp, &file);
             if self.sync_slots(&canonical).is_ok() {
                 return Ok(());
+            }
+            // The live writer can restore the old digest only after observing
+            // the exact old record. An interrupted process leaves a mismatch
+            // held, and an exact visible successor can be synced by a restart.
+            if self
+                .read_slot_record()
+                .is_ok_and(|visible| visible == current)
+                && self.read_slot_authority().ok().flatten() == Some(digest)
+            {
+                let restored = match prior_authority {
+                    Some(prior) => self.write_slot_authority(&prior),
+                    None => fs::remove_file(self.root.join(AUTHORITY_FILE))
+                        .and_then(|()| sync_directory(self.root)),
+                };
+                if restored.is_err() {
+                    return Err(Self::slot_authority_error(&path));
+                }
             }
             return Err(format_error(
                 &path,
@@ -1812,6 +2751,25 @@ impl crate::State {
         let path = root.join(FILE);
         owner_directory(&root).map_err(|err| format_error(&path, err.to_string()))?;
         Ok(Self { root })
+    }
+
+    /// Shares the existing, positively identified store lock for a guarded seed.
+    pub fn slot_store_shared_or_cancelled(
+        &self,
+        cancel: impl FnMut() -> bool,
+    ) -> Result<crate::StoreLock, StateError> {
+        use cargo_hive_platform::flock::{FlockError, shared_or_cancelled};
+        let path = self.root.join("store.lock");
+        owner_directory(&self.root).map_err(|err| io_err(&path, err))?;
+        let file = open_owner_state_lock(&path).map_err(|err| io_err(&path, err))?;
+        let guard = shared_or_cancelled(&file, cancel).map_err(|err| match err {
+            FlockError::Cancelled => StateError::Cancelled,
+            FlockError::Io(err) => io_err(&path, err),
+        })?;
+        Ok(crate::StoreLock {
+            _guard: guard,
+            _file: file,
+        })
     }
 
     /// Uses the ordinary state lock through checked independent opens.
@@ -2030,7 +2988,13 @@ mod tests {
                     .unwrap_err();
                 assert!(error.to_string().contains("publication was not confirmed"));
                 assert_eq!(fs::read(state.root().join(FILE)).unwrap(), old);
-                assert_eq!(fs::read_dir(state.root()).unwrap().count(), 3);
+                assert!(fs::read_dir(state.root()).unwrap().all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".tmp-")
+                }));
                 assert_eq!(tx.read_slots()?.map(|file| file.revision), Some(1));
                 Ok(())
             })
@@ -2057,11 +3021,55 @@ mod tests {
                     })
                     .unwrap_err();
                 assert!(error.to_string().contains("publication was not confirmed"));
-                assert_eq!(tx.read_slots()?.map(|file| file.revision), Some(3));
+                assert_eq!(tx.read_slot_record()?.map(|file| file.revision), Some(3));
+                assert!(tx.read_slots().is_err());
                 assert!(tx.commit_slots(Some(1), &next).is_err());
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn a_reopened_writer_requires_the_record_named_by_the_durable_authority() {
+        for rename_visible in [false, true] {
+            let scratch = Scratch::new();
+            let prior = SlotsFile::new(1, Vec::new());
+            let next = SlotsFile::new(2, Vec::new());
+            let path = scratch.0.join(FILE);
+            State::open_at(scratch.0.clone())
+                .unwrap()
+                .locked(|tx| {
+                    tx.commit_slots(None, &prior)?;
+                    let candidate = encode(&path, &next)?;
+                    tx.write_slot_authority(&sha256(&candidate).unwrap())
+                        .unwrap();
+                    if rename_visible {
+                        let tmp = scratch.0.join("unacknowledged-publication");
+                        let mut file = new_private_file(&tmp).unwrap();
+                        file.write_all(&candidate).unwrap();
+                        file.sync_all().unwrap();
+                        fs::rename(tmp, &path).unwrap();
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            State::open_at(scratch.0.clone())
+                .unwrap()
+                .locked(|tx| {
+                    if rename_visible {
+                        assert!(tx.read_slots()?.as_ref() == Some(&next));
+                        tx.sync_slots(&next)?;
+                    } else {
+                        let error = tx.read_slots().err().unwrap().to_string();
+                        assert!(error.contains(AUTHORITY_FILE), "{error}");
+                        assert!(tx.sync_slots(&prior).is_err());
+                        assert!(tx.commit_slots(Some(prior.revision), &next).is_err());
+                        assert_eq!(fs::read(&path).unwrap(), encode(&path, &prior)?);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
     }
 
     #[test]
@@ -2172,6 +3180,462 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn ready_publication_reopens_only_the_exact_committed_outcome() {
+        for rename_visible in [false, true] {
+            let scratch = Scratch::new();
+            let (initial, reserved) = reservation_records(&scratch.0);
+            let (preparing, ready) = ready_publication_records(&reserved);
+            State::open_at(scratch.0.clone())
+                .unwrap()
+                .locked(|tx| {
+                    tx.commit_slots(None, &initial)?;
+                    tx.commit_slots(Some(initial.revision), &reserved)?;
+                    tx.commit_slots(Some(reserved.revision), &preparing)?;
+                    let publication =
+                        tx.commit_slots_with(Some(preparing.revision), &ready, |temp, path| {
+                            if rename_visible {
+                                fs::rename(temp, path)?;
+                            }
+                            Err(io::Error::other("injected ready publication failure"))
+                        });
+                    if rename_visible {
+                        publication?;
+                    } else {
+                        let error = publication.unwrap_err().to_string();
+                        assert!(
+                            error.contains("injected ready publication failure"),
+                            "{error}"
+                        );
+                    }
+                    Ok(())
+                })
+                .unwrap();
+
+            let reader = State::open_at(scratch.0.clone()).unwrap();
+            reader
+                .slot_locked_or_cancelled(
+                    || false,
+                    |tx| {
+                        let visible = tx.read_slots()?.unwrap();
+                        if !rename_visible {
+                            assert!(
+                                visible == preparing,
+                                "the prior lease and permit must survive"
+                            );
+                            assert!(tx.sync_slots(&ready).is_err());
+                            tx.commit_slots(Some(preparing.revision), &ready)?;
+                        } else {
+                            assert!(visible == ready, "the published Ready record must survive");
+                        }
+
+                        let recovered = tx.read_slots()?.unwrap();
+                        tx.sync_slots(&recovered)?;
+                        assert!(recovered == ready, "one exact Ready outcome must survive");
+                        assert!(tx.commit_slots(Some(preparing.revision), &ready).is_err());
+
+                        let mut wrong_runner = recovered.clone();
+                        let outcome = wrong_runner.pools[0].slots[0].outcomes.last_mut().unwrap();
+                        let OutcomeRequest::Ready { runner } = &mut outcome.request else {
+                            panic!("expected a Ready request");
+                        };
+                        runner.nonce = "f".repeat(64);
+                        assert!(tx.sync_slots(&wrong_runner).is_err());
+
+                        let mut vacant = recovered;
+                        vacant.revision += 1;
+                        vacant.pools[0].slots[0].phase = Phase::Vacant;
+                        tx.commit_slots(Some(ready.revision), &vacant)?;
+                        let mut renewed = vacant.clone();
+                        renewed.revision += 1;
+                        let renewed_slot = &mut renewed.pools[0].slots[0];
+                        renewed_slot.generation += 1;
+                        renewed_slot.phase = Phase::Reserved {
+                            lease: Lease {
+                                requested_commit: "d".repeat(40),
+                                credential: "e".repeat(64),
+                                reservation_op: "4".repeat(32),
+                            },
+                        };
+                        tx.commit_slots(Some(vacant.revision), &renewed)?;
+                        assert!(tx.sync_slots(&ready).is_err());
+                        let mut stale_ready = ready.clone();
+                        stale_ready.revision = renewed.revision + 1;
+                        let error = tx
+                            .commit_slots(Some(renewed.revision), &stale_ready)
+                            .unwrap_err()
+                            .to_string();
+                        assert!(
+                            error.contains("slot generation is stale or skipped"),
+                            "{error}"
+                        );
+                        assert!(tx.read_slots()?.as_ref() == Some(&renewed));
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    fn ready_publication_records(reserved: &SlotsFile) -> (SlotsFile, SlotsFile) {
+        let mut preparing = reserved.clone();
+        preparing.revision += 1;
+        let pool = &mut preparing.pools[0];
+        let root = pool.checkout_path(&pool.slots[0]).join("target");
+        let slot = &mut pool.slots[0];
+        let Phase::Reserved { lease } = &slot.phase else {
+            panic!("fixture must be reserved");
+        };
+        let lease = lease.clone();
+        let runner = Runner {
+            boot_session: "boot".into(),
+            pid: 2,
+            start_secs: 1,
+            start_micros: 0,
+            nonce: "d".repeat(64),
+        };
+        let attempt_id = 1;
+        let begin_op = "2".repeat(32);
+        slot.outcomes.push(Outcome {
+            pool_id: pool.pool_id.clone(),
+            slot: slot.number,
+            generation: slot.generation,
+            operation: begin_op.clone(),
+            kind: OperationKind::Begin,
+            attempt_id: Some(attempt_id),
+            request: OutcomeRequest::Begin {
+                runner: runner.clone(),
+            },
+            credential: lease.credential.clone(),
+            result: TransitionResult::PermitIssued,
+        });
+        let checkout = CheckoutIdentity {
+            directory: FileIdentity { dev: 1, ino: 4 },
+            admin: GitIdentity {
+                path: pool.common_git_id.path.join("worktrees/slot-1"),
+                dev: 1,
+                ino: 5,
+            },
+        };
+        slot.checkout_id = Some(checkout.clone());
+        slot.producer = Producer::NeverBuilt {
+            evidence: Some(EmptyEpoch {
+                epoch: OutputEpoch {
+                    pool_id: pool.pool_id.clone(),
+                    slot: slot.number,
+                    checkout,
+                },
+                roots: OutputRoots {
+                    target: RootProof::Absent { path: root.clone() },
+                    build: RootProof::Absent { path: root },
+                },
+            }),
+        };
+        slot.last_head = Some(lease.requested_commit.clone());
+        slot.phase = Phase::Preparing {
+            lease: lease.clone(),
+            attempt: Attempt {
+                attempt_id,
+                begin_op,
+                runner: runner.clone(),
+                host_binding: None,
+                stage: AttemptStage::GcInProgress,
+                lock_offset: Some(1 << 32),
+                prior_head: None,
+                anchors: Vec::new(),
+                anchor_cursor: 0,
+            },
+        };
+
+        let mut ready = preparing.clone();
+        ready.revision += 1;
+        let pool = &mut ready.pools[0];
+        let slot = &mut pool.slots[0];
+        let commit = lease.requested_commit.clone();
+        let credential = lease.credential.clone();
+        slot.phase = Phase::Leased {
+            lease,
+            ready_commit: commit.clone(),
+            preparation: None,
+        };
+        slot.outcomes.push(Outcome {
+            pool_id: pool.pool_id.clone(),
+            slot: slot.number,
+            generation: slot.generation,
+            operation: "3".repeat(32),
+            kind: OperationKind::Ready,
+            attempt_id: Some(attempt_id),
+            request: OutcomeRequest::Ready { runner },
+            credential,
+            result: TransitionResult::Ready { commit },
+        });
+        (preparing, ready)
+    }
+
+    #[test]
+    fn a_completed_preparation_preserves_its_exact_writer_even_after_compaction() {
+        let scratch = Scratch::new();
+        let (initial, reserved) = reservation_records(&scratch.0);
+        let (mut preparing, mut ready) = ready_publication_records(&reserved);
+        let Phase::Preparing { attempt, .. } = &mut preparing.pools[0].slots[0].phase else {
+            panic!("the fixture must contain a saved attempt");
+        };
+        let host_binding = [7; 32];
+        attempt.host_binding = Some(host_binding);
+        let Phase::Leased { preparation, .. } = &mut ready.pools[0].slots[0].phase else {
+            panic!("the fixture must contain a ready lease");
+        };
+        *preparation = Some(CompletedPreparation {
+            attempt_id: attempt.attempt_id,
+            begin_op: attempt.begin_op.clone(),
+            runner: attempt.runner.clone(),
+            host_binding,
+        });
+        let rewrite_host = |record: &mut SlotsFile| {
+            let Phase::Leased {
+                preparation: Some(proof),
+                ..
+            } = &mut record.pools[0].slots[0].phase
+            else {
+                panic!("the fixture must have a completed writer");
+            };
+            proof.host_binding = [8; 32];
+        };
+        let state = State::open_at(scratch.0.clone()).unwrap();
+        state
+            .locked(|tx| {
+                tx.commit_slots(None, &initial)?;
+                tx.commit_slots(Some(initial.revision), &reserved)?;
+                tx.commit_slots(Some(reserved.revision), &preparing)?;
+                let mut forged = ready.clone();
+                rewrite_host(&mut forged);
+                assert!(
+                    tx.commit_slots(Some(preparing.revision), &forged).is_err(),
+                    "Ready cannot install a different host proof"
+                );
+                tx.commit_slots(Some(preparing.revision), &ready)?;
+
+                let mut conflicting = ready.clone();
+                conflicting.revision += 1;
+                let labeled = conflicting.pools[0].slots[0].outcomes.last_mut().unwrap();
+                let OutcomeRequest::Ready { runner } = &mut labeled.request else {
+                    panic!("the fixture must have a retained Ready outcome");
+                };
+                runner.nonce = "f".repeat(64);
+                assert!(
+                    tx.commit_slots(Some(ready.revision), &conflicting).is_err(),
+                    "the retained Ready outcome must agree with its completed preparation"
+                );
+
+                let mut compacted = ready.clone();
+                compacted.revision += 1;
+                compacted.pools[0].slots[0].outcomes.clear();
+                tx.commit_slots(Some(ready.revision), &compacted)?;
+                let mut replaced = compacted.clone();
+                replaced.revision += 1;
+                rewrite_host(&mut replaced);
+                assert!(
+                    tx.commit_slots(Some(compacted.revision), &replaced)
+                        .is_err(),
+                    "replay compaction cannot rebind the completed writer"
+                );
+                assert!(tx.read_slots()?.as_ref() == Some(&compacted));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_retry_fence_binds_the_next_begin_after_outcome_compaction() {
+        let scratch = Scratch::new();
+        let (initial, reservation) = reservation_records(&scratch.0);
+        let (mut preparing, _) = ready_publication_records(&reservation);
+        let pool_id = preparing.pools[0].pool_id.clone();
+        let Phase::Preparing { lease, attempt } = &mut preparing.pools[0].slots[0].phase else {
+            panic!("the fixture must contain a saved GC attempt");
+        };
+        attempt.host_binding = Some([7; 32]);
+        let (lease, attempt) = (lease.clone(), attempt.clone());
+        let next_begin = "9".repeat(32);
+        let mut recovered = preparing.clone();
+        recovered.revision += 1;
+        let slot = &mut recovered.pools[0].slots[0];
+        slot.phase = Phase::Reserved {
+            lease: lease.clone(),
+        };
+        slot.retry = Some(PreparationRetry {
+            retired_attempt: attempt.attempt_id,
+            begin_op: next_begin.clone(),
+        });
+        let state = State::open_at(scratch.0.clone()).unwrap();
+        state
+            .locked(|tx| {
+                tx.commit_slots(None, &initial)?;
+                tx.commit_slots(Some(initial.revision), &reservation)?;
+                tx.commit_slots(Some(reservation.revision), &preparing)?;
+                assert!(
+                    tx.commit_slots(Some(preparing.revision), &recovered)
+                        .is_err()
+                );
+                recovered.pools[0].slots[0].outcomes.push(Outcome {
+                    pool_id,
+                    slot: 1,
+                    generation: 1,
+                    operation: "8".repeat(32),
+                    kind: OperationKind::Recover,
+                    attempt_id: Some(attempt.attempt_id),
+                    request: OutcomeRequest::Recover {
+                        recovery: Some(RecoveryRequest {
+                            observed_revision: preparing.revision,
+                            begin_op: Some(attempt.begin_op.clone()),
+                            authority: RecoveryAuthorization::Holder {
+                                nonce: Some(attempt.runner.nonce.clone()),
+                            },
+                            quiescence: RecoveryQuiescence::VerifiedLaterBoot,
+                            next_begin_op: Some(next_begin.clone()),
+                        }),
+                    },
+                    credential: lease.credential.clone(),
+                    result: TransitionResult::Recovered,
+                });
+                tx.commit_slots(Some(preparing.revision), &recovered)?;
+                let mut compacted = recovered.clone();
+                compacted.revision += 1;
+                compacted.pools[0].slots[0].outcomes.clear();
+                tx.commit_slots(Some(recovered.revision), &compacted)?;
+
+                let mut accepted = compacted.clone();
+                accepted.revision += 1;
+                accepted.pools[0].slots[0].phase = Phase::Preparing {
+                    lease,
+                    attempt: attempt.clone(),
+                };
+                assert!(
+                    tx.commit_slots(Some(compacted.revision), &accepted)
+                        .is_err()
+                );
+                let Phase::Preparing { attempt, .. } = &mut accepted.pools[0].slots[0].phase else {
+                    unreachable!()
+                };
+                attempt.begin_op = next_begin;
+                attempt.attempt_id = accepted.revision;
+                attempt.stage = AttemptStage::PermitIssued;
+                tx.commit_slots(Some(compacted.revision), &accepted)?;
+                assert!(tx.read_slots()?.as_ref() == Some(&accepted));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn retained_output_cannot_reset_lost_or_interrupted_provenance() {
+        let scratch = Scratch::new();
+        let state = State::open_at(scratch.0.clone()).unwrap();
+        let (_, mut initial) = reservation_records(state.root());
+        let pool = &mut initial.pools[0];
+        let root = pool.checkout_path(&pool.slots[0]).join("target");
+        let slot = &mut pool.slots[0];
+        let checkout = CheckoutIdentity {
+            directory: FileIdentity { dev: 1, ino: 4 },
+            admin: GitIdentity {
+                path: pool.main.join(".git/worktrees/other"),
+                dev: 1,
+                ino: 5,
+            },
+        };
+        let epoch = OutputEpoch {
+            pool_id: pool.pool_id.clone(),
+            slot: 1,
+            checkout: checkout.clone(),
+        };
+        let Phase::Reserved { lease } = &slot.phase else {
+            panic!("fixture must be reserved");
+        };
+        slot.checkout_id = Some(checkout);
+        slot.last_head = Some(lease.requested_commit.clone());
+        slot.phase = Phase::Leased {
+            lease: lease.clone(),
+            ready_commit: lease.requested_commit.clone(),
+            preparation: None,
+        };
+        let evidence = EmptyEpoch {
+            epoch: epoch.clone(),
+            roots: OutputRoots {
+                target: RootProof::Absent { path: root.clone() },
+                build: RootProof::Absent { path: root.clone() },
+            },
+        };
+        let reasons = OutputRoots {
+            target: None,
+            build: None,
+        };
+        let pending = Producer::Pending(Box::new(PendingProducer {
+            epoch: epoch.clone(),
+            generation: 1,
+            profile: ProfileBinding {
+                id: "fixture".into(),
+                revision: 1,
+            },
+            invocation: InvocationEvidence {
+                invocation: "check".into(),
+                graph_digest: "a".repeat(64),
+                environment_digest: "b".repeat(64),
+                stable_digest: None,
+            },
+            roots: OutputRoots {
+                target: RootExpectation::Absent { path: root.clone() },
+                build: RootExpectation::Absent { path: root },
+            },
+            operation: "4".repeat(32),
+            runner: Runner {
+                boot_session: "boot".into(),
+                pid: 2,
+                start_secs: 1,
+                start_micros: 0,
+                nonce: "c".repeat(64),
+            },
+            prior: EligibleProducer::NeverBuilt {
+                evidence: evidence.clone(),
+            },
+            foreground: None,
+            guide_guard_offset: None,
+        }));
+        for producer in [
+            pending,
+            Producer::Unknown {
+                epoch: epoch.clone(),
+                generation: 1,
+                roots: reasons.clone(),
+                reason: ProvenanceLoss::LostWriter,
+            },
+            Producer::Tainted {
+                epoch,
+                generation: 1,
+                roots: reasons,
+                reason: ProvenanceLoss::OffProfile,
+                report: None,
+            },
+        ] {
+            let isolated = Scratch::new();
+            let state = State::open_at(isolated.0.clone()).unwrap();
+            initial.revision = 1;
+            initial.pools[0].slots[0].producer = producer;
+            state
+                .locked(|tx| {
+                    tx.commit_slots(None, &initial)?;
+                    let mut proposed = initial.clone();
+                    proposed.revision = 2;
+                    proposed.pools[0].slots[0].producer = Producer::NeverBuilt {
+                        evidence: Some(evidence.clone()),
+                    };
+                    assert!(tx.commit_slots(Some(1), &proposed).is_err());
+                    assert!(tx.read_slots()?.as_ref() == Some(&initial));
+                    Ok(())
+                })
+                .unwrap();
+        }
     }
 
     fn reservation_records(root: &Path) -> (SlotsFile, SlotsFile) {

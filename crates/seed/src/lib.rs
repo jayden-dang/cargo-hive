@@ -261,6 +261,67 @@ pub fn run_clone(
     unit_layout: Option<UnitLayout>,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<Outcome, Error> {
+    run_clone_selected(
+        ctx,
+        repo,
+        toolchain,
+        filled,
+        unit_layout,
+        CloneDestination {
+            checkout,
+            slot: None,
+        },
+        cancel,
+    )
+}
+
+/// Places existing, selected registry units for a positively scoped new slot.
+pub fn run_prefilled_slot_seed(
+    ctx: &Ctx<'_>,
+    repo: &Repo,
+    checkout: &Checkout,
+    toolchain: &Toolchain,
+    unit_layout: Option<UnitLayout>,
+    destination: &place::SlotDestination<'_>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Outcome, Error> {
+    let filled = Filled {
+        report: empty_fill(),
+        findings: Vec::new(),
+        store_lock: ctx
+            .state
+            .slot_store_shared_or_cancelled(cancel)
+            .map_err(Error::State)?,
+    };
+    run_clone_selected(
+        ctx,
+        repo,
+        toolchain,
+        filled,
+        unit_layout,
+        CloneDestination {
+            checkout,
+            slot: Some(destination),
+        },
+        cancel,
+    )
+}
+
+struct CloneDestination<'a> {
+    checkout: &'a Checkout,
+    slot: Option<&'a place::SlotDestination<'a>>,
+}
+
+fn run_clone_selected(
+    ctx: &Ctx<'_>,
+    repo: &Repo,
+    toolchain: &Toolchain,
+    filled: Filled,
+    unit_layout: Option<UnitLayout>,
+    destination: CloneDestination<'_>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<Outcome, Error> {
+    let CloneDestination { checkout, slot } = destination;
     let Filled {
         report: filled,
         mut findings,
@@ -286,8 +347,16 @@ pub fn run_clone(
         findings.push(("store.tag".to_string(), Some(tag.clone()), detail));
         return Ok(from_fill(ctx, &filled, findings, false, 0));
     }
-    let stored = store::read(ctx.state).map_err(Error::State)?;
-    let lane_lock = read_lock_file(&checkout.path);
+    let stored = match slot {
+        Some(_) => store::read_for_slot(ctx.state, cancel),
+        None => store::read(ctx.state),
+    }
+    .map_err(Error::State)?;
+    // A guarded seed only uses the existing store. It never reads donor checkouts.
+    let lane_lock = slot
+        .is_none()
+        .then(|| read_lock_file(&checkout.path))
+        .flatten();
     let order = choose::source_order(&stored, &repo.main, &|record| {
         lane_lock.is_some() && read_lock_file(&record.checkout) == lane_lock
     });
@@ -338,7 +407,18 @@ pub fn run_clone(
         Choice::Units { rows, dropped } => (rows, dropped),
     };
     let window = Duration::from_secs(days.saturating_mul(86_400));
-    let placed = place::place(ctx, &checkout.path, &rows, window, CRATE_DIR_CAP, cancel)?;
+    let placed = match slot {
+        Some(slot) => place::place_for_slot(
+            ctx,
+            &checkout.path,
+            &rows,
+            window,
+            CRATE_DIR_CAP,
+            slot,
+            cancel,
+        )?,
+        None => place::place(ctx, &checkout.path, &rows, window, CRATE_DIR_CAP, cancel)?,
+    };
     drop(store_lock);
     let disk_full = placed.disk_full.clone();
     let outcome = record_placed(ctx, assemble(&filled, placed, dropped, findings), cancel);
