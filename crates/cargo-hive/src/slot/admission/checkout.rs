@@ -330,30 +330,57 @@ mod tests {
         tree_entries, verified_file, verify_whole_tree,
     };
     use crate::slot::profile::digest;
-    use cargo_hive_platform::host_fs;
+    use cargo_hive_platform::{
+        host_fs,
+        proc::{Capture, Spec, run_bounded_complete},
+    };
     use std::collections::BTreeMap;
     use std::fs::{self, FileTimes, OpenOptions, Permissions};
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
     use std::path::{Path, PathBuf};
-    use std::process::Command;
+    use std::time::Duration;
 
     fn git(root: &Path, args: &[&str]) -> Vec<u8> {
-        let output = Command::new("/usr/bin/git")
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .current_dir(root)
-            .args([
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
-            ])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "fixture git operation failed");
+        let mut spec = Spec::new("/usr/bin/git");
+        spec.cwd = Some(root.to_path_buf());
+        spec.env_clear = true;
+        spec.env_set = [
+            ("PATH", "/usr/bin:/bin"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        spec.args = [
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+        ]
+        .into_iter()
+        .chain(args.iter().copied())
+        .map(Into::into)
+        .collect();
+        let output = run_bounded_complete(
+            &spec,
+            Duration::from_secs(10),
+            Capture {
+                stdout_cap: TREE_LIMIT,
+                stderr_cap: 4096,
+            },
+            || false,
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture git operation failed: {}",
+            String::from_utf8_lossy(&output.stderr_tail),
+        );
         output.stdout
     }
 
@@ -402,7 +429,7 @@ mod tests {
         assert!(verify().is_ok(), "the reviewed large tree should qualify");
 
         let same_time = fs::metadata(&edited).unwrap().modified().unwrap();
-        fs::write(&edited, [b'x'].repeat(bytes.len())).unwrap();
+        fs::write(&edited, b"x".repeat(bytes.len())).unwrap();
         OpenOptions::new()
             .write(true)
             .open(&edited)
