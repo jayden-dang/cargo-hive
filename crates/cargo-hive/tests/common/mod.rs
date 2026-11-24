@@ -315,6 +315,9 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
             "init.defaultBranch=main",
             "-c",
             "core.fsmonitor=false",
+            // Detached Git maintenance can change the fixture after this command exits.
+            "-c",
+            "maintenance.auto=false",
         ])
         .arg("-C")
         .arg(dir)
