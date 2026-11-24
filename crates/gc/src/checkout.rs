@@ -395,7 +395,10 @@ impl LockedGeneratedInputs {
         custody: &GeneratedInputCustody<'_>,
         cancel: &dyn Fn() -> bool,
     ) -> Result<Self, String> {
-        let [_, build] = roots;
+        let build = roots
+            .iter()
+            .find(|root| root.role == RootRole::Build)
+            .ok_or(GENERATED_SCOPE)?;
         let root = custody.root;
         if !(1..=MAX_PROTECTED_INPUTS).contains(&custody.inputs.len())
             || build.path != root.path
@@ -1908,6 +1911,7 @@ mod tests {
         enum Case {
             ProtectedCandidate,
             UnrelatedCandidate,
+            SplitBuildRootFirst,
             ReplacedDuringAccounting,
             AliasedDuringAccounting,
             CancelledDuringAccounting,
@@ -1915,20 +1919,28 @@ mod tests {
         for case in [
             Case::ProtectedCandidate,
             Case::UnrelatedCandidate,
+            Case::SplitBuildRootFirst,
             Case::ReplacedDuringAccounting,
             Case::AliasedDuringAccounting,
             Case::CancelledDuringAccounting,
         ] {
             let protected_dead = case == Case::ProtectedCandidate;
-            let completes = case == Case::UnrelatedCandidate;
+            let split = case == Case::SplitBuildRootFirst;
+            let completes = split || case == Case::UnrelatedCandidate;
             let scratch = Scratch::new("generated-gc-custody");
             let checkout = scratch.0.join("repo");
             let target = checkout.join("target");
-            let profile = target.join("debug");
+            let build = if split {
+                assert_eq!(plant_target(&checkout), target);
+                checkout.join("a-build")
+            } else {
+                target.clone()
+            };
+            let profile = build.join("debug");
             fs::create_dir_all(profile.join("build")).unwrap();
             plant_locks(&profile);
             fs::write(
-                target.join("CACHEDIR.TAG"),
+                build.join("CACHEDIR.TAG"),
                 format!("Signature: 8a477f597d28d172789f06886806bc55\n{TAG_LINE}\n"),
             )
             .unwrap();
@@ -1966,11 +1978,11 @@ mod tests {
 
             let identity = |path: &Path| FileIdentity::of(&fs::symlink_metadata(path).unwrap());
             let root = VerifiedRoot {
-                path: target.clone(),
-                identity: identity(&target),
+                path: build.clone(),
+                identity: identity(&build),
             };
-            let relative_path = leaf.strip_prefix(&target).unwrap().to_path_buf();
-            let mut named = target.clone();
+            let relative_path = leaf.strip_prefix(&build).unwrap().to_path_buf();
+            let mut named = build.clone();
             let parents = relative_path
                 .parent()
                 .unwrap()
@@ -2025,6 +2037,12 @@ mod tests {
                     fs.try_lock_exclusive(&profile.join(".cargo-lock")),
                     platform::TryLock::Held
                 ));
+                if split {
+                    assert!(matches!(
+                        fs.try_lock_exclusive(&target.join("debug/.cargo-lock")),
+                        platform::TryLock::Held
+                    ));
+                }
                 assert_eq!(identity(&leaf), witness.file);
                 revalidations.set(revalidations.get() + 1);
                 Ok(())
@@ -2034,15 +2052,32 @@ mod tests {
                 inputs: &[&witness],
                 revalidate: &revalidate,
             };
-            let expected = [RootRole::Target, RootRole::Build].map(|role| RequiredRoot {
-                path: target.clone(),
-                role,
-                presence: RootPresence::Present {
-                    dev: root.identity.dev,
-                    ino: root.identity.ino,
-                },
-            });
-            let scan = scan_one(&checkout, &target);
+            let expected =
+                [(&target, RootRole::Target), (&build, RootRole::Build)].map(|(path, role)| {
+                    let identity = identity(path);
+                    RequiredRoot {
+                        path: path.clone(),
+                        role,
+                        presence: RootPresence::Present {
+                            dev: identity.dev,
+                            ino: identity.ino,
+                        },
+                    }
+                });
+            let mut scan = scan_one(&checkout, &target);
+            if split {
+                assert!(build < target);
+                scan.targets.push(TargetDir {
+                    path: build.clone(),
+                    owner: Owner::Owned {
+                        checkout: checkout.clone(),
+                    },
+                    profiles: Vec::new(),
+                    size: None,
+                    unreadable: None,
+                });
+                scan.workspaces[0].result.as_mut().unwrap().build_directory = build;
+            }
             let input = CheckoutInput {
                 fs: &fs,
                 scan: &scan,
