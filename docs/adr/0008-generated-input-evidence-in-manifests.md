@@ -1,6 +1,6 @@
 # ADR-0008: Keep generated-input evidence in content-addressed manifests
 
-Status: Proposed (2026-11-24)
+Status: Accepted (2026-11-24)
 
 A real workspace retains hundreds of named generated files per warm checkout.
 Klynt retains 654 files and 31.3 MB, and per-file evidence for them does not

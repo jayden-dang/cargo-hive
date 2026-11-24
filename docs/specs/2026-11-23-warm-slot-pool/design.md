@@ -574,7 +574,7 @@ real builds. A fixture-only proof does not grant warm readiness.
 
 ### Amendment 2026-11-24: generated-input manifests for real workspaces
 
-Status: Draft, awaiting operator approval (reroute-plan, Design level, scope limited to this section). Revised after `.skills/SLOTS/design-review.md`.
+Status: Approved 2026-11-24 17:32 +07 by Jayden ("Approve all"), reroute-plan Design level, scope limited to this section. Revised after `.skills/SLOTS/design-review.md`.
 
 **Context.** Real Klynt (`205ad3b`, workspace `nextest --all-features --no-run`)
 leaves 654 files totalling 31.3 MB in 15 build-script `out` directories. They are
@@ -692,7 +692,7 @@ See [ADR-0008](../../adr/0008-generated-input-evidence-in-manifests.md).
 
 ## Coverage check
 
-Each of the 40 behavioral and quality IDs appears on one Satisfies line and
+Each of the 41 behavioral and quality IDs (SLOTS-4.10 added 2026-11-24) appears on one Satisfies line and
 at one or more verification seams. No browser-rendered surface is delivered.
 All mechanisms and numbers describe planned proofs and implementation. No
 profile, filesystem fence, live state change or performance result was

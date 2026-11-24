@@ -80,7 +80,6 @@ Design: ./design.md
 | `docs/specs/2026-11-23-warm-slot-pool/verification.md` | New implementation-time runbook and proof procedure for real pair measurements. |
 | `docs/roadmap/roads/ROAD-17.md` | Approved roadmap card recording the dirty-return decision. |
 | `docs/roadmap/roads/ROAD-17.notes.md` | Approved shaping notes that record the decision and its evidence. |
-| `crates/cargo-hive/src/slot/generated/declared.rs` | 2026-11-24 amendment: generic reviewed declaration of a producer's named unit-local outputs. |
 | `crates/cargo-hive/src/slot/draft.rs` | 2026-11-24 amendment: hidden operation drafting a reviewable real-workspace profile. |
 | `crates/cargo-hive/tests/slot_draft.rs` | 2026-11-24 amendment: draft digests match admission; unreviewed stubs refused. |
 
@@ -446,7 +445,7 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 - Consumes: Task 7 sealed profile and output fences, Task 8 recovery and Task 9 normal guide and seed paths. The operator supplies the read-only Klynt workspace, exact endpoints and reviewed profile, replicated into an isolated proof area with no default source path.
 - Produces: bounded complete tree and exact recipe verification, durable named generated-input evidence and strict locked GC custody, followed by the reproducible runbook and dated results for the two Draft performance thresholds. Reuse the guide as a caller without modifying it here.
 
-**Depends-on:** Task 7 for independent qualification components. Integrating generated-input evidence into the lease depends on Task 8. The real installed handoff and measurement depend on Task 9 and positive qualification. The unchecked real-profile steps also depend on Tasks 11–17 of the 2026-11-24 amendment and on FIX-2 (`docs/specs/fixes.md`, issue #42).
+**Depends-on:** Task 7 for independent qualification components. Integrating generated-input evidence into the lease depends on Task 8. The real installed handoff and measurement depend on Task 9 and positive qualification. The unchecked real-profile steps also depend on Tasks 11–17 of the 2026-11-24 amendment and on FIX-2 (issue #42, being added to `docs/specs/fixes.md` on `fix/untagged-target`).
 
 - [x] Prove a bounded whole-tree source verifier on both Cargo layouts, including exact immutable bytes and admitted edits. Cover both real endpoint inventories without weakening profile validation for earlier callers.
 - [x] Prove named generated Rust input and native archive custody through a real guard and strict GC, including wrong unit, same-mtime changes, identity replacement and overlapping cleanup refusals. Start with actual serde_core and one pinned native archive case. Account for every selected producer and consumer before enabling any real invocation.
@@ -465,90 +464,92 @@ _Requirements: SLOTS-1.6, SLOTS-2.2, SLOTS-3.4, SLOTS-3.5, SLOTS-3.7, SLOTS-3.8,
 
 ## ROAD-17 amendment (2026-11-24): admit the real Klynt producers
 
-Status: Draft — awaiting operator approval.
+Status: Draft, awaiting operator approval. Revised after `.skills/SLOTS/plan-review.md` and the approved design amendment.
 
-The operator approved a plan-level rewind on 2026-11-24 (reroute-plan). Design and
-ADR-0006 hold: `design.md` "Operator-approved generated inputs" already admits named
-unit-local files recorded at production. The code admits only `serde_core` and the
-synthetic `named-native-archive-leaf`, and `MAX_GENERATED_INPUTS` is 8. A real
-`nextest run --workspace --all-features --no-run` of Klynt `205ad3b` left files in 15
-build-script `out` directories; the Clippy recipe needs the same 15. Evidence (local):
-`/Users/jayden/Developer/klynt-proof/2026-11-24/qualification-blockers.md` and
-`RESULTS.md`. The tasks below run before Task 10's unchecked steps.
+The operator approved the rewind on 2026-11-24 through reroute-plan. The design
+amendment "generated-input manifests for real workspaces" (`design.md`), SLOTS-4.10
+and ADR-0008 were approved at 17:32 +07. A real
+`nextest run --workspace --all-features --no-run` of Klynt `205ad3b` left 654 files
+(31.3 MB) in 15 build-script `out` directories, and the Clippy recipe needs the same
+15. Evidence (local): `/Users/jayden/Developer/klynt-proof/2026-11-24/`
+(`qualification-blockers.md`, `RESULTS.md`). These tasks run before Task 10's
+unchecked steps and after FIX-2 (issue #42, branch `fix/untagged-target`) merges.
 
-### Task 11: Bound retained generated-input witnesses by the state envelope
+### Task 11: Store generated-input evidence in content-addressed manifests
 
 **Files:**
-- Modify: `crates/state/src/slots.rs` (replace the per-record `MAX_GENERATED_INPUTS` count with a bound derived from the 1 MiB envelope; bump the slot-state format version)
-- Modify: `crates/state/src/lib.rs` (format version and reader for the previous slot format)
-- Create: `crates/cargo-hive/tests/fixtures/` slot-state fixture for the previous format, following `docs/agents/project.md` state-fixture rules
-- Modify: `crates/cargo-hive/tests/upgrade.rs`
-- Modify: `crates/state/src/slots.rs` unit tests
+- Modify: `crates/state/src/slots.rs` (`GeneratedManifestRef`; `CompletedInvocation.generated_manifests` replaces `generated_inputs`; manifest type with directory table and compact entries; `Tx::write_generated_manifest` / `Tx::read_generated_manifest`; post-commit sweep; aggregate bounds from refs; configurable read bound and multi-level idempotent `make_private_directory`; no-overwrite link)
+- Modify: `crates/state/src/lib.rs` (recovery and display text for `slot-manifests/`)
+- Modify: `crates/cargo-hive/src/slot/mod.rs` (completion at the `CompletedInvocation` build near `:1340-1366` writes manifests inside the locked publish; orphan and lost-record checks near `:3627` cover the manifest directory)
+- Modify: `crates/cargo-hive/src/slot/generated.rs`, `crates/cargo-hive/src/slot/generated/serde_core.rs`, `crates/cargo-hive/src/slot/generated/archive.rs`, `crates/cargo-hive/src/slot/inspect.rs`, `crates/cargo-hive/src/slot/admission.rs` (`verify_generated_bindings`), `crates/cargo-hive/src/cli.rs` (`run_with_generated_inputs` call) — read through the manifest; serde_core and the fixture archive still produce one entry each
+- Modify: `crates/gc/src/checkout.rs` (`MAX_PROTECTED_INPUTS` becomes the per-record file bound; set lookup replaces `allows_removal`'s quadratic scan)
+- Modify: `crates/cargo-hive/tests/slots.rs` (cases at `:6935`, `:7009`, `:7095-7111`, `:7511` read the manifest)
+- Modify: `crates/gc/src/checkout.rs` unit tests (`:1915`, `:2007`, `:2104`)
 
-**Reuse:** rung 2 — existing `GeneratedInputWitness`, the bounded private writer and the ROAD-14 upgrade fixtures.
+**Reuse:** rung 2 — `new_private_file`, `open_exact_private` and the `commit_slots_with` ordering in `crates/state/src/slots.rs` (generalized for a second private record kind: a configurable read bound, multi-level idempotent `make_private_directory`, no-overwrite link); `sha256_reader` in `crates/platform/src/slot.rs`; GC custody slice in `crates/gc/src/checkout.rs`
 
 **Interfaces:**
-- Consumes: `GeneratedInputWitness` and `Producer.generated_inputs` (`crates/state/src/slots.rs`).
-- Produces: a producer record that can hold every witness of one reviewed invocation (at least 700 files for Klynt) within the 1 MiB file bound, plus a reader that still opens the previous format.
+- Consumes: `GeneratedInputWitness` fields (`crates/state/src/slots.rs:1096-1106`) as the source of each entry.
+- Produces: `GeneratedManifestRef { sha256, bytes, files, payload_bytes }`; `Tx::write_generated_manifest(pool, &GeneratedManifest) -> Result<GeneratedManifestRef, StateError>`; `Tx::read_generated_manifest(pool, &GeneratedManifestRef) -> Result<GeneratedManifest, StateError>`; manifests at `$HIVE_HOME/slot-manifests/<pool_id>/<sha256>.json`.
 
 **Depends-on:** none
 
-- [ ] Write state tests: a producer with 700 valid witnesses round-trips; a record whose witnesses push the file past 1 MiB is refused with the existing fail-closed result; duplicates stay refused; a previous-format file still opens.
-- [ ] Run `cargo test -p cargo-hive-state` and `cargo test -p cargo-hive --test upgrade`; observe the 8-witness refusal and the missing fixture.
-- [ ] Replace the count cap with the envelope-derived bound and add the format step and fixture.
-- [ ] Re-run both suites green. Commit as `feat(state): bound generated-input witnesses by the state envelope`.
+- [ ] Write state tests for: a 4,096-entry manifest that round-trips under 2 MiB; refusal before writing above 2 MiB; a missing, renamed, changed or aliased manifest refused with the file named and no delete advice; an existing digest name with different bytes refused; a sweep that keeps manifests referenced by `Pending.prior`, `EligibleProducer` and unacknowledged outcomes and skips after "publication was not confirmed"; an inline-witness development record refused as malformed.
+- [ ] Write a `tests/slots.rs` case where a retained generated input survives return, scoped GC and retake through a manifest, and a case where deleting the manifest holds the slot and names it.
+- [ ] Run `cargo test -p cargo-hive-state` and `cargo test -p cargo-hive --test slots`; observe the missing manifest store.
+- [ ] Implement the store, the locked write in completion, the readers and the GC bound.
+- [ ] Re-run both suites on `RUSTUP_TOOLCHAIN=1.97.1` and `1.100.0`, plus `cargo test -p cargo-hive-gc`. Commit as `feat(state): keep generated-input evidence in content-addressed manifests`.
 
-_Requirements: SLOTS-3.2, SLOTS-3.7_
+_Requirements: SLOTS-3.2, SLOTS-3.7, SLOTS-4.10_
 
 ---
 
-### Task 12: Declare and verify any reviewed generated-Rust producer
+### Task 12: Admit any declared generated-Rust producer with full consumer coverage
 
 **Files:**
-- Create: `crates/cargo-hive/src/slot/generated/declared.rs` (generic reviewed declaration: producer `ReviewedUnit`, package material digest, consumer units, named relative files)
-- Modify: `crates/cargo-hive/src/slot/generated.rs` (`GeneratedPlan` holds a list; `collect` returns `Vec<GeneratedInputWitness>`)
-- Modify: `crates/cargo-hive/src/slot/generated/serde_core.rs` (becomes one instance of the generic form; constants kept only as the guard fixture's values)
-- Modify: `crates/cargo-hive/src/slot/admission.rs` (`seal.generated_inputs` may hold many declarations; remove the `len() > 1` refusal; `ReviewedBehavior::GeneratedRust` replaces the serde_core-only variant)
-- Modify: `crates/cargo-hive/src/slot/prepare.rs` (collect and recheck every declared file)
+- Modify: `crates/cargo-hive/src/slot/generated.rs` (`GeneratedRust` gains the declared file list and full consumer set; `valid_for` stops pinning serde_core values; `GeneratedPlan::collect` returns `Vec` of entries)
+- Modify: `crates/cargo-hive/src/slot/generated/serde_core.rs` (generic generated-Rust plan; `require_prior` drops the `len() != 1` check at `:82` and index-0 reads at `:89-96`; serde_core values move to test fixtures)
+- Modify: `crates/cargo-hive/src/slot/admission.rs` (gates at `:1095-1166`: allow several declarations, all four recipes when both roles are `target`, consumer coverage from the closure graph, proc-macro only with `SealedInputsTokenTransform`; `generated_input()` at `:1230` returns all declarations; `ReviewedBehavior::SerdeCoreGeneratedRust` becomes `GeneratedRust`)
+- Modify: `crates/cargo-hive/src/slot/profile.rs` (`generated_plan` plumbing for several plans)
+- Modify: `crates/cargo-hive/src/slot/mod.rs` (completion collects every plan's entries)
 - Modify: `crates/cargo-hive/tests/slot_inputs.rs`
 
-**Reuse:** rung 2 — `GeneratedRustPlan::require_prior` / `collect`, `verify_retained`, `retained_gc_inputs`, `verify_named_inputs` in `crates/cargo-hive/src/slot/generated.rs`.
+**Reuse:** rung 2 — `GeneratedRust` and `ReviewedUnit` (`crates/cargo-hive/src/slot/generated.rs:46-70`), `GeneratedRustPlan`, `verify_retained`, `retained_gc_inputs`, `verify_named_inputs`
 
 **Interfaces:**
-- Consumes: Task 11's witness bound; the reviewed closure JSON read by `admission.rs`.
-- Produces: `DeclaredOutput { producer: ReviewedUnit, package_material_sha256: String, consumers: Vec<ReviewedUnit>, files: Vec<PathBuf> }`; `GeneratedPlan::collect(&self, root, layout) -> Result<Vec<GeneratedInputWitness>, Refusal>`.
+- Consumes: Task 11's manifest refs and `Tx` methods.
+- Produces: `GeneratedRust { producer, package_material_sha256, consumers, files }`, where `files` holds exact relative paths under `out`; `GeneratedPlan::collect(&self, root, layout) -> Result<Vec<GeneratedInputWitness>, Refusal>`.
 
 **Depends-on:** Task 11
 
-- [ ] Write fixture tests with two generated-Rust producers in one workspace (for example `serde_core` and a second registry-like build script writing one `.rs` file): both retained through scoped GC; an undeclared extra file, a substituted file, a wrong consumer or a missing producer each withhold readiness.
-- [ ] Keep the existing `serde_core` cases as guards and run `cargo test -p cargo-hive --test slot_inputs` on 1.97.1 and 1.100.0; observe the second producer refused.
-- [ ] Implement the generic declaration and list-valued plan; express `serde_core` through it.
-- [ ] Re-run on both pins green, including the unchanged guard cases. Commit as `feat(slot): verify any reviewed generated-Rust producer`.
+- [ ] Write fixture tests with two generated-Rust producers, one writing three files in a nested directory. Cover retention through scoped GC and retake on the workspace Nextest recipe. Each of these must withhold readiness: an undeclared extra file, a missing declared file, a substituted file, a consumer unit missing from the declaration, a proc-macro without a reviewed transform, and an undeclared producer with a non-empty `out`.
+- [ ] Keep the existing serde_core cases as guards. Run `cargo test -p cargo-hive --test slot_inputs` on both pins and observe the second producer refused.
+- [ ] Implement the generic declaration, the consumer coverage check and the recipe gate change.
+- [ ] Re-run on both pins green. Commit as `feat(slot): admit declared generated-Rust producers with full consumer coverage`.
 
-_Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.7_
+_Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.4, SLOTS-3.7_
 
 ---
 
-### Task 13: Declare and verify reviewed native-build producers
+### Task 13: Admit declared registry native-build producers
 
 **Files:**
-- Modify: `crates/cargo-hive/src/slot/generated/archive.rs` (generic native producer: named archives and objects under `OUT_DIR`, sealed compiler and archiver identities; the synthetic leaf becomes the guard fixture)
-- Modify: `crates/cargo-hive/src/slot/generated/declared.rs` (native variant)
-- Modify: `crates/cargo-hive/src/slot/admission.rs` (`ReviewedBehavior::NamedNativeArchive` accepts a declared producer instead of the one synthetic package)
+- Modify: `crates/cargo-hive/src/slot/generated/archive.rs` (`NativeArchive` becomes a declared registry or Git native producer with many named outputs; `matches_witnesses` at `:114-120` and `require_prior` at `:195-230` work over all entries; the synthetic leaf constants at `:22-45` move to test fixtures)
+- Modify: `crates/cargo-hive/src/slot/admission.rs` (`native_archive` at `:1101-1113` becomes a list; registry origin admitted; `ReviewedBehavior::NamedNativeArchive` checks the declared producer, not `is_named_archive_script`)
 - Modify: `crates/cargo-hive/tests/slot_inputs.rs`
 
-**Reuse:** rung 2 — `NativeArchivePlan`, the sealed `clang`/`ld`/`otool` identities and `NativeArchive::matches_witnesses` in `crates/cargo-hive/src/slot/generated/archive.rs`.
+**Reuse:** rung 2 — `NativeArchivePlan`, the sealed `clang` / `ld` / `otool` / SDK identities in the closure `tools`, and `NativeArchive::matches_witnesses` (`crates/cargo-hive/src/slot/generated/archive.rs`)
 
 **Interfaces:**
-- Consumes: Task 12's `DeclaredOutput` and list-valued `GeneratedPlan`.
-- Produces: native declarations whose `files` may name hundreds of outputs (aws-lc-sys 468), each witnessed at production and rechecked before ready.
+- Consumes: Task 12's generic declaration and list-valued plans.
+- Produces: native declarations naming hundreds of outputs (`.o`, `.a`, `.h` and others), each witnessed in a manifest and rechecked before ready, with consumers covering every unit that links the producer.
 
 **Depends-on:** Task 12
 
-- [ ] Write fixture tests with two native producers that use the pinned Apple Clang and archiver, one emitting several archives and objects. Cover retention through scoped GC, a changed object, an undeclared archive and a consumer linking an undeclared library.
+- [ ] Write fixture tests with two registry-like native producers using the pinned Apple Clang and archiver, one emitting at least 50 objects plus archives and headers. Cover retention through scoped GC, a changed object, an undeclared archive, and a linking unit missing from the consumers. Keep the synthetic leaf cases as guards.
 - [ ] Run on both pins; observe the second native producer refused.
-- [ ] Generalize the native plan; keep the synthetic leaf cases as guards.
-- [ ] Re-run on both pins green. Commit as `feat(slot): verify reviewed native-build producers`.
+- [ ] Generalize the native plan and its admission.
+- [ ] Re-run on both pins green. Commit as `feat(slot): admit declared native-build producers`.
 
 _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.7_
 
@@ -557,19 +558,20 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.7_
 ### Task 14: Refuse output from a build script reviewed as metadata-only
 
 **Files:**
-- Modify: `crates/cargo-hive/src/slot/admission.rs` (`ReviewedBehavior::MetadataOnlyBuildScript` requires an empty `out` for that unit)
-- Modify: `crates/cargo-hive/src/slot/prepare.rs` (check at producer completion and before ready)
+- Modify: `crates/cargo-hive/src/slot/generated.rs` (helper resolving a unit's `out` directory for both layouts: flat `<profile>/build/<pkg>-<hash>/out` and the unit-dir layout of ADR-0005)
+- Modify: `crates/cargo-hive/src/slot/admission.rs` (`ReviewedBehavior::MetadataOnlyBuildScript` requires an empty `out`)
+- Modify: `crates/cargo-hive/src/slot/mod.rs` (check at producer completion and in the pre-ready `require_prior` paths)
 - Modify: `crates/cargo-hive/tests/slot_inputs.rs`
 
-**Reuse:** rung 2 — the unit-directory reader in `crates/core/src/unit_path.rs` and the per-root evidence from Task 6.
+**Reuse:** rung 2 — the unit-dir reader in `crates/core/src/unit_path.rs` for layout detection, and the per-root evidence from Task 6
 
 **Interfaces:**
-- Consumes: the executable reviews in the reviewed closure.
+- Consumes: executable reviews in the closure; Task 12's declaration list, which names the units allowed a non-empty `out`.
 - Produces: a refusal naming the unit when a metadata-only build script left any file in its `out`.
 
-**Depends-on:** none
+**Depends-on:** Task 12
 
-- [ ] Write a fixture test where a build script reviewed as metadata-only writes one file to `OUT_DIR`; completion must not become eligible and the next take must not be ready. Add a guard case where an empty `out` stays eligible.
+- [ ] Write a fixture test where a build script reviewed as metadata-only writes one file to `OUT_DIR`. Completion must not become eligible, and the next take must not be ready. Add guard cases: an empty `out` stays eligible, and a declared producer's files are unaffected.
 - [ ] Run `cargo test -p cargo-hive --test slot_inputs` on both pins; observe the file accepted today.
 - [ ] Implement the check at both points.
 - [ ] Re-run green. Commit as `fix(slot): refuse output from metadata-only build scripts`.
@@ -578,23 +580,25 @@ _Requirements: SLOTS-3.2, SLOTS-3.3_
 
 ---
 
-### Task 15: Generate a reviewable profile draft for a real workspace
+### Task 15: Draft a reviewable profile for a real workspace
 
 **Files:**
-- Create: `crates/cargo-hive/src/slot/draft.rs` (hidden operation that writes a profile draft, reviewed closure and per-executable review stubs for a registered main and the three recipes; it never writes a reviewed verdict)
-- Modify: `crates/cargo-hive/src/cli.rs` (hidden subcommand, absent from help and the CLI tree fixture)
+- Create: `crates/cargo-hive/src/slot/draft.rs` (writes `profile.json`, `closure.json`, generated declarations from observed `out` contents, and one review stub per build script and proc-macro, each marked unreviewed)
+- Modify: `crates/cargo-hive/src/cli.rs` (hidden `SlotCommand::DraftProfile` as `cargo hive slot draft-profile`, `#[command(hide = true)]` like `Reserve`)
 - Modify: `crates/cargo-hive/src/slot/mod.rs`
+- Modify: `crates/cargo-hive/src/slot/admission.rs` (widen `scan_inventory` and `MaterializedPackage` visibility to `pub(super)` for the draft)
+- Modify: `crates/cargo-hive/tests/fixtures/current/cli-tree.txt` (regenerated through `HIVE_WRITE_CLI_TREE`; the new entry shows `hidden=true`)
 - Create: `crates/cargo-hive/tests/slot_draft.rs`
 
-**Reuse:** rung 2 — `scan_inventory`, `MaterializedPackage` and the profile types in `crates/cargo-hive/src/slot/admission.rs` and `crates/state/src/slots.rs`, so draft digests match what admission recomputes.
+**Reuse:** rung 2 — `scan_inventory`, `MaterializedPackage` and the closure types in `crates/cargo-hive/src/slot/admission.rs`; the profile types in `crates/state/src/slots.rs`
 
 **Interfaces:**
-- Consumes: a registered main, two endpoint commits, the recipe names, the scratch Cargo home.
-- Produces: `profile.json`, `closure.json` and one review stub per build script and proc-macro, each stub marked unreviewed; admission refuses any stub until an operator records a behavior.
+- Consumes: a registered main, the two endpoint commits, the recipe names, the scratch Cargo home, and a completed unguarded reference build's target.
+- Produces: draft files under a caller-chosen directory outside the checkout. Admission refuses every unreviewed stub until the operator records a behavior.
 
 **Depends-on:** Task 12, Task 13, Task 14
 
-- [ ] Write tests on a fixture workspace with a proc-macro, a metadata-only script, one generated-Rust and one native producer. The draft's digests must equal admission's recomputation, unreviewed stubs must be refused, and the draft must not include secrets or the credential descriptor.
+- [ ] Write tests on a fixture workspace with a proc-macro, a metadata-only script, one generated-Rust producer and one native producer. Check that the draft's digests equal admission's recomputation, unreviewed stubs are refused, the draft contains no secrets or credential descriptor, and the CLI tree lists the hidden command.
 - [ ] Run `cargo test -p cargo-hive --test slot_draft --test cli_tree`; observe the missing operation.
 - [ ] Implement the hidden draft operation.
 - [ ] Re-run green, then run it against the Klynt proof clone and keep the output under the dated proof directory. Commit as `feat(slot): draft a reviewable profile for a real workspace`.
@@ -603,50 +607,50 @@ _Requirements: SLOTS-3.2, SLOTS-3.3_
 
 ---
 
-### Task 16: Time guarded-build overhead on the real workspace before timing pairs
+### Task 16: Bind SQLx, startup and Clippy evidence to the selected units
 
 **Files:**
-- Modify: `docs/specs/2026-11-23-warm-slot-pool/verification.md` (overhead section and decision)
-
-**Reuse:** rung 2 — Task 15's draft profile and the installed guide's guarded producer.
-
-**Interfaces:**
-- Consumes: the Klynt draft profile with operator-reviewed behaviors.
-- Produces: a measured split of guarded time into verification and Cargo time for an unchanged rebuild and the routine edit, against the SLOTS-5.2 budget (about 10% of the fresh edit median, roughly 5 s).
-
-**Depends-on:** Task 15
-
-- [ ] On the proof clone outside every repository, run the routine edit build guarded and unguarded five times each, alternating order, and record integer milliseconds.
-- [ ] If the guarded median exceeds the unguarded median by more than 10%, stop and reopen through reroute-plan before Task 10's timing pairs.
-- [ ] Record the result and decision in `verification.md`. Commit as `docs(slot): record guarded overhead on the real workspace`.
-
-_Requirements: SLOTS-5.2_
-
----
-
-### Task 17: Bind SQLx, startup and Clippy evidence to the selected units
-
-**Files:**
-- Modify: `crates/cargo-hive/src/slot/admission/sqlx.rs` (per-recipe consumer units and expected nested metadata requests for cold and reused units)
+- Modify: `crates/cargo-hive/src/slot/admission/sqlx.rs` (`OfflineInputs` gains per-recipe consumer units and expected nested metadata requests for cold and reused units)
 - Modify: `crates/cargo-hive/src/slot/gates/artifact.rs` (startup review bound to the selected test artifacts)
-- Modify: `crates/cargo-hive/src/slot/admission.rs` (Clippy recipe's selected compiler units)
+- Modify: `crates/cargo-hive/src/slot/admission.rs` (the Clippy recipe's selected compiler units)
 - Modify: `crates/cargo-hive/tests/nextest_gates.rs`
 - Modify: `crates/cargo-hive/tests/slot_inputs.rs`
 
-**Reuse:** rung 2 — `OfflineInputs::verify`, `gates::verify_completion`, `UnitReview` and the ADR-0007 recipe gates.
+**Reuse:** rung 2 — `OfflineInputs::verify` (`crates/cargo-hive/src/slot/admission/sqlx.rs:93`), `gates::verify_completion` and `UnitReview` (`crates/cargo-hive/src/slot/gates/mod.rs`), the ADR-0007 recipe gates
 
 **Interfaces:**
 - Consumes: Task 15's draft and the reviewed closure.
-- Produces: refusals when a SQLx macro runs from an unlisted unit or makes an unexpected number of nested requests, when a selected test artifact's startup routines differ from its review, or when Clippy compiles an unreviewed unit.
+- Produces: three refusals. A SQLx macro running from an unlisted unit, or making an unexpected number of nested requests. A selected test artifact whose startup routines differ from its review. A Clippy run that compiles an unreviewed unit.
 
-**Depends-on:** Task 15
+**Depends-on:** Task 12, Task 13, Task 14, Task 15
 
-- [ ] Write fixture tests for each refusal and for one positive run of each recipe on both pins.
+- [ ] Write one failing fixture test per refusal: an extra SQLx consumer, one nested request too many, a test artifact with an unreviewed initializer, and an unreviewed Clippy unit. Add one positive run of each recipe on both pins.
 - [ ] Run `cargo test -p cargo-hive --test nextest_gates --test slot_inputs`; observe the missing bindings.
 - [ ] Implement the three bindings.
 - [ ] Re-run green on both pins. Commit as `feat(slot): bind SQLx, startup and Clippy evidence to selected units`.
 
 _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.5_
+
+---
+
+### Task 17: Time guarded-build overhead on the real workspace before timing pairs
+
+**Files:**
+- Modify: `docs/specs/2026-11-23-warm-slot-pool/verification.md` (overhead section, raw numbers and decision)
+
+**Reuse:** rung 2 — Task 15's draft profile, after the operator reviews it, and the installed guide's guarded producer
+
+**Interfaces:**
+- Consumes: the Klynt reviewed profile and the proof area outside every repository.
+- Produces: guarded time split into verification and Cargo time for an unchanged rebuild and the routine edit, checked against the SLOTS-5.2 budget of 10% of the fresh edit median.
+
+**Depends-on:** Task 16
+
+- [ ] On the proof clone, run the routine edit build guarded and unguarded five times each, alternating order. Record integer milliseconds and the handoff's manifest hashing time.
+- [ ] Check the decision rule: if the guarded median exceeds the unguarded median by more than 10%, stop and reopen through reroute-plan before Task 10's timing pairs.
+- [ ] Record the result and decision in `verification.md`. Commit as `docs(slot): record guarded overhead on the real workspace`.
+
+_Requirements: SLOTS-5.2_
 
 ---
 
