@@ -1,6 +1,7 @@
 //! Sealed admission for a bounded native Cargo build.
 
 mod checkout;
+mod nextest;
 
 use super::profile::{digest, read_input_bounded, refused};
 use super::{CheckoutProof, Refusal, directory_stamp, git_scope};
@@ -78,6 +79,8 @@ struct Seal {
     packages: Vec<NativePackage>,
     #[serde(default)]
     metadata_resolution_sha256: Option<String>,
+    #[serde(default)]
+    nextest_project: Option<nextest::ProjectConfig>,
     data: Vec<FiniteData>,
     materialized: Option<MaterializedGraph>,
 }
@@ -1010,6 +1013,12 @@ impl NativeBuild {
                 .is_some_and(|graph| !graph.valid(seal.packages.len()))
             || !seal.packages.iter().all(valid_package)
             || !seal.valid_local_target_catalog()
+            || seal.nextest_project.as_ref().is_some_and(|project| {
+                !seal.recipe.is_nextest()
+                    || seal.metadata_resolution_sha256.is_none()
+                    || !project.valid()
+                    || !project.fixed_in(&profile.graph_inputs)
+            })
             || !bounded_unique(seal.data.iter().map(|item| item.id.as_str()))
             || !seal.data.iter().all(|item| {
                 bounded_unique(item.sha256.iter().map(String::as_str))
@@ -1125,14 +1134,10 @@ impl NativeBuild {
         if tree.strip_suffix(b"\n") != Some(endpoint.tree.as_bytes()) {
             return Err(unproved());
         }
-        if self.seal.recipe.is_nextest()
-            && read_input_bounded(&checkout.path.join(".config/nextest.toml"), 64 * 1024)?.is_some()
-        {
-            return Err(unproved());
-        }
         match self.seal.recipe {
             Recipe::Clippy => self.verify_clippy_config(&checkout.path)?,
             Recipe::NextestWorkspace | Recipe::NextestGateways => {
+                nextest::verify_project(&checkout.path, self.seal.nextest_project.as_ref())?;
                 self.verify_default_harness(&checkout.path)?
             }
             Recipe::NativeBuild => (),
@@ -1385,9 +1390,9 @@ impl NativeBuild {
             || refused("The sealed Cargo external command or executable lookup is unproved.");
         if std::env::vars_os().any(|(name, _)| {
             let name = name.to_string_lossy();
-            matches!(name.as_ref(), "CARGO" | "NEXTEST")
+            name == "CARGO"
                 || name.starts_with("CLIPPY_")
-                || name.starts_with("NEXTEST_")
+                || nextest::overrides_configuration(&name)
         }) {
             return Err(refused());
         }
@@ -1824,57 +1829,83 @@ mod tests {
         assert!(!valid_package(&incomplete));
     }
 
+    fn catalog(recipe: &str) -> serde_json::Value {
+        let tool = json!({ "path": "/reviewed/tool", "sha256": "a".repeat(64) });
+        json!({
+            "schema": 1,
+            "recipe": recipe,
+            "profile": {"id": "reviewed", "revision": 1},
+            "proof": "test-catalog",
+            "invocation": recipe,
+            "layout": "flat",
+            "native_target": "aarch64-apple-darwin",
+            "endpoints": [{
+                "commit": "b".repeat(40),
+                "tree": "c".repeat(40),
+                "whole_tree": {"entries": 1, "sha256": "d".repeat(64)},
+            }],
+            "tools": {
+                "cargo": tool,
+                "rustc": tool,
+                "rust_runtime": [],
+                "target_sysroot": [],
+                "clang": tool,
+                "ld": tool,
+                "otool": tool,
+                "sdk": "/reviewed/sdk",
+                "sdk_settings": tool,
+                "system_library": tool,
+            },
+            "packages": [{
+                "name": "gateways",
+                "version": "1.0.0",
+                "manifest": "Cargo.toml",
+                "targets": [{
+                    "name": "it",
+                    "kind": "test",
+                    "source": "tests/it.rs",
+                    "metadata": {
+                        "crate_types": ["bin"],
+                        "edition": "2021",
+                        "doc": false,
+                        "doctest": false,
+                        "test": true,
+                    },
+                }],
+                "dependencies": [],
+            }],
+            "metadata_resolution_sha256": "e".repeat(64),
+            "data": [],
+        })
+    }
+
+    #[test]
+    fn both_nextest_no_run_seals_accept_reviewed_project_data() {
+        for recipe in ["nextest_workspace", "nextest_gateways"] {
+            let mut declaration = catalog(recipe);
+            declaration["nextest_project"] = json!({
+                "sha256": "a".repeat(64),
+                "profile": "default",
+                "store": "target/nextest",
+            });
+            if let Err(error) = serde_json::from_value::<Seal>(declaration) {
+                panic!("reviewed Nextest project data was refused: {error}");
+            }
+        }
+    }
+
     #[test]
     fn metadata_catalogs_carry_no_clippy_or_nextest_launch_authority() {
-        let tool = json!({ "path": "/reviewed/tool", "sha256": "a".repeat(64) });
         for recipe in ["clippy", "nextest_workspace", "nextest_gateways"] {
-            let seal: Seal = serde_json::from_value(json!({
-                "schema": 1,
-                "recipe": recipe,
-                "profile": {"id": "reviewed", "revision": 1},
-                "proof": "test-catalog",
-                "invocation": recipe,
-                "layout": "flat",
-                "native_target": "aarch64-apple-darwin",
-                "endpoints": [{
-                    "commit": "b".repeat(40),
-                    "tree": "c".repeat(40),
-                    "whole_tree": {"entries": 1, "sha256": "d".repeat(64)},
-                }],
-                "tools": {
-                    "cargo": tool,
-                    "rustc": tool,
-                    "rust_runtime": [],
-                    "target_sysroot": [],
-                    "clang": tool,
-                    "ld": tool,
-                    "otool": tool,
-                    "sdk": "/reviewed/sdk",
-                    "sdk_settings": tool,
-                    "system_library": tool,
-                },
-                "packages": [{
-                    "name": "gateways",
-                    "version": "1.0.0",
-                    "manifest": "Cargo.toml",
-                    "targets": [{
-                        "name": "it",
-                        "kind": "test",
-                        "source": "tests/it.rs",
-                        "metadata": {
-                            "crate_types": ["bin"],
-                            "edition": "2021",
-                            "doc": false,
-                            "doctest": false,
-                            "test": true,
-                        },
-                    }],
-                    "dependencies": [],
-                }],
-                "metadata_resolution_sha256": "e".repeat(64),
-                "data": [],
-            }))
-            .unwrap();
+            let mut declaration = catalog(recipe);
+            if recipe != "clippy" {
+                declaration["nextest_project"] = json!({
+                    "sha256": "f".repeat(64),
+                    "profile": "default",
+                    "store": "target/nextest",
+                });
+            }
+            let seal: Seal = serde_json::from_value(declaration).unwrap();
             assert!(seal.valid_local_target_catalog());
             let candidate = NativeBuild {
                 seal,
