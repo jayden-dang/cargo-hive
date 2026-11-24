@@ -1,6 +1,7 @@
 //! The slot CLI scopes operations to a registered main and its private pool namespace.
 
 mod admission;
+mod fallback;
 mod inspect;
 mod prepare;
 mod profile;
@@ -46,8 +47,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const HELD_ACTION: &str = "Preserve the slot files and ask the repository operator to inspect identity, quiescence and unfinished work. Create a separate fresh secondary checkout and run `cargo hive seed <checkout>` there.";
-const LOST_PROVENANCE: &str = "This slot does not regain warm capacity for these retained outputs in this version. Create a separate fresh secondary checkout and run `cargo hive seed <checkout>` there.";
+const HELD_ACTION: &str = "Preserve the slot files and ask the repository operator to inspect identity, quiescence and unfinished work. Use the installed guide's seed fallback in a separate fresh secondary checkout.";
+const LOST_PROVENANCE: &str = "This slot does not regain warm capacity for these retained outputs in this version. Use the installed guide's seed fallback in a separate fresh secondary checkout.";
 const OUTCOME_LIMIT_ACTION: &str = "Retry the exact unresolved request or have the guide confirm its delivered result before reserving.";
 const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
 const MAX_WORKTREES: usize = 256;
@@ -140,6 +141,16 @@ pub(super) fn dispatch(command: SlotCommand) -> i32 {
         }
         SlotCommand::Outcome(op) => return dispatch_replay(&op, ReplayAction::Outcome),
         SlotCommand::Ack(op) => return dispatch_replay(&op, ReplayAction::Acknowledge),
+        SlotCommand::SeedFallback {
+            repo,
+            checkout,
+            commit,
+            out,
+        } => {
+            return run_scoped(fallback::COMMAND, &repo, out.json, |state| {
+                fallback::seed(state, &repo, &checkout, &commit)
+            });
+        }
     };
     run_scoped(name, &repo, json, |state| {
         with_slot_state(state, |tx| inspect_or_init(tx, state, name, &repo, init))
@@ -257,6 +268,7 @@ enum Refusal {
     Capacity(&'static str),
     ReturnWork(&'static str),
     ReturnUncertain(&'static str),
+    SeedFallback(&'static str),
     OutcomeLimit,
     ProducerHistoryLimit,
 }
@@ -285,6 +297,12 @@ fn refusal(command: &'static str, repo: &Path, err: Refusal) -> SlotResult {
             "Resolve the unfinished work deliberately, then retry the original return.",
         ),
         Refusal::ReturnUncertain(detail) => ("refused", 1, detail.into(), HELD_ACTION),
+        Refusal::SeedFallback(detail) => (
+            "seed_refused",
+            1,
+            detail.into(),
+            "Inspect the separate checkout and seed prerequisites before trying again.",
+        ),
         Refusal::OutcomeLimit => (
             "unavailable",
             1,
@@ -2533,7 +2551,12 @@ fn make_ready_result(
         commit: commit.clone(),
         current: path.is_some(),
     });
-    result.use_policy = path.as_ref().map(|_| "guide_guarded_cargo_only");
+    if path.is_some() {
+        result.use_policy = Some("guide_guarded_cargo_only");
+        result.next_action = Some(
+            "Run Cargo only through the installed guide's guarded producer. An unrecorded build can permanently hold this slot.",
+        );
+    }
     result.path = path;
     Ok(result)
 }

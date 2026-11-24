@@ -80,6 +80,7 @@ fn the_slot_help_lists_only_operator_commands() {
         "return",
         "outcome",
         "ack",
+        "seed-fallback",
     ] {
         assert!(slot.find_subcommand(private).unwrap().is_hide_set());
         assert!(

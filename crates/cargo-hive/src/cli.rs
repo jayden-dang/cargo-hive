@@ -215,6 +215,20 @@ pub enum SlotCommand {
     Outcome(SlotReplay),
     #[command(hide = true)]
     Ack(SlotReplay),
+    #[command(hide = true)]
+    SeedFallback {
+        /// Canonical registered main checkout
+        #[arg(long, value_name = "MAIN")]
+        repo: PathBuf,
+        /// Separate fresh secondary checkout
+        #[arg(long, value_name = "CHECKOUT")]
+        checkout: PathBuf,
+        /// Full requested Git commit ID
+        #[arg(long, value_name = "OID")]
+        commit: String,
+        #[command(flatten)]
+        out: SlotOutputArgs,
+    },
 }
 
 #[derive(Args)]
@@ -2550,9 +2564,7 @@ pub(crate) fn initial_seed_for_slot(
     generation: u64,
     cancel: &(dyn Fn() -> bool + Sync),
 ) -> Result<(cargo_hive_state::slots::SeedEvidence, SlotOutputScope), &'static str> {
-    use cargo_hive_state::slots::{
-        FileIdentity, OutputRoots, RootExpectation, RootProof, SeedEvidence, VerifiedRoot,
-    };
+    use cargo_hive_state::slots::{OutputRoots, RootExpectation, RootProof, SeedEvidence};
     let refused = "Initial seed could not prove complete registry-only placement in the new slot.";
     let (RootProof::Absent { path }, RootProof::Absent { path: build }) =
         (&evidence.roots.target, &evidence.roots.build)
@@ -2571,15 +2583,73 @@ pub(crate) fn initial_seed_for_slot(
     });
     let scope =
         verify_slot_output_scope(state, &proof.path, &expected, cancel).map_err(|_| refused)?;
+    let destination = cargo_hive_seed::place::SlotDestination {
+        target: path,
+        checkout_identity: evidence.epoch.checkout.directory,
+        registry: &scope.registry,
+        config: &scope.config,
+    };
+    let placed = place_absent_registry_seed(state, &proof.path, None, &destination, cancel)
+        .map_err(|_| refused)?;
+    if !scope.is_current(state) {
+        return Err(refused);
+    }
+    initialize_seed_locks(
+        state,
+        &destination,
+        placed.root.identity,
+        &placed.units,
+        cancel,
+    )?;
+    if !scope.is_current(state) {
+        return Err(refused);
+    }
+    let root = RootExpectation::Present { root: placed.root };
+    Ok((
+        SeedEvidence {
+            evidence,
+            generation,
+            final_roots: OutputRoots {
+                target: root.clone(),
+                build: root,
+            },
+            registry_units: placed.units.len() as u64,
+        },
+        scope,
+    ))
+}
+
+pub(crate) struct RegistryPlacement {
+    pub(crate) root: cargo_hive_state::slots::VerifiedRoot,
+    pub(crate) units: Vec<cargo_hive_seed::place::SeededUnit>,
+}
+
+/// Places already stored registry units into the independently checked absent root.
+pub(crate) fn place_absent_registry_seed(
+    state: &State,
+    checkout: &Path,
+    required_main: Option<&Path>,
+    destination: &cargo_hive_seed::place::SlotDestination<'_>,
+    cancel: &(dyn Fn() -> bool + Sync),
+) -> Result<RegistryPlacement, &'static str> {
+    use cargo_hive_state::slots::{FileIdentity, VerifiedRoot};
+
+    let refused = "Seed could not prove complete registry-only placement in the fresh output root.";
     let max_bytes = cargo_hive_state::slots::MAX_BYTES;
-    let reg = &scope.registry;
-    let cfg = &scope.config;
+    let reg = destination.registry;
+    let cfg = destination.config;
     cargo_hive_state::window_days(cfg.gc_window_days).map_err(|_| refused)?;
     let caps = state
         .read_regular_bounded(cargo_hive_doctor::CAPABILITIES_FILE, max_bytes)
         .map_err(|_| refused)?;
-    let found = find_checkout_complete(reg, cfg, &proof.path, cancel).map_err(|_| refused)?;
-    let toolchain = cargo_hive_cargo::toolchain::resolve_toolchain_until(&proof.path, cancel)
+    let found = find_checkout_complete(reg, cfg, checkout, cancel).map_err(|_| refused)?;
+    if found.row.path != checkout
+        || required_main.is_some_and(|main| found.repo.main != main)
+        || cancel()
+    {
+        return Err(refused);
+    }
+    let toolchain = cargo_hive_cargo::toolchain::resolve_toolchain_until(checkout, cancel)
         .map_err(|_| refused)?;
     for cap in [
         cargo_hive_doctor::Capability::Seeding,
@@ -2588,27 +2658,10 @@ pub(crate) fn initial_seed_for_slot(
         cargo_hive_doctor::require(&caps, cap, Some(toolchain.release.as_str()))
             .map_err(|_| refused)?;
     }
-    if found.row.path != proof.path || cancel() {
-        return Err(refused);
-    }
     let selected = (found.repo, found.row, toolchain);
-    let destination = cargo_hive_seed::place::SlotDestination {
-        target: path,
-        checkout_identity: evidence.epoch.checkout.directory,
-        registry: reg,
-        config: cfg,
-    };
-    let outcome = run_selected_seed(
-        state,
-        reg,
-        cfg,
-        &caps,
-        &selected,
-        Some(&destination),
-        cancel,
-    )
-    .ok_or(refused)?
-    .map_err(|_| refused)?;
+    let outcome = run_selected_seed(state, reg, cfg, &caps, &selected, Some(destination), cancel)
+        .ok_or(refused)?
+        .map_err(|_| refused)?;
     let count = outcome.placed.len() as u64;
     if cancel()
         || outcome.cancelled
@@ -2630,38 +2683,19 @@ pub(crate) fn initial_seed_for_slot(
     {
         return Err(refused);
     }
+    let path = destination.target;
     let observed = cargo_hive_state::slots::owner_directory(path).map_err(|_| refused)?;
     let identity = FileIdentity::of(&observed);
-    if path.canonicalize().as_ref().ok() != Some(path)
-        || outcome.target.as_ref() != Some(&(path.clone(), (identity.dev, identity.ino)))
-    {
+    if outcome.target.as_ref() != Some(&(path.to_path_buf(), (identity.dev, identity.ino))) {
         return Err(refused);
     }
-    if !scope.is_current(state) {
-        return Err(refused);
-    }
-    initialize_seed_locks(state, &destination, identity, &outcome.placed, cancel)?;
-    if !scope.is_current(state) {
-        return Err(refused);
-    }
-    let root = RootExpectation::Present {
+    Ok(RegistryPlacement {
         root: VerifiedRoot {
-            path: path.clone(),
+            path: path.to_path_buf(),
             identity,
         },
-    };
-    Ok((
-        SeedEvidence {
-            evidence,
-            generation,
-            final_roots: OutputRoots {
-                target: root.clone(),
-                build: root,
-            },
-            registry_units: count,
-        },
-        scope,
-    ))
+        units: outcome.placed,
+    })
 }
 
 fn initialize_seed_locks(

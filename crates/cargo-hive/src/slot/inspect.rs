@@ -104,11 +104,7 @@ fn inspect_with_policy(
         Err(Refusal::ReturnUncertain(detail)) => (CheckoutInventory::Uncertain(detail), Vec::new()),
         Err(err) => return Err(err),
     };
-    if !linked_checkout_identity_matches(&path, identity, &pool.common_git_id.path)
-        || observed_head(&path)? != head
-    {
-        return Err(checkout_refusal());
-    }
+    verify_linked_head(&path, identity, &pool.common_git_id.path, &head)?;
     Ok(CheckoutProof {
         path,
         head,
@@ -250,6 +246,40 @@ fn observed_head(path: &Path) -> Result<String, Refusal> {
     Ok(head.into())
 }
 
+pub(super) fn verify_linked_head(
+    path: &Path,
+    identity: &CheckoutIdentity,
+    common: &Path,
+    commit: &str,
+) -> Result<(), Refusal> {
+    if !linked_checkout_identity_matches(path, identity, common) || observed_head(path)? != commit {
+        return Err(checkout_refusal());
+    }
+    Ok(())
+}
+
+pub(super) fn inspect_fresh_checkout(
+    checkout: &Path,
+    common: &Path,
+    commit: &str,
+) -> Result<CheckoutIdentity, Refusal> {
+    let identity = super::new_checkout_identity(checkout, common)?;
+    verify_linked_head(checkout, &identity, common, commit)?;
+    reject_incomplete_operations(&identity.admin.path)?;
+    let tracked = tracked_paths(checkout, commit.len())?;
+    let fs = host_fs();
+    inspect_inventory(
+        checkout,
+        &identity,
+        &tracked,
+        BTreeMap::new(),
+        None,
+        fs.as_ref(),
+    )?;
+    verify_linked_head(checkout, &identity, common, commit)?;
+    Ok(identity)
+}
+
 fn inventory(
     scope: &SlotScope<'_>,
     checkout: &Path,
@@ -261,8 +291,25 @@ fn inventory(
     let tracked = tracked_paths(checkout, oid_len)?;
     let fs = host_fs();
     let retained = retained_roots(scope, checkout, &tracked, fs.as_ref(), policy)?;
+    inspect_inventory(
+        checkout,
+        identity,
+        &tracked,
+        retained,
+        policy.map(|policy| policy.mutable),
+        fs.as_ref(),
+    )
+}
+
+fn inspect_inventory(
+    checkout: &Path,
+    identity: &CheckoutIdentity,
+    tracked: &BTreeMap<PathBuf, EntryKind>,
+    retained: BTreeMap<PathBuf, FileIdentity>,
+    mutable: Option<&BTreeSet<PathBuf>>,
+    fs: &dyn Fs,
+) -> Result<Vec<HeldLock>, Refusal> {
     let mut directories = BTreeSet::new();
-    let mutable = policy.map(|policy| policy.mutable);
     for path in tracked
         .keys()
         .chain(retained.keys())
@@ -271,10 +318,10 @@ fn inventory(
         directories.extend(path.ancestors().skip(1).map(Path::to_path_buf));
     }
     let mut walk = CheckoutWalk {
-        fs: fs.as_ref(),
+        fs,
         checkout,
         device: identity.directory.dev,
-        tracked: &tracked,
+        tracked,
         mutable,
         directories,
         retained,

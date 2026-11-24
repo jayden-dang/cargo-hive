@@ -621,6 +621,30 @@ Options:
   -h, --help
           Print help
 
+    cmd seed-fallback hidden=true about=None long_about=None
+      arg checkout long=Some("checkout") short=None hidden=false required=true defaults=[] help=Some("Separate fresh secondary checkout") long_help=None
+      arg commit long=Some("commit") short=None hidden=false required=true defaults=[] help=Some("Full requested Git commit ID") long_help=None
+      arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
+      arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical registered main checkout") long_help=None
+      long_help_render:
+Usage: seed-fallback [OPTIONS] --repo <MAIN> --checkout <CHECKOUT> --commit <OID>
+
+Options:
+      --repo <MAIN>
+          Canonical registered main checkout
+
+      --checkout <CHECKOUT>
+          Separate fresh secondary checkout
+
+      --commit <OID>
+          Full requested Git commit ID
+
+      --json
+          Print exactly one JSON slot result on stdout
+
+  -h, --help
+          Print help
+
     cmd status hidden=false about=Some("Show current pool capacity, holds and next steps") long_about=None
       arg json long=Some("json") short=None hidden=false required=false defaults=[] help=Some("Print exactly one JSON slot result on stdout") long_help=None
       arg repo long=Some("repo") short=None hidden=false required=true defaults=[] help=Some("Canonical path to the registered main checkout") long_help=None

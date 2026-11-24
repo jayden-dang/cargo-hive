@@ -4560,6 +4560,12 @@ fn the_packaged_guide_returns_a_first_ready_slot_with_absent_roots() {
     let ready: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(ready["kind"], "ready");
     assert_eq!(ready["use_policy"], "guide_guarded_cargo_only");
+    let warning = ready["next_action"]
+        .as_str()
+        .expect("a current ready result must show the guarded-use warning");
+    assert!(warning.contains("guarded producer"), "{warning}");
+    assert!(warning.contains("unrecorded build"), "{warning}");
+    assert!(warning.contains("permanently hold"), "{warning}");
     assert_eq!(ready["path"], json!(checkout));
     assert_eq!(ready["commit"], head);
     assert_eq!(ready["current"], true);
@@ -4595,6 +4601,7 @@ fn the_packaged_guide_returns_a_first_ready_slot_with_absent_roots() {
     assert_eq!(historical["current"], false);
     assert!(historical.get("path").is_none());
     assert!(historical.get("use_policy").is_none());
+    assert_ne!(historical.get("next_action"), ready.get("next_action"));
     let (out, ack) = replay("ack");
     assert!(out.status.success(), "{ack}");
     assert_eq!(ack["kind"], "acknowledged");
@@ -4668,6 +4675,26 @@ fn packaged_take_with_binary(
     expect: &str,
     binary: &Path,
 ) -> std::process::Command {
+    let mut command = packaged_slot_command(fixture, binary, mode);
+    command.arg(&fixture.repo).args([
+        pool,
+        "1",
+        expect,
+        head,
+        &"1".repeat(32),
+        &"2".repeat(32),
+        &"3".repeat(32),
+    ]);
+    command.stdin(fs::File::open(key_path).unwrap());
+    command
+}
+
+#[allow(clippy::disallowed_types)]
+fn packaged_slot_command(
+    fixture: &PoolFixture,
+    binary: &Path,
+    action: &str,
+) -> std::process::Command {
     let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
     let mut command = fixture
@@ -4676,20 +4703,9 @@ fn packaged_take_with_binary(
     producer_environment(&mut command);
     command
         .arg(helper)
-        .arg(mode)
+        .arg(action)
         .arg(binary)
-        .arg(&fixture.repo)
-        .args([
-            pool,
-            "1",
-            expect,
-            head,
-            &"1".repeat(32),
-            &"2".repeat(32),
-            &"3".repeat(32),
-        ])
         .env_remove("BASH_ENV")
-        .stdin(fs::File::open(key_path).unwrap())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
@@ -6808,33 +6824,55 @@ fn a_lost_packaged_ready_reply_can_be_replayed_from_the_original_request() {
     let saved = fixture.record();
     assert_eq!(saved["pools"][0]["slots"][0]["phase"]["kind"], "leased");
 
-    let original = fixture.replay("outcome", pool, 1, 1, &"2".repeat(32));
-    let (out, permit) = finish_private(start_private(&fixture.hive, original, &credential));
+    let guide_receipt = |action: &str, operation: &str, attempt: Option<&str>| {
+        let binary = Path::new(env!("CARGO_BIN_EXE_cargo-hive"));
+        let mut guide = packaged_slot_command(&fixture, binary, action);
+        guide
+            .arg(&fixture.repo)
+            .args([pool, "1", "1", operation])
+            .args(attempt)
+            .stdin(fs::File::open(&key).unwrap());
+        let (out, result) = finish_private(guide.spawn().unwrap());
+        assert_no_credential(&out, &credential);
+        (out, result)
+    };
+    let (out, permit) = guide_receipt("resume", &"2".repeat(32), None);
     assert!(out.status.success(), "{permit}");
     assert_eq!(permit["current"], false);
     assert!(permit.get("path").is_none());
     let ready_op = "3".repeat(32);
     let attempt = permit["attempt"].as_u64().unwrap().to_string();
-    let replay = |command| {
-        let mut request = fixture.replay(command, pool, 1, 1, &ready_op);
-        request.extend(["--attempt".into(), attempt.clone()]);
-        let (out, result) = finish_private(start_private(&fixture.hive, request, &credential));
-        assert_no_credential(&out, &credential);
-        (out, result)
-    };
-    let (out, ready) = replay("outcome");
+    let replay = |action| guide_receipt(action, &ready_op, Some(&attempt));
+    let (out, ready) = replay("resume");
     assert!(out.status.success(), "{ready}");
     assert_eq!(ready["kind"], "ready");
     assert_eq!(ready["current"], true);
     assert_eq!(ready["path"], initialized["slots"][0]["path"]);
     assert_eq!(fixture.record()["revision"], saved["revision"]);
 
-    let returned = fixture.replay("return", pool, 1, 1, &"4".repeat(32));
-    let (out, returned) = finish_private(start_private(&fixture.hive, returned, &credential));
+    let checkout = Path::new(ready["path"].as_str().unwrap());
+    let source = checkout.join("src/lib.rs");
+    let original = fs::read(&source).unwrap();
+    fs::write(
+        &source,
+        [original.as_slice(), b"\n// unfinished change\n"].concat(),
+    )
+    .unwrap();
+    let slot_file = fixture.file();
+    let protected = [checkout, slot_file.as_path()];
+    let before = snapshot_paths(&protected);
+    let return_op = "4".repeat(32);
+    let (out, refused) = guide_receipt("return", &return_op, None);
+    assert_eq!(out.status.code(), Some(1), "{refused}");
+    assert!(refused.get("path").is_none());
+    assert_eq!(refused["kind"], "refused");
+    assert!(snapshot_paths(&protected) == before);
+    fs::write(&source, original).unwrap();
+    let (out, returned) = guide_receipt("return", &return_op, None);
     assert!(out.status.success(), "{returned}");
     let assert_historical = || {
         let before = fs::read(fixture.file()).unwrap();
-        let (out, historical) = replay("outcome");
+        let (out, historical) = replay("resume");
         assert!(out.status.success(), "{historical}");
         assert_eq!(historical["generation"], 1);
         assert_eq!(historical["current"], false);
@@ -6857,13 +6895,13 @@ fn a_lost_packaged_ready_reply_can_be_replayed_from_the_original_request() {
     assert_eq!(later_ready["path"], ready["path"]);
     assert_historical();
 
-    let (out, confirmed) = replay("ack");
+    let (out, confirmed) = replay("confirm");
     assert!(out.status.success(), "{confirmed}");
     assert_eq!(confirmed["kind"], "acknowledged");
     assert_eq!(confirmed["current"], false);
     assert!(confirmed.get("path").is_none());
     let after_ack = fs::read(fixture.file()).unwrap();
-    assert_eq!(replay("outcome").0.status.code(), Some(1));
+    assert_eq!(replay("resume").0.status.code(), Some(1));
     assert!(fs::read(fixture.file()).unwrap() == after_ack);
     assert_eq!(fixture.record()["pools"][0]["slots"][0]["generation"], 2);
 }
@@ -6985,6 +7023,292 @@ fn the_packaged_guide_can_attest_a_nonempty_registry_only_initial_seed() {
     assert_eq!(producer["evidence"]["roots"]["target"]["kind"], "absent");
     assert_eq!(producer["final_roots"]["target"]["kind"], "present");
     assert!(checkout.join("target/CACHEDIR.TAG").is_file());
+}
+
+#[test]
+fn full_pool_fallback_seeds_only_registry_units_in_a_distinct_checkout() {
+    let (fixture, _registry_fixture, pool_root) = registry_seed_pool();
+    let (out, initialized) = fixture.init_at(&pool_root);
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let binary = Path::new(env!("CARGO_BIN_EXE_cargo-hive"));
+    let keys = ["key-one", "key-two"].map(|name| {
+        let path = fixture._repo_dir.path.join(name);
+        private_file(&path);
+        assert!(
+            key_command(&fixture, PRIVATE_KEY_COMMAND, &path, "3")
+                .status
+                .success()
+        );
+        path
+    });
+    let credentials = keys
+        .each_ref()
+        .map(|path| fs::read_to_string(path).unwrap());
+    let slots = std::array::from_fn::<_, 2, _>(|index| {
+        let mut take = packaged_slot_command(&fixture, binary, "take");
+        take.arg(&fixture.repo)
+            .args([
+                pool,
+                &(index + 1).to_string(),
+                "0",
+                &head,
+                &"1".repeat(32),
+                &"2".repeat(32),
+                &"3".repeat(32),
+            ])
+            .stdin(fs::File::open(&keys[index]).unwrap());
+        let out = common::wait_within(take.spawn().unwrap(), Duration::from_secs(30));
+        assert_no_credential(&out, &credentials[index]);
+        assert!(out.status.success(), "{out:?}");
+        let ready: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(ready["kind"], "ready");
+        assert_eq!(ready["current"], true);
+        PathBuf::from(ready["path"].as_str().unwrap())
+    });
+    let (out, status) = fixture.status();
+    assert!(out.status.success(), "{status}");
+    for slot in status["slots"].as_array().unwrap() {
+        assert_eq!(slot["phase"], "leased", "{status}");
+    }
+    let unavailable = common::wait_within(
+        start_packaged_take_at(&fixture, pool, &head, &keys[0], "take", "1"),
+        Duration::from_secs(30),
+    );
+    assert_no_credential(&unavailable, &credentials[0]);
+    assert_eq!(unavailable.status.code(), Some(1), "{unavailable:?}");
+    let full: Value = serde_json::from_slice(&unavailable.stdout).unwrap();
+    assert!(full.get("path").is_none(), "{full}");
+    assert!(
+        full["next_action"]
+            .as_str()
+            .is_some_and(|action| action.contains("fresh")),
+        "{full}"
+    );
+
+    let warm = &slots[0];
+    fixture.hive.check_crate(warm);
+    let warm_target = warm.join("target");
+    let warm_graph = cargo_hive_core::fingerprint::read_profile(&warm_target.join("debug"))
+        .graph
+        .unwrap();
+    assert!(
+        warm_graph
+            .units
+            .iter()
+            .any(|unit| unit.loc.package() == "fixture")
+    );
+
+    let lock_path = fixture
+        .hive
+        .home
+        .path
+        .join("slot-locks")
+        .join(pool)
+        .join("slot-1.lock");
+    let (lock, _) = cargo_hive_state::slots::open_slot_lock(&lock_path).unwrap();
+    let guard = cargo_hive_platform::flock::try_exclusive(&lock)
+        .unwrap()
+        .unwrap();
+    let mut args = fixture.replay("producer", pool, 1, 1, &"4".repeat(32));
+    args.extend(["--lock-fd".into(), PRODUCER_SLOT_FD.to_string()]);
+    let bypass = json!({
+        "action": "report_bypass",
+        "credential": credentials[0].trim_end(),
+        "nonce": "9".repeat(64),
+        "profile": {"id": "fixture", "revision": 1}
+    });
+    let (out, reported) = finish_private(start_private_with(
+        &fixture.hive,
+        args,
+        &bypass.to_string(),
+        |command| pass_producer_lock(command, &lock),
+    ));
+    assert_no_credential(&out, &credentials[0]);
+    assert!(out.status.success(), "{reported}");
+    assert_eq!(reported["kind"], "producer_tainted");
+    let (out, status) = fixture.status();
+    assert!(out.status.success(), "{status}");
+    assert_eq!(status["slots"][0]["phase"], "held");
+    assert_eq!(status["slots"][1]["phase"], "leased");
+
+    let source_alias = fixture._repo_dir.path.join("warm-checkout-alias");
+    let output_alias = fixture._repo_dir.path.join("warm-output-alias");
+    symlink(warm, &source_alias).unwrap();
+    symlink(&warm_target, &output_alias).unwrap();
+    let fresh_parent = fixture.hive.secondary_root.path.join("fresh-scope");
+    fs::create_dir_all(fresh_parent.join(".cargo")).unwrap();
+    let fresh = fresh_parent.join("fresh");
+    git(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            fresh.to_str().unwrap(),
+            &head,
+        ],
+    );
+    assert_eq!(git(&fresh, &["rev-parse", "HEAD"]), head);
+    let fresh_target = fresh.join("target");
+    let index = PathBuf::from(git(
+        warm,
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    ));
+    let state = fixture.file();
+    let authority = fixture
+        .hive
+        .home
+        .path
+        .join(cargo_hive_state::slots::AUTHORITY_FILE);
+    let protected = [
+        warm.as_path(),
+        slots[1].as_path(),
+        index.as_path(),
+        state.as_path(),
+        authority.as_path(),
+    ];
+    let before = snapshot_paths(&protected);
+
+    let fallback = |checkout: &Path, target_variable: Option<&str>| {
+        let mut command = packaged_slot_command(&fixture, binary, "fallback");
+        command
+            .arg(&fixture.repo)
+            .arg(checkout)
+            .arg(&head)
+            .stdin(Stdio::null());
+        if let Some(variable) = target_variable {
+            command.env(variable, &output_alias);
+        }
+        let out = common::wait_within(command.spawn().unwrap(), Duration::from_secs(45));
+        for key in &credentials {
+            assert_no_credential(&out, key);
+        }
+        out
+    };
+    let refused = |out: Output| {
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_ne!(result["kind"], "seeded_fallback");
+        assert!(result.get("path").is_none(), "{result}");
+        assert!(!fresh_target.exists());
+        assert!(
+            snapshot_paths(&protected) == before,
+            "refused fallback mutated warm state"
+        );
+    };
+    refused(fallback(warm, None));
+    refused(fallback(&source_alias, None));
+    let case_alias = warm.with_file_name("SLOT-1");
+    if let Ok(alias) = fs::metadata(&case_alias) {
+        let original = fs::metadata(warm).unwrap();
+        if (alias.dev(), alias.ino()) == (original.dev(), original.ino()) {
+            refused(fallback(&case_alias, None));
+        }
+    }
+
+    let configuration = fresh_parent.join(".cargo/config.toml");
+    for destination in [&warm_target, &output_alias] {
+        fs::write(
+            &configuration,
+            format!(
+                "[build]\ntarget-dir = {:?}\n",
+                destination.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let mut cargo = fixture.hive.command_with(
+            Path::new("cargo"),
+            &[
+                "metadata",
+                "--format-version=1",
+                "--no-deps",
+                "--locked",
+                "--offline",
+            ],
+        );
+        let metadata = cargo.current_dir(&fresh).output().unwrap();
+        assert!(metadata.status.success(), "{metadata:?}");
+        let metadata: Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        assert_eq!(
+            Path::new(metadata["target_directory"].as_str().unwrap())
+                .canonicalize()
+                .unwrap(),
+            warm_target
+        );
+        refused(fallback(&fresh, None));
+    }
+    fs::remove_file(configuration).unwrap();
+    for variable in cargo_hive_cargo::metadata::TARGET_VARS {
+        refused(fallback(&fresh, Some(variable)));
+    }
+
+    let out = fallback(&fresh, None);
+    assert!(out.status.success(), "{out:?}");
+    let seeded: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(seeded["kind"], "seeded_fallback");
+    assert_eq!(seeded["path"], json!(fresh));
+    assert_eq!(seeded["commit"], head);
+    assert_eq!(seeded["registry_units"], 1);
+    assert!(seeded.get("use_policy").is_none());
+    let prior = fs::metadata(&warm_target).unwrap();
+    let placed = fs::metadata(&fresh_target).unwrap();
+    assert_ne!((prior.dev(), prior.ino()), (placed.dev(), placed.ino()));
+    let profile = fresh_target.join("debug");
+    let graph = cargo_hive_core::fingerprint::read_profile(&profile)
+        .graph
+        .unwrap();
+    let [unit] = graph.units.as_slice() else {
+        panic!("fallback placed more than the one registry fixture unit");
+    };
+    assert_eq!(unit.loc.package(), "leafcrate");
+    let outputs = cargo_hive_core::unit_path::outputs(&profile, &unit.loc);
+    assert!(fs::read_dir(&outputs).unwrap().any(|entry| {
+        let path = entry.unwrap().path();
+        path.extension() == Some(OsStr::new("rlib"))
+            && path
+                .file_name()
+                .unwrap()
+                .as_bytes()
+                .starts_with(b"libleafcrate")
+    }));
+    assert!(
+        snapshot_paths(&protected) == before,
+        "fallback mutated the warm slot"
+    );
+    drop(guard);
+}
+
+#[test]
+fn the_packaged_fallback_reports_a_seed_refusal_when_the_registry_store_is_empty() {
+    let fixture = reviewed_pool_fixture(None);
+    fixture.hive.write_ready_capabilities();
+    let fresh = fixture.hive.secondary_root.path.join("fresh-first-seed");
+    let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    git(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            fresh.to_str().unwrap(),
+            &head,
+        ],
+    );
+    let binary = Path::new(env!("CARGO_BIN_EXE_cargo-hive"));
+    let mut fallback = packaged_slot_command(&fixture, binary, "fallback");
+    fallback
+        .arg(&fixture.repo)
+        .arg(&fresh)
+        .arg(&head)
+        .stdin(Stdio::null());
+    let (out, result) = finish_private(fallback.spawn().unwrap());
+    assert_eq!(out.status.code(), Some(1), "{result}");
+    assert_eq!(result["kind"], "seed_refused", "{result}");
+    assert!(result.get("path").is_none());
+    assert!(result.get("registry_units").is_none());
+    assert!(!fresh.join("target").exists());
 }
 
 #[test]

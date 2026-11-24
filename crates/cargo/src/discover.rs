@@ -819,6 +819,14 @@ pub fn foreign_output_overlaps(scan: &TargetScan, checkout: &Path, root: &Path) 
     })
 }
 
+/// Tests physical overlap, treating an unproved path as potentially overlapping.
+pub fn output_paths_may_overlap(left: &Path, right: &Path) -> bool {
+    match (OutputPath::resolve(left), OutputPath::resolve(right)) {
+        (Some(left), Some(right)) => left.overlaps(&right),
+        _ => true,
+    }
+}
+
 const MAX_OUTPUT_COMPONENTS: usize = 256;
 
 struct OutputPath {
