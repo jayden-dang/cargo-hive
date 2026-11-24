@@ -5,9 +5,10 @@ mod nextest;
 mod sqlx;
 
 use super::generated::{
-    ARCHIVE_CONSUMER, ARCHIVE_PACKAGE, ARCHIVE_WORKSPACE_LIB, GeneratedPlan, GeneratedRust,
-    GeneratedRustPlan, NativeArchive, NativeArchivePlan, SERDE_CORE_ARCHIVE,
-    SERDE_CORE_BUILD_SCRIPT, SERDE_CORE_INVENTORY, SERDE_CORE_PACKAGE,
+    ARCHIVE_CONSUMER, ARCHIVE_INDEPENDENT_LIB, ARCHIVE_PACKAGE, ARCHIVE_WORKSPACE_LIB,
+    GeneratedPlan, GeneratedRust, GeneratedRustPlan, NativeArchive, NativeArchivePlan,
+    SERDE_CORE_ARCHIVE, SERDE_CORE_BUILD_SCRIPT, SERDE_CORE_INVENTORY, SERDE_CORE_PACKAGE,
+    is_named_archive_script,
 };
 use super::profile::{digest, read_input_bounded, refused};
 use super::{CheckoutProof, Refusal, directory_stamp, git_scope};
@@ -535,7 +536,10 @@ impl MaterializedPackage {
                         None,
                         ExecutableKind::CustomBuild,
                         ReviewedBehavior::MetadataOnlyBuildScript,
-                    ) => review.source_sha256 != SERDE_CORE_BUILD_SCRIPT,
+                    ) => {
+                        review.source_sha256 != SERDE_CORE_BUILD_SCRIPT
+                            && !is_named_archive_script(&source)
+                    }
                     (
                         None,
                         None,
@@ -1092,12 +1096,7 @@ impl NativeBuild {
                                 && approval.target.name == archive.producer.target
                                 && approval.target.source == archive.producer.source))
                     })
-                    || !seal.packages.iter().any(|package| {
-                        package.name == archive.consumer.package && package.targets.iter().any(|target| {
-                            target.name == archive.consumer.target && target.kind == "bin"
-                                && target.source == archive.consumer.source
-                        })
-                    })
+                    || !archive.matches_workspace(&seal.packages)
             })
             || !seal.generated_inputs.iter().all(|declaration| {
                 seal.materialized.as_ref().is_some_and(|graph| {
@@ -1229,6 +1228,13 @@ impl NativeBuild {
             })
     }
 
+    pub fn archive_package_id(&self) -> Option<&str> {
+        self.seal
+            .native_archive
+            .as_ref()
+            .map(|archive| archive.producer.package_id.as_str())
+    }
+
     pub fn generated_plan(
         &self,
         home: &Path,
@@ -1326,7 +1332,10 @@ impl NativeBuild {
             && (read_input_bounded(&checkout.path.join(&archive.consumer.source), 4096)?.as_deref()
                 != Some(ARCHIVE_CONSUMER)
                 || read_input_bounded(&checkout.path.join("src/lib.rs"), 4096)?.as_deref()
-                    != Some(ARCHIVE_WORKSPACE_LIB))
+                    != Some(ARCHIVE_WORKSPACE_LIB)
+                || read_input_bounded(&checkout.path.join("independent/src/lib.rs"), 4096)?
+                    .as_deref()
+                    != Some(ARCHIVE_INDEPENDENT_LIB))
         {
             return Err(unproved());
         }

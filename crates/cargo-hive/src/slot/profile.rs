@@ -3,7 +3,7 @@
 use super::admission::{
     MaterializedGraph, NativeBuild, NativePackage, NativeTarget, NativeTargetMetadata,
 };
-use super::generated::GeneratedPlan;
+use super::generated::{ARCHIVE_LIB_PATH, ARCHIVE_LIB_TARGET, GeneratedPlan};
 use super::{CheckoutProof, Refusal, canonical_worktree_path, check_cancelled, exists, git_scope};
 use cargo_hive_cargo::metadata;
 use cargo_hive_platform::{
@@ -347,6 +347,7 @@ pub(super) fn check_invocation(
                 &cargo_home,
                 material,
                 seal.generated_package_id(),
+                seal.archive_package_id(),
             )?;
             let after = seal.verify_dependency_material(profile, &cargo_home, &checkout.path)?;
             if material_before != after {
@@ -1152,6 +1153,7 @@ fn verify_materialized_graph(
     home: &Path,
     materialized: &MaterializedGraph,
     generated_package: Option<&str>,
+    archive_package: Option<&str>,
 ) -> Result<(), Refusal> {
     let unproved = || {
         refused(
@@ -1188,6 +1190,13 @@ fn verify_materialized_graph(
                 || expected.version != pkg.version
                 || &expected.source != source
                 || pkg.manifest_path != root.join("Cargo.toml")
+                || (archive_package == Some(pkg.id.as_str())
+                    && (targets.len() != 2
+                        || !targets.iter().any(|(name, kinds, source)| {
+                            *name == ARCHIVE_LIB_TARGET
+                                && *kinds == ["lib"]
+                                && source.as_os_str() == ARCHIVE_LIB_PATH
+                        })))
                 || !expected
                     .matches_executables(targets.iter().copied().filter(|_| executable_scope))
                 || (generated_package.is_some_and(|name| pkg.id != name)
@@ -1252,6 +1261,21 @@ fn metadata_resolution_digest(graph: &Discovered, checkout: &Path) -> Result<Str
     let mut nodes = BTreeMap::new();
     for node in &graph.nodes {
         let node_id = keys.get(&node.id).ok_or_else(unproved)?;
+        if let Some(archive) = archive_package {
+            let exact = node.features.is_empty()
+                && match node_id.as_str() {
+                    "workspace:Cargo.toml" => matches!(node.deps.as_slice(), [edge]
+                    if edge.pkg == archive && edge.name == ARCHIVE_LIB_TARGET
+                        && matches!(edge.dep_kinds.as_slice(), [kind]
+                            if kind.kind.is_none() && kind.target.is_none())),
+                    "workspace:independent/Cargo.toml" => node.deps.is_empty(),
+                    id if id == archive => node.deps.is_empty(),
+                    _ => false,
+                };
+            if !exact {
+                return Err(unproved());
+            }
+        }
         let mut features = node.features.clone();
         features.sort();
         let mut dependencies = Vec::new();

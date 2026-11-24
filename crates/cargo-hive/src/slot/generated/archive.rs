@@ -4,7 +4,7 @@ use super::serde_core::{artifact_bytes, capture_witness};
 use super::{ReviewedUnit, UnitRole, unproved, verify};
 use crate::slot::{
     Refusal,
-    admission::{Material, native_output},
+    admission::{Material, NativePackage, native_output},
     profile::{digest, refused},
 };
 use cargo_hive_core::{
@@ -16,11 +16,12 @@ use cargo_hive_state::slots::{
     self, CargoLayout, EligibleProducer, GeneratedInputWitness, VerifiedRoot,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 pub(in crate::slot) const PACKAGE: &str = "named-native-archive-leaf";
+pub(in crate::slot) const LIB_TARGET: &str = "named_native_archive_leaf";
+pub(in crate::slot) const LIB_PATH: &str = "src/lib.rs";
 // The reviewed SDKROOT contributes the SDK version in LC_BUILD_VERSION.
 const OBJECT_SHA256: &str = "f0795339e1a6fb81170c5b95b7ad332705a3fe95e9f79f11fcbb818fb34e6919";
 const NATIVE_SOURCE: &[u8] = b"int hive_archived_value(void) {\n    return 7;\n}\n";
@@ -29,6 +30,7 @@ pub(in crate::slot) const CONSUMER_SOURCE: &[u8] =
     b"fn main() {\n    assert_eq!(fixture::answer(), 7);\n}\n";
 pub(in crate::slot) const WORKSPACE_LIB: &[u8] =
     b"pub fn answer() -> u32 { named_native_archive_leaf::value() as u32 }\n";
+pub(in crate::slot) const INDEPENDENT_LIB: &[u8] = b"pub fn independent() {}\n";
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -79,19 +81,57 @@ impl NativeArchive {
         clang: &Path,
         script: &[u8],
     ) -> Result<bool, Refusal> {
-        let portable = |path: &Path| {
-            path.is_absolute()
-                && path.to_str().is_some_and(|name| {
-                    name.bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
-                })
-        };
-        if !portable(clang) || !portable(&self.archiver.path) {
-            return Ok(false);
-        }
-        let ar = &self.archiver.path;
-        let reviewed = format!(
-            r#"use std::{{env, path::PathBuf, process::Command}};
+        Ok(archive_script(clang, &self.archiver.path)
+            .is_some_and(|reviewed| script == reviewed.as_bytes())
+            && artifact_bytes(&root.join(&self.native_source), 4096)? == NATIVE_SOURCE
+            && artifact_bytes(&root.join(LIB_PATH), 4096)? == LIB_SOURCE)
+    }
+
+    pub fn matches_workspace(&self, packages: &[NativePackage]) -> bool {
+        packages.len() == 2
+            && packages.iter().any(|package| {
+                package.name == self.consumer.package
+                    && package.version == "0.1.0"
+                    && package.manifest.as_os_str() == "Cargo.toml"
+                    && package.dependencies == [PACKAGE]
+                    && matches!(package.targets.as_slice(), [lib, bin]
+                        if lib.name == self.consumer.package && lib.kind == "lib"
+                            && lib.source.as_os_str() == LIB_PATH
+                            && bin.name == self.consumer.target && bin.kind == "bin"
+                            && bin.source == self.consumer.source)
+            })
+            && packages.iter().any(|package| {
+                package.name == "independent"
+                    && package.version == "0.1.0"
+                    && package.manifest.as_os_str() == "independent/Cargo.toml"
+                    && package.dependencies.is_empty()
+                    && matches!(package.targets.as_slice(), [lib]
+                        if lib.name == "independent" && lib.kind == "lib"
+                            && lib.source.as_os_str() == "independent/src/lib.rs")
+            })
+    }
+
+    pub fn matches_witnesses(&self, inputs: &[GeneratedInputWitness]) -> Result<bool, Refusal> {
+        let hash = digest(&serde_json::to_vec(self).map_err(|_| unproved())?)?;
+        Ok(matches!(inputs, [input] if input.declaration_sha256 == hash
+            && input.relative_path.file_name().is_some_and(|name| name == self.leaf.as_str())
+            && input.bytes == 728))
+    }
+}
+
+fn archive_script(clang: &Path, ar: &Path) -> Option<String> {
+    let portable = |path: &Path| {
+        path.is_absolute()
+            && path.to_str().is_some_and(|name| {
+                name.bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
+            })
+    };
+    if !portable(clang) || !portable(ar) {
+        return None;
+    }
+    Some(format!(
+        r#"use std::{{env, path::PathBuf, process::Command}};
 
 fn main() {{
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
@@ -107,18 +147,23 @@ fn main() {{
     println!("cargo:rustc-link-lib=static=hive_named");
 }}
 "#
-        );
-        Ok(script == reviewed.as_bytes()
-            && artifact_bytes(&root.join(&self.native_source), 4096)? == NATIVE_SOURCE
-            && artifact_bytes(&root.join("src/lib.rs"), 4096)? == LIB_SOURCE)
-    }
+    ))
+}
 
-    pub fn matches_witnesses(&self, inputs: &[GeneratedInputWitness]) -> Result<bool, Refusal> {
-        let hash = digest(&serde_json::to_vec(self).map_err(|_| unproved())?)?;
-        Ok(matches!(inputs, [input] if input.declaration_sha256 == hash
-            && input.relative_path.file_name().is_some_and(|name| name == self.leaf.as_str())
-            && input.bytes == 728))
-    }
+pub(in crate::slot) fn is_named_archive_script(bytes: &[u8]) -> bool {
+    let Ok(script) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let mut commands = script.lines().filter_map(|line| {
+        let argument = line
+            .strip_prefix("    assert!(Command::new(")?
+            .strip_suffix(')')?;
+        serde_json::from_str::<PathBuf>(argument).ok()
+    });
+    let (Some(clang), Some(ar), None) = (commands.next(), commands.next(), commands.next()) else {
+        return false;
+    };
+    archive_script(&clang, &ar).as_deref() == Some(script)
 }
 
 pub(in crate::slot) struct NativeArchivePlan {
@@ -229,11 +274,14 @@ impl NativeArchivePlan {
             UnitKind::BuildScript,
             "build-script-build-script-build",
         )?;
-        let (consumer, _) = exact(
+        let (consumer, consumer_unit) = exact(
             &self.declaration.consumer.package,
             UnitKind::Bin,
             "bin-link-proof",
         )?;
+        let (workspace_library, _) = exact("fixture", UnitKind::Lib, "lib-fixture")?;
+        let (independent, independent_unit) =
+            exact("independent", UnitKind::Lib, "lib-independent")?;
         let linked = |from: &Unit, to: &Unit| matches!(from.deps.as_slice(), [edge] if UnitHash::from_fingerprint(edge.fingerprint) == to.hash);
         if !linked(library, run)
             || !linked(run, compiled)
@@ -246,21 +294,19 @@ impl NativeArchivePlan {
                 "The archive producer's compiled and executed units are not linked.",
             ));
         }
-        let mut remaining = vec![consumer];
-        let mut seen = BTreeSet::new();
-        let mut consumed = false;
-        while let Some(unit) = remaining.pop() {
-            if unit == library_id {
-                consumed = true;
-                break;
-            }
-            if seen.insert(unit.0) {
-                remaining.extend(graph.successors(unit));
-            }
-        }
-        if !consumed {
+        let consumer_dependencies = graph.successors(consumer);
+        if graph.units.len() != 6
+            || graph.successors(workspace_library) != [library_id]
+            || !graph.successors(independent).is_empty()
+            || !independent_unit.deps.is_empty()
+            || !consumer_dependencies.contains(&workspace_library)
+            || consumer_dependencies
+                .iter()
+                .any(|dependency| *dependency != workspace_library && *dependency != library_id)
+            || consumer_unit.deps.len() != consumer_dependencies.len()
+        {
             return Err(refused(
-                "The expected Rust binary has no dependency path to the archive producer.",
+                "The native archive output has a different Cargo consumer graph than the reviewed fixture.",
             ));
         }
 
@@ -312,7 +358,13 @@ impl NativeArchivePlan {
                 "The named archive does not contain the exact compiled object and symbol table.",
             ));
         }
-        let binary = profile.join(&self.declaration.consumer.target);
+        let stem = self.declaration.consumer.target.replace('-', "_");
+        let name = match layout {
+            UnitLayout::Flat => format!("{stem}-{}", consumer_unit.loc.hex()),
+            UnitLayout::UnitDir => stem,
+        };
+        let binary = unit_path::outputs(&profile, &consumer_unit.loc).join(name);
+        let published = profile.join(&self.declaration.consumer.target);
         let before = artifact_bytes(&binary, 2 * 1024 * 1024)?;
         let listing = native_output(
             &self.otool,
@@ -321,7 +373,10 @@ impl NativeArchivePlan {
             self.home.as_os_str(),
             4 * 1024 * 1024,
         )?;
-        if !linked_symbol(&listing) || artifact_bytes(&binary, 2 * 1024 * 1024)? != before {
+        if !linked_symbol(&listing)
+            || artifact_bytes(&binary, 2 * 1024 * 1024)? != before
+            || artifact_bytes(&published, 2 * 1024 * 1024)? != before
+        {
             return Err(refused(
                 "The Rust binary does not contain the exact linked native function.",
             ));

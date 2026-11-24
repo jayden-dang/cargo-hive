@@ -7099,15 +7099,45 @@ fn exercise_packaged_serde_core(case: SerdeCoreCase) {
 
 #[test]
 fn a_reviewed_native_archive_is_linked_and_retained_through_scoped_gc() {
-    exercise_named_native_archive(false);
+    exercise_named_native_archive(ArchiveFixture::Reviewed);
 }
 
 #[test]
 fn a_named_native_archive_refuses_a_changed_child_command() {
-    exercise_named_native_archive(true);
+    exercise_named_native_archive(ArchiveFixture::WrongChild);
 }
 
-fn exercise_named_native_archive(wrong_child: bool) {
+#[test]
+fn a_named_native_archive_refuses_an_additional_binary_consumer() {
+    exercise_named_native_archive(ArchiveFixture::ExtraBin);
+}
+
+#[test]
+fn a_named_native_archive_refuses_an_additional_workspace_edge() {
+    exercise_named_native_archive(ArchiveFixture::ExtraEdge);
+}
+
+#[test]
+fn a_named_native_archive_cannot_be_reviewed_as_metadata_only() {
+    exercise_named_native_archive(ArchiveFixture::MetadataOnly);
+}
+
+#[test]
+fn a_named_native_archive_refuses_an_alternate_library_target() {
+    exercise_named_native_archive(ArchiveFixture::AlternateLib);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArchiveFixture {
+    Reviewed,
+    WrongChild,
+    ExtraBin,
+    ExtraEdge,
+    MetadataOnly,
+    AlternateLib,
+}
+
+fn exercise_named_native_archive(case: ArchiveFixture) {
     let fixture = reviewed_pool_fixture(Some(
         "pub fn answer() -> u32 { named_native_archive_leaf::value() as u32 }\n",
     ));
@@ -7141,7 +7171,20 @@ fn exercise_named_native_archive(wrong_child: bool) {
     .unwrap();
     fs::write(donor.join("src/lib.rs"),
         "unsafe extern \"C\" {\n    fn hive_archived_value() -> i32;\n}\n\npub fn value() -> i32 {\n    unsafe { hive_archived_value() }\n}\n").unwrap();
-    let archive_mode = if wrong_child { "qc" } else { "rcs" };
+    if case == ArchiveFixture::AlternateLib {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(donor.join("Cargo.toml"))
+            .unwrap()
+            .write_all(b"\n[lib]\npath = \"src/alternate.rs\"\n")
+            .unwrap();
+        fs::copy(donor.join("src/lib.rs"), donor.join("src/alternate.rs")).unwrap();
+    }
+    let archive_mode = if case == ArchiveFixture::WrongChild {
+        "qc"
+    } else {
+        "rcs"
+    };
     let source = format!(
         r#"use std::{{env, path::PathBuf, process::Command}};
 
@@ -7190,6 +7233,32 @@ fn main() {{
         "fn main() {\n    assert_eq!(fixture::answer(), 7);\n}\n",
     )
     .unwrap();
+    if case == ArchiveFixture::ExtraBin {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&manifest)
+            .unwrap()
+            .write_all(b"\n[[bin]]\nname = \"second-link\"\npath = \"src/secondary.rs\"\n")
+            .unwrap();
+        fs::copy(
+            fixture.repo.join("src/main.rs"),
+            fixture.repo.join("src/secondary.rs"),
+        )
+        .unwrap();
+    }
+    if case == ArchiveFixture::ExtraEdge {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(fixture.repo.join("independent/Cargo.toml"))
+            .unwrap()
+            .write_all(b"\n[dependencies]\nfixture = { path = \"..\" }\n")
+            .unwrap();
+        fs::write(
+            fixture.repo.join("independent/src/lib.rs"),
+            "pub fn independent() -> u32 { fixture::answer() }\n",
+        )
+        .unwrap();
+    }
     let out = fixture
         .hive
         .command_with(Path::new("cargo"), &["generate-lockfile"])
@@ -7243,6 +7312,11 @@ fn main() {{
     profile["graph_inputs"].as_array_mut().unwrap().push(json!({
         "locator":{"kind":"checkout","path":"src/main.rs"},"expectation":{"kind":"present","identity":{
             "kind":"git_object","oid":git(&fixture.repo,&["rev-parse","HEAD:src/main.rs"])}}}));
+    if case == ArchiveFixture::ExtraBin {
+        profile["graph_inputs"].as_array_mut().unwrap().push(json!({
+            "locator":{"kind":"checkout","path":"src/secondary.rs"},"expectation":{"kind":"present","identity":{
+                "kind":"git_object","oid":git(&fixture.repo,&["rev-parse","HEAD:src/secondary.rs"])}}}));
+    }
     fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
     let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
     external_fixture_seal(
@@ -7268,7 +7342,7 @@ fn main() {{
         "schema":1,"profile":{"id":"fixture","revision":1},"invocation":"check","recipe":"native_build",
         "package_id":pkg["id"],"inventory_sha256":inventory,"git_checkout_sha256":inventory,
         "source_sha256":fixture_sha(&fs::read(root.join("build.rs")).unwrap()),
-        "target":target,"behavior":"named_native_archive",
+        "target":target,"behavior":if case == ArchiveFixture::MetadataOnly { "metadata_only_build_script" } else { "named_native_archive" },
     })).unwrap();
     fs::write(&review, &reviewed).unwrap();
     closure["packages"][0]["dependencies"] = json!(["named-native-archive-leaf"]);
@@ -7276,6 +7350,15 @@ fn main() {{
         .as_array_mut()
         .unwrap()
         .push(json!({"name":"link-proof","kind":"bin","source":"src/main.rs"}));
+    if case == ArchiveFixture::ExtraBin {
+        closure["packages"][0]["targets"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"second-link","kind":"bin","source":"src/secondary.rs"}));
+    }
+    if case == ArchiveFixture::ExtraEdge {
+        closure["packages"][1]["dependencies"] = json!(["fixture"]);
+    }
     closure["materialized"] = json!({
         "resolve_sha256":fixture_resolve_digest(&metadata,&fixture.repo),"packages":[{
             "id":pkg["id"],"name":pkg["name"],"version":pkg["version"],"source":pkg["source"],
@@ -7284,13 +7367,15 @@ fn main() {{
             "executables":[{"target":target,"review_sha256":fixture_sha(&reviewed)}]
         }]
     });
-    closure["native_archive"] = json!({
+    if case != ArchiveFixture::MetadataOnly {
+        closure["native_archive"] = json!({
         "producer":{"package_id":pkg["id"],"target":"build-script-build","source":"build.rs",
             "role":"host_build_script","profile":"dev","triple":closure["native_target"],"features":[]},
         "package_material_sha256":inventory,"consumer":{"package":"fixture","target":"link-proof","source":"src/main.rs"},
         "native_source":"native.c","archiver":{"path":ar,"sha256":fixture_sha(&fs::read(&ar).unwrap())},
         "leaf":"libhive_named.a"
-    });
+        });
+    }
     let bytes = serde_json::to_vec(&closure).unwrap();
     fs::write(&seal, &bytes).unwrap();
     let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
@@ -7320,14 +7405,18 @@ fn main() {{
     let credential = fs::read_to_string(&key).unwrap();
     let out = run_packaged_take(&fixture, pool, &head, &key, "take");
     assert_no_credential(&out, &credential);
-    if wrong_child {
+    if case != ArchiveFixture::Reviewed {
         assert_eq!(out.status.code(), Some(1), "{out:?}");
         let refusal: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let expected = match case {
+            ArchiveFixture::WrongChild | ArchiveFixture::MetadataOnly => {
+                "exact sealed behavior review"
+            }
+            ArchiveFixture::AlternateLib => "sealed dependency graph",
+            _ => "native build closure",
+        };
         assert!(
-            refusal["detail"]
-                .as_str()
-                .unwrap()
-                .contains("exact sealed behavior review"),
+            refusal["detail"].as_str().unwrap().contains(expected),
             "{refusal}"
         );
         assert!(!checkout.join("target").exists());

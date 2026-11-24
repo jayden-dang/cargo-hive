@@ -3,8 +3,10 @@
 mod archive;
 mod serde_core;
 pub(super) use self::archive::{
-    CONSUMER_SOURCE as ARCHIVE_CONSUMER, NativeArchive, NativeArchivePlan,
-    PACKAGE as ARCHIVE_PACKAGE, WORKSPACE_LIB as ARCHIVE_WORKSPACE_LIB,
+    CONSUMER_SOURCE as ARCHIVE_CONSUMER, INDEPENDENT_LIB as ARCHIVE_INDEPENDENT_LIB,
+    LIB_PATH as ARCHIVE_LIB_PATH, LIB_TARGET as ARCHIVE_LIB_TARGET, NativeArchive,
+    NativeArchivePlan, PACKAGE as ARCHIVE_PACKAGE, WORKSPACE_LIB as ARCHIVE_WORKSPACE_LIB,
+    is_named_archive_script,
 };
 pub(super) use self::serde_core::GeneratedRustPlan;
 
