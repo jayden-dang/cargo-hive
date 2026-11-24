@@ -7000,10 +7000,7 @@ fn exercise_packaged_serde_core(case: SerdeCoreCase) {
         );
         let held: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert!(
-            held["detail"]
-                .as_str()
-                .unwrap()
-                .contains("generated input"),
+            held["detail"].as_str().unwrap().contains("generated input"),
             "{held}"
         );
         assert!(

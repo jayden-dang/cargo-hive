@@ -131,6 +131,13 @@ matched their recorded query hashes. The target catalog verifies the declared
 local targets and all-feature metadata graph. Both stable Cargo pins refused
 the separate unit-graph query.
 
+Guarded fixtures exercised the exact reviewed `serde_core` 1.0.228 generated
+Rust file and one named archive built with pinned Apple Clang and an archiver.
+On both layouts each fixture preserved its input through actual scoped GC and
+removed an unrelated stale unit. These fixtures bind the actual compiler unit
+or linked executable and refuse an undeclared consumer or a substituted file.
+The real SQLite, Ring and AWS-LC producers still require their own proofs.
+
 In disposable controls on both pins, the two exact Nextest recipes listed
 their selected integration binaries in normal and ignored discovery modes.
 Across eight runs, the test bodies and custom benchmark stayed unexecuted.
@@ -141,6 +148,12 @@ shadowing and override precedence. The nested Cargo process lacked direct
 custody evidence. These checks qualify data and fixture behavior. The real
 Klynt profile still requires the exact selected units, harness startup,
 producer behavior and child custody for each recipe.
+
+The current foreground watcher sees the top-level writer. The pinned tools
+supply no complete pre-execution record for the two real Nextest recipes.
+The macOS descendant execution authorization interface requires an entitlement
+and an ancestor supervisor. That crosses the current design boundary, so the
+real recipes remain held.
 
 The real qualification has no observed Hive admission receipt. The saved
 isolated 1.97.1 lint and compile-only runs used earlier flags and serve as
