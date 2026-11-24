@@ -572,6 +572,114 @@ directory, offline input selection, approved workspace root and successful
 bounded response. Compiler and startup closure need independent review before
 real builds. A fixture-only proof does not grant warm readiness.
 
+### Amendment 2026-11-24: generated-input manifests for real workspaces
+
+Status: Draft, awaiting operator approval (reroute-plan, Design level, scope limited to this section). Revised after `.skills/SLOTS/design-review.md`.
+
+**Context.** Real Klynt (`205ad3b`, workspace `nextest --all-features --no-run`)
+leaves 654 files totalling 31.3 MB in 15 build-script `out` directories. They are
+531 `.o`, 94 `.h`, 14 `.rs` and 8 `.a`, plus 7 other files, at most 4 levels below
+`out`; the largest is 8.1 MB. Today each witness is stored inline in
+`CompletedInvocation.generated_inputs` (`crates/state/src/slots.rs:1033-1041`) inside
+the 1 MiB `slots.json` this design fixes. `GeneratedInputWitness::valid_for`
+(`slots.rs:1108-1158`) also requires a direct `out` parent, a `.rs` or `.a` file and at
+most 1 MiB. The record caps are 8 witnesses and 8 MiB. GC custody stops at 64 inputs
+(`crates/gc/src/checkout.rs:379`). Admission allows generated inputs only on the
+native fixture recipe, and only for the pinned `serde_core` 1.0.228 `private.rs` with
+one consumer (`generated.rs:129-160`, `admission.rs:1095-1166`).
+
+This amendment has two parts, kept separate. **A** moves the evidence out of
+`slots.json` into immutable manifests. **B** widens admission to more producers and
+recipes through an explicit consumer declaration. Part B depends on A; A changes no
+admission rule. Raising the `slots.json` bound was rejected because every lease
+transition rewrites the whole file. One digest per `out` directory was rejected
+because it drops ADR-0006's explicitly named files. The operator chose manifests on
+2026-11-24.
+
+**A. Manifest storage**
+
+A1. A completed invocation that retains generated inputs records
+   `generated_manifests: Vec<GeneratedManifestRef>`, one per producer unit, instead of
+   inline witnesses. Each ref holds `sha256`, manifest `bytes`, `files` and
+   `payload_bytes`. State validation enforces the aggregate bounds from the refs: at
+   most 16 producer units, 4,096 files and 1 GiB per completed producer record.
+A2. A manifest is `$HIVE_HOME/slot-manifests/<pool_id>/<sha256>.json`. It is owner-only
+   `0600` in `0700` directories and opened no-follow. Its first key is `layout`, as
+   ADR-0004 requires; then come the pool ID, the declaration digest and the build-root
+   identity. A directory table lists each directory below the unit's `out` once, with
+   its identity. File entries hold `{dir, name, file, bytes, sha256}`, where `dir`
+   indexes that table, and are sorted by path. The name is the SHA-256 of the exact
+   bytes.
+A3. Size: a compact entry is under 200 bytes, so 4,096 files fit in 1 MiB. The writer
+   refuses a manifest over 2 MiB **before writing**, and readers read at most 2 MiB.
+   One file may be at most 64 MiB. Parent depth below `out` is at most 8. Any regular
+   file name is accepted; no extension rule applies (Part B names the files).
+A4. Locking and order (ARCH-16): manifests are written and read only through the state
+   module, as `Tx` methods, under the state lock. The producer-completion commit runs
+   in one locked closure. Inside it, hive writes each manifest to a temporary file,
+   calls `sync_all`, links it to its digest name without overwriting (an existing
+   name must already hold identical bytes), syncs the directory, then commits
+   `slots.json`. `slots.authority` covers the refs. A crash or rolled-back commit can
+   leave only an unreferenced manifest. A temporary file is removed by the same
+   writer on failure, and the sweep removes leftovers older than one hour.
+A5. Reading: open by digest name, read at most 2 MiB, recompute the digest, parse
+   strictly, check the directory and file identities. Anything missing, aliased,
+   oversized, malformed or changed holds the slot with a refusal that names
+   `slot-manifests/<pool_id>/<sha256>.json`. The refusal never proposes deleting it.
+   The `lib.rs:99-115` recovery text gains a manifest arm. The lost-record and orphan
+   checks (`slot/mod.rs:3627`) treat a pool's manifest directory like its lock
+   directory: a lost record never makes manifests deletable.
+A6. Sweep: only after an `Ok` commit, under the same lock, re-read the committed
+   `slots.json` from disk. Then delete a manifest in that pool only if no record
+   references it. That includes `Pending.prior`, every `EligibleProducer` and every
+   unacknowledged outcome. The commit's "publication was not confirmed" result skips
+   the sweep. A failed deletion is left in place and reported.
+A7. GC custody receives the witnesses as today's slice. The bound becomes the
+   per-record file count. Each retained byte is hashed once at producer completion
+   and once per handoff: GC custody revalidates, and the pre-ready recheck reuses
+   that result under the same output locks. For Klynt that is 31.3 MB per handoff.
+   The quadratic `allows_removal` check is replaced with a set lookup.
+A8. `slots.json` is unreleased (absent from v0.1.0 through v0.1.2). It stays at layout
+   2 with no upgrade step, and manifests start at layout 2. Development records with
+   inline witnesses get the existing malformed-state refusal.
+
+**B. Admitting declared producers (depends on A)**
+
+B1. A reviewed declaration names each producer unit, its package material digest, the
+   exact relative paths it may leave under its `out`, and **every consumer unit**.
+   Consumers are the reviewed units of the recipe whose compile reads those files.
+   For a `-sys` crate they are its library unit plus every unit that links it
+   transitively in the selected recipe. That set is enumerated from the reviewed
+   closure's dependency graph, not observed.
+B2. Coverage (SLOTS-3.3): admission refuses when any selected unit with the producer
+   package in its transitive normal or build dependencies is missing from that
+   producer's consumers, unless a reviewed exclusion names it. A file outside the
+   declared list, a missing declared file, or an undeclared producer with a non-empty
+   `out` holds the slot.
+B3. Generated inputs may be declared on all four reviewed recipes when both output
+   roles are `target`. Native and generated-Rust producers may coexist. A workspace
+   proc-macro is admitted only with a `SealedInputsTokenTransform` review. The
+   `serde_core` pins become one fixture declaration among others.
+
+Satisfies: SLOTS-3.2, SLOTS-3.3 (Part B), SLOTS-3.7, SLOTS-4.10
+Reuse: rung 2 — `new_private_file`, `open_exact_private` and the `commit_slots_with` ordering in `crates/state/src/slots.rs` (generalized for a second private record kind: a configurable read bound, multi-level idempotent `make_private_directory`, no-overwrite link); `sha256_reader` in `crates/platform/src/slot.rs`; GC custody slice in `crates/gc/src/checkout.rs`
+Respects: ARCH-16 (manifests written only through the state module under its lock), ARCH-17 (evidence read from files, never from replaying a build), ARCH-19 (manifested files read under held output locks), ARCH-22 (GC deletion order unchanged)
+Interface: `GeneratedManifestRef` in `CompletedInvocation.generated_manifests`; `Tx::write_generated_manifest(pool, &Manifest) -> GeneratedManifestRef` and `Tx::read_generated_manifest(pool, &GeneratedManifestRef) -> Manifest`. Callers never see paths.
+Depth: n/a — extends the private slot-state writer with a second immutable record kind.
+Locality: extend `crates/state/src/slots.rs` and `crates/state/src/lib.rs`; replace single-witness handling in `crates/cargo-hive/src/slot/{mod.rs,generated.rs,generated/serde_core.rs,generated/archive.rs,admission.rs,inspect.rs}` and `crates/cargo-hive/src/cli.rs:1774-1805`; extend `crates/gc/src/checkout.rs`.
+Surface:
+- Witness writers `generated.rs:95, 339, 414`, `serde_core.rs:111, 123, 295, 316`, `archive.rs:114, 234`, and completion at `slot/mod.rs:1340-1366`: **replace**. They return entries and the locked publish writes the manifest.
+- Readers `slot/mod.rs:2577-2620`, `generated.rs:104, 225, 251, 268`, `serde_core.rs:80-97`, `archive.rs:195-230`, `admission.rs:1285-1304`, `inspect.rs:67-74`, `cli.rs:1774-1805`: **replace**. They read through `Tx::read_generated_manifest`, and the single-witness assumptions at `serde_core.rs:82, 89-96` and `archive.rs:212` go.
+- `Pending.prior` and `completed_records_match` in `slots.rs`: **replace**. They compare refs.
+- Admission gates `admission.rs:99, 1095-1166, 1230`: **replace** (Part B).
+- State validation `slots.rs:1406-1444` and `GeneratedInputWitness::valid_for` `slots.rs:1108-1158`: **replace**. Validation covers refs and aggregate bounds; entry checks move to the manifest reader.
+- GC custody `gc/src/checkout.rs:365-403` (`MAX_PROTECTED_INPUTS`, `allows_removal`): **replace**.
+- Recovery and display text `crates/state/src/lib.rs:99-115` and the orphan check `slot/mod.rs:3627`: **replace**.
+- Tests `tests/slots.rs:6935, 7009, 7095-7111, 7511` and `gc/src/checkout.rs:1915, 2007, 2104`: **replace**.
+- Persisted `slots.json`: no release contains it. The design changes it in place, and nothing is gated.
+
+See [ADR-0008](../../adr/0008-generated-input-evidence-in-manifests.md).
+
 ## Seams for testing
 
 | Seam | Kind | Covers |
@@ -580,6 +688,7 @@ real builds. A fixture-only proof does not grant warm readiness.
 | Injected slot publication fault at the existing transaction/I/O boundary, plus real subprocesses | Unit/integration | SLOTS-4.1, SLOTS-4.2, SLOTS-4.3, SLOTS-4.6, SLOTS-5.4 |
 | Installed hive guide and real stock Cargo, with independent clean and unprotected stale controls on each admitted layout | Integration/acceptance | SLOTS-1.8, SLOTS-2.6, SLOTS-3.8, SLOTS-3.9 |
 | Paired real release-mode handoff and seed on supported proof machine | Manual evidence | SLOTS-5.1, SLOTS-5.2 |
+| `Tx::write_generated_manifest` / `read_generated_manifest` and real `cargo hive slot` on scratch state with many-file fixture producers (2026-11-24 amendment) | Unit/integration | SLOTS-3.2, SLOTS-3.3, SLOTS-3.7, SLOTS-4.10 |
 
 ## Coverage check
 
