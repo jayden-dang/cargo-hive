@@ -1,14 +1,13 @@
 //! Retire explicitly confirmed slot authority under the existing physical fence.
 
 use super::{
-    AttemptStage, CREDENTIAL_DEADLINE, CheckoutInventory, ExpectedCheckout, KEY_HEX_LEN,
-    LOCK_NAMESPACE, MAX_OUTCOMES, MAX_ROOT_ENTRIES, OperationKind, Outcome, OutcomeRequest, Phase,
-    Pool, Refusal, Registry, ReturnScope, Slot, SlotOperation, SlotResult, SlotScope, State,
-    StateError, TransitionResult, cancelled, check_cancelled, check_nested_checkouts,
-    check_private_dir, checked_pool, commit_slot_update, credential_refusal, inspect_checkout,
-    owner_worktree_inventory, path_refusal, read_stdin_complete, request_key,
-    slot_identity_present, slot_producer_is_eligible, slots, try_exclusive,
-    verify_no_checkout_ancestor, verify_operation_repo, with_slot_state,
+    AttemptStage, CREDENTIAL_DEADLINE, KEY_HEX_LEN, LOCK_NAMESPACE, MAX_OUTCOMES, MAX_ROOT_ENTRIES,
+    OperationKind, Outcome, OutcomeRequest, Phase, Pool, Refusal, Registry, ReturnScope, Slot,
+    SlotOperation, SlotResult, State, StateError, TransitionResult, cancelled, check_cancelled,
+    check_nested_checkouts, check_private_dir, checked_pool, commit_slot_update,
+    credential_refusal, inspect_detached_checkout, owner_worktree_inventory, path_refusal,
+    read_stdin_complete, request_key, slot_identity_present, slot_producer_is_eligible, slots,
+    try_exclusive, verify_no_checkout_ancestor, verify_operation_repo, with_slot_state,
 };
 use cargo_hive_state::slots::{
     PriorPhase, RecoveryAuthorization, RecoveryQuiescence, RecoveryRequest,
@@ -241,25 +240,10 @@ pub(super) fn run(state: &State, operation: &SlotOperation) -> Result<SlotResult
             "The retained outputs cannot be used by a new reservation. Create a separate seeded checkout.",
         ));
     }
-    let proof = if let Some(checkout) = &slot.checkout_id {
-        let proof = inspect_checkout(
-            &SlotScope {
-                pool,
-                slot,
-                registry: &snapshot.registry,
-                secondary_roots: &snapshot.config.secondary_roots,
-            },
-            &ExpectedCheckout {
-                identity: checkout,
-                head: slot.last_head.as_deref(),
-            },
-        )?;
-        match proof.inventory {
-            CheckoutInventory::Clean => (),
-            CheckoutInventory::Dirty(detail) => return Err(Refusal::ReturnWork(detail)),
-            CheckoutInventory::Uncertain(detail) => return Err(Refusal::ReturnUncertain(detail)),
-        }
-        Some(proof)
+    let proof = if let Some(head) = &slot.last_head {
+        Some(inspect_detached_checkout(
+            pool, &snapshot, slot_index, head,
+        )?)
     } else {
         verify_no_checkout_ancestor(&pool.root)?;
         let paths = owner_worktree_inventory(&pool.root, &snapshot.registry, Some(pool))?

@@ -2245,7 +2245,7 @@ fn first_root_evidence(
     Ok(slots::EmptyEpoch { epoch, roots })
 }
 
-fn inspect_prepared_checkout(
+fn inspect_detached_checkout(
     pool: &Pool,
     scope: &ReturnScope,
     index: usize,
@@ -2278,6 +2278,17 @@ fn inspect_prepared_checkout(
             "The prepared checkout is not detached at the requested commit.",
         ));
     }
+    Ok(proof)
+}
+
+fn inspect_prepared_checkout(
+    pool: &Pool,
+    scope: &ReturnScope,
+    index: usize,
+    commit: &str,
+) -> Result<CheckoutProof, Refusal> {
+    let proof = inspect_detached_checkout(pool, scope, index, commit)?;
+    let slot = &pool.slots[index];
     let eligible = profile::eligible_producer(&slot.producer, slot.generation)?;
     let roots = eligible.roots();
     for invocation in &pool.profile.invocations {

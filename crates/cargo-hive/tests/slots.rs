@@ -4275,6 +4275,75 @@ fn recovery_accepts_exact_operator_confirmation_without_the_lost_reservation_key
 }
 
 #[test]
+fn recovery_refuses_a_retained_checkout_attached_to_the_same_commit() {
+    let fixture = reviewed_pool_fixture(None);
+    fixture.hive.write_ready_capabilities();
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = Path::new(initialized["slots"][0]["path"].as_str().unwrap());
+    let commit = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let key_path = fixture._repo_dir.path.join("recovery-first-key");
+    private_file(&key_path);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &key_path, "3")
+            .status
+            .success()
+    );
+    let credential = fs::read_to_string(&key_path).unwrap();
+    let out = run_packaged_take(&fixture, pool, &commit, &key_path, "take");
+    assert!(
+        out.status.success(),
+        "the ordinary guide must first complete a ready checkout"
+    );
+    let args = fixture.replay("return", pool, 1, 1, &"4".repeat(32));
+    let (out, returned) = finish_private(start_private(&fixture.hive, args, &credential));
+    assert!(out.status.success(), "{returned}");
+    let args = fixture.reservation(pool, 1, 1, &commit, &"5".repeat(32));
+    let next_credential = "d".repeat(64);
+    let (out, reserved) = finish_private(start_private(&fixture.hive, args, &next_credential));
+    assert!(out.status.success(), "{reserved}");
+    let revision = fixture.record()["revision"].as_u64().unwrap();
+    let recover = || {
+        let args = fixture.replay("recover", pool, 1, 2, &"6".repeat(32));
+        let input = json!({
+            "observed_revision": revision,
+            "authority": { "kind": "holder", "credential": next_credential },
+            "quiescence": { "kind": "no_permit_issued" }
+        });
+        let (out, result) = finish_private(start_private(&fixture.hive, args, &input.to_string()));
+        assert_no_credential(&out, &next_credential);
+        assert!(result.get("path").is_none());
+        (out, result)
+    };
+    git(checkout, &["switch", "-c", "recovery-attached"]);
+    assert_eq!(git(checkout, &["rev-parse", "HEAD"]), commit);
+    assert!(git(checkout, &["status", "--porcelain"]).is_empty());
+    let before = fs::read(fixture.file()).unwrap();
+    let (out, refused) = recover();
+    assert_eq!(out.status.code(), Some(1), "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("detached"))
+    );
+    assert!(fs::read(fixture.file()).unwrap() == before);
+    assert_eq!(
+        git(checkout, &["branch", "--show-current"]),
+        "recovery-attached"
+    );
+
+    git(checkout, &["switch", "--detach", &commit]);
+    let (out, recovered) = recover();
+    assert!(out.status.success(), "{recovered}");
+    assert_eq!(recovered["kind"], "recovered");
+    assert_eq!(
+        fixture.record()["pools"][0]["slots"][0]["phase"]["kind"],
+        "vacant"
+    );
+}
+
+#[test]
 fn the_packaged_guide_returns_a_first_ready_slot_with_absent_roots() {
     let fixture = reviewed_pool_fixture(None);
     fixture.hive.write_ready_capabilities();
