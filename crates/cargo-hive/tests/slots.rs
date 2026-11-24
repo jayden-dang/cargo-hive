@@ -119,6 +119,27 @@ impl PoolFixture {
         serde_json::from_slice(&fs::read(self.file()).unwrap()).unwrap()
     }
 
+    fn install_record(&self, value: &Value) {
+        let mut record: cargo_hive_state::slots::SlotsFile =
+            serde_json::from_value(value.clone()).unwrap();
+        record.pools.sort_by(|one, other| one.main.cmp(&other.main));
+        for pool in &mut record.pools {
+            pool.slots.sort_by_key(|slot| slot.number);
+        }
+        let mut canonical = serde_json::to_vec_pretty(&record).unwrap();
+        canonical.push(b'\n');
+        let digest = cargo_hive_platform::slot::sha256(&canonical).unwrap();
+        fs::write(self.file(), serde_json::to_vec(value).unwrap()).unwrap();
+        fs::write(
+            self.hive
+                .home
+                .path
+                .join(cargo_hive_state::slots::AUTHORITY_FILE),
+            digest,
+        )
+        .unwrap();
+    }
+
     fn reservation(
         &self,
         pool: &str,
@@ -272,7 +293,7 @@ impl LeasedSlot {
                 }
             }
         });
-        fs::write(fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+        fixture.install_record(&record);
         Self {
             fixture,
             pool,
@@ -354,7 +375,7 @@ impl LeasedSlot {
                 "foreground": {"pid": 2, "start_secs": 1, "start_micros": 0}
             }]
         });
-        fs::write(self.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+        self.fixture.install_record(&record);
     }
 }
 
@@ -600,7 +621,7 @@ fn mutable_rust_and_consumer_anchors_require_reviewed_compiler_inputs() {
             consumer["prior_object"] = json!(oid);
             consumer["requested_object"] = json!(oid);
             saved["pools"][0]["profile"]["mutable_inputs"][0]["locator"]["path"] = json!(path);
-            fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+            slot.fixture.install_record(&saved);
         }
         let (out, result) = finish_private(start_producer(
             &slot,
@@ -660,7 +681,7 @@ fn an_unchanged_rust_entry_cannot_admit_arbitrary_included_source() {
                 "coverage": {"kind": "consumers", "ids": ["fixture-library"]}
             }));
         }
-        fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+        slot.fixture.install_record(&saved);
         let index = slot.admin.join("index");
         let state_file = slot.fixture.file();
         let files = [&*slot.path, &*index, &*state_file];
@@ -713,7 +734,7 @@ fn only_the_native_builtin_target_is_admitted_without_a_target_spec_probe() {
                 "name": "RUST_TARGET_PATH", "expectation": {"kind": "present", "value": search}
             }));
         }
-        fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+        slot.fixture.install_record(&saved);
         let mut input = producer_input(&slot);
         input["shape"]["argv"] = argv;
         let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
@@ -761,7 +782,7 @@ fn an_unverified_native_linker_cannot_get_a_build_permit() {
     let argv = json!(["build", "--locked"]);
     let mut saved = slot.fixture.record();
     saved["pools"][0]["profile"]["invocations"][0]["argv"] = argv.clone();
-    fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    slot.fixture.install_record(&saved);
     let mut input = producer_input(&slot);
     input["shape"]["argv"] = argv;
     let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
@@ -810,7 +831,7 @@ fn a_return_without_a_writer_cannot_pass_old_output_to_a_second_reservation() {
     let state = &mut ready["pools"][0]["slots"][0];
     state["phase"]["kind"] = json!("leased");
     state["phase"]["ready_commit"] = json!(slot.head);
-    fs::write(slot.fixture.file(), serde_json::to_vec(&ready).unwrap()).unwrap();
+    slot.fixture.install_record(&ready);
     let (returned, result) = finish_private(start_private(
         &slot.fixture.hive,
         slot.fixture
@@ -838,7 +859,7 @@ fn an_exact_reviewed_rust_variant_can_record_a_guarded_start() {
     );
     let mut saved = slot.fixture.record();
     saved["pools"][0]["profile"]["consumers"][0]["requested_object"] = json!(oid);
-    fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    slot.fixture.install_record(&saved);
     let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
     let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
         .unwrap()
@@ -884,7 +905,7 @@ fn an_executable_dependency_without_foreground_proof_is_refused_before_start() {
     state["last_head"] = json!(head);
     state["phase"]["ready_commit"] = json!(head);
     state["phase"]["lease"]["requested_commit"] = json!(head);
-    fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    slot.fixture.install_record(&saved);
     let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
     let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
         .unwrap()
@@ -970,7 +991,7 @@ fn a_reviewed_config_and_environment_must_exclude_compiler_overrides() {
                     "name": name, "expectation": {"kind": "present", "value": shim}
                 }));
         }
-        fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+        slot.fixture.install_record(&saved);
         let (out, result) = finish_private(start_producer(
             &slot,
             1,
@@ -1018,7 +1039,7 @@ fn a_legacy_completion_without_its_foreground_witness_is_held() {
         .as_object_mut()
         .unwrap()
         .remove("foreground");
-    fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    slot.fixture.install_record(&saved);
     let (out, status) = slot.fixture.status();
     assert!(out.status.success(), "{status}");
     assert_eq!(status["slots"][0]["phase"], "held");
@@ -1026,7 +1047,7 @@ fn a_legacy_completion_without_its_foreground_witness_is_held() {
     assert_eq!(out.status.code(), Some(1), "{result}");
     assert_eq!(slot.fixture.record(), saved);
     saved["pools"][0]["slots"][0]["phase"] = json!({"kind": "vacant"});
-    fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    slot.fixture.install_record(&saved);
     let (out, status) = slot.fixture.status();
     assert!(out.status.success(), "{status}");
     assert_eq!(status["slots"][0]["phase"], "held");
@@ -1069,7 +1090,7 @@ fn acknowledging_completed_producers_releases_capacity_for_the_next_lease() {
             "ready_commit": slot.head },
         "credential": slot.credential, "result": {"kind": "producer_complete"}
     })).collect::<Vec<_>>());
-    fs::write(slot.fixture.file(), serde_json::to_vec(&saved).unwrap()).unwrap();
+    slot.fixture.install_record(&saved);
 
     let (blocked, result) = finish_private(slot.start("return"));
     assert_eq!(blocked.status.code(), Some(1), "{result}");
@@ -1609,7 +1630,7 @@ fn uncovered_producer_shapes_are_refused_before_output_is_created() {
             }
             _ => unreachable!("test case"),
         };
-        fs::write(slot.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+        slot.fixture.install_record(&record);
         let before = fs::read(slot.fixture.file()).unwrap();
         let (out, result) = finish_private(start_producer(
             &slot,
@@ -1682,7 +1703,7 @@ fn a_successful_off_protocol_build_cannot_restore_lost_provenance() {
             "roots": {"target": null, "build": null},
             "reason": if reason == "tainted" { "off_profile" } else { "lost_writer" }
         });
-        fs::write(slot.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+        slot.fixture.install_record(&record);
         slot.fixture.hive.check_crate(&slot.path);
         assert!(slot.path.join("target").is_dir());
         let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
@@ -1725,7 +1746,7 @@ fn completed_history_limit_does_not_ask_to_acknowledge_absent_outcomes() {
             .collect::<Vec<_>>()
     );
     assert_eq!(state["outcomes"], json!([]));
-    fs::write(slot.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+    slot.fixture.install_record(&record);
     let (lock, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
     let _guard = cargo_hive_platform::flock::try_exclusive(&lock)
         .unwrap()
@@ -1924,9 +1945,8 @@ fn retained_output_identity_excludes_input_probes_symlinks_and_nested_checkouts(
     slot.assert_refused("nested checkout");
     fs::remove_dir_all(target.join("debug/.git")).unwrap();
 
-    let file = slot.fixture.file();
-    let previous = fs::read(&file).unwrap();
-    let mut record = slot.fixture.record();
+    let previous = slot.fixture.record();
+    let mut record = previous.clone();
     record["pools"][0]["profile"]["graph_inputs"]
         .as_array_mut()
         .unwrap()
@@ -1934,21 +1954,19 @@ fn retained_output_identity_excludes_input_probes_symlinks_and_nested_checkouts(
             "locator": {"kind": "checkout", "path": "target/debug/negative-input"},
             "expectation": {"kind": "absent"}
         }));
-    fs::write(&file, serde_json::to_vec(&record).unwrap()).unwrap();
+    slot.fixture.install_record(&record);
     assert!(!target.join("debug/negative-input").exists());
     slot.assert_refused("possible input");
-    fs::write(&file, &previous).unwrap();
-
-    let mut overlapping = slot.fixture.record();
+    let mut overlapping = previous.clone();
     let debug = target.join("debug");
     let metadata = fs::metadata(&debug).unwrap();
     overlapping["pools"][0]["profile"]["invocations"][0]["build_root"] = json!("target/debug");
     overlapping["pools"][0]["slots"][0]["producer"]["roots"]["build"] = json!({
         "path": debug, "identity": {"dev": metadata.dev(), "ino": metadata.ino()}
     });
-    fs::write(&file, serde_json::to_vec(&overlapping).unwrap()).unwrap();
+    slot.fixture.install_record(&overlapping);
     slot.assert_refused("exclusive generated use");
-    fs::write(&file, &previous).unwrap();
+    slot.fixture.install_record(&previous);
 
     git(&slot.path, &["add", "-f", "target/debug/fixture.rmeta"]);
     git(&slot.path, &["commit", "-qm", "disguised tracked input"]);
@@ -2008,14 +2026,14 @@ fn a_live_writer_and_lost_writer_custody_each_preserve_the_lease() {
         },
         "prior": {"kind": "never_built", "evidence": initial}
     });
-    fs::write(slot.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+    slot.fixture.install_record(&record);
     slot.assert_refused("prior writer may still change");
 
     record["pools"][0]["slots"][0]["producer"] = json!({
         "kind": "unknown", "epoch": epoch, "generation": 1,
         "roots": {"target": null, "build": null}, "reason": "lost_writer"
     });
-    fs::write(slot.fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+    slot.fixture.install_record(&record);
     slot.assert_refused("provenance is unproved");
 }
 
@@ -2702,7 +2720,7 @@ fn the_thirty_third_unacknowledged_reservation_is_refused() {
     let mut record = fixture.record();
     record["pools"][0]["slots"][0]["generation"] = json!(31);
     record["pools"][0]["slots"][0]["outcomes"] = json!((1..=31).map(previous).collect::<Vec<_>>());
-    fs::write(fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+    fixture.install_record(&record);
 
     let op = format!("{:032x}", 32);
     let (out, reserved) = finish_private(start_private(
@@ -2723,7 +2741,7 @@ fn the_thirty_third_unacknowledged_reservation_is_refused() {
     // Model the vacant slot left by a later return without implementing its writer.
     record["pools"][0]["slots"][0]["phase"] = json!({"kind": "vacant"});
     let bytes = serde_json::to_vec(&record).unwrap();
-    fs::write(fixture.file(), &bytes).unwrap();
+    fixture.install_record(&record);
 
     let (out, status) = fixture.status();
     assert!(out.status.success(), "{status}");
@@ -4299,6 +4317,54 @@ fn recovery_accepts_exact_operator_confirmation_without_the_lost_reservation_key
 }
 
 #[test]
+fn restored_slot_bytes_cannot_reauthorize_an_old_reservation() {
+    let fixture = PoolFixture::new();
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let checkout = Path::new(initialized["slots"][0]["path"].as_str().unwrap());
+    let commit = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let old_key = "a".repeat(64);
+    let old_reserve = fixture.reservation(pool, 1, 0, &commit, &"1".repeat(32));
+    let (out, reserved) =
+        finish_private(start_private(&fixture.hive, old_reserve.clone(), &old_key));
+    assert!(out.status.success(), "{reserved}");
+    let old = fs::read(fixture.file()).unwrap();
+    let revision = fixture.record()["revision"].as_u64().unwrap();
+    let recovery = json!({
+        "observed_revision": revision,
+        "authority": { "kind": "holder", "credential": old_key },
+        "quiescence": { "kind": "no_permit_issued" }
+    });
+    let recover = |operation: &str| {
+        let args = fixture.replay("recover", pool, 1, 1, operation);
+        finish_private(start_private(&fixture.hive, args, &recovery.to_string()))
+    };
+    let (out, released) = recover(&"2".repeat(32));
+    assert!(out.status.success(), "{released}");
+    let new_reserve = fixture.reservation(pool, 1, 1, &commit, &"3".repeat(32));
+    let (out, newer) = finish_private(start_private(&fixture.hive, new_reserve, &"b".repeat(64)));
+    assert!(out.status.success(), "{newer}");
+    assert_eq!(newer["generation"], 2);
+
+    fs::write(fixture.file(), &old).unwrap();
+    let (out, refused) = recover(&"4".repeat(32));
+    assert_eq!(out.status.code(), Some(1), "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("slots.json"))
+    );
+    assert!(refused.get("path").is_none());
+    assert_no_credential(&out, &old_key);
+    let (out, refused) = finish_private(start_private(&fixture.hive, old_reserve, &old_key));
+    assert_eq!(out.status.code(), Some(1), "{refused}");
+    assert_ne!(refused["current"], true);
+    assert!(fs::read(fixture.file()).unwrap() == old);
+    assert!(!checkout.exists());
+}
+
+#[test]
 fn recovery_refuses_a_retained_checkout_attached_to_the_same_commit() {
     let fixture = reviewed_pool_fixture(None);
     fixture.hive.write_ready_capabilities();
@@ -4365,6 +4431,106 @@ fn recovery_refuses_a_retained_checkout_attached_to_the_same_commit() {
         fixture.record()["pools"][0]["slots"][0]["phase"]["kind"],
         "vacant"
     );
+}
+
+#[test]
+fn recovery_keeps_both_slots_held_when_their_output_provenance_is_lost() {
+    let fixture = reviewed_pool_fixture(None);
+    let (out, initialized) = fixture.init();
+    assert!(out.status.success(), "{initialized}");
+    let pool = initialized["pool_id"].as_str().unwrap();
+    let commit = git(&fixture.repo, &["rev-parse", "HEAD"]);
+    let helper = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plugin/skills/hive/scripts/slot-handoff.sh");
+    for number in ["1", "2"] {
+        let key = fixture
+            ._repo_dir
+            .path
+            .join(format!("held-slot-{number}-key"));
+        private_file(&key);
+        assert!(
+            key_command(&fixture, PRIVATE_KEY_COMMAND, &key, "3")
+                .status
+                .success()
+        );
+        let mut command = fixture
+            .hive
+            .command_with(Path::new("/bin/bash"), &["--noprofile", "--norc"]);
+        producer_environment(&mut command);
+        let child = command
+            .arg(&helper)
+            .args(["take", env!("CARGO_BIN_EXE_cargo-hive")])
+            .arg(&fixture.repo)
+            .args([
+                pool,
+                number,
+                "0",
+                &commit,
+                &"1".repeat(32),
+                &"2".repeat(32),
+                &"3".repeat(32),
+            ])
+            .env_remove("BASH_ENV")
+            .stdin(fs::File::open(&key).unwrap())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (out, ready) = finish_private(child);
+        assert!(out.status.success(), "{ready}");
+        assert_eq!(ready["kind"], "ready");
+    }
+    let mut record = fixture.record();
+    for (index, reason) in ["lost_writer", "off_profile"].into_iter().enumerate() {
+        let producer = &mut record["pools"][0]["slots"][index]["producer"];
+        *producer = json!({
+            "kind": if reason == "lost_writer" { "unknown" } else { "tainted" },
+            "epoch": producer["evidence"]["epoch"],
+            "generation": 1,
+            "roots": { "target": null, "build": null },
+            "reason": reason
+        });
+    }
+    fixture.install_record(&record);
+    let before = fs::read(fixture.file()).unwrap();
+    for number in 1_u8..=2 {
+        let prior = &record["pools"][0]["slots"][usize::from(number - 1)]["phase"]["preparation"];
+        let request = json!({
+            "observed_revision": record["revision"],
+            "attempt_id": prior["attempt_id"],
+            "begin_op": prior["begin_op"],
+            "authority": {
+                "kind": "operator",
+                "confirmation": "abandon_resolved_work",
+                "result_credential": "f".repeat(64)
+            },
+            "quiescence": { "kind": "foreground_completed" }
+        });
+        let args = fixture.replay("recover", pool, number, 1, &"7".repeat(32));
+        let (out, held) = finish_private(start_private(&fixture.hive, args, &request.to_string()));
+        assert_eq!(out.status.code(), Some(1), "{held}");
+        assert!(
+            held["detail"]
+                .as_str()
+                .unwrap()
+                .contains("does not regain warm capacity")
+        );
+        assert!(held.get("path").is_none());
+        assert!(fs::read(fixture.file()).unwrap() == before);
+    }
+    let (out, status) = fixture.status();
+    assert!(out.status.success(), "{status}");
+    assert_eq!(status["slots"][0]["phase"], "held");
+    assert_eq!(status["slots"][1]["phase"], "held");
+    assert!(
+        status["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("cargo hive seed")
+    );
+    let (out, refused) = fixture.init();
+    assert_eq!(out.status.code(), Some(1), "{refused}");
+    assert!(fs::read(fixture.file()).unwrap() == before);
 }
 
 #[test]
@@ -4601,7 +4767,10 @@ fn workspace_unit_stamp_path(path: &Path, package: &str) -> PathBuf {
 const RETAINED_EDIT: &str = "pub fn answer() -> u32 { 43 }\n";
 
 fn first_completed_workspace() -> (LeasedSlot, PathBuf, String) {
-    let fixture = reviewed_pool_fixture(None);
+    first_completed_workspace_in(reviewed_pool_fixture(None))
+}
+
+fn first_completed_workspace_in(fixture: PoolFixture) -> (LeasedSlot, PathBuf, String) {
     fixture.hive.write_ready_capabilities();
     let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
     fs::write(fixture.repo.join("src/lib.rs"), RETAINED_EDIT).unwrap();
@@ -4954,8 +5123,9 @@ fn changing_dep_info_during_gc_does_not_discard_a_surviving_unit() {
         fs::write(
             &shim,
             r#"#!/bin/sh
-if [ "$1" = metadata ] && [ -n "$HIVE_TEST_GC_DEP_INFO" ] && [ ! -f "$HIVE_TEST_GC_CHANGED" ] &&
-    /usr/bin/grep -q '"stage"[[:space:]]*:[[:space:]]*"gc_in_progress"' "$HIVE_HOME/slots.json"; then
+if [ "$1" = metadata ] && [ -n "$HIVE_TEST_GC_DEP_INFO" ] &&
+    /usr/bin/grep -q '"stage"[[:space:]]*:[[:space:]]*"gc_in_progress"' "$HIVE_HOME/slots.json" &&
+    /bin/mkdir -- "$HIVE_TEST_GC_CHANGED.claim" 2>/dev/null; then
     /bin/cp -p "$HIVE_TEST_GC_DEP_INFO" "$HIVE_TEST_GC_CHANGED" || exit 20
     printf '%s: independent/src/lib.rs\n' "$HIVE_TEST_GC_DEP_INFO" > "$HIVE_TEST_GC_DEP_INFO" || exit 21
     /usr/bin/touch -r "$HIVE_TEST_GC_CHANGED" "$HIVE_TEST_GC_DEP_INFO" || exit 22
@@ -5042,6 +5212,343 @@ exec "$HIVE_TEST_GC_DEP_INFO_CARGO" "$@"
         saved["pools"][0]["slots"][0]["phase"]["attempt"]["stage"],
         "gc_in_progress"
     );
+}
+
+#[test]
+fn recovery_holds_an_interrupted_attempt_after_an_actual_scoped_deletion() {
+    exercise_interrupted_scoped_cleanup(false);
+}
+
+#[test]
+fn a_fresh_gc_fence_can_clean_again_after_a_scoped_deletion() {
+    exercise_interrupted_scoped_cleanup(true);
+}
+
+fn exercise_interrupted_scoped_cleanup(retry: bool) {
+    if std::env::var_os("HIVE_TEST_INTERRUPTED_GC_GIT").is_none() {
+        use cargo_hive_platform::proc::{Spec, output_with_deadline};
+
+        let bin = Scratch::new("interrupted-gc-git");
+        let shim = bin.path.join("git");
+        fs::write(
+            &shim,
+            r#"#!/bin/sh
+if [ -n "$HIVE_TEST_GC_REMOVED_FINGERPRINT" ] &&
+    [ ! -e "$HIVE_TEST_GC_REMOVED_FINGERPRINT" ] &&
+    /usr/bin/grep -q '"stage"[[:space:]]*:[[:space:]]*"gc_in_progress"' "$HIVE_HOME/slots.json"; then
+    printf '%s\n' 'the scoped deletion is visible' > "$HIVE_TEST_GC_INTERRUPTED" || exit 63
+    exit 62
+fi
+exec /usr/bin/git "$@"
+"#,
+        ).unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut path = bin.path.as_os_str().to_owned();
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap());
+        let mut child = Spec::new(std::env::current_exe().unwrap());
+        child.args = vec![
+            "--exact".into(),
+            if retry {
+                "a_fresh_gc_fence_can_clean_again_after_a_scoped_deletion"
+            } else {
+                "recovery_holds_an_interrupted_attempt_after_an_actual_scoped_deletion"
+            }
+            .into(),
+        ];
+        child.env_set = vec![
+            ("PATH".into(), path),
+            ("HIVE_TEST_INTERRUPTED_GC_GIT".into(), "1".into()),
+        ];
+        let out = output_with_deadline(&child, Duration::from_secs(45), || false).unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        return;
+    }
+
+    let fixture = if retry {
+        retry_gc_fixture()
+    } else {
+        reviewed_pool_fixture(None)
+    };
+    let (slot, key, next) = first_completed_workspace_in(fixture);
+    return_workspace(&slot, 1);
+    let (obsolete, survivor) = if retry {
+        ("independent", "fixture")
+    } else {
+        ("fixture", "independent")
+    };
+    let stamp = workspace_unit_stamp_path(&slot.path, obsolete);
+    let untouched = workspace_unit_stamp(&slot.path, survivor);
+    let removed = stamp.parent().unwrap();
+    let interrupted = slot.fixture._repo_dir.path.join("gc-interrupted");
+    assert!(removed.is_dir());
+    fs::File::open(&stamp)
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000)),
+        )
+        .unwrap();
+    let child = packaged_take_command(&slot.fixture, &slot.pool, &next, &key, "take", "1")
+        .env("HIVE_TEST_GC_REMOVED_FINGERPRINT", removed)
+        .env("HIVE_TEST_GC_INTERRUPTED", &interrupted)
+        .spawn()
+        .unwrap();
+    let (out, refused) = finish_private(child);
+    assert_eq!(out.status.code(), Some(1), "{refused}");
+    assert!(refused.get("path").is_none());
+    assert_eq!(
+        fs::read_to_string(&interrupted).unwrap(),
+        "the scoped deletion is visible\n"
+    );
+    assert!(!removed.exists());
+    assert_eq!(workspace_unit_stamp(&slot.path, survivor), untouched);
+
+    let record = slot.fixture.record();
+    let phase = &record["pools"][0]["slots"][0]["phase"];
+    let attempt = &phase["attempt"];
+    assert_eq!(phase["kind"], "preparing");
+    assert_eq!(attempt["stage"], "gc_in_progress");
+    let prior = fs::read(slot.fixture.file()).unwrap();
+    for mode in ["foreground_completed", "verified_later_boot"] {
+        let input = json!({
+            "observed_revision": record["revision"],
+            "attempt_id": attempt["attempt_id"],
+            "begin_op": attempt["begin_op"],
+            "authority": {
+                "kind": "operator",
+                "confirmation": "abandon_resolved_work",
+                "result_credential": "f".repeat(64)
+            },
+            "quiescence": { "kind": mode }
+        });
+        let args = slot
+            .fixture
+            .replay("recover", &slot.pool, 1, 2, &"7".repeat(32));
+        let (out, held) =
+            finish_private(start_private(&slot.fixture.hive, args, &input.to_string()));
+        assert_eq!(out.status.code(), Some(1), "{held}");
+        assert!(held.get("path").is_none());
+        assert!(fs::read(slot.fixture.file()).unwrap() == prior);
+        assert_eq!(workspace_unit_stamp(&slot.path, survivor), untouched);
+    }
+    if retry {
+        fresh_gc_after_injected_later_boot(&slot, &key, &next);
+    }
+}
+
+fn fresh_gc_after_injected_later_boot(slot: &LeasedSlot, key: &Path, next: &str) {
+    use cargo_hive_state::slots::{
+        OperationKind, Outcome, OutcomeRequest, Phase, PreparationRetry, RecoveryAuthorization,
+        RecoveryQuiescence, RecoveryRequest, TransitionResult,
+    };
+
+    let fixture = &slot.fixture;
+    let surviving_stamp = workspace_unit_stamp(&slot.path, "survivor");
+    let state = cargo_hive_state::State::open_at(fixture.hive.home.path.clone()).unwrap();
+    let begin_op = "8".repeat(32);
+    let (file, _) = cargo_hive_state::slots::open_slot_lock(&slot.lock_path()).unwrap();
+    let guard = cargo_hive_platform::flock::try_exclusive(&file)
+        .unwrap()
+        .expect("the interrupted guide released the original slot lock");
+    // Compose the proof from the injected boot-decision unit and the real
+    // checked state transaction here. The catalogued prior boot stays intact.
+    let (retired, old_op) = state
+        .locked(|tx| {
+            let mut saved = tx.read_slots()?.unwrap();
+            let revision = saved.revision;
+            let saved_slot = &mut saved.pools[0].slots[0];
+            let Phase::Preparing { lease, attempt } = &saved_slot.phase else {
+                panic!("the scoped cleanup must have left a durable attempt");
+            };
+            let (lease, attempt) = (lease.clone(), attempt.clone());
+            saved_slot.phase = Phase::Reserved { lease };
+            saved_slot.last_head = Some(next.to_owned());
+            saved_slot.retry = Some(PreparationRetry {
+                retired_attempt: attempt.attempt_id,
+                begin_op: begin_op.clone(),
+            });
+            saved_slot.outcomes.push(Outcome {
+                pool_id: slot.pool.clone(),
+                slot: 1,
+                generation: saved_slot.generation,
+                operation: "7".repeat(32),
+                kind: OperationKind::Recover,
+                attempt_id: Some(attempt.attempt_id),
+                request: OutcomeRequest::Recover {
+                    recovery: Some(RecoveryRequest {
+                        observed_revision: revision,
+                        begin_op: Some(attempt.begin_op.clone()),
+                        authority: RecoveryAuthorization::Holder {
+                            nonce: Some(attempt.runner.nonce),
+                        },
+                        quiescence: RecoveryQuiescence::VerifiedLaterBoot,
+                        next_begin_op: Some(begin_op.clone()),
+                    }),
+                },
+                credential: slot.credential.clone(),
+                result: TransitionResult::Recovered,
+            });
+            saved.revision += 1;
+            tx.commit_slots(Some(revision), &saved)?;
+            Ok((attempt.attempt_id, attempt.begin_op))
+        })
+        .unwrap();
+    drop(guard);
+    let replay = |command, operation| {
+        let mut args = fixture.replay(command, &slot.pool, 1, 2, operation);
+        args.extend(["--attempt".into(), retired.to_string()]);
+        finish_private(start_private(&fixture.hive, args, &slot.credential))
+    };
+    let recovery_op = "7".repeat(32);
+    let (out, recovered) = replay("outcome", &recovery_op);
+    assert!(out.status.success(), "{recovered}");
+    assert_eq!(recovered["kind"], "recovered");
+    assert_eq!(recovered["current"], false);
+    assert!(recovered.get("path").is_none());
+    for operation in [&recovery_op, &old_op] {
+        let (out, confirmed) = replay("ack", operation);
+        assert!(out.status.success(), "{confirmed}");
+        assert_eq!(confirmed["kind"], "acknowledged");
+        assert!(confirmed.get("path").is_none());
+        assert_eq!(replay("outcome", operation).0.status.code(), Some(1));
+    }
+    let prior_unit = workspace_unit_stamp_path(&slot.path, "fixture");
+    let namespace = prior_unit.parent().unwrap();
+    fs::File::open(&prior_unit)
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_600_000_000)),
+        )
+        .unwrap();
+
+    let scratch = fixture._repo_dir.path.join("retry-guide");
+    fs::create_dir(&scratch).unwrap();
+    for name in ["nonce", "permit", "result", "old-control"] {
+        private_file(&scratch.join(name));
+    }
+    let guide = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../plugin/skills/hive/scripts/slot-handoff.sh"),
+    )
+    .unwrap();
+    let tail = guide.split_once("    \"$binary\" slot begin ").unwrap().1;
+    let body = tail.split_once("\n}\n\nproduce_slot()").unwrap().0;
+    let script = format!(
+        r#"
+set +x +a
+binary=$1 repo=$2 pool=$3 lock=$4 scratch=$5 commit=$6 begin_op=$7 old_op=$8
+scope=(--repo "$repo" --pool "$pool" --slot 1)
+generation=2 mode=take ready_op=99999999999999999999999999999999
+count_pattern='^(0|[1-9][0-9]*)$'
+git_for_slot() {{ return 1; }}
+IFS= read -r credential || exit 20
+"$binary" slot key --out-fd 8 --json 8<> "$scratch/nonce" > "$scratch/result" || exit 21
+IFS= read -r nonce < "$scratch/nonce" || exit 22
+printf -v request '{{"credential":"%s","nonce":"%s"}}' "$credential" "$nonce"
+exec 9< "$lock" || exit 23
+if "$binary" slot begin "${{scope[@]}}" --generation "$generation" --op "$old_op" \
+  --lock-fd 9 --control-fd 8 --json <<< "$request" 8<> "$scratch/old-control" > "$scratch/result"; then
+    exit 24
+fi
+[[ ! -s "$scratch/old-control" ]] || exit 25
+retry_preparation() {{
+    "$binary" slot begin {body}
+}}
+retry_preparation
+"#
+    );
+    let mut command = fixture.hive.command_with(
+        Path::new("/bin/bash"),
+        &["--noprofile", "--norc", "-c", &script, "retry-guide"],
+    );
+    producer_environment(&mut command);
+    let child = command
+        .arg(env!("CARGO_BIN_EXE_cargo-hive"))
+        .arg(&fixture.repo)
+        .arg(&slot.pool)
+        .arg(slot.lock_path())
+        .arg(scratch)
+        .arg(next)
+        .arg(begin_op)
+        .arg(old_op)
+        .env_remove("BASH_ENV")
+        .stdin(fs::File::open(key).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (out, ready) = finish_private(child);
+    assert_no_credential(&out, &slot.credential);
+    assert!(
+        out.status.success(),
+        "{ready} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(ready["kind"], "ready");
+    assert_eq!(ready["generation"], 2);
+    assert!(ready["attempt"].as_u64().unwrap() > retired);
+    assert_eq!(ready["path"], json!(slot.path));
+    assert!(
+        !namespace.exists(),
+        "the fresh attempt ran its own scoped deletion"
+    );
+    assert_eq!(
+        workspace_unit_stamp(&slot.path, "survivor"),
+        surviving_stamp
+    );
+}
+
+fn retry_gc_fixture() -> PoolFixture {
+    let fixture = reviewed_pool_fixture(None);
+    let manifest = fixture.repo.join("Cargo.toml");
+    let contents = fs::read_to_string(&manifest).unwrap().replace(
+        "members = [\"independent\"]",
+        "members = [\"independent\", \"survivor\"]",
+    );
+    fs::write(manifest, contents).unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(fixture.repo.join("Cargo.lock"))
+        .unwrap()
+        .write_all(b"\n[[package]]\nname = \"survivor\"\nversion = \"0.1.0\"\n")
+        .unwrap();
+    fs::create_dir_all(fixture.repo.join("survivor/src")).unwrap();
+    fs::write(
+        fixture.repo.join("survivor/Cargo.toml"),
+        "[package]\nname = \"survivor\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.repo.join("survivor/src/lib.rs"),
+        "pub fn survivor() {}\n",
+    )
+    .unwrap();
+    git(&fixture.repo, &["add", "-A"]);
+    git(
+        &fixture.repo,
+        &[
+            "commit",
+            "-qm",
+            "Keep one supported Cargo unit after both cleanups",
+        ],
+    );
+
+    let mut profile: Value = serde_json::from_slice(&fs::read(&fixture.profile).unwrap()).unwrap();
+    profile["graph_inputs"] = json!(["Cargo.toml", "Cargo.lock", "independent/Cargo.toml", "survivor/Cargo.toml"]
+        .map(|path| json!({
+            "locator": {"kind": "checkout", "path": path},
+            "expectation": {"kind": "present", "identity": {
+                "kind": "git_object", "oid": git(&fixture.repo, &["rev-parse", &format!("HEAD:{path}")])
+            }}
+        })));
+    fs::write(&fixture.profile, serde_json::to_vec(&profile).unwrap()).unwrap();
+    fixture
 }
 
 #[test]
@@ -6306,17 +6813,59 @@ fn a_lost_packaged_ready_reply_can_be_replayed_from_the_original_request() {
     assert!(out.status.success(), "{permit}");
     assert_eq!(permit["current"], false);
     assert!(permit.get("path").is_none());
-    let mut request = fixture.replay("outcome", pool, 1, 1, &"3".repeat(32));
-    request.extend([
-        "--attempt".into(),
-        permit["attempt"].as_u64().unwrap().to_string(),
-    ]);
-    let (out, ready) = finish_private(start_private(&fixture.hive, request, &credential));
+    let ready_op = "3".repeat(32);
+    let attempt = permit["attempt"].as_u64().unwrap().to_string();
+    let replay = |command| {
+        let mut request = fixture.replay(command, pool, 1, 1, &ready_op);
+        request.extend(["--attempt".into(), attempt.clone()]);
+        let (out, result) = finish_private(start_private(&fixture.hive, request, &credential));
+        assert_no_credential(&out, &credential);
+        (out, result)
+    };
+    let (out, ready) = replay("outcome");
     assert!(out.status.success(), "{ready}");
     assert_eq!(ready["kind"], "ready");
     assert_eq!(ready["current"], true);
     assert_eq!(ready["path"], initialized["slots"][0]["path"]);
     assert_eq!(fixture.record()["revision"], saved["revision"]);
+
+    let returned = fixture.replay("return", pool, 1, 1, &"4".repeat(32));
+    let (out, returned) = finish_private(start_private(&fixture.hive, returned, &credential));
+    assert!(out.status.success(), "{returned}");
+    let assert_historical = || {
+        let before = fs::read(fixture.file()).unwrap();
+        let (out, historical) = replay("outcome");
+        assert!(out.status.success(), "{historical}");
+        assert_eq!(historical["generation"], 1);
+        assert_eq!(historical["current"], false);
+        assert!(historical.get("path").is_none());
+        assert!(historical.get("use_policy").is_none());
+        assert!(fs::read(fixture.file()).unwrap() == before);
+    };
+    assert_historical();
+    let next_key = fixture._repo_dir.path.join("later-ready-key");
+    private_file(&next_key);
+    assert!(
+        key_command(&fixture, PRIVATE_KEY_COMMAND, &next_key, "3")
+            .status
+            .success()
+    );
+    let next = start_packaged_take_at(&fixture, pool, &head, &next_key, "take", "1");
+    let (out, later_ready) = finish_private(next);
+    assert!(out.status.success(), "{later_ready}");
+    assert_eq!(later_ready["generation"], 2);
+    assert_eq!(later_ready["path"], ready["path"]);
+    assert_historical();
+
+    let (out, confirmed) = replay("ack");
+    assert!(out.status.success(), "{confirmed}");
+    assert_eq!(confirmed["kind"], "acknowledged");
+    assert_eq!(confirmed["current"], false);
+    assert!(confirmed.get("path").is_none());
+    let after_ack = fs::read(fixture.file()).unwrap();
+    assert_eq!(replay("outcome").0.status.code(), Some(1));
+    assert!(fs::read(fixture.file()).unwrap() == after_ack);
+    assert_eq!(fixture.record()["pools"][0]["slots"][0]["generation"], 2);
 }
 
 #[test]
@@ -7053,7 +7602,7 @@ fn a_pending_producer_requires_a_ready_lease() {
         ),
     ] {
         record["pools"][0]["slots"][0]["phase"] = phase;
-        fs::write(fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+        fixture.install_record(&record);
         let (out, result) = fixture.status();
         assert!(out.status.success(), "{result}");
         assert_eq!(result["slots"][0]["phase"], projected);
@@ -7103,7 +7652,7 @@ fn an_outcome_cannot_rebind_the_current_lease_or_repeat_a_replay_key() {
         "credential": credential, "result": {"kind": "reserved"}
     });
     slot["outcomes"] = json!([outcome]);
-    fs::write(fixture.file(), serde_json::to_vec(&record).unwrap()).unwrap();
+    fixture.install_record(&record);
     let (out, status) = fixture.status();
     assert!(out.status.success(), "{status}");
     assert_eq!(status["slots"][0]["phase"], "reserved");

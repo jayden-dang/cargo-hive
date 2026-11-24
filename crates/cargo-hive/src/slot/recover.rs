@@ -10,8 +10,9 @@ use super::{
     request_key, slot_identity_present, slot_producer_is_eligible, slots, try_exclusive,
     verify_no_checkout_ancestor, verify_operation_repo, with_slot_state,
 };
+use cargo_hive_platform::slot::BootWitness;
 use cargo_hive_state::slots::{
-    PriorPhase, RecoveryAuthorization, RecoveryQuiescence, RecoveryRequest,
+    PreparationRetry, PriorPhase, RecoveryAuthorization, RecoveryQuiescence, RecoveryRequest,
 };
 use serde::Deserialize;
 use std::io;
@@ -26,6 +27,7 @@ struct RecoveryInput {
     begin_op: Option<String>,
     authority: RecoveryAuthority,
     quiescence: RecoveryQuiescence,
+    next_begin_op: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -86,6 +88,13 @@ pub(super) fn run(state: &State, operation: &SlotOperation) -> Result<SlotResult
             .as_ref()
             .is_none_or(|operation| slots::hex(operation, 32))
         || input.attempt_id.is_some() != (input.quiescence != RecoveryQuiescence::NoPermitIssued)
+        || input.next_begin_op.as_ref().is_some_and(|op| {
+            !slots::hex(op, 32)
+                || op == &operation.op
+                || input.begin_op.as_ref() == Some(op)
+                || input.quiescence != RecoveryQuiescence::VerifiedLaterBoot
+                || !matches!(authority, RecoveryAuthorization::Holder { .. })
+        })
         || !slots::hex(&credential, KEY_HEX_LEN)
     {
         return Err(credential_refusal());
@@ -103,6 +112,7 @@ pub(super) fn run(state: &State, operation: &SlotOperation) -> Result<SlotResult
         begin_op: input.begin_op,
         authority,
         quiescence: input.quiescence,
+        next_begin_op: input.next_begin_op,
     };
     let request = OutcomeRequest::Recover {
         recovery: Some(original.clone()),
@@ -203,6 +213,7 @@ pub(super) fn run(state: &State, operation: &SlotOperation) -> Result<SlotResult
                     && attempt.anchor_cursor == 0
             }
             (RecoveryQuiescence::ForegroundCompleted, Some(PriorPreparation::Completed(_))) => true,
+            (RecoveryQuiescence::VerifiedLaterBoot, Some(_)) => true,
             _ => false,
         };
         if !evidence_matches_phase {
@@ -223,31 +234,92 @@ pub(super) fn run(state: &State, operation: &SlotOperation) -> Result<SlotResult
     };
     let pool = &snapshot.pool;
     let slot = &pool.slots[slot_index];
-    let mut vacant = slot.clone();
-    vacant.phase = Phase::Vacant;
-    if !slot_producer_is_eligible(&vacant) {
+    if slot.producer.lost() {
         return Err(Refusal::ReturnUncertain(
-            "The retained outputs cannot be used by a new reservation. Create a separate seeded checkout.",
+            "The output provenance is lost and this slot does not regain warm capacity for the retained outputs.",
         ));
     }
-    if original.quiescence == RecoveryQuiescence::ForegroundCompleted {
-        let (_, Some(PriorPreparation::Completed(preparation))) =
-            prior_lease(&slot.phase).ok_or_else(stale)?
-        else {
-            return Err(quiescence_unproved());
+    let mut vacant = slot.clone();
+    vacant.phase = Phase::Vacant;
+    let retry = if let Some(begin_op) = &original.next_begin_op {
+        let Phase::Preparing { lease, attempt } = &slot.phase else {
+            return Err(stale());
         };
+        if attempt.stage != AttemptStage::GcInProgress
+            || begin_op == &lease.reservation_op
+            || slot
+                .outcomes
+                .iter()
+                .any(|entry| entry.generation == slot.generation && &entry.operation == begin_op)
+            || !slot_producer_is_eligible(slot)
+        {
+            return Err(stale());
+        }
+        Some(PreparationRetry {
+            retired_attempt: attempt.attempt_id,
+            begin_op: begin_op.clone(),
+        })
+    } else {
+        None
+    };
+    if retry.is_none() && !slot_producer_is_eligible(&vacant) {
+        return Err(Refusal::ReturnUncertain(
+            "The retained output provenance cannot be established for a new reservation.",
+        ));
+    }
+    let (previous_lease, previous_preparation) = prior_lease(&slot.phase).ok_or_else(stale)?;
+    let boot_required = matches!(
+        original.quiescence,
+        RecoveryQuiescence::ForegroundCompleted | RecoveryQuiescence::VerifiedLaterBoot
+    );
+    if boot_required {
         let observed = boot_witness(key.pool_id).map_err(|_| quiescence_unproved())?;
-        if observed.boot_session != preparation.runner.boot_session
-            || observed.host_binding != preparation.host_binding
+        if !previous_preparation
+            .is_some_and(|preparation| preparation.matches_boot(original.quiescence, &observed))
         {
             return Err(quiescence_unproved());
         }
     }
-    let proof = if let Some(head) = &slot.last_head {
-        Some(inspect_detached_checkout(
-            pool, &snapshot, slot_index, head,
-        )?)
+    let checkout_in_progress = matches!(
+        (original.quiescence, previous_preparation),
+        (RecoveryQuiescence::VerifiedLaterBoot, Some(PriorPreparation::Preparing(attempt)))
+            if attempt.stage == AttemptStage::CheckoutInProgress
+    );
+    let expected_head = match (original.quiescence, previous_preparation) {
+        (RecoveryQuiescence::VerifiedLaterBoot, Some(PriorPreparation::Preparing(attempt)))
+            if attempt.stage == AttemptStage::CheckoutInProgress =>
+        {
+            None
+        }
+        (RecoveryQuiescence::VerifiedLaterBoot, Some(PriorPreparation::Preparing(attempt)))
+            if attempt.stage != AttemptStage::PermitIssued =>
+        {
+            Some(previous_lease.requested_commit.as_str())
+        }
+        _ => slot.last_head.as_deref(),
+    };
+    let proof = if slot.checkout_id.is_some() {
+        let proof = inspect_detached_checkout(pool, &snapshot, slot_index, expected_head)?;
+        if checkout_in_progress
+            && proof.head != previous_lease.requested_commit
+            && Some(proof.head.as_str()) != slot.last_head.as_deref()
+        {
+            return Err(Refusal::ReturnUncertain(
+                "The interrupted checkout is outside its prior and requested HEAD scope.",
+            ));
+        }
+        if retry.is_some() {
+            // A fresh preparation needs a positive baseline for every reviewed
+            // consumer. An interrupted cleanup cannot supply that proof.
+            super::prepare::witness(&proof, &pool.profile, &slot.producer)?;
+        }
+        Some(proof)
     } else {
+        if expected_head.is_some() {
+            return Err(Refusal::ReturnUncertain(
+                "The prior checkpoint lacks its durable checkout identity.",
+            ));
+        }
         verify_no_checkout_ancestor(&pool.root)?;
         let paths = owner_worktree_inventory(&pool.root, &snapshot.registry, Some(pool))?
             .into_iter()
@@ -271,7 +343,17 @@ pub(super) fn run(state: &State, operation: &SlotOperation) -> Result<SlotResult
         }
         check_cancelled()?;
         let slot = &mut saved.pools[index].slots[slot_index];
-        slot.phase = Phase::Vacant;
+        slot.phase = if retry.is_some() {
+            Phase::Reserved {
+                lease: previous_lease.clone(),
+            }
+        } else {
+            Phase::Vacant
+        };
+        slot.retry = retry;
+        if let Some(proof) = &proof {
+            slot.last_head = Some(proof.head.clone());
+        }
         slot.outcomes.push(outcome);
         commit_slot_update(tx, &mut saved)
     })?;
@@ -303,6 +385,24 @@ impl<'a> PriorPreparation<'a> {
         match self {
             Self::Preparing(attempt) => (attempt.attempt_id, &attempt.begin_op, &attempt.runner),
             Self::Completed(attempt) => (attempt.attempt_id, &attempt.begin_op, &attempt.runner),
+        }
+    }
+
+    fn matches_boot(self, proof: RecoveryQuiescence, observed: &BootWitness) -> bool {
+        let binding = match self {
+            Self::Preparing(attempt) => attempt.host_binding,
+            Self::Completed(preparation) => Some(preparation.host_binding),
+        };
+        if binding != Some(observed.host_binding) {
+            return false;
+        }
+        let same_boot = self.identity().2.boot_session == observed.boot_session;
+        match proof {
+            RecoveryQuiescence::ForegroundCompleted => {
+                matches!(self, Self::Completed(_)) && same_boot
+            }
+            RecoveryQuiescence::VerifiedLaterBoot => !same_boot,
+            _ => false,
         }
     }
 }
@@ -343,17 +443,16 @@ pub(super) fn recorded_result(
     pool: &Pool,
     outcome: &Outcome,
 ) -> Option<SlotResult> {
-    if outcome.kind != OperationKind::Recover
-        || !matches!(
-            (&outcome.request, &outcome.result),
-            (
-                OutcomeRequest::Recover { recovery: Some(_) },
-                TransitionResult::Recovered
-            )
-        )
-    {
+    let (
+        OperationKind::Recover,
+        OutcomeRequest::Recover {
+            recovery: Some(request),
+        },
+        TransitionResult::Recovered,
+    ) = (outcome.kind, &outcome.request, &outcome.result)
+    else {
         return None;
-    }
+    };
     let mut result = SlotResult::new(
         command,
         acknowledgement.unwrap_or("recovered"),
@@ -363,7 +462,50 @@ pub(super) fn recorded_result(
     result.pool_id = Some(pool.pool_id.clone());
     result.attempt = outcome.attempt_id;
     result.current = Some(false);
-    result.next_action =
-        Some("Use a new reservation and the normal preparation checks before using the slot.");
+    result.next_action = Some(if request.next_begin_op.is_some() {
+        "Begin the same lease with the requested fresh operation and complete the normal preparation checks."
+    } else {
+        "Use a new reservation and the normal preparation checks before using the slot."
+    });
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_later_boot_requires_a_different_session_and_the_same_native_host() {
+        let mut prior = Attempt {
+            attempt_id: 2,
+            begin_op: "1".repeat(32),
+            runner: Runner {
+                boot_session: "earlier-boot".into(),
+                pid: 2,
+                start_secs: 1,
+                start_micros: 0,
+                nonce: "a".repeat(64),
+            },
+            host_binding: Some([7; 32]),
+            stage: AttemptStage::GcInProgress,
+            lock_offset: Some(1 << 32),
+            prior_head: Some("b".repeat(40)),
+            anchors: Vec::new(),
+            anchor_cursor: 0,
+        };
+        let proves = |attempt: &Attempt, boot: &str, digest| {
+            PriorPreparation::Preparing(attempt).matches_boot(
+                RecoveryQuiescence::VerifiedLaterBoot,
+                &BootWitness {
+                    boot_session: boot.into(),
+                    host_binding: digest,
+                },
+            )
+        };
+        assert!(proves(&prior, "later-boot", [7; 32]));
+        assert!(!proves(&prior, "earlier-boot", [7; 32]));
+        assert!(!proves(&prior, "later-boot", [8; 32]));
+        prior.host_binding = None;
+        assert!(!proves(&prior, "later-boot", [7; 32]));
+    }
 }

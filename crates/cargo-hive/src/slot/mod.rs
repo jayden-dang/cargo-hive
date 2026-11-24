@@ -1523,6 +1523,10 @@ fn begin(
         }
         if slot.generation != key.generation
             || !matches!(&slot.phase, Phase::Reserved { lease } if lease.credential == input.credential)
+            || slot
+                .retry
+                .as_ref()
+                .is_some_and(|retry| retry.begin_op != key.operation)
             || !slot_producer_is_eligible(slot)
             || !slot_identity_present(state.root(), pool, slot)
         {
@@ -2257,7 +2261,7 @@ fn inspect_detached_checkout(
     pool: &Pool,
     scope: &ReturnScope,
     index: usize,
-    commit: &str,
+    commit: Option<&str>,
 ) -> Result<CheckoutProof, Refusal> {
     let slot = &pool.slots[index];
     let identity = slot
@@ -2273,7 +2277,7 @@ fn inspect_detached_checkout(
         },
         &ExpectedCheckout {
             identity,
-            head: Some(commit),
+            head: commit,
         },
     )?;
     check_producer_inventory(&proof)?;
@@ -2294,7 +2298,7 @@ fn inspect_prepared_checkout(
     index: usize,
     commit: &str,
 ) -> Result<CheckoutProof, Refusal> {
-    let proof = inspect_detached_checkout(pool, scope, index, commit)?;
+    let proof = inspect_detached_checkout(pool, scope, index, Some(commit))?;
     let slot = &pool.slots[index];
     let eligible = profile::eligible_producer(&slot.producer, slot.generation)?;
     let roots = eligible.roots();
@@ -2595,9 +2599,12 @@ fn replay_ready(
         && let Phase::Leased {
             lease,
             ready_commit,
-            ..
+            preparation,
         } = &slot.phase
         && lease.credential == auth.credential
+        && preparation
+            .as_ref()
+            .is_none_or(|preparation| outcome.attempt_id == Some(preparation.attempt_id))
         && outcome.result
             == (TransitionResult::Ready {
                 commit: ready_commit.clone(),
@@ -2786,6 +2793,7 @@ fn return_slot(
         check_cancelled()?;
         let slot = &mut saved.pools[index].slots[slot_index];
         slot.phase = Phase::Vacant;
+        slot.retry = None;
         slot.last_head = Some(proof.head);
         slot.outcomes.push(outcome);
         commit_slot_update(tx, &mut saved)?;
@@ -3070,6 +3078,7 @@ fn reservation_result(
     let mut result = SlotResult::new(command, kind, Some(pool.main.clone()), 0);
     result.pool_id = Some(pool.pool_id.clone());
     let current = slot.generation == outcome.generation
+        && slot.retry.is_none()
         && matches!(&slot.phase, Phase::Reserved { lease }
             if lease.reservation_op == outcome.operation && lease.credential == outcome.credential)
         && slot_producer_is_eligible(slot)
@@ -3499,6 +3508,10 @@ fn check_namespaces(
             check_checkout_root(ancestor)?;
         }
         scan_checkout_roots(selected, 0, &mut remaining, &check_checkout_root)?;
+    }
+    let authority = state.join(slots::AUTHORITY_FILE);
+    if pools.is_empty() && exists(&authority).map_err(|_| orphan(&authority))? {
+        return Err(orphan(&authority));
     }
     Ok(())
 }

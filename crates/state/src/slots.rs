@@ -5,7 +5,7 @@ use cargo_hive_platform::flock::{
     LockFileIdentity, checked_owner_directory, checked_stable_ancestor, open_owner_state_file,
     open_owner_state_lock, open_private_file,
 };
-use cargo_hive_platform::slot::random_slot_bytes;
+use cargo_hive_platform::slot::{random_slot_bytes, sha256};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -14,6 +14,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::{Component, Path, PathBuf};
 
 pub const FILE: &str = "slots.json";
+pub const AUTHORITY_FILE: &str = "slots.authority";
 pub const LOCK_NAMESPACE: &str = "slot-locks";
 pub const CHECKOUT_NAMESPACE: &str = "hive-slots";
 pub const MAX_BYTES: u64 = 1_048_576;
@@ -90,7 +91,7 @@ impl SlotsFile {
                         "reused checkout or Git admin identity",
                     )?;
                 }
-                slot.validate(pool)?;
+                slot.validate(pool, self.revision)?;
             }
         }
         for pool in &self.pools {
@@ -130,6 +131,8 @@ impl SlotsFile {
                         || old.generation.checked_add(1) == Some(new.generation),
                     "slot generation is stale or skipped",
                 )?;
+                new.phase.validate_preparation_successor(old, new)?;
+                new.validate_retry_successor(old)?;
                 old.producer.validate_successor(&new.producer, old, new)?;
             }
         }
@@ -182,6 +185,8 @@ pub struct Slot {
     pub last_head: Option<String>,
     pub generation: u64,
     pub phase: Phase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<PreparationRetry>,
     pub producer: Producer,
     pub outcomes: Vec<Outcome>,
 }
@@ -196,6 +201,7 @@ impl Slot {
             last_head: None,
             generation: 0,
             phase: Phase::Vacant,
+            retry: None,
             producer: Producer::NeverBuilt { evidence: None },
             outcomes: Vec::new(),
         }
@@ -209,7 +215,7 @@ impl Slot {
         format!("slot-{number}.lock")
     }
 
-    fn validate(&self, pool: &Pool) -> FormatResult {
+    fn validate(&self, pool: &Pool, revision: u64) -> FormatResult {
         require((1..=2).contains(&self.number), "invalid slot number")?;
         require(
             self.path.as_os_str() == format!("slot-{}", self.number).as_str(),
@@ -253,7 +259,30 @@ impl Slot {
                     && self.outcomes.is_empty()),
             "unused generation cannot carry prior checkout or lease",
         )?;
-        self.phase.validate(self)?;
+        self.phase.validate(self, revision)?;
+        if let Some(retry) = &self.retry {
+            let lease = self
+                .phase
+                .active_lease()
+                .ok_or("retry lacks an active lease")?;
+            require(
+                retry.retired_attempt > 0
+                    && retry.retired_attempt <= revision
+                    && hex(&retry.begin_op, 32)
+                    && retry.begin_op != lease.reservation_op
+                    && self.phase.preparing_attempt().is_none_or(|attempt| {
+                        attempt.begin_op == retry.begin_op
+                            && attempt.attempt_id > retry.retired_attempt
+                    })
+                    && self.phase.ready_preparation().is_none_or(|preparation| {
+                        preparation.as_ref().is_some_and(|completed| {
+                            completed.begin_op == retry.begin_op
+                                && completed.attempt_id > retry.retired_attempt
+                        })
+                    }),
+                "invalid retry preparation binding",
+            )?;
+        }
         self.producer.validate(pool, self)?;
         require(
             self.outcomes.len() <= MAX_OUTCOMES,
@@ -262,6 +291,31 @@ impl Slot {
         let mut keys = BTreeSet::new();
         for outcome in &self.outcomes {
             outcome.validate(pool, self)?;
+            if let Some(Some(preparation)) = self.phase.ready_preparation()
+                && outcome.generation == self.generation
+                && !self.retry.as_ref().is_some_and(|retry| {
+                    outcome
+                        .attempt_id
+                        .is_some_and(|attempt| attempt <= retry.retired_attempt)
+                })
+            {
+                let matches = match &outcome.request {
+                    OutcomeRequest::Begin { runner } => {
+                        outcome.attempt_id == Some(preparation.attempt_id)
+                            && outcome.operation == preparation.begin_op
+                            && runner == &preparation.runner
+                    }
+                    OutcomeRequest::Ready { runner } => {
+                        outcome.attempt_id == Some(preparation.attempt_id)
+                            && runner == &preparation.runner
+                    }
+                    _ => true,
+                };
+                require(
+                    matches,
+                    "completed preparation conflicts with its retained outcome",
+                )?;
+            }
             require(
                 keys.insert((
                     outcome.generation,
@@ -272,6 +326,50 @@ impl Slot {
             )?;
         }
         Ok(())
+    }
+
+    fn validate_retry_successor(&self, prior: &Slot) -> FormatResult {
+        if self.retry == prior.retry {
+            if self.retry.is_some() {
+                require(
+                    self.generation == prior.generation
+                        && self.phase.active_lease() == prior.phase.active_lease(),
+                    "an active retry cannot rebind its lease",
+                )?;
+            }
+            return Ok(());
+        }
+        let Some(retry) = &self.retry else {
+            return require(
+                matches!(self.phase, Phase::Vacant),
+                "an active lease cannot drop its recovery fence",
+            );
+        };
+        let Phase::Preparing { lease, attempt } = &prior.phase else {
+            return Err("only an interrupted preparation can establish a retry fence");
+        };
+        require(
+            matches!(&self.phase, Phase::Reserved { lease: next } if next == lease)
+                && prior.generation == self.generation
+                && attempt.stage == AttemptStage::GcInProgress
+                && attempt.attempt_id == retry.retired_attempt
+                && attempt.host_binding.is_some()
+                && self.outcomes.iter().any(|outcome| {
+                    outcome.generation == self.generation
+                        && outcome.attempt_id == Some(attempt.attempt_id)
+                        && outcome.credential == lease.credential
+                        && !prior.outcomes.contains(outcome)
+                        && matches!(&outcome.request,
+                            OutcomeRequest::Recover { recovery: Some(request) }
+                                if request.next_begin_op.as_ref() == Some(&retry.begin_op)
+                                    && request.begin_op.as_ref() == Some(&attempt.begin_op)
+                                    && matches!(&request.authority,
+                                        RecoveryAuthorization::Holder { nonce: Some(nonce) } if nonce == &attempt.runner.nonce
+                                    )
+                        )
+                }),
+            "retry must retire the exact interrupted GC attempt under the original lease",
+        )
     }
 }
 
@@ -334,6 +432,13 @@ impl GitIdentity {
             "invalid Git identity",
         )
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparationRetry {
+    pub retired_attempt: u64,
+    pub begin_op: String,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -426,7 +531,70 @@ impl Phase {
         }
     }
 
-    fn validate(&self, slot: &Slot) -> FormatResult {
+    fn preparing_attempt(&self) -> Option<&Attempt> {
+        match self {
+            Self::Preparing { attempt, .. }
+            | Self::Held {
+                prior: PriorPhase::Preparing { attempt, .. },
+                ..
+            } => Some(attempt),
+            _ => None,
+        }
+    }
+
+    fn ready_preparation(&self) -> Option<&Option<CompletedPreparation>> {
+        match self {
+            Self::Leased { preparation, .. }
+            | Self::Held {
+                prior: PriorPhase::Leased { preparation, .. },
+                ..
+            } => Some(preparation),
+            _ => None,
+        }
+    }
+
+    fn validate_preparation_successor(&self, old: &Slot, new: &Slot) -> FormatResult {
+        if let (Some(previous), Some(next)) =
+            (old.phase.preparing_attempt(), self.preparing_attempt())
+        {
+            require(
+                old.generation == new.generation
+                    && previous.attempt_id == next.attempt_id
+                    && previous.begin_op == next.begin_op
+                    && previous.runner == next.runner
+                    && previous.host_binding == next.host_binding,
+                "an active preparation cannot rebind its writer",
+            )?;
+        }
+        let Some(next) = self.ready_preparation() else {
+            return Ok(());
+        };
+        if let Some(previous) = old.phase.ready_preparation() {
+            return require(
+                previous == next && old.generation == new.generation,
+                "a ready lease cannot rebind its completed preparation",
+            );
+        }
+        if let Some(completed) = next {
+            require(
+                old.generation == new.generation
+                    && matches!(old.phase, Self::Preparing { .. })
+                    && matches!(self, Self::Leased { .. })
+                    && old.phase.active_lease() == self.active_lease()
+                    && old.phase.preparing_attempt().is_some_and(|attempt| {
+                        attempt.stage == AttemptStage::GcInProgress
+                            && attempt.attempt_id == completed.attempt_id
+                            && attempt.begin_op == completed.begin_op
+                            && attempt.runner == completed.runner
+                            && attempt.host_binding == Some(completed.host_binding)
+                    }),
+                "Ready must preserve the exact completed GC attempt and writer",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate(&self, slot: &Slot, revision: u64) -> FormatResult {
         let (lease, attempt, ready) = match self {
             Self::Vacant
             | Self::Held {
@@ -460,6 +628,10 @@ impl Phase {
         };
         lease.validate()?;
         if let Some(attempt) = attempt {
+            require(
+                attempt.attempt_id <= revision,
+                "preparation is newer than the record",
+            )?;
             attempt.validate()?;
         }
         if let Some((commit, preparation)) = ready {
@@ -468,6 +640,10 @@ impl Phase {
                 "invalid ready HEAD binding",
             )?;
             if let Some(preparation) = preparation {
+                require(
+                    preparation.attempt_id <= revision,
+                    "completed preparation is newer than the record",
+                )?;
                 preparation.validate()?;
             }
         }
@@ -1375,6 +1551,8 @@ pub struct RecoveryRequest {
     pub begin_op: Option<String>,
     pub authority: RecoveryAuthorization,
     pub quiescence: RecoveryQuiescence,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_begin_op: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1492,6 +1670,16 @@ impl Outcome {
                         && preparing == (recovery.quiescence != RecoveryQuiescence::NoPermitIssued)
                         && recovery.begin_op.as_ref().is_none_or(|begin_op| {
                             hex(begin_op, 32) && begin_op != &self.operation
+                        })
+                        && recovery.next_begin_op.as_ref().is_none_or(|begin_op| {
+                            hex(begin_op, 32)
+                                && begin_op != &self.operation
+                                && recovery.begin_op.as_ref() != Some(begin_op)
+                                && recovery.quiescence == RecoveryQuiescence::VerifiedLaterBoot
+                                && matches!(
+                                    recovery.authority,
+                                    RecoveryAuthorization::Holder { .. }
+                                )
                         })
                         && match &recovery.authority {
                             RecoveryAuthorization::Operator => true,
@@ -2190,9 +2378,25 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<SlotsFile, StateError> {
     Ok(slots)
 }
 
+fn remove_private_temp(path: &Path, file: &File) {
+    if let (Ok(named), Ok(created)) = (fs::symlink_metadata(path), file.metadata())
+        && FileIdentity::of(&named) == FileIdentity::of(&created)
+    {
+        let _ = fs::remove_file(path);
+    }
+}
+
 impl Tx<'_> {
     /// Missing is distinct from any unsafe, unsupported or malformed record.
     pub fn read_slots(&self) -> Result<Option<SlotsFile>, StateError> {
+        let saved = self.read_slot_record()?;
+        if let Some(saved) = &saved {
+            self.verify_slot_authority(saved)?;
+        }
+        Ok(saved)
+    }
+
+    fn read_slot_record(&self) -> Result<Option<SlotsFile>, StateError> {
         let path = self.root.join(FILE);
         owner_directory(self.root).map_err(|err| format_error(&path, err.to_string()))?;
         let file = match open_exact_private(&path) {
@@ -2206,6 +2410,60 @@ impl Tx<'_> {
             Err(err) => return Err(format_error(&path, err.to_string())),
         };
         decode(&path, &read_bounded(&path, file)?).map(Some)
+    }
+
+    fn read_slot_authority(&self) -> io::Result<Option<[u8; 32]>> {
+        let path = self.root.join(AUTHORITY_FILE);
+        let mut file = match open_exact_private(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return match fs::symlink_metadata(&path) {
+                    Err(missing) if missing.kind() == io::ErrorKind::NotFound => Ok(None),
+                    _ => Err(err),
+                };
+            }
+            Err(err) => return Err(err),
+        };
+        let mut digest = [0; 32];
+        file.read_exact(&mut digest)?;
+        if file.read(&mut [0])? != 0 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(Some(digest))
+    }
+
+    fn write_slot_authority(&self, digest: &[u8; 32]) -> io::Result<()> {
+        let path = self.root.join(AUTHORITY_FILE);
+        let tmp = self
+            .root
+            .join(format!(".{AUTHORITY_FILE}.tmp-{}", random_pool_id()?));
+        let mut file = new_private_file(&tmp)?;
+        let result = file
+            .write_all(digest)
+            .and_then(|()| file.sync_all())
+            .and_then(|()| fs::rename(&tmp, &path))
+            .and_then(|()| sync_directory(self.root));
+        if result.is_err() {
+            remove_private_temp(&tmp, &file);
+        }
+        result
+    }
+
+    fn verify_slot_authority(&self, record: &SlotsFile) -> Result<(), StateError> {
+        let path = self.root.join(FILE);
+        let bytes = encode(&path, record)?;
+        let digest = sha256(&bytes).map_err(|err| io_err(&path, err))?;
+        if self.read_slot_authority().ok().flatten() != Some(digest) {
+            return Err(Self::slot_authority_error(&path));
+        }
+        Ok(())
+    }
+
+    fn slot_authority_error(path: &Path) -> StateError {
+        format_error(
+            path,
+            format!("could not verify the last authoritative slot record against {AUTHORITY_FILE}"),
+        )
     }
 
     /// Publishes a checked successor while the state lock remains held.
@@ -2227,6 +2485,7 @@ impl Tx<'_> {
         if decode(&path, &read_bounded(&path, reader)?)? != canonical {
             return Err(format_error(&path, "authoritative revision changed"));
         }
+        self.verify_slot_authority(&canonical)?;
         file.sync_all()
             .and_then(|()| sync_directory(self.root))
             .map_err(|err| io_err(&path, err))
@@ -2240,6 +2499,12 @@ impl Tx<'_> {
     ) -> Result<(), StateError> {
         let path = self.root.join(FILE);
         let current = self.read_slots()?;
+        let prior_authority = self
+            .read_slot_authority()
+            .map_err(|_| Self::slot_authority_error(&path))?;
+        if current.is_some() != prior_authority.is_some() {
+            return Err(Self::slot_authority_error(&path));
+        }
         if current.as_ref().map(|file| file.revision) != previous
             || previous.unwrap_or(0).checked_add(1) != Some(next.revision)
         {
@@ -2262,6 +2527,7 @@ impl Tx<'_> {
                 format!("would be larger than {MAX_BYTES} bytes"),
             ));
         }
+        let digest = sha256(&bytes).map_err(|err| io_err(&path, err))?;
 
         let suffix = random_pool_id().map_err(|err| io_err(&path, err))?;
         let tmp = self.root.join(format!(".{FILE}.tmp-{suffix}"));
@@ -2270,16 +2536,31 @@ impl Tx<'_> {
         let result = file
             .write_all(&bytes)
             .and_then(|()| file.sync_all())
+            // Persist the independent candidate digest first. A reader that sees a
+            // different record cannot acknowledge or authorize a slot transition.
+            .and_then(|()| self.write_slot_authority(&digest))
             .and_then(|()| publish(&tmp, &path));
         if let Err(err) = result {
-            if let Ok(named) = fs::symlink_metadata(&tmp)
-                && let Ok(created) = file.metadata()
-                && FileIdentity::of(&named) == FileIdentity::of(&created)
-            {
-                let _ = fs::remove_file(&tmp);
-            }
+            remove_private_temp(&tmp, &file);
             if self.sync_slots(&canonical).is_ok() {
                 return Ok(());
+            }
+            // The live writer can restore the old digest only after observing
+            // the exact old record. An interrupted process leaves a mismatch
+            // held, and an exact visible successor can be synced by a restart.
+            if self
+                .read_slot_record()
+                .is_ok_and(|visible| visible == current)
+                && self.read_slot_authority().ok().flatten() == Some(digest)
+            {
+                let restored = match prior_authority {
+                    Some(prior) => self.write_slot_authority(&prior),
+                    None => fs::remove_file(self.root.join(AUTHORITY_FILE))
+                        .and_then(|()| sync_directory(self.root)),
+                };
+                if restored.is_err() {
+                    return Err(Self::slot_authority_error(&path));
+                }
             }
             return Err(format_error(
                 &path,
@@ -2534,7 +2815,13 @@ mod tests {
                     .unwrap_err();
                 assert!(error.to_string().contains("publication was not confirmed"));
                 assert_eq!(fs::read(state.root().join(FILE)).unwrap(), old);
-                assert_eq!(fs::read_dir(state.root()).unwrap().count(), 3);
+                assert!(fs::read_dir(state.root()).unwrap().all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".tmp-")
+                }));
                 assert_eq!(tx.read_slots()?.map(|file| file.revision), Some(1));
                 Ok(())
             })
@@ -2561,11 +2848,55 @@ mod tests {
                     })
                     .unwrap_err();
                 assert!(error.to_string().contains("publication was not confirmed"));
-                assert_eq!(tx.read_slots()?.map(|file| file.revision), Some(3));
+                assert_eq!(tx.read_slot_record()?.map(|file| file.revision), Some(3));
+                assert!(tx.read_slots().is_err());
                 assert!(tx.commit_slots(Some(1), &next).is_err());
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn a_reopened_writer_requires_the_record_named_by_the_durable_authority() {
+        for rename_visible in [false, true] {
+            let scratch = Scratch::new();
+            let prior = SlotsFile::new(1, Vec::new());
+            let next = SlotsFile::new(2, Vec::new());
+            let path = scratch.0.join(FILE);
+            State::open_at(scratch.0.clone())
+                .unwrap()
+                .locked(|tx| {
+                    tx.commit_slots(None, &prior)?;
+                    let candidate = encode(&path, &next)?;
+                    tx.write_slot_authority(&sha256(&candidate).unwrap())
+                        .unwrap();
+                    if rename_visible {
+                        let tmp = scratch.0.join("unacknowledged-publication");
+                        let mut file = new_private_file(&tmp).unwrap();
+                        file.write_all(&candidate).unwrap();
+                        file.sync_all().unwrap();
+                        fs::rename(tmp, &path).unwrap();
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            State::open_at(scratch.0.clone())
+                .unwrap()
+                .locked(|tx| {
+                    if rename_visible {
+                        assert!(tx.read_slots()?.as_ref() == Some(&next));
+                        tx.sync_slots(&next)?;
+                    } else {
+                        let error = tx.read_slots().err().unwrap().to_string();
+                        assert!(error.contains(AUTHORITY_FILE), "{error}");
+                        assert!(tx.sync_slots(&prior).is_err());
+                        assert!(tx.commit_slots(Some(prior.revision), &next).is_err());
+                        assert_eq!(fs::read(&path).unwrap(), encode(&path, &prior)?);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
     }
 
     #[test]
@@ -2868,6 +3199,161 @@ mod tests {
             result: TransitionResult::Ready { commit },
         });
         (preparing, ready)
+    }
+
+    #[test]
+    fn a_completed_preparation_preserves_its_exact_writer_even_after_compaction() {
+        let scratch = Scratch::new();
+        let (initial, reserved) = reservation_records(&scratch.0);
+        let (mut preparing, mut ready) = ready_publication_records(&reserved);
+        let Phase::Preparing { attempt, .. } = &mut preparing.pools[0].slots[0].phase else {
+            panic!("the fixture must contain a saved attempt");
+        };
+        let host_binding = [7; 32];
+        attempt.host_binding = Some(host_binding);
+        let Phase::Leased { preparation, .. } = &mut ready.pools[0].slots[0].phase else {
+            panic!("the fixture must contain a ready lease");
+        };
+        *preparation = Some(CompletedPreparation {
+            attempt_id: attempt.attempt_id,
+            begin_op: attempt.begin_op.clone(),
+            runner: attempt.runner.clone(),
+            host_binding,
+        });
+        let rewrite_host = |record: &mut SlotsFile| {
+            let Phase::Leased {
+                preparation: Some(proof),
+                ..
+            } = &mut record.pools[0].slots[0].phase
+            else {
+                panic!("the fixture must have a completed writer");
+            };
+            proof.host_binding = [8; 32];
+        };
+        let state = State::open_at(scratch.0.clone()).unwrap();
+        state
+            .locked(|tx| {
+                tx.commit_slots(None, &initial)?;
+                tx.commit_slots(Some(initial.revision), &reserved)?;
+                tx.commit_slots(Some(reserved.revision), &preparing)?;
+                let mut forged = ready.clone();
+                rewrite_host(&mut forged);
+                assert!(
+                    tx.commit_slots(Some(preparing.revision), &forged).is_err(),
+                    "Ready cannot install a different host proof"
+                );
+                tx.commit_slots(Some(preparing.revision), &ready)?;
+
+                let mut conflicting = ready.clone();
+                conflicting.revision += 1;
+                let labeled = conflicting.pools[0].slots[0].outcomes.last_mut().unwrap();
+                let OutcomeRequest::Ready { runner } = &mut labeled.request else {
+                    panic!("the fixture must have a retained Ready outcome");
+                };
+                runner.nonce = "f".repeat(64);
+                assert!(
+                    tx.commit_slots(Some(ready.revision), &conflicting).is_err(),
+                    "the retained Ready outcome must agree with its completed preparation"
+                );
+
+                let mut compacted = ready.clone();
+                compacted.revision += 1;
+                compacted.pools[0].slots[0].outcomes.clear();
+                tx.commit_slots(Some(ready.revision), &compacted)?;
+                let mut replaced = compacted.clone();
+                replaced.revision += 1;
+                rewrite_host(&mut replaced);
+                assert!(
+                    tx.commit_slots(Some(compacted.revision), &replaced)
+                        .is_err(),
+                    "replay compaction cannot rebind the completed writer"
+                );
+                assert!(tx.read_slots()?.as_ref() == Some(&compacted));
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_retry_fence_binds_the_next_begin_after_outcome_compaction() {
+        let scratch = Scratch::new();
+        let (initial, reservation) = reservation_records(&scratch.0);
+        let (mut preparing, _) = ready_publication_records(&reservation);
+        let pool_id = preparing.pools[0].pool_id.clone();
+        let Phase::Preparing { lease, attempt } = &mut preparing.pools[0].slots[0].phase else {
+            panic!("the fixture must contain a saved GC attempt");
+        };
+        attempt.host_binding = Some([7; 32]);
+        let (lease, attempt) = (lease.clone(), attempt.clone());
+        let next_begin = "9".repeat(32);
+        let mut recovered = preparing.clone();
+        recovered.revision += 1;
+        let slot = &mut recovered.pools[0].slots[0];
+        slot.phase = Phase::Reserved {
+            lease: lease.clone(),
+        };
+        slot.retry = Some(PreparationRetry {
+            retired_attempt: attempt.attempt_id,
+            begin_op: next_begin.clone(),
+        });
+        let state = State::open_at(scratch.0.clone()).unwrap();
+        state
+            .locked(|tx| {
+                tx.commit_slots(None, &initial)?;
+                tx.commit_slots(Some(initial.revision), &reservation)?;
+                tx.commit_slots(Some(reservation.revision), &preparing)?;
+                assert!(
+                    tx.commit_slots(Some(preparing.revision), &recovered)
+                        .is_err()
+                );
+                recovered.pools[0].slots[0].outcomes.push(Outcome {
+                    pool_id,
+                    slot: 1,
+                    generation: 1,
+                    operation: "8".repeat(32),
+                    kind: OperationKind::Recover,
+                    attempt_id: Some(attempt.attempt_id),
+                    request: OutcomeRequest::Recover {
+                        recovery: Some(RecoveryRequest {
+                            observed_revision: preparing.revision,
+                            begin_op: Some(attempt.begin_op.clone()),
+                            authority: RecoveryAuthorization::Holder {
+                                nonce: Some(attempt.runner.nonce.clone()),
+                            },
+                            quiescence: RecoveryQuiescence::VerifiedLaterBoot,
+                            next_begin_op: Some(next_begin.clone()),
+                        }),
+                    },
+                    credential: lease.credential.clone(),
+                    result: TransitionResult::Recovered,
+                });
+                tx.commit_slots(Some(preparing.revision), &recovered)?;
+                let mut compacted = recovered.clone();
+                compacted.revision += 1;
+                compacted.pools[0].slots[0].outcomes.clear();
+                tx.commit_slots(Some(recovered.revision), &compacted)?;
+
+                let mut accepted = compacted.clone();
+                accepted.revision += 1;
+                accepted.pools[0].slots[0].phase = Phase::Preparing {
+                    lease,
+                    attempt: attempt.clone(),
+                };
+                assert!(
+                    tx.commit_slots(Some(compacted.revision), &accepted)
+                        .is_err()
+                );
+                let Phase::Preparing { attempt, .. } = &mut accepted.pools[0].slots[0].phase else {
+                    unreachable!()
+                };
+                attempt.begin_op = next_begin;
+                attempt.attempt_id = accepted.revision;
+                attempt.stage = AttemptStage::PermitIssued;
+                tx.commit_slots(Some(compacted.revision), &accepted)?;
+                assert!(tx.read_slots()?.as_ref() == Some(&accepted));
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
