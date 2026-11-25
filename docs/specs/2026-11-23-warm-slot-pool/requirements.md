@@ -83,6 +83,7 @@ receipt alone does not verify either build outcome.
 - **SLOTS-4.7** (guard) WHEN an existing consumer reads an artifact from a pre-slot hive state root THE SYSTEM SHALL CONTINUE TO read it or report a refusal naming the file under the artifact's established layout rules.
 - **SLOTS-4.8** (guard) WHEN a pre-existing CLI command emits a receipt THE SYSTEM SHALL CONTINUE TO honor its existing JSON schema, findings, exit and data-logging contract.
 - **SLOTS-4.9** (agent-decided) WHEN the current slot status is requested THE SYSTEM SHALL report held or unavailable states and next steps without revealing another caller's credential. If output provenance cannot be restored for a retained epoch, report that this slot does not regain warm capacity in this version and give the separate seeded fallback.
+- **SLOTS-4.10** (agent-decided, 2026-11-24 amendment, approved 2026-11-24 17:32 +07) IF a generated-input manifest that a slot record references is missing, unreadable, malformed or changed THEN THE SYSTEM SHALL keep that slot unavailable, name the manifest file and the recovery action, and never propose deleting it.
 
 ## 5. Quality attributes
 
