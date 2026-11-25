@@ -1,5 +1,6 @@
 //! Clones chosen store entries into a checkout whose Cargo target does not exist yet.
-//! An empty set creates nothing. A target path that already exists, a missing parent,
+//! An empty set creates nothing. A target path that already exists (except one holding only
+//! seed's own Cargo tag, which a standalone seed fills), a missing parent,
 //! or a build directory that is not the target directory is one finding and clones nothing.
 //! Each file is cloned on its own, `deps/` then `build/` then `.fingerprint/`. A clone that
 //! still has the compressed-file flag is replaced in the same directory by a new regular file
@@ -430,12 +431,20 @@ fn place_selected(
         resolved.target_directory
     };
     report.target_directory = Some(target.clone());
+    let mut tag_present = false;
     let created = match destination {
         Some(scope) => scope.create_root(ctx, checkout, cancel)?,
         None => ctx.fs.create_dir(&target),
     };
     match created {
         Ok(()) => {}
+        Err(err)
+            if err.kind() == io::ErrorKind::AlreadyExists
+                && destination.is_none()
+                && holds_only_cargo_tag(ctx.fs, &target) =>
+        {
+            tag_present = true;
+        }
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
             report.findings.push((
                 "target.exists".to_string(),
@@ -495,7 +504,7 @@ fn place_selected(
         scoped_files: destination.map(|_| BTreeMap::new()),
         ..Added::default()
     };
-    if let Err(stop) = clone_tag(ctx, &mut added, root) {
+    if !tag_present && let Err(stop) = clone_tag(ctx, &mut added, root) {
         return match stop.into_result(&mut report, "tag.clone", &target) {
             Ok(report) => finish(ctx, report, &mut added),
             Err(err) => Err(err),
@@ -799,6 +808,25 @@ fn place_unit(
         },
         outside,
     ))
+}
+
+/// A directory with exactly one entry, a regular file `CACHEDIR.TAG` holding Cargo's exact tag
+/// bytes: what an earlier seed leaves when it finishes early. Anything else is not.
+fn holds_only_cargo_tag(fs: &dyn Fs, target: &Path) -> bool {
+    use cargo_hive_core::target::CARGO_TAG;
+    if !fs
+        .entry_stat(target)
+        .is_ok_and(|stat| stat.kind == EntryKind::Dir)
+    {
+        return false;
+    }
+    let Ok(entries) = fs.read_dir_bounded(target, 1) else {
+        return false;
+    };
+    matches!(entries.as_slice(), [(name, EntryKind::File)] if name == "CACHEDIR.TAG")
+        && fs
+            .read_regular_bounded(&target.join("CACHEDIR.TAG"), CARGO_TAG.len())
+            .is_ok_and(|bytes| bytes == CARGO_TAG.as_bytes())
 }
 
 fn clone_tag(ctx: &Ctx<'_>, added: &mut Added, root: PlacementRoot<'_>) -> Result<(), Stop> {

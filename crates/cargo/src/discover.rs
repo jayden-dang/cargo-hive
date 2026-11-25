@@ -784,17 +784,35 @@ pub struct TargetScan {
     pub workspaces: Vec<WorkspaceResolution>,
 }
 
-/// The `target.untagged` finding detail for `path`.
+/// The `target.untagged` finding detail for `path`. A directory that already holds a
+/// `CACHEDIR.TAG` that is not Cargo's is named, and no command that overwrites it is offered.
 pub fn untagged_detail(path: &Path) -> String {
+    let shown = path.display();
+    let foreign = std::fs::symlink_metadata(path.join("CACHEDIR.TAG")).is_ok();
+    let remedy = if foreign {
+        format!(
+            "It already holds a CACHEDIR.TAG that is not Cargo's, which hive leaves alone. \
+             Delete the directory and let Cargo create it, or replace that tag yourself with \
+             Cargo's: {tag}",
+            tag = target::CARGO_TAG.replace('\n', "\\n")
+        )
+    } else {
+        format!(
+            "Add Cargo's tag with: printf '{tag}' > {file} \
+             or delete the directory and let Cargo create it",
+            tag = target::CARGO_TAG.replace('\n', "\\n"),
+            file = shell_quote(&path.join("CACHEDIR.TAG").display().to_string())
+        )
+    };
     format!(
-        "{path} has Cargo's target layout but no CACHEDIR.TAG, so hive does not recognize it \
-         as a Cargo target and does not read, seed or clean it (a tool such as cargo-nextest \
-         created it before Cargo did). Add Cargo's tag with: \
-         printf '{tag}' > {path}/CACHEDIR.TAG \
-         or delete the directory and let Cargo create it",
-        tag = target::CARGO_TAG.replace('\n', "\\n"),
-        path = path.display()
+        "{shown} has Cargo's target layout but no Cargo CACHEDIR.TAG, so hive does not \
+         recognize it as a Cargo target and does not read, seed or clean it (a tool such as \
+         cargo-nextest created it before Cargo did). {remedy}"
     )
+}
+
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 pub fn resolvers_of(scan: &TargetScan, target: &Path) -> Vec<PathBuf> {

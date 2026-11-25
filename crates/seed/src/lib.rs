@@ -349,21 +349,45 @@ fn tag_empty_target(
     outcome: &mut Outcome,
     cancel: &(dyn Fn() -> bool + Sync),
 ) {
-    let Ok(resolved) = cargo_hive_cargo::metadata::resolve(checkout, cancel) else {
-        return;
+    let resolved = match cargo_hive_cargo::metadata::resolve(checkout, cancel) {
+        Ok(resolved) => resolved,
+        Err(reason) => {
+            outcome.findings.push((
+                "target.unresolved".to_string(),
+                Some(checkout.to_path_buf()),
+                format!(
+                    "{checkout}: {reason}; no target was created, so none was tagged",
+                    checkout = checkout.display()
+                ),
+            ));
+            return;
+        }
     };
     if resolved.build_directory != resolved.target_directory {
+        outcome.findings.push((
+            "target.split".to_string(),
+            Some(resolved.target_directory.clone()),
+            format!(
+                "the build directory {} differs from the target directory {}; no target was created, so none was tagged",
+                resolved.build_directory.display(),
+                resolved.target_directory.display()
+            ),
+        ));
         return;
     }
     let target = resolved.target_directory;
     match ctx.fs.create_dir(&target) {
         Ok(()) => {}
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::AlreadyExists | io::ErrorKind::NotFound
-            ) =>
-        {
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            outcome.findings.push((
+                "target.missing".to_string(),
+                Some(target.clone()),
+                format!(
+                    "{}: {err}; a parent of the target does not exist, so no target was created and none was tagged",
+                    target.display()
+                ),
+            ));
             return;
         }
         Err(err) => {
@@ -378,22 +402,26 @@ fn tag_empty_target(
     let tag = target.join("CACHEDIR.TAG");
     let written = match ctx.fs.clone_file(&tag_path(ctx.state), &tag) {
         Ok(()) => Ok(()),
-        Err(_) => {
-            use std::io::Write;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tag)
-                .and_then(|mut file| file.write_all(cargo_hive_core::target::CARGO_TAG.as_bytes()))
-        }
+        Err(clone_err) => write_cargo_tag(ctx.fs, &tag)
+            .map_err(|err| format!("{err} (cloning the store tag failed first: {clone_err})")),
     };
-    if let Err(err) = written {
+    if let Err(reason) = written {
         outcome.findings.push((
             "tag.clone".to_string(),
             Some(tag.clone()),
-            format!("{}: {err}; the new target was not tagged", tag.display()),
+            format!("{}: {reason}; the new target was not tagged", tag.display()),
         ));
     }
+}
+
+/// Writes Cargo's exact tag through `fs`, never over an entry that exists.
+fn write_cargo_tag(fs: &dyn cargo_hive_platform::Fs, tag: &Path) -> io::Result<()> {
+    match fs.entry_stat(tag) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+        Ok(_) => return Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+    }
+    fs.write_file(tag, cargo_hive_core::target::CARGO_TAG.as_bytes())
 }
 
 fn clone_units(

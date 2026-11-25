@@ -188,3 +188,37 @@ fn seed_tags_the_target_it_creates_even_when_the_store_has_no_unit_to_place() {
     );
     assert!(!lane.join("target/debug").exists());
 }
+
+#[test]
+fn the_remedy_quotes_a_path_with_spaces() {
+    let hive = Hive::ready();
+    let s = Scratch::new("untagged-spaces");
+    let (repo, target) = untagged_checkout(&s, "my app");
+    register(&hive, &repo);
+    let (out, receipt) = hive.json(&["status", repo.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let found = findings(&receipt, "target.untagged");
+    assert_eq!(found.len(), 1, "{receipt}");
+    let detail = found[0]["detail"].as_str().unwrap();
+    let quoted = format!("'{}/CACHEDIR.TAG'", target.display());
+    assert!(detail.contains(&format!("> {quoted}")), "{detail}");
+}
+
+#[test]
+fn a_foreign_tag_is_named_and_the_remedy_does_not_overwrite_it() {
+    let hive = Hive::ready();
+    let s = Scratch::new("untagged-foreign");
+    let (repo, target) = untagged_checkout(&s, "app");
+    fs::write(target.join("CACHEDIR.TAG"), "Signature: other\n").unwrap();
+    register(&hive, &repo);
+    let before = tree(&target);
+    let (out, receipt) = hive.json(&["status", repo.to_str().unwrap()]);
+    assert!(out.status.success(), "{receipt}");
+    let found = findings(&receipt, "target.untagged");
+    assert_eq!(found.len(), 1, "{receipt}");
+    let detail = found[0]["detail"].as_str().unwrap();
+    assert!(detail.contains("not Cargo's"), "{detail}");
+    assert!(!detail.contains("printf"), "{detail}");
+    assert!(!detail.contains("> "), "{detail}");
+    assert_eq!(tree(&target), before);
+}

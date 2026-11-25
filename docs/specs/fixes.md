@@ -35,7 +35,7 @@ red/green repro script `/private/tmp/tagbug-scripts/repro.sh <hive-bin> junit|no
 what seed creates.
 
 - **FIX-2.1** WHEN `status`, `seed` or `gc --checkout` scans a checkout whose Cargo target location holds a directory with no Cargo tag but with Cargo's layout (a profile dir with `.fingerprint`, or `.rustc_info.json`) THE SYSTEM SHALL report a `target.untagged` finding naming that path and the remedy (Cargo's exact tag bytes, or deleting the directory so Cargo recreates it), and SHALL NOT read, clone from, or delete anything in it.
-- **FIX-2.2** WHEN `seed` creates a checkout's target dir THE SYSTEM SHALL leave it carrying Cargo's tag, whether or not it places any unit (the standalone path; a slot's seed output is unchanged), and SHALL NOT write a tag into a target dir that already exists. SEED-1.5 carries the matching exception.
+- **FIX-2.2** WHEN `seed` creates a checkout's target dir THE SYSTEM SHALL leave it carrying Cargo's tag, whether or not it places any unit (the standalone path; a slot's seed output is unchanged), and SHALL NOT write a tag into a target dir that already exists. SEED-1.5 carries the matching exception. A later `seed` treats a target holding only that exact tag as absent and seeds it (owner decision 2026-11-25, SEED-1.4).
 - **FIX-2.3** WHEN a target dir carries Cargo's tag THE SYSTEM SHALL CONTINUE TO discover, own, lock, report and clean it exactly as before, with no `target.untagged` finding.
 
 Checked by: `crates/cargo-hive/tests/untagged_target.rs`, and the unit tests of
