@@ -100,6 +100,10 @@ pub fn owned_targets(
             format!("{}: {}", fault.path.display(), fault.detail),
         ));
     }
+    for path in scan.untagged {
+        let detail = discover::untagged_detail(&path);
+        findings.push(("target.untagged".to_string(), Some(path), detail));
+    }
     let mut owned = Vec::new();
     for target in scan.targets {
         match &target.owner {

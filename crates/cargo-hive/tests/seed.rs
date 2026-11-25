@@ -597,7 +597,7 @@ fn a_store_with_no_tag_clones_nothing_with_a_finding() {
     );
     assert_early_finish_bytes(&receipt);
     assert!(!tag.exists());
-    assert!(!lane.join("target").exists());
+    assert_only_cargo_tag(&lane.join("target"));
 }
 
 #[test]
@@ -620,7 +620,7 @@ fn a_store_tag_that_cannot_be_stated_names_the_error() {
             .unwrap_or(0),
         0
     );
-    assert!(!lane.join("target").exists());
+    assert_only_cargo_tag(&lane.join("target"));
     let named = outcome.findings.iter().any(|(_, path, detail)| {
         path.as_deref() == Some(tag.as_path())
             && detail.contains(&err.to_string())
@@ -666,7 +666,243 @@ fn a_store_with_no_source_record_clones_nothing_and_says_so() {
             .any(|f| f["kind"] == "source.none"),
         "{receipt}"
     );
+    assert_only_cargo_tag(&lane.join("target"));
+}
+
+#[test]
+fn a_retry_after_an_early_finish_seeds_into_the_tag_only_target() {
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    let repo = RegistryRepo::new(&hive);
+    let lane = repo.worktree("retry");
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
+    assert_eq!(receipt["counts"]["clone_units_cloned"], 0, "{receipt}");
+    assert_only_cargo_tag(&lane.join("target"));
+    let tag = lane.join("target/CACHEDIR.TAG");
+    let tag_mtime = fs::metadata(&tag).unwrap().modified().unwrap();
+    cargo_json(&hive, &repo.main, &["build"]);
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
+    assert!(
+        receipt["counts"]["clone_units_cloned"].as_u64().unwrap() > 0,
+        "{receipt}"
+    );
+    assert!(
+        !receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "target.exists"),
+        "{receipt}"
+    );
+    assert_eq!(
+        fs::read_to_string(lane.join("target/CACHEDIR.TAG")).unwrap(),
+        cargo_hive_core::target::CARGO_TAG
+    );
+    assert!(file_count(&lane.join("target")) > 1);
+    assert_eq!(
+        fs::metadata(&tag).unwrap().modified().unwrap(),
+        tag_mtime,
+        "the retry touched the tag it found"
+    );
+}
+
+#[test]
+fn a_refusal_from_placing_units_is_reported_once() {
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+
+    let split = repo.worktree("split-with-units");
+    let build = repo.scratch.path.join("split-units-build");
+    fs::create_dir_all(split.join(".cargo")).unwrap();
+    fs::write(
+        split.join(".cargo/config.toml"),
+        format!("[build]\nbuild-dir = {:?}\n", build.display().to_string()),
+    )
+    .unwrap();
+
+    let missing = repo.worktree("missing-with-units");
+    let target = repo.scratch.path.join("absent-units-parent/target");
+    fs::create_dir_all(missing.join(".cargo")).unwrap();
+    fs::write(
+        missing.join(".cargo/config.toml"),
+        format!("[build]\ntarget-dir = {:?}\n", target.display().to_string()),
+    )
+    .unwrap();
+
+    let unresolved = repo.worktree("unresolved-with-units");
+    fs::remove_file(unresolved.join("Cargo.toml")).unwrap();
+
+    for (lane, kind) in [
+        (&split, "target.split"),
+        (&missing, "target.missing"),
+        (&unresolved, "target.unresolved"),
+    ] {
+        let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(0), "{kind}: {receipt}");
+        let named = receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["kind"] == kind)
+            .count();
+        assert_eq!(named, 1, "{kind}: {receipt}");
+    }
+}
+
+#[test]
+fn a_target_holding_more_than_the_exact_tag_is_still_refused_untouched() {
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+    for (name, setup) in [
+        ("tag-and-file", 0),
+        ("tag-and-dir", 1),
+        ("other-tag", 2),
+        ("tag-symlink", 3),
+        ("only-extra-file", 4),
+    ] {
+        let lane = repo.worktree(name);
+        let target = lane.join("target");
+        fs::create_dir(&target).unwrap();
+        let tag = target.join("CACHEDIR.TAG");
+        let cargo_tag = cargo_hive_core::target::CARGO_TAG;
+        match setup {
+            0 => {
+                fs::write(&tag, cargo_tag).unwrap();
+                fs::write(target.join("extra"), b"x").unwrap();
+            }
+            1 => {
+                fs::write(&tag, cargo_tag).unwrap();
+                fs::create_dir(target.join("nextest")).unwrap();
+            }
+            2 => fs::write(&tag, format!("{cargo_tag}more")).unwrap(),
+            3 => {
+                fs::write(target.join("real-tag"), cargo_tag).unwrap();
+                std::os::unix::fs::symlink("real-tag", &tag).unwrap();
+            }
+            _ => fs::write(target.join("extra"), b"x").unwrap(),
+        }
+        let before = tree_listing(&target);
+        let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(0), "{name}: {receipt}");
+        assert_eq!(
+            receipt["counts"]["clone_units_cloned"], 0,
+            "{name}: {receipt}"
+        );
+        assert!(
+            receipt["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f["kind"] == "target.exists"),
+            "{name}: {receipt}"
+        );
+        assert_eq!(tree_listing(&target), before, "{name}");
+    }
+}
+
+#[test]
+fn an_early_finish_with_a_target_whose_parent_is_missing_says_nothing_was_tagged() {
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    let repo = RegistryRepo::new(&hive);
+    let lane = repo.worktree("no-parent");
+    let target = repo.scratch.path.join("absent-parent/target");
+    fs::create_dir_all(lane.join(".cargo")).unwrap();
+    fs::write(
+        lane.join(".cargo/config.toml"),
+        format!("[build]\ntarget-dir = {:?}\n", target.display().to_string()),
+    )
+    .unwrap();
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
+    assert!(!target.exists());
+    assert!(
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "target.missing"),
+        "{receipt}"
+    );
+}
+
+#[test]
+fn an_early_finish_with_a_split_build_directory_says_nothing_was_tagged() {
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    let repo = RegistryRepo::new(&hive);
+    let lane = repo.worktree("split");
+    let build = repo.scratch.path.join("split-build");
+    fs::create_dir_all(lane.join(".cargo")).unwrap();
+    fs::write(
+        lane.join(".cargo/config.toml"),
+        format!("[build]\nbuild-dir = {:?}\n", build.display().to_string()),
+    )
+    .unwrap();
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
     assert!(!lane.join("target").exists());
+    assert!(
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "target.split"),
+        "{receipt}"
+    );
+}
+
+#[test]
+fn an_early_finish_with_no_resolvable_checkout_says_nothing_was_tagged() {
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    let repo = RegistryRepo::new(&hive);
+    let lane = repo.worktree("unresolvable");
+    fs::remove_file(lane.join("Cargo.toml")).unwrap();
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
+    assert!(!lane.join("target").exists());
+    let named = receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["kind"] == "target.unresolved")
+        .count();
+    assert_eq!(named, 1, "{receipt}");
+}
+
+fn tree_listing(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                stack.push(path.clone());
+                out.push((path, b"<dir>".to_vec()));
+            } else if meta.is_symlink() {
+                out.push((
+                    path.clone(),
+                    fs::read_link(&path)
+                        .unwrap()
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .to_vec(),
+                ));
+            } else {
+                out.push((path.clone(), fs::read(&path).unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 #[test]
@@ -704,7 +940,7 @@ fn an_empty_choice_clones_nothing_and_reports_why() {
     assert_eq!(findings.len(), 1, "{receipt}");
     assert_eq!(findings[0]["kind"], "units.empty", "{receipt}");
     assert_early_finish_bytes(&receipt);
-    assert!(!lane.join("target").exists());
+    assert_only_cargo_tag(&lane.join("target"));
 }
 
 #[test]
@@ -733,7 +969,7 @@ fn no_toolchain_row_clones_nothing_with_a_finding_and_exit_zero() {
         stored["toolchains"].as_object().unwrap().is_empty(),
         "{stored}"
     );
-    assert!(!lane.join("target").exists());
+    assert_only_cargo_tag(&lane.join("target"));
 }
 
 #[test]
@@ -2100,6 +2336,19 @@ fn ref_outcome(outcome: &cargo_hive_seed::Outcome) -> cargo_hive_seed::Outcome {
         placed: outcome.placed.clone(),
         target: outcome.target.clone(),
     }
+}
+
+/// Seed created the target with nothing to place: only Cargo's tag, in Cargo's exact bytes.
+fn assert_only_cargo_tag(target: &Path) {
+    let names: Vec<_> = fs::read_dir(target)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, [std::ffi::OsString::from("CACHEDIR.TAG")]);
+    assert_eq!(
+        fs::read_to_string(target.join("CACHEDIR.TAG")).unwrap(),
+        cargo_hive_core::target::CARGO_TAG
+    );
 }
 
 fn assert_early_finish_bytes(receipt: &serde_json::Value) {

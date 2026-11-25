@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 
 pub const TAG_LINE: &str = "# This file is a cache directory tag created by cargo.";
 
+/// The exact bytes Cargo writes to `CACHEDIR.TAG` when it creates a target dir.
+pub const CARGO_TAG: &str = "Signature: 8a477f597d28d172789f06886806bc55\n# This file is a cache directory tag created by cargo.\n# For information about cache directory tags see https://bford.info/cachedir/\n";
+
 const MAX_TAG_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -112,6 +115,22 @@ pub fn identify(dir: &Path) -> Option<Result<Vec<(PathBuf, Layout)>, String>> {
     let path = dir.join("CACHEDIR.TAG");
     let body = fs::File::open(&path).and_then(read_tag);
     identify_tag(&path, body, || profile_dirs(dir))
+}
+
+/// True for a directory that has Cargo's target layout (a profile dir with fingerprints, or
+/// `.rustc_info.json`) but no Cargo tag, so [`identify`] cannot recognize it. Something other
+/// than Cargo created it first. Reads only the tag, `.rustc_info.json` and profile layout.
+pub fn is_untagged_cargo_shaped(dir: &Path) -> bool {
+    if !is_dir(dir).unwrap_or(false) {
+        return false;
+    }
+    let tagless = match fs::File::open(dir.join("CACHEDIR.TAG")).and_then(read_tag) {
+        Ok(body) => valid_tag(&body) == Ok(false),
+        Err(err) => err.kind() == io::ErrorKind::NotFound,
+    };
+    tagless
+        && (fs::metadata(dir.join(".rustc_info.json")).is_ok_and(|meta| meta.is_file())
+            || profile_dirs(dir).is_ok_and(|profiles| !profiles.is_empty()))
 }
 
 /// Same as [`identify`], but every directory listing stops at `cap` entries.
@@ -521,6 +540,48 @@ mod tests {
             matches!(&got, Some(Err(why)) if why.contains("debug")),
             "{got:?}"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_a_tagless_dir_with_cargos_layout_is_untagged_cargo_shaped() {
+        let root = scratch("untagged-shape");
+        let profile = root.join("profile");
+        mkdir(profile.join("debug/.fingerprint"));
+        let info = root.join("info");
+        mkdir(info.clone());
+        fs::write(info.join(".rustc_info.json"), "{}").unwrap();
+        let tagged = root.join("tagged");
+        tag(&tagged, TAG_LINE);
+        mkdir(tagged.join("debug/.fingerprint"));
+        let foreign = root.join("foreign");
+        tag(&foreign, "# created by someone else.");
+        mkdir(foreign.join("debug/.fingerprint"));
+        let tagged_info = root.join("tagged-info");
+        tag(&tagged_info, TAG_LINE);
+        fs::write(tagged_info.join(".rustc_info.json"), "{}").unwrap();
+        let nextest = root.join("nextest-only");
+        mkdir(nextest.join("nextest"));
+        let uplifted = root.join("uplifted");
+        mkdir(uplifted.join("debug/deps"));
+        let file = root.join("file");
+        fs::write(&file, "x").unwrap();
+        let absent = root.join("absent");
+        let cases = [
+            (&profile, true),
+            (&info, true),
+            (&foreign, true),
+            (&tagged, false),
+            (&tagged_info, false),
+            (&nextest, false),
+            (&uplifted, false),
+            (&file, false),
+            (&absent, false),
+        ];
+        for (dir, want) in cases {
+            assert_eq!(is_untagged_cargo_shaped(dir), want, "{}", dir.display());
+        }
+        assert_eq!(CARGO_TAG.lines().nth(1), Some(TAG_LINE));
         fs::remove_dir_all(root).unwrap();
     }
 

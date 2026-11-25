@@ -1,5 +1,6 @@
 //! Clones chosen store entries into a checkout whose Cargo target does not exist yet.
-//! An empty set creates nothing. A target path that already exists, a missing parent,
+//! An empty set creates nothing. A target path that already exists (except one holding only
+//! seed's own Cargo tag, which a standalone seed fills), a missing parent,
 //! or a build directory that is not the target directory is one finding and clones nothing.
 //! Each file is cloned on its own, `deps/` then `build/` then `.fingerprint/`. A clone that
 //! still has the compressed-file flag is replaced in the same directory by a new regular file
@@ -430,12 +431,20 @@ fn place_selected(
         resolved.target_directory
     };
     report.target_directory = Some(target.clone());
+    let mut tag_present = false;
     let created = match destination {
         Some(scope) => scope.create_root(ctx, checkout, cancel)?,
         None => ctx.fs.create_dir(&target),
     };
     match created {
         Ok(()) => {}
+        Err(err)
+            if err.kind() == io::ErrorKind::AlreadyExists
+                && destination.is_none()
+                && holds_only_cargo_tag(ctx.fs, &target) =>
+        {
+            tag_present = true;
+        }
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
             report.findings.push((
                 "target.exists".to_string(),
@@ -495,7 +504,7 @@ fn place_selected(
         scoped_files: destination.map(|_| BTreeMap::new()),
         ..Added::default()
     };
-    if let Err(stop) = clone_tag(ctx, &mut added, root) {
+    if !tag_present && let Err(stop) = clone_tag(ctx, &mut added, root) {
         return match stop.into_result(&mut report, "tag.clone", &target) {
             Ok(report) => finish(ctx, report, &mut added),
             Err(err) => Err(err),
@@ -548,7 +557,7 @@ fn place_selected(
                 }
                 report.disk_full = Some(why);
                 if destination.is_none() {
-                    align_mtimes(ctx, &target, &mut report);
+                    align_mtimes(ctx, &target, tag_present, &mut report);
                 }
                 return finish(ctx, report, &mut added);
             }
@@ -564,7 +573,7 @@ fn place_selected(
             align_scoped(root, &made, &added, &mut report)?;
         }
         Some(_) => (),
-        None => align_mtimes(ctx, &target, &mut report),
+        None => align_mtimes(ctx, &target, tag_present, &mut report),
     }
     finish(ctx, report, &mut added)
 }
@@ -573,7 +582,7 @@ fn place_selected(
 /// earlier build keeps that build's mtimes while one new in a later build is newer, and
 /// Cargo calls a unit stale when a dependency's output is newer than its own. With one
 /// mtime, no dependency is newer. The seed record's stamps take that mtime too.
-fn align_mtimes(ctx: &Ctx<'_>, target: &Path, report: &mut PlaceReport) {
+fn align_mtimes(ctx: &Ctx<'_>, target: &Path, kept_tag: bool, report: &mut PlaceReport) {
     let files = match list_files(ctx.fs, target, cargo_hive_core::caps::DEPS_CAP) {
         Ok(files) => files,
         Err(detail) => {
@@ -585,6 +594,11 @@ fn align_mtimes(ctx: &Ctx<'_>, target: &Path, report: &mut PlaceReport) {
             return;
         }
     };
+    // A tag the retry found is left exactly as it was, mtime included.
+    let files: Vec<_> = files
+        .into_iter()
+        .filter(|rel| !(kept_tag && rel.as_path() == Path::new("CACHEDIR.TAG")))
+        .collect();
     let mut newest = None;
     for rel in &files {
         if let Ok(mtime) = ctx.fs.mtime(&target.join(rel)) {
@@ -799,6 +813,25 @@ fn place_unit(
         },
         outside,
     ))
+}
+
+/// A directory with exactly one entry, a regular file `CACHEDIR.TAG` holding Cargo's exact tag
+/// bytes: what an earlier seed leaves when it finishes early. Anything else is not.
+fn holds_only_cargo_tag(fs: &dyn Fs, target: &Path) -> bool {
+    use cargo_hive_core::target::CARGO_TAG;
+    if !fs
+        .entry_stat(target)
+        .is_ok_and(|stat| stat.kind == EntryKind::Dir)
+    {
+        return false;
+    }
+    let Ok(entries) = fs.read_dir_bounded(target, 1) else {
+        return false;
+    };
+    matches!(entries.as_slice(), [(name, EntryKind::File)] if name == "CACHEDIR.TAG")
+        && fs
+            .read_regular_bounded(&target.join("CACHEDIR.TAG"), CARGO_TAG.len())
+            .is_ok_and(|bytes| bytes == CARGO_TAG.as_bytes())
 }
 
 fn clone_tag(ctx: &Ctx<'_>, added: &mut Added, root: PlacementRoot<'_>) -> Result<(), Stop> {

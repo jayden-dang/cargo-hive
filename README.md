@@ -161,6 +161,11 @@ When a command refuses:
   `toolchain.missing` when the store has no row for the current toolchain. Build the main
   checkout with the current toolchain, then run `seed` again. When `store.tag` says the tag
   could not be read, a build does not fix it: read the finding's detail.
+- hive recognizes a Cargo target dir by the `CACHEDIR.TAG` Cargo writes when it creates the
+  dir. When another tool creates `target/` first (cargo-nextest with JUnit output does), the
+  tag never appears. `status`, `seed` and `gc --checkout` then report `target.untagged` with
+  the path and the command that writes Cargo's tag; hive reads and deletes nothing in that
+  dir until it is tagged.
 - `store.busy` means run `cargo hive gc` again when no seed runs. `store.held_over_cap` names
   the targets to retire.
 

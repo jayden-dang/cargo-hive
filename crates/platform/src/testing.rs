@@ -56,6 +56,10 @@ impl Fs for Hooked {
         self.inner.write_file(path, bytes)
     }
 
+    fn write_new_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write_new_file(path, bytes)
+    }
+
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         self.inner.read(path)
     }
