@@ -445,7 +445,7 @@ _Requirements: SLOTS-1.4, SLOTS-1.7, SLOTS-1.8, SLOTS-2.6, SLOTS-3.10, SLOTS-3.1
 - Consumes: Task 7 sealed profile and output fences, Task 8 recovery and Task 9 normal guide and seed paths. The operator supplies the read-only Klynt workspace, exact endpoints and reviewed profile, replicated into an isolated proof area with no default source path.
 - Produces: bounded complete tree and exact recipe verification, durable named generated-input evidence and strict locked GC custody, followed by the reproducible runbook and dated results for the two Draft performance thresholds. Reuse the guide as a caller without modifying it here.
 
-**Depends-on:** Task 7 for independent qualification components. Integrating generated-input evidence into the lease depends on Task 8. The real installed handoff and measurement depend on Task 9 and positive qualification. The unchecked real-profile steps also depend on Tasks 11–17 of the 2026-11-24 amendment and on FIX-2 (issue #42, being added to `docs/specs/fixes.md` on `fix/untagged-target`).
+**Depends-on:** Task 7 for independent qualification components. Integrating generated-input evidence into the lease depends on Task 8. The real installed handoff and measurement depend on Task 9 and positive qualification. The unchecked real-profile steps also depend on Tasks 11–18 of the 2026-11-24 amendment and on FIX-2 (issue #42, being added to `docs/specs/fixes.md` on `fix/untagged-target`).
 
 - [x] Prove a bounded whole-tree source verifier on both Cargo layouts, including exact immutable bytes and admitted edits. Cover both real endpoint inventories without weakening profile validation for earlier callers.
 - [x] Prove named generated Rust input and native archive custody through a real guard and strict GC, including wrong unit, same-mtime changes, identity replacement and overlapping cleanup refusals. Start with actual serde_core and one pinned native archive case. Account for every selected producer and consumer before enabling any real invocation.
@@ -651,6 +651,31 @@ _Requirements: SLOTS-3.2, SLOTS-3.3, SLOTS-3.5_
 - [ ] Record the result and decision in `verification.md`. Commit as `docs(slot): record guarded overhead on the real workspace`.
 
 _Requirements: SLOTS-5.2_
+
+---
+
+### Task 18: Keep a slot's nextest-first target visible to its handoff GC
+
+**Files:**
+- Modify: `crates/cargo-hive/tests/slots.rs` (a red journey on a fixture with a `.config/nextest.toml` that enables JUnit output)
+- Modify: `crates/cargo-hive/src/slot/mod.rs` (the slot preparation and ready path chosen after the red test)
+- Modify: `crates/cargo-hive/src/slot/inspect.rs` (only if the chosen fix changes the empty-root or output-absent proof)
+- Modify: `crates/cargo-hive/tests/slot_inputs.rs` (guard: the fallback's "outputs absent" rule still holds)
+
+**Reuse:** rung 2 — FIX-2's `target.untagged` detection (`crates/core/src/target.rs` `is_untagged_cargo_shaped`) and Cargo's tag bytes (`CARGO_TAG`), once #42 lands
+
+**Interfaces:**
+- Consumes: FIX-2 (issue #42) on `main`; the guarded producer and handoff from Tasks 7–8.
+- Produces: a slot whose first guarded build is the workspace Nextest recipe, with JUnit configured, that still reaches a complete scoped GC and a ready retake; or a named refusal before ready, never a silent zero-target GC.
+
+**Depends-on:** none (requires #42 on `main`)
+
+- [ ] Write the red journey: take a slot on proved empty roots, run the guarded `cargo nextest run --workspace --no-run` with JUnit configured, return the slot, retake it at the next commit, and assert that scoped GC saw the slot's target and the retake is ready. Run it on both pins and record the observed failure.
+- [ ] Choose the smallest fix that keeps the empty-root and "outputs absent" proofs true. For example: hive creates the slot's target with Cargo's exact tag inside the preparation fence and accounts for it in the root evidence, or the handoff refuses with `target.untagged`. If the fix changes a design rule, stop and reopen through reroute-plan.
+- [ ] Implement it, re-run the journey and the guards on both pins green, and confirm a standalone `seed` still follows FIX-2.2.
+- [ ] Commit as `fix(slot): keep a nextest-first slot target visible to handoff GC`.
+
+_Requirements: SLOTS-3.6, SLOTS-3.7_
 
 ---
 
