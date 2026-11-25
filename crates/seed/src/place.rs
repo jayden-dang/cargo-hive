@@ -557,7 +557,7 @@ fn place_selected(
                 }
                 report.disk_full = Some(why);
                 if destination.is_none() {
-                    align_mtimes(ctx, &target, &mut report);
+                    align_mtimes(ctx, &target, tag_present, &mut report);
                 }
                 return finish(ctx, report, &mut added);
             }
@@ -573,7 +573,7 @@ fn place_selected(
             align_scoped(root, &made, &added, &mut report)?;
         }
         Some(_) => (),
-        None => align_mtimes(ctx, &target, &mut report),
+        None => align_mtimes(ctx, &target, tag_present, &mut report),
     }
     finish(ctx, report, &mut added)
 }
@@ -582,7 +582,7 @@ fn place_selected(
 /// earlier build keeps that build's mtimes while one new in a later build is newer, and
 /// Cargo calls a unit stale when a dependency's output is newer than its own. With one
 /// mtime, no dependency is newer. The seed record's stamps take that mtime too.
-fn align_mtimes(ctx: &Ctx<'_>, target: &Path, report: &mut PlaceReport) {
+fn align_mtimes(ctx: &Ctx<'_>, target: &Path, kept_tag: bool, report: &mut PlaceReport) {
     let files = match list_files(ctx.fs, target, cargo_hive_core::caps::DEPS_CAP) {
         Ok(files) => files,
         Err(detail) => {
@@ -594,6 +594,11 @@ fn align_mtimes(ctx: &Ctx<'_>, target: &Path, report: &mut PlaceReport) {
             return;
         }
     };
+    // A tag the retry found is left exactly as it was, mtime included.
+    let files: Vec<_> = files
+        .into_iter()
+        .filter(|rel| !(kept_tag && rel.as_path() == Path::new("CACHEDIR.TAG")))
+        .collect();
     let mut newest = None;
     for rel in &files {
         if let Ok(mtime) = ctx.fs.mtime(&target.join(rel)) {

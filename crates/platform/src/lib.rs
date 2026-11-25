@@ -306,6 +306,16 @@ pub trait Fs {
     fn temp_dir(&self, parent: &Path, prefix: &str) -> io::Result<TempDir>;
     fn write_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+    /// Creates `path` as a new file holding `bytes`. Fails with `AlreadyExists` on any entry
+    /// there, including a symlink, and never writes through one.
+    fn write_new_file(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(bytes)
+    }
     /// Opens one regular file without following its last component or waiting on a pipe.
     fn open_regular(&self, path: &Path) -> io::Result<std::fs::File> {
         #[cfg(unix)]
@@ -554,6 +564,27 @@ fn read_dir_capped(dir: &Path, cap: usize) -> io::Result<Vec<(String, EntryKind)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_file_is_never_written_over_an_entry_or_through_a_link() {
+        let fs = apfs::Apfs::new(std::env::temp_dir());
+        let dir = fs.temp_dir(&std::env::temp_dir(), "write-new-").unwrap();
+        let existing = dir.path().join("existing");
+        std::fs::write(&existing, b"keep").unwrap();
+        let err = fs.write_new_file(&existing, b"new").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&existing).unwrap(), b"keep");
+
+        let link = dir.path().join("link");
+        let behind = dir.path().join("behind");
+        std::os::unix::fs::symlink(&behind, &link).unwrap();
+        assert!(fs.write_new_file(&link, b"new").is_err());
+        assert!(!behind.exists());
+
+        let fresh = dir.path().join("fresh");
+        fs.write_new_file(&fresh, b"new").unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"new");
+    }
 
     #[test]
     fn only_macos_is_supported() {

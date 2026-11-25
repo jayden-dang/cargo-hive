@@ -679,6 +679,8 @@ fn a_retry_after_an_early_finish_seeds_into_the_tag_only_target() {
     assert_eq!(out.status.code(), Some(0), "{receipt}");
     assert_eq!(receipt["counts"]["clone_units_cloned"], 0, "{receipt}");
     assert_only_cargo_tag(&lane.join("target"));
+    let tag = lane.join("target/CACHEDIR.TAG");
+    let tag_mtime = fs::metadata(&tag).unwrap().modified().unwrap();
     cargo_json(&hive, &repo.main, &["build"]);
     let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(0), "{receipt}");
@@ -699,6 +701,56 @@ fn a_retry_after_an_early_finish_seeds_into_the_tag_only_target() {
         cargo_hive_core::target::CARGO_TAG
     );
     assert!(file_count(&lane.join("target")) > 1);
+    assert_eq!(
+        fs::metadata(&tag).unwrap().modified().unwrap(),
+        tag_mtime,
+        "the retry touched the tag it found"
+    );
+}
+
+#[test]
+fn a_refusal_from_placing_units_is_reported_once() {
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    let repo = RegistryRepo::new(&hive);
+    cargo_json(&hive, &repo.main, &["build"]);
+
+    let split = repo.worktree("split-with-units");
+    let build = repo.scratch.path.join("split-units-build");
+    fs::create_dir_all(split.join(".cargo")).unwrap();
+    fs::write(
+        split.join(".cargo/config.toml"),
+        format!("[build]\nbuild-dir = {:?}\n", build.display().to_string()),
+    )
+    .unwrap();
+
+    let missing = repo.worktree("missing-with-units");
+    let target = repo.scratch.path.join("absent-units-parent/target");
+    fs::create_dir_all(missing.join(".cargo")).unwrap();
+    fs::write(
+        missing.join(".cargo/config.toml"),
+        format!("[build]\ntarget-dir = {:?}\n", target.display().to_string()),
+    )
+    .unwrap();
+
+    let unresolved = repo.worktree("unresolved-with-units");
+    fs::remove_file(unresolved.join("Cargo.toml")).unwrap();
+
+    for (lane, kind) in [
+        (&split, "target.split"),
+        (&missing, "target.missing"),
+        (&unresolved, "target.unresolved"),
+    ] {
+        let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+        assert_eq!(out.status.code(), Some(0), "{kind}: {receipt}");
+        let named = receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["kind"] == kind)
+            .count();
+        assert_eq!(named, 1, "{kind}: {receipt}");
+    }
 }
 
 #[test]
@@ -804,6 +856,25 @@ fn an_early_finish_with_a_split_build_directory_says_nothing_was_tagged() {
             .any(|f| f["kind"] == "target.split"),
         "{receipt}"
     );
+}
+
+#[test]
+fn an_early_finish_with_no_resolvable_checkout_says_nothing_was_tagged() {
+    let hive = Hive::ready();
+    quiet_cache(&hive);
+    let repo = RegistryRepo::new(&hive);
+    let lane = repo.worktree("unresolvable");
+    fs::remove_file(lane.join("Cargo.toml")).unwrap();
+    let (out, receipt) = hive.json(&["seed", lane.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(0), "{receipt}");
+    assert!(!lane.join("target").exists());
+    let named = receipt["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["kind"] == "target.unresolved")
+        .count();
+    assert_eq!(named, 1, "{receipt}");
 }
 
 fn tree_listing(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {

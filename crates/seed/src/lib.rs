@@ -334,10 +334,22 @@ fn run_clone_selected(
     if let Some(checkout) = tag_checkout
         && outcome.target.is_none()
         && !outcome.cancelled
+        && !outcome
+            .findings
+            .iter()
+            .any(|(kind, _, _)| is_target_refusal(kind))
     {
         tag_empty_target(ctx, &checkout, &mut outcome, cancel);
     }
     Ok(outcome)
+}
+
+/// The refusals placing reports about the target, which tagging an empty target must not repeat.
+fn is_target_refusal(kind: &str) -> bool {
+    matches!(
+        kind,
+        "target.unresolved" | "target.split" | "target.missing"
+    )
 }
 
 /// When nothing was placed, still leave a target that seed creates carrying Cargo's tag, so a
@@ -414,14 +426,9 @@ fn tag_empty_target(
     }
 }
 
-/// Writes Cargo's exact tag through `fs`, never over an entry that exists.
+/// Writes Cargo's exact tag through `fs` as a new file, never over an entry that exists.
 fn write_cargo_tag(fs: &dyn cargo_hive_platform::Fs, tag: &Path) -> io::Result<()> {
-    match fs.entry_stat(tag) {
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => return Err(err),
-        Ok(_) => return Err(io::Error::from(io::ErrorKind::AlreadyExists)),
-    }
-    fs.write_file(tag, cargo_hive_core::target::CARGO_TAG.as_bytes())
+    fs.write_new_file(tag, cargo_hive_core::target::CARGO_TAG.as_bytes())
 }
 
 fn clone_units(
