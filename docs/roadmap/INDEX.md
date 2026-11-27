@@ -1,7 +1,7 @@
 # Roadmap: cargo-hive
 
 Status: Approved
-Date: 2026-11-22
+Date: 2026-11-27
 
 <!--
 The program layer: milestone INTENT, above any single feature and below the product
@@ -85,7 +85,7 @@ ID rules:
 | MILE-2 | Planned reclaim | A user or agent previews closure-based garbage and orphan target dirs as a plan, and an agent applies that plan itself on any checkout and on orphan target dirs, with no owner step, hive rechecking it under locks before it deletes. | MILE-1 | Closed |
 | MILE-3 | Warm worktrees from a shared store | A new secondary checkout (a build-in-waves lane, a native Claude worktree) is seeded from a ~~compressed,~~ hive-owned store (uncompressed since 2026-11-11: rustc rejects a compressed rmeta), so its first build recompiles zero seeded registry units while the seeded copies add about zero private bytes, and `cargo hive bench` gives the measured cold-versus-seeded time. | MILE-2 | Closed |
 | MILE-4 | Upgrades keep hive's state | A user or agent who upgrades hive keeps every registered repo, plan, receipt and store entry an earlier release wrote, or is stopped with the file named and the command that fixes it, and hive never starts empty because it could not read what is there. | none | Closed |
-| MILE-5 | Warm agent worktrees stay fast | An agent that takes a task in a warm worktree at a stable path runs its first commands and every rebuild about as fast as in a freshly built one, however many tasks that worktree has served, with no wrapper, hook or Cargo config installed. | MILE-2 | Planned |
+| MILE-5 | Warm agent worktrees stay fast | An agent that takes a task in a warm worktree at a stable path runs its first commands and every rebuild about as fast as in a freshly built one, however many tasks that worktree has served, with no wrapper, hook or Cargo config installed. | MILE-2 | Committed |
 
 ## MILE-1 — Safe automatic reclaim
 
@@ -155,7 +155,7 @@ ID rules:
 - **ROAD-17** warm-slot-pool — After: ROAD-16 — Surfaces: pool and lease state in `crates/state`, a new command in `crates/cargo-hive`, the handoff, `skills/hive/`; issue #18. — Card: [ROAD-17](roads/ROAD-17.md)
 - **ROAD-19** worktree-scorecard — After: none — Surfaces: a scorecard file under `docs/` with its written rerun steps; `cargo hive bench` is used as is, not changed; issue #16. — Card: [ROAD-19](roads/ROAD-19.md)
 **Depends-on:** MILE-2
-**Commitment:** Planned
+**Commitment:** Committed 2026-11-27
 **Closed:** None
 **Deferred:**
 - **ROAD-18** harness-integration — deferred 2026-11-15: not measured yet, and it needs the "Claude Code hooks" non-goal reopened; revisit once ROAD-17 has numbers (issue #19).
